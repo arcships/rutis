@@ -333,3 +333,25 @@ M1 → M2 → M3。M1 先行的理由:独立收益最大、不动总线;M2 改 T
 - `wait_until_state` 对瞬态的脆弱性:本组测试全部等待受控稳定中间态(SlowFactory gate / drain_gate 保持),helper 语义已在测试 17 注释说明;
 - 测试 1 的"LIFO 断言"实为 apply 顺序断言(清理恰好一次已单独锁定)——计划 #1 措辞略宽,不改测试;
 - 工作区 `examples/tui.rs` 的 fmt 残留(6 行)收入本修复提交。
+
+## 十 第三轮复审记录(2026-09-22,3 评审员:空基线专审 / 不变量证伪(含探针实测) / 终态通读)
+
+复审对象:c7043e2。前两轮的修复声明复核属实;本轮发现集中在**第二轮修复引入的新逻辑**与其交互。
+
+### 已修(第三轮发现)
+
+1. **空基线两种来源无法区分**(空基线专审,阻断):`spawn_injects` 用空 Vec 同时表示"panic 基线未知"与"明确声明无依赖"——后者 update 漂移到有依赖被当恢复静默放行,打穿 fail-fast。修复:`spawn_injects` 改 `Option<Vec<TypeKey>>`——`None`=panic 未知(跳过校验),`Some(含空集)`=明确声明(严格校验)。测试 18:真空声明漂移被拒。
+2. **基线逃逸链**(证伪,应修,探针实测):None 基线恢复后若不写回,后续**所有** update 永远逃逸校验(探针:恢复 [A,B] 后漂移到 [B] 仍被允许,inject_index 累积过期条目)。修复:update 成功后写回 `Some(derived)` 成为新基线。测试 17 扩展:恢复后再漂移被拒。
+3. **dry-run 后的并发 dispose 窗口**(证伪,应修,探针实测 10 中 6):dry-run 无锁同步,期间并发 dispose 可完整执行——update 返回 Ok 但 config 落进已死 fiber + 注册死 Weak。修复:dry-run 通过后、存 config 前**二次终态检查**(terminal_task/alive),被抢先则返回 InactiveEffect 不存不注册。
+4. **`post_join` 自完成覆盖真实错误**(终态通读,应修,存量但触发面在 update 语义内):二次 alive 检查以 `None` 兜底,Failed 态驱动退出时真实终态错误被覆盖成伪装成功。修复:自完成携带 `tr.error`。注:post_join 是存量代码,此缺陷由本 PR 的 update 重度使用而暴露。
+5. **observe 双打印残留**(空基线专审,应修):observe 用 `is_some()`、forward 用 `as_str`——`event: null/123` 类帧(字段存在非字符串)仍双打印。修复:observe 对齐 `and_then(as_str)` 判定。
+6. **config=None 死分支哨兵化**(终态通读,建议):`resolve_deps` 工厂分支 config 为 None 时原返回空 Vec(未来若引入 None 路径会被当无依赖直接装载)——改返回哨兵键(留 Pending)。恶形 eprintln 补 `origin={origin:?}`(证伪,建议)。
+
+### 归档无行动(第三轮,记入遗留)
+
+- `inject_index` 死 Weak 永不清除:动态键场景无界增长,建议后续加定期 prune(append-only 保 Weak 计数、地址不复用,ABA 去重因此安全——证伪确认);
+- `update()` 提取 dry-run 子函数 / 哨兵逻辑内聚为 `resolve_injects_safe`(终态通读,可读性):留后续简化批次;
+- 测试魔法数字常量化、注释去"评审:"过程前缀(终态通读,风格):留后续;
+- 证伪确认封住的不变量:死 Weak 幽灵消费者(upgrade 过滤)、EventOrigin 串扰(独立 Arc)、emit 重入/dispose/注册交叉(尾链快照语义)、测试 17 在 multi_thread 下的断言稳定性(所有 apply 均 v2)。
+
+**修复后状态**:config_update 18 条 + event_keys 11 + host_events 2 = 全 workspace 270 项全绿;clippy 存量 3 条不变。

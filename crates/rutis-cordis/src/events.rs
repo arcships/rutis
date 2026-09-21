@@ -63,7 +63,8 @@ pub fn forward_host_events(ctx: &Ctx, observe: Option<NotifyHook>) -> NotifyHook
                 } else {
                     let summary = serde_json::to_string(&params).unwrap_or_else(|_| "?".into());
                     eprintln!(
-                        "[rutis-cordis] malformed evt/emit dropped (no string event field): {}",
+                        "[rutis-cordis] malformed evt/emit dropped (no string event field) \
+                         origin={origin:?}: {}",
                         truncate(&summary, 200)
                     );
                 }

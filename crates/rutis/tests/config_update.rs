@@ -887,7 +887,9 @@ async fn update_recovers_from_spawn_time_injects_panic() {
     struct RecDep;
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
-    // injects 只在 v1 panic;v2 正常声明 [RecDep](漂移在空基线下被允许)
+    // injects:n==1 panic(spawn 基线未知);n==2 正常声明 [RecDep](None
+    // 基线下允许,恢复);n==3 声明空集(与恢复后的基线 [RecDep] 漂移,
+    // 拒绝——封死基线逃逸链)。
     struct FlakyFactory {
         seen: Arc<Mutex<Vec<String>>>,
     }
@@ -895,6 +897,9 @@ async fn update_recovers_from_spawn_time_injects_panic() {
         fn injects(&self, config: &TestConfig) -> Vec<TypeKey> {
             if config.n == 1 {
                 panic!("injects boom at spawn");
+            }
+            if config.n == 3 {
+                return Vec::new();
             }
             vec![TypeKey::of::<RecDep>()]
         }
@@ -933,10 +938,10 @@ async fn update_recovers_from_spawn_time_injects_panic() {
     wait_until_state(&view, FiberState::Pending).await;
     assert!(seen.lock().unwrap().is_empty());
 
-    // update:新 config 的 injects 成功 → 跳过校验 + 补注册 + Restart 重查 → 装载。
-    // 注:mailbox 时序决定装载 1 或 2 次(spawn 排队的 RefreshDeps 若落在
-    // 存 config 之后,会先装载一次,Restart 再换代一次)——两次都是 v2,
-    // 终态收敛,断言按终态语义而非计数。
+    // update:新 config 的 injects 成功 → None 基线跳过漂移校验 + 补注册 +
+    // Restart 重查 → 装载。注:mailbox 时序决定装载 1 或 2 次(spawn 排队的
+    // RefreshDeps 若落在存 config 之后,会先装载一次,Restart 再换代一次)
+    // ——两次都是 v2,终态收敛,断言按终态语义而非计数。
     view.update(cfg("v2", 2))
         .await
         .expect("update recovers from spawn-time injects panic");
@@ -946,4 +951,55 @@ async fn update_recovers_from_spawn_time_injects_panic() {
         !log.is_empty() && log.iter().all(|e| e == "apply:v2"),
         "all loads use recovered config v2: {log:?}"
     );
+
+    // 恢复后基线写回 Some([RecDep]):再次 update 漂移(派生空集)被严格
+    // 校验拒绝——基线逃逸链封死(评审 3 证伪:基线若永不写回,后续所有
+    // update 都逃逸校验,inject_index 累积过期条目)。
+    // FlakyFactory 的 injects: n==3 → 空集(与基线 [RecDep] 不等)。
+    let err = view.update(cfg("v3", 3)).await.err().unwrap();
+    assert!(matches!(*err, CordisError::Validation { .. }), "{err:?}");
+    assert_eq!(view.state().state, FiberState::Active);
+}
+
+// ── 18. 真空声明的漂移被拒(Some(空集) 是明确基线,非 panic 未知) ──
+
+#[tokio::test]
+async fn update_rejects_drift_from_explicit_empty_declaration() {
+    #[derive(Debug)]
+    struct DriftDep2;
+    // injects: n==1 返回空(明确声明"无依赖");n==2 派生 [DriftDep2]。
+    // spawn n=1 → 基线 Some([]);update n=2 → derived 非空 → 必须拒绝
+    //(评审 3 阻断:此前空基线不区分来源,无依赖工厂漂移被当"恢复"放行)。
+    struct EmptyThenDriftFactory;
+    impl PluginFactory<TestConfig> for EmptyThenDriftFactory {
+        fn injects(&self, config: &TestConfig) -> Vec<TypeKey> {
+            if config.n == 1 {
+                Vec::new()
+            } else {
+                vec![TypeKey::of::<DriftDep2>()]
+            }
+        }
+        fn build(&self, _config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
+            Ok(Box::new(NoopPlugin))
+        }
+    }
+    struct NoopPlugin;
+    impl Plugin for NoopPlugin {
+        fn name(&self) -> &str {
+            "noop"
+        }
+        fn apply<'a>(&'a self, _ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+            Box::pin(async move { Ok(Effect::Done) })
+        }
+    }
+
+    let ctx = Ctx::root().unwrap();
+    let view = ctx.plugin_with(EmptyThenDriftFactory, cfg("nodeps", 1));
+    view.clone().await.expect("loads with no deps");
+    assert_eq!(view.state().state, FiberState::Active);
+
+    // 漂移(无依赖 → 有依赖):明确基线严格校验,拒绝
+    let err = view.update(cfg("wants-dep", 2)).await.err().unwrap();
+    assert!(matches!(*err, CordisError::Validation { .. }), "{err:?}");
+    assert_eq!(view.state().state, FiberState::Active);
 }

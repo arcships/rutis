@@ -143,9 +143,13 @@ async fn up() {
         &ctx,
         Some(Arc::new(|method, params, _origin| {
             Box::pin(async move {
-                // 恶形帧(无 event 字段)由 forward 的截断日志负责,
-                // 这里跳过避免双重打印(观察者只打合法帧的摘要)。
-                if method == "evt/emit" && params.get("event").is_some() {
+                // 恶形帧(event 缺失或非字符串)由 forward 的截断日志负责,
+                // 这里按同一判定跳过,避免双重打印(观察者只打合法帧的摘要)。
+                let well_formed = params
+                    .get("event")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some();
+                if method == "evt/emit" && well_formed {
                     // 载荷摘要(截断):形状级可见性;保真断言在测试里做。
                     let summary =
                         serde_json::to_string(&params["params"]).unwrap_or_else(|_| "?".into());

@@ -14,7 +14,7 @@ Cordis 核心范式的 Rust 惯用实现(自 [min-cordis](https://github.com/eri
 
 | crate | 内容 |
 |---|---|
-| [`rutis`](crates/rutis) | 内核:Ctx / fiber / registry / event bus / effect / PluginFactory 配置热更新 / keyed 动态事件(143 项契约与对拍测试) |
+| [`rutis`](crates/rutis) | 内核:Ctx / fiber / registry / event bus / effect / PluginFactory 配置热更新 / keyed 动态事件(144 项契约与对拍测试) |
 | [`rutis-cordis`](crates/rutis-cordis) | 业务无关兼容层:协议机制(`Wire` 传输接缝 / 在飞表 / 取消 / 超时 / 孤儿计数)+ cordis 词汇(hello 能力集 / evt mode / wf kind / 装载仲裁)+ 注册表驱动的通用服务分发(`svc/call` + 流式 `svc/part`),零 dsh 知识(决策 [docs/decision-aimux-llm-plugin-2026-08-23.md](docs/decision-aimux-llm-plugin-2026-08-23.md) v2) |
 | [`aimux-llm`](crates/aimux-llm) | 独立 llm 服务插件:rutis 插件形态(apply → 注册 `llm` 服务),aimux 原生 DTO/StreamPart 即中性协议 schema;工厂/keyed 缓存/listModels 缓存/回落全在此,零桥零 dsh 知识 |
 | [`rutis-dsh`](crates/rutis-dsh) | 入口与组合根:起 rutis 运行时、装载 aimux-llm、把注册表中的服务经业务无关桥供给宿主进程(`rutis-dsh up`);`LlmFace` 是纯形状胶水,零 dsh 知识 |
