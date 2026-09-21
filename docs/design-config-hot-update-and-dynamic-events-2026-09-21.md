@@ -124,11 +124,12 @@ impl FiberView {
 5. update 后消费者重载:provider update → 依赖它的消费者自动驱逐并用其当前 config 重载;
 6. 并发 update × dispose / update × update(FIFO、join 均正确落定);
 7. 工厂模式 `injects(config)` 门控:依赖缺失时 Pending,不 apply;
-8. config 类型不匹配的 update 报 Validation;
+8. config 类型不匹配的 update 报 Validation(测试实际捆了"静态 fiber 拒绝"断言——同为 Validation 路径的设计行为);
 9. 依赖驱动重载用当前 config 重造实例(provider 摘除 → 重提供 → 重载仍用当前 config;update 后再驱逐则用新 config);
 10. `current_config` 快照与类型不符路径。
 
 **评审增补(§八 之 2)**:11. Loading 态 update(apply 运行中,协作取消后重载新 config);12. Unloading 态 update(慢清理中排队,收敛后重新提供依赖装载新 config);13. update × 驱逐并发(provider 换代与消费者热更新并发,双方收敛);14. injects 随 config 漂移被 dry-run 拒绝;15. build panic → Failed 且驱动存活/join 不挂起;16. injects(config) panic → 视为不就绪留 Pending。
+**第二轮增补(§九)**:17. spawn 期 injects panic 的 update 恢复(空基线跳过漂移校验 + 补注册,装载次数随 mailbox 时序为 1-2 次,断言按终态)。
 
 ---
 
@@ -190,7 +191,7 @@ impl EventBus {
 }
 ```
 
-- 键构造即烙类型:`keyed_dynamic::<E>(name)` 的 TypeId 来自 E,分发侧 `take_hooks` 校验 `key.type_id == TypeId::of::<E>()`,不符 → `PluginFailed`(fail fast,防 downcast 灾难);
+- 键构造即烙类型:`keyed_dynamic::<E>(name)` 的 TypeId 来自 E;类型隔离由键内嵌的 type_id 保证——**错位键无法经公开 API 构造**(TypeKey 字段私有),监听器适配层的 downcast mismatch 兜底实际不可达(评审 2 注:设计草案此处的"take_hooks 校验 type_id fail-fast"为防御层高估,实际机制即此);
 - keyed 变体内部一律转 TypeKey 走同一条注册/快照/派发代码路径(与非 keyed 共享实现,非 keyed = qualifier None 的特例),不复制四套逻辑;
 - **D31 尾链键跟随 TypeKey**:同名(跨 Static/Dynamic 拼写)同类型共享一条派发链,跨名不保序——边界声明照旧。
 
@@ -204,6 +205,7 @@ HostEvent 定义在 **rutis-cordis**(内核零 serde 红线不破):
 pub struct HostEvent {
     pub name: String,
     pub payload: serde_json::Value,
+    pub origin: EventOrigin, // 评审补:三预留字段透传
 }
 impl Event for HostEvent {
     const NAME: &'static str = "host/*";
@@ -211,8 +213,8 @@ impl Event for HostEvent {
 }
 ```
 
-- `InboundHooks` 增 evt 转发缝:`on_event(ctx, name, payload)`;`Bridge::start` 需持有 `Ctx`(runner 侧传入,rutis_dsh.rs 组装时已有);
-- 泵的 `dispatch_notify` 对 `evt/emit` 调 `ctx.events().emit_keyed::<HostEvent>(name, HostEvent{ name, payload: params })`;其余 Ntf 维持现状;
+- **实施形态**(评审 2 注:与草案差异)——不做 `InboundHooks.on_event` 字段、`Bridge::start` 不持 `Ctx`;改为 `forward_host_events(ctx, observe) -> NotifyHook` 纯函数由 runner 组装进 `on_notify`(桥保持零 rutis 运行时知识,分层更干净);
+- 泵的 `dispatch_notify` 对 `evt/emit` 经上述钩子调 `ctx.events().emit_keyed::<HostEvent>(name, HostEvent{..})`;其余 Ntf 维持现状;
 - 三字段透传(scopeId/sessionId/turnId,rpc.rs 预留)——**实施已定**(评审补):`EventOrigin{scope_id, session_id, turn_id}` 独立结构体,泵解构 Ntf 时构造并随 `NotifyHook(method, params, origin)` 下传;`HostEvent.origin` 携带,订阅方区分同事件名下不同会话/回合;
 - 订阅方用法:`ctx.events().on_keyed::<HostEvent>("session/event", |ctx, e| ..)`,随注册方 fiber 卸载自动清理(D28 照旧)。
 
@@ -263,7 +265,7 @@ M1/M2 可并行(不同文件为主,fiber.rs 仅 M1 触及)。每阶段独立提�
 - loader(插件名→工厂注册表、配置文件驱动装载)(D33e)——D32 的 PluginFactory 是其底座,本期不建注册表;
 - `internal/*` 协议面整体(维持原对拍裁决);
 - 事件名通配符/glob 订阅(宿主侧真需要再加,当前无需求证据);
-- **dispatch_tail 已完成 JoinHandle 的清理**(评审遗留:存量问题,键数量有界,非本设计引入;动 D31 结构的改造留后续简化批次)。
+- **dispatch_tail 已完成 JoinHandle 的清理**(评审遗留:存量问题,非本设计引入;键在静态事件类型下有界,D33 动态名后有界性依赖宿主事件名集合——数量级仍是"事件名数",动 D31 结构的改造留后续简化批次)。
 
 ## 六 实施顺序建议
 
@@ -273,9 +275,9 @@ M1 → M2 → M3。M1 先行的理由:独立收益最大、不动总线;M2 改 T
 
 **全部落地,全 workspace 测试全绿(新增 29:config_update 16 + event_keys 11 + host_events 2)**,clippy 对新增代码零警告(存量警告未动)。
 
-- **M1(D32)**:`PluginFactory`(plugin.rs)+ `Ctx::plugin_with/plugin_from`(ctx.rs,与 `plugin()` 共享 mount 收尾)+ `FiberView::update/current_config`(fiber.rs)。内部:`FiberInner.factory/config` 双字段,`ErasedFactory` 擦除适配;`load()` 经 `current_plugin()` 统一取实例,工厂模式每代重造。**实施中补的一个设计缺口**:`resolve_deps` 原从 `plugin` 实例读 injects,工厂模式 plugin 为 None → 门控失效(直接装载);已改为工厂模式从当前 config 派生(config 先 clone 出锁再进用户回调,防重入死锁)。`update` 的 dry-run 用户回调裹 catch_unwind。测试 10 条:tests/config_update.rs。
+- **M1(D32)**:`PluginFactory`(plugin.rs)+ `Ctx::plugin_with/plugin_from`(ctx.rs,与 `plugin()` 共享 mount 收尾)+ `FiberView::update/current_config`(fiber.rs)。内部:`FiberInner.factory/config` 双字段,`ErasedFactory` 擦除适配;`load()` 经 `current_plugin()` 统一取实例,工厂模式每代重造。**实施中补的一个设计缺口**:`resolve_deps` 原从 `plugin` 实例读 injects,工厂模式 plugin 为 None → 门控失效(直接装载);已改为工厂模式从当前 config 派生(config 先 clone 出锁再进用户回调,防重入死锁)。`update` 的 dry-run 用户回调裹 catch_unwind。测试 16 条:tests/config_update.rs(§1.7 的 1-10 + 评审增补 11-16,第二轮复审再增 17,见 §八)。
 - **M2(D33)**:`Qualifier` 双轨 enum(key.rs,Static 零分配 / Dynamic `Arc<str>`;**Eq/Hash 手写按字符串内容**,derive 会按变体判等——测试抓出);bus 三个注册面键 `TypeId` → `TypeKey`,keyed API 全家桶(`on/once/on_waterfall/emit/parallel/serial/waterfall` 的 `_keyed` 变体,内部共享一条 TypeKey 路径)。TypeKey 失 `Copy` 的连锁由编译器全量暴露,registry 的 lookup/consumers_of/notify_key_changed 顺势改吃借用。测试 11 条:tests/event_keys.rs(含 parity 补拍:cordis events.spec 字符串事件名内核,原判"部分对拍"升级为可全拍)。
-- **M3**:rutis-cordis 新模块 events.rs(`HostEvent{name, payload}` + `forward_host_events(ctx, observe)`——observe 收全部 Ntf 与转发并行,恶形 evt 静默丢弃);rutis_dsh runner 的 on_notify 换装(stderr 摘要降为观察者)。e2e:tests/host_events.rs(MemoryWire 双名订阅 + 恶形不进总线 + 观察者全量)。
+- **M3**:rutis-cordis 新模块 events.rs(`HostEvent{name, payload, origin}` + `forward_host_events(ctx, observe)`——**转发先于 observe**(评审修订),恶形 evt 打一行截断日志后丢弃);rutis_dsh runner 的 on_notify 换装(stderr 摘要降为观察者)。e2e:tests/host_events.rs(MemoryWire 双名订阅 + origin 透传断言 + 恶形不进总线 + 观察者全量 + 桥断连后总线存活,2 条)。
 
 **与设计的偏差**:
 - `current_config` 返回 `Option<Arc<C>>`(设计草案写 `Option<Box<C>>`;Arc 存储使快照零拷贝,且 update 的存入也走 Arc);
@@ -283,7 +285,7 @@ M1 → M2 → M3。M1 先行的理由:独立收益最大、不动总线;M2 改 T
 
 ## 八 评审轮记录(2026-09-21,4 个独立评审员并行)
 
-评审对象:PR #1(feat/config-hot-update-and-dynamic-events)。**阻断 0**;分层纪律、键机制正确性、数字声明(README 136 / 全绿 / clippy)全部核实通过。
+评审对象:PR #1(feat/config-hot-update-and-dynamic-events)。**阻断 0**;分层纪律、键机制正确性、数字声明(README 136(评审时点,修复后为 142)/ 全绿 / clippy)全部核实通过。
 
 ### 已修(全部)
 
@@ -311,4 +313,23 @@ M1 → M2 → M3。M1 先行的理由:独立收益最大、不动总线;M2 改 T
 - build 纯构造契约的并发双跑窗口:D32b 已声明契约,维持;
 - `dispatch_tail` 已完成 JoinHandle 不清理:存量,键有界,记入 §五 遗留。
 
-**修复后状态**:config_update 16 条 + event_keys 11 条(信号化)+ host_events 2 条 = 全 workspace 测试全绿,clippy 对新增代码零警告。
+**修复后状态**:config_update 17 条 + event_keys 11 条(信号化)+ host_events 2 条 = 全 workspace 测试全绿,clippy 对新增代码零警告(存量 3 条:services.rs 1 + aimux-llm 2,与本设计无关)。
+
+## 九 第二轮复审记录(2026-09-22,4 评审员并行复审修复轮)
+
+复审对象:976d2f1。**阻断 0**;修复轮的关键声明(§1.7 映射 1:1、268 全绿、README 142、零 sleep、11 项修复全部落地)逐条验证**属实**;EventOrigin 透传链(含出站/握手期帧的 origin 语义)、转发先于 observe、信号化 Notify permit 语义、负断言确定性论证、签名适配、桥所有权环、CI 覆盖全部验证通过。
+
+### 已修(第二轮发现)
+
+1. **哨兵交互盲区(应修,窄)**:第一轮修复 #2/#8 的交互——spawn 时 injects panic 的哨兵同时进 `spawn_injects` 快照与 `inject_index`:死 Weak 无界累积(append-only)+ panic 工厂"既装不上也 update 不了"(漂移校验拿哨兵当基线必拒绝)。修复:spawn panic 时基线记空集且**不注册**(泄漏消除);update 对空基线**跳过漂移校验**并**补注册 derived**(panic 工厂获得恢复路径);`register_inject` 加指针去重(补注册与 spawn 注册重叠时 no-op)。测试 17:spawn 期 injects panic → update 换 config 恢复装载(装载次数随 mailbox 时序为 1-2 次,断言按终态语义)。
+2. **spawn injects panic 路由 ErrorSink**(并发复审 S1):原 `Err(_p)` 静默丢弃,与 resolve_deps 路径不一致且 doc 不实。修复:panic 转 `PluginFailed` 经 `ctx.error_sink()` 路由,注释同步。
+3. **恶形 eprintln 无截断**(桥层复审,应修):巨型 params 可刷爆 stderr。修复:200 字符截断(`truncate`,防御纵深);runner observe 跳过恶形帧,消除双打印(评审 2 建议 4)。
+4. **文档内部矛盾三处**(一致性复审,应修):§七 M1 测试数 10→16、§七 M3 过时描述(并行/静默丢弃 → 转发先于/截断日志)、§八 README 引用 136→142——均已改。
+5. **文档漂移**(盲区复审,建议):§2.3 "take_hooks 校验 type_id" 措辞改为"类型烙在键里,错位键无法经公开 API 构造"(实际防御机制);§2.4 `on_event`/`Bridge 持 Ctx` 草稿加实施注记(实际为 `forward_host_events` 钩子组合,桥不持 Ctx);§2.4 HostEvent 代码块补 `origin`;§五 dispatch_tail "键有界"补动态名说明;§1.7 计划 #8 补静态 fiber 拒绝;`events.rs` 文档"所有帧"改"所有通知帧(Ntf)";rutis-cordis lib.rs crate 文档补 events 模块。
+
+### 归档无行动(第二轮)
+
+- spawn 时 register_inject 与驱动启动的窗口(provider notify 先于注册到达则丢失):与静态模式完全同构的预存设计,实际使用模式下不可触发;
+- `wait_until_state` 对瞬态的脆弱性:本组测试全部等待受控稳定中间态(SlowFactory gate / drain_gate 保持),helper 语义已在测试 17 注释说明;
+- 测试 1 的"LIFO 断言"实为 apply 顺序断言(清理恰好一次已单独锁定)——计划 #1 措辞略宽,不改测试;
+- 工作区 `examples/tui.rs` 的 fmt 残留(6 行)收入本修复提交。

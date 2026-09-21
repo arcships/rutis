@@ -130,12 +130,15 @@ impl Registry {
     }
 
     pub(crate) fn register_inject(&self, key: TypeKey, fiber: &Arc<FiberInner>) {
-        self.inject_index
-            .lock()
-            .unwrap()
-            .entry(key)
-            .or_default()
-            .push(Arc::downgrade(fiber));
+        let mut index = self.inject_index.lock().unwrap();
+        let list = index.entry(key).or_default();
+        // 去重:同一 fiber 对同一键重复注册 no-op(update 的补注册路径
+        // 会与 spawn 注册重叠;append-only 无去重会无限增长死 Weak)。
+        let fiber_ptr = Arc::as_ptr(fiber);
+        if list.iter().any(|w| w.as_ptr() == fiber_ptr) {
+            return;
+        }
+        list.push(Arc::downgrade(fiber));
     }
 
     /// 通知所有注入该键的 fiber 重查依赖。

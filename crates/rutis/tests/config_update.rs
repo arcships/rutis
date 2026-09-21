@@ -499,6 +499,9 @@ async fn current_config_returns_snapshot() {
 }
 
 // ── 状态等待助手(watch,无 sleep) ─────────────────────────────
+// 注意:`want` 必须是受控稳定的中间态或终态(本文件用 gate 保持 Loading/
+// Unloading 窗口)——watch 是 last-value 语义,等一个瞬时翻过的状态会永等
+// (不会假通过,只会挂起)。
 
 async fn wait_until_state(view: &FiberView, want: FiberState) {
     let mut rx = view.watch();
@@ -523,7 +526,8 @@ async fn update_during_loading_converges_to_new_config() {
     struct SlowFactory {
         gate: Arc<Notify>,
         seen: Arc<Mutex<Vec<String>>>,
-    }    impl PluginFactory<TestConfig> for SlowFactory {
+    }
+    impl PluginFactory<TestConfig> for SlowFactory {
         fn build(&self, config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
             let gate = self.gate.clone();
             let seen = self.seen.clone();
@@ -863,11 +867,83 @@ async fn factory_injects_panic_leaves_fiber_pending() {
 
     let ctx = Ctx::root().unwrap();
     let view = ctx.plugin_with(PanicInjectsFactory, cfg("v1", 1));
-    // 不 panic、不装载:Pending 等待(哨兵键永远无 provider)
+    // 不 panic、不装载:Pending 等待(哨兵键永远无 provider);
+    // panic 已路由 ErrorSink(spawn 路径,见 17 的恢复场景)。
     wait_until_state(&view, FiberState::Pending).await;
     // 驱动存活:dispose 正常收敛
     view.dispose()
         .await
         .expect("dispose works after injects panic");
     assert_eq!(view.state().state, FiberState::Disposed);
+}
+
+// ── 17. spawn 期 injects panic 的 update 恢复(评审 2 复审:交互盲区) ──
+// spawn panic → 基线空集且不注册;update 换 config 后 injects 成功 →
+// 跳过漂移校验 + 补注册 derived → Restart 重查装载。全程不再死等。
+
+#[tokio::test]
+async fn update_recovers_from_spawn_time_injects_panic() {
+    #[derive(Debug)]
+    struct RecDep;
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // injects 只在 v1 panic;v2 正常声明 [RecDep](漂移在空基线下被允许)
+    struct FlakyFactory {
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+    impl PluginFactory<TestConfig> for FlakyFactory {
+        fn injects(&self, config: &TestConfig) -> Vec<TypeKey> {
+            if config.n == 1 {
+                panic!("injects boom at spawn");
+            }
+            vec![TypeKey::of::<RecDep>()]
+        }
+        fn build(&self, config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
+            let seen = self.seen.clone();
+            let label = config.label.clone();
+            Ok(Box::new(RecPlugin { seen, label }))
+        }
+    }
+    struct RecPlugin {
+        seen: Arc<Mutex<Vec<String>>>,
+        label: String,
+    }
+    impl Plugin for RecPlugin {
+        fn name(&self) -> &str {
+            "rec"
+        }
+        fn apply<'a>(&'a self, _ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+            let seen = self.seen.clone();
+            let label = self.label.clone();
+            Box::pin(async move {
+                seen.lock().unwrap().push(format!("apply:{label}"));
+                Ok(Effect::Done)
+            })
+        }
+    }
+
+    let ctx = Ctx::root().unwrap();
+    let view = ctx.plugin_with(FlakyFactory { seen: seen.clone() }, cfg("v1", 1));
+    // spawn panic → Pending,基线空,inject_index 无此 fiber
+    wait_until_state(&view, FiberState::Pending).await;
+    assert!(seen.lock().unwrap().is_empty());
+
+    // 提供依赖(此时无人注册,pending 不动——不靠 notify,靠 update 的重查)
+    let _dep = ctx.provide(RecDep).unwrap();
+    wait_until_state(&view, FiberState::Pending).await;
+    assert!(seen.lock().unwrap().is_empty());
+
+    // update:新 config 的 injects 成功 → 跳过校验 + 补注册 + Restart 重查 → 装载。
+    // 注:mailbox 时序决定装载 1 或 2 次(spawn 排队的 RefreshDeps 若落在
+    // 存 config 之后,会先装载一次,Restart 再换代一次)——两次都是 v2,
+    // 终态收敛,断言按终态语义而非计数。
+    view.update(cfg("v2", 2))
+        .await
+        .expect("update recovers from spawn-time injects panic");
+    assert_eq!(view.state().state, FiberState::Active);
+    let log = seen.lock().unwrap().clone();
+    assert!(
+        !log.is_empty() && log.iter().all(|e| e == "apply:v2"),
+        "all loads use recovered config v2: {log:?}"
+    );
 }

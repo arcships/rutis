@@ -35,10 +35,11 @@ impl rutis::Event for HostEvent {
 ///
 /// - `evt/emit`(`params.event` 非空字符串):翻译为
 ///   `emit_keyed::<HostEvent>(name, HostEvent)` 转发进内核事件总线。
-///   恶形(无 event / 非字符串)丢弃并 `eprintln!` 一行——通知帧无回执
-///   通道,错误无处上报,但不可静默消失(可观测性)。
-/// - 所有帧:原样交给 `observe`(可选观察者,如 stderr 摘要日志)。
-///   **转发先于 observe** 且互不隔离:observe panic/阻塞不吞事件
+///   恶形(无 event / 非字符串)丢弃并 `eprintln!` 一行截断摘要——通知帧
+///   无回执通道,错误无处上报,但不可静默消失,也不可被巨型载荷打爆日志
+///   (防御纵深)。
+/// - 所有通知帧(Ntf):原样交给 `observe`(可选观察者,如 stderr 摘要
+///   日志)。**转发先于 observe** 且互不隔离:observe panic/阻塞不吞事件
 ///   (emit_keyed 只入队尾链任务,不等待派发完成)。
 pub fn forward_host_events(ctx: &Ctx, observe: Option<NotifyHook>) -> NotifyHook {
     let ctx = ctx.clone();
@@ -60,8 +61,10 @@ pub fn forward_host_events(ctx: &Ctx, observe: Option<NotifyHook>) -> NotifyHook
                         }),
                     );
                 } else {
+                    let summary = serde_json::to_string(&params).unwrap_or_else(|_| "?".into());
                     eprintln!(
-                        "[rutis-cordis] malformed evt/emit dropped (no string event field): {params}"
+                        "[rutis-cordis] malformed evt/emit dropped (no string event field): {}",
+                        truncate(&summary, 200)
                     );
                 }
             }
@@ -70,4 +73,14 @@ pub fn forward_host_events(ctx: &Ctx, observe: Option<NotifyHook>) -> NotifyHook
             }
         })
     })
+}
+
+/// 恶形帧摘要截断:按字符数,超长以 `…` 结尾(防御巨型载荷刷爆 stderr)。
+fn truncate(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_chars).collect();
+    out.push('…');
+    out
 }

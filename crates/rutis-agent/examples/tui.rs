@@ -66,14 +66,12 @@ async fn main() {
     (&driver_view).await.expect("driver loads");
 
     // TUI 在 driver 装载完成后创建:apply 内 get agent 必成功(启动门控)
-    let tui_view = root.plugin(
-        TuiPlugin::new().with_intro(vec![
+    let tui_view = root.plugin(TuiPlugin::new().with_intro(vec![
             format!("backend: {provider}/{model_id}"),
             format!("cwd: {cwd}"),
             "tools: bash + replace_text + get_weather | Enter 发送 | Esc 取消 | Ctrl+Q 退出"
                 .to_string(),
-        ]),
-    );
+        ]));
     // TUI apply 即主循环:退出(或 fiber 卸载)后 settle 才完成
     match (&tui_view).await {
         Ok(()) => println!("tui exited"),

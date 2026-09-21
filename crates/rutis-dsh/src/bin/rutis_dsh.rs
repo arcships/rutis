@@ -143,7 +143,9 @@ async fn up() {
         &ctx,
         Some(Arc::new(|method, params, _origin| {
             Box::pin(async move {
-                if method == "evt/emit" {
+                // 恶形帧(无 event 字段)由 forward 的截断日志负责,
+                // 这里跳过避免双重打印(观察者只打合法帧的摘要)。
+                if method == "evt/emit" && params.get("event").is_some() {
                     // 载荷摘要(截断):形状级可见性;保真断言在测试里做。
                     let summary =
                         serde_json::to_string(&params["params"]).unwrap_or_else(|_| "?".into());
