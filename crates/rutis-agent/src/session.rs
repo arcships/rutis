@@ -121,10 +121,10 @@ impl Session {
     }
 
     fn try_restore(path: &Path) -> Result<Option<Self>, String> {
-        let raw = std::fs::read_to_string(path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
-        let file: SessionFile = serde_json::from_str(&raw)
-            .map_err(|e| format!("parse {}: {e}", path.display()))?;
+        let raw =
+            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let file: SessionFile =
+            serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
         if file.version != SESSION_FILE_VERSION {
             return Err(format!(
                 "unsupported session file version {} (expected {})",
@@ -234,12 +234,13 @@ impl Session {
             saved_at_ms: now_ms(),
             tokens_used: self.tokens_used,
         };
-        let json = serde_json::to_string_pretty(&file)
-            .map_err(|e| format!("serialize session: {e}"))?;
+        let json =
+            serde_json::to_string_pretty(&file).map_err(|e| format!("serialize session: {e}"))?;
 
         let tmp = tmp_path(path);
         std::fs::write(&tmp, json).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, path).map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
+        std::fs::rename(&tmp, path)
+            .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
         Ok(())
     }
 }

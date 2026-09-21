@@ -51,7 +51,11 @@ impl LanguageModel for ChunkedLlm {
                 provider_metadata: None,
             });
         };
-        Ok(StreamResult { stream: Box::pin(stream), request_body: None, response_headers: None })
+        Ok(StreamResult {
+            stream: Box::pin(stream),
+            request_body: None,
+            response_headers: None,
+        })
     }
 }
 
@@ -86,11 +90,17 @@ fn req(value: serde_json::Value) -> StreamRequest {
 
 #[tokio::test]
 async fn stream_yields_parts_in_order_with_finish_last() {
-    let recorder = Arc::new(ChunkedLlm { calls: Mutex::new(Vec::new()) });
+    let recorder = Arc::new(ChunkedLlm {
+        calls: Mutex::new(Vec::new()),
+    });
     let rec2 = Arc::clone(&recorder);
-    let factory = Arc::new(move |_p: &str, _k: &str, _m: &str| Ok(Arc::clone(&rec2) as Arc<dyn LanguageModel>));
+    let factory = Arc::new(move |_p: &str, _k: &str, _m: &str| {
+        Ok(Arc::clone(&rec2) as Arc<dyn LanguageModel>)
+    });
     let svc = AimuxLlm::with_factory(
-        Arc::new(FailLlm { touched: Arc::new(Mutex::new(false)) }),
+        Arc::new(FailLlm {
+            touched: Arc::new(Mutex::new(false)),
+        }),
         "deepseek",
         "env-model",
         factory,
@@ -115,13 +125,20 @@ async fn stream_yields_parts_in_order_with_finish_last() {
 #[tokio::test]
 async fn keyed_request_routes_through_factory_fallback_untouched() {
     let touched: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
-    let fail = FailLlm { touched: Arc::clone(&touched) };
+    let fail = FailLlm {
+        touched: Arc::clone(&touched),
+    };
     let fallback: Arc<dyn LanguageModel> = Arc::new(fail);
     let seen: Arc<Mutex<Vec<(String, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let seen2 = Arc::clone(&seen);
-    let recorder = Arc::new(ChunkedLlm { calls: Mutex::new(Vec::new()) });
+    let recorder = Arc::new(ChunkedLlm {
+        calls: Mutex::new(Vec::new()),
+    });
     let factory = Arc::new(move |provider: &str, key: &str, model: &str| {
-        seen2.lock().unwrap().push((provider.to_owned(), key.to_owned(), model.to_owned()));
+        seen2
+            .lock()
+            .unwrap()
+            .push((provider.to_owned(), key.to_owned(), model.to_owned()));
         Ok(Arc::clone(&recorder) as Arc<dyn LanguageModel>)
     });
     let svc = AimuxLlm::with_factory(fallback, "deepseek", "env-model", factory);
@@ -132,17 +149,35 @@ async fn keyed_request_routes_through_factory_fallback_untouched() {
     let calls = seen.lock().unwrap();
     assert_eq!(
         calls.as_slice(),
-        [("deepseek".to_string(), "sk-from-page".to_string(), "deepseek-v4-flash".to_string())]
+        [(
+            "deepseek".to_string(),
+            "sk-from-page".to_string(),
+            "deepseek-v4-flash".to_string()
+        )]
     );
-    assert!(!*touched.lock().unwrap(), "fallback must stay untouched when a key crossed");
+    assert!(
+        !*touched.lock().unwrap(),
+        "fallback must stay untouched when a key crossed"
+    );
 }
 
 #[tokio::test]
 async fn keyless_request_falls_back_and_request_without_provider_uses_env_default() {
-    let recorder = Arc::new(ChunkedLlm { calls: Mutex::new(Vec::new()) });
+    let recorder = Arc::new(ChunkedLlm {
+        calls: Mutex::new(Vec::new()),
+    });
     // 无 key:回落 fallback(即注入的 recorder),不经工厂。
-    let svc = AimuxLlm::new(Arc::clone(&recorder) as Arc<dyn LanguageModel>, "deepseek", "env-model");
-    let _ = svc.stream(req(json!({ "options": { "messages": [{ "text": "hi" }] } }))).await.expect("stream");
+    let svc = AimuxLlm::new(
+        Arc::clone(&recorder) as Arc<dyn LanguageModel>,
+        "deepseek",
+        "env-model",
+    );
+    let _ = svc
+        .stream(req(
+            json!({ "options": { "messages": [{ "text": "hi" }] } }),
+        ))
+        .await
+        .expect("stream");
     let calls = recorder.calls.lock().unwrap();
     assert_eq!(calls.len(), 1, "fallback used");
 }
@@ -150,11 +185,17 @@ async fn keyless_request_falls_back_and_request_without_provider_uses_env_defaul
 /// DTO → CallOptions 的逐字段映射(原 L3 面下沉到服务层)。
 #[tokio::test]
 async fn dto_maps_to_call_options_field_by_field() {
-    let recorder = Arc::new(ChunkedLlm { calls: Mutex::new(Vec::new()) });
+    let recorder = Arc::new(ChunkedLlm {
+        calls: Mutex::new(Vec::new()),
+    });
     let rec2 = Arc::clone(&recorder);
-    let factory = Arc::new(move |_p: &str, _k: &str, _m: &str| Ok(Arc::clone(&rec2) as Arc<dyn LanguageModel>));
+    let factory = Arc::new(move |_p: &str, _k: &str, _m: &str| {
+        Ok(Arc::clone(&rec2) as Arc<dyn LanguageModel>)
+    });
     let svc = AimuxLlm::with_factory(
-        Arc::new(FailLlm { touched: Arc::new(Mutex::new(false)) }),
+        Arc::new(FailLlm {
+            touched: Arc::new(Mutex::new(false)),
+        }),
         "deepseek",
         "env-model",
         factory,

@@ -161,8 +161,8 @@ impl SessionSnapshot {
             saved_at_ms: crate::session::now_ms(),
             tokens_used: self.tokens_used,
         };
-        let json = serde_json::to_string_pretty(&file)
-            .map_err(|e| format!("serialize session: {e}"))?;
+        let json =
+            serde_json::to_string_pretty(&file).map_err(|e| format!("serialize session: {e}"))?;
         let tmp = crate::session::tmp_path(path);
         std::fs::write(&tmp, json).map_err(|e| format!("write {}: {e}", tmp.display()))?;
         std::fs::rename(&tmp, path)

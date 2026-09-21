@@ -529,7 +529,10 @@ async fn pre_execute_gate_can_block_specific_tool() {
     let done = soon(agent.followup("run it")).await;
     assert_eq!(done.unwrap(), "understood the block");
     // bash 未真正执行
-    assert!(!ran.load(std::sync::atomic::Ordering::SeqCst), "bash must NOT execute when gated");
+    assert!(
+        !ran.load(std::sync::atomic::Ordering::SeqCst),
+        "bash must NOT execute when gated"
+    );
     // model 看到了 error 反馈
     let session = agent.session();
     let msgs = session.messages();

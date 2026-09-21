@@ -61,8 +61,14 @@ impl TcpInner {
             .write_all(line.as_bytes())
             .await
             .map_err(|e| ProtoError::Wire(format!("tcp write: {e}")))?;
-        write.write_all(b"\n").await.map_err(|e| ProtoError::Wire(format!("tcp write: {e}")))?;
-        write.flush().await.map_err(|e| ProtoError::Wire(format!("tcp flush: {e}")))
+        write
+            .write_all(b"\n")
+            .await
+            .map_err(|e| ProtoError::Wire(format!("tcp write: {e}")))?;
+        write
+            .flush()
+            .await
+            .map_err(|e| ProtoError::Wire(format!("tcp flush: {e}")))
     }
 
     /// 手动按缓冲切行:`read_line` 无界,这里以 32MiB 守卫代替。
@@ -79,7 +85,7 @@ impl TcpInner {
                 };
                 if buf.is_empty() {
                     // EOF:连接关闭 = 宿主死亡。
-                    return None
+                    return None;
                 }
                 let found = buf.iter().position(|&b| b == b'\n');
                 match found {
@@ -101,23 +107,26 @@ impl TcpInner {
                         Ok(text) => text,
                         Err(e) => {
                             eprintln!("[tcp] non-utf8 frame dropped: {e}");
-                            continue
+                            continue;
                         }
                     };
                     return match serde_json::from_str(&text) {
                         Ok(frame) => Some(frame),
                         Err(e) => {
-                            eprintln!("[tcp] bad json frame dropped: {e}; line[0..120]={}", &text[..text.len().min(120)]);
+                            eprintln!(
+                                "[tcp] bad json frame dropped: {e}; line[0..120]={}",
+                                &text[..text.len().min(120)]
+                            );
                             // 坏帧不是宿主死亡:丢弃并继续泵(诊断期行为,
                             // 定稿后改为计数 + 断连策略)。
-                            continue
+                            continue;
                         }
-                    }
+                    };
                 }
                 None => {
                     read.consume(filled);
                     if line.len() > MAX_LINE_BYTES {
-                        return None
+                        return None;
                     }
                 }
             }

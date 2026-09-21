@@ -9,8 +9,7 @@ use std::sync::Arc;
 use aimux_core::language_model::LanguageModel;
 use rutis::Ctx;
 use rutis_agent::{
-    agent_key, llm_key, minimal_persona, AgentDriverPlugin, LlmResponse, ScriptedLlm,
-    ToolsPlugin,
+    agent_key, llm_key, minimal_persona, AgentDriverPlugin, LlmResponse, ScriptedLlm, ToolsPlugin,
 };
 
 fn scripted() -> Arc<dyn LanguageModel> {
@@ -49,18 +48,28 @@ async fn driver_restart_preserves_session_and_cascades_tui() {
 
     // turn 1
     agent1.followup("hello").await.unwrap();
-    assert!(agent1.session().messages().len() > msgs1, "turn should add messages");
+    assert!(
+        agent1.session().messages().len() > msgs1,
+        "turn should add messages"
+    );
 
     // fiber 级热重启 driver
     driver_view.restart().await.unwrap();
 
     // 重启后 agent 服务被重新 provide
     let agent2 = root.get_as::<dyn rutis_agent::Agent>(agent_key()).unwrap();
-    assert!(!Arc::ptr_eq(&agent1, &agent2), "driver should be a new instance");
+    assert!(
+        !Arc::ptr_eq(&agent1, &agent2),
+        "driver should be a new instance"
+    );
 
     // session 恢复:identity 稳定,generation+1,历史连续
     let id2 = agent2.id();
-    assert_eq!(id1.identity(), id2.identity(), "identity stable across restart");
+    assert_eq!(
+        id1.identity(),
+        id2.identity(),
+        "identity stable across restart"
+    );
     assert_eq!(id1.generation() + 1, id2.generation(), "generation +1");
     assert!(
         agent2.session().messages().len() >= msgs1,

@@ -30,7 +30,9 @@ use crossterm::event::{
     KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
@@ -38,23 +40,19 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::Paragraph;
 use ratatui::{Frame, Terminal};
-use unicode_width::UnicodeWidthStr;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Listener, Plugin, TypeKey};
 use rutui_core::scrollback::block::RenderBlock;
 use rutui_core::scrollback::blocks::{
     AgentMessageBlock, OtherToolCallBlock, SessionEvent, SessionEventBlock, SystemMessageBlock,
     ThinkingBlock, ToolCallBlock, UserPromptBlock,
 };
-use rutui_core::scrollback::{
-    EntryId, ScrollbackPane, ScrollbackState, ScratchBuffer,
-};
+use rutui_core::scrollback::{EntryId, ScratchBuffer, ScrollbackPane, ScrollbackState};
 use rutui_prompt::prompt_widget::{PromptStyle, PromptWidget};
 use tokio::sync::{mpsc, oneshot};
+use unicode_width::UnicodeWidthStr;
 
 use crate::agent::Agent;
-use crate::events::{
-    AgentReasoning, AgentTextDelta, AgentToolCall, AgentToolResult, AgentTurnEnd,
-};
+use crate::events::{AgentReasoning, AgentTextDelta, AgentToolCall, AgentToolResult, AgentTurnEnd};
 
 /// TUI 前端插件:apply 时读取 agent 服务(启动时门控),不声明依赖——
 /// driver fiber 热重启时 TUI 不级联驱逐,UI 保持运行(热重启意图)。
@@ -91,20 +89,12 @@ const MOUSE_SCROLL_LINES: u16 = 3;
 
 fn setup_terminal() -> std::io::Result<()> {
     enable_raw_mode()?;
-    execute!(
-        std::io::stdout(),
-        EnterAlternateScreen,
-        EnableMouseCapture
-    )?;
+    execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
     Ok(())
 }
 
 fn restore_terminal() -> std::io::Result<()> {
-    execute!(
-        std::io::stdout(),
-        DisableMouseCapture,
-        LeaveAlternateScreen
-    )?;
+    execute!(std::io::stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
     disable_raw_mode()?;
     Ok(())
 }
@@ -155,10 +145,7 @@ struct Active {
 impl Active {
     /// 收尾所有 open 块并清空。
     fn close_all(&mut self, sb: &mut ScrollbackState) {
-        for id in [self.agent, self.thinking, self.tool]
-            .into_iter()
-            .flatten()
-        {
+        for id in [self.agent, self.thinking, self.tool].into_iter().flatten() {
             sb.finish_running(id);
         }
         *self = Self::default();
@@ -244,9 +231,9 @@ impl App {
                 let id = match self.active.agent {
                     Some(id) => id,
                     None => {
-                        let id = self.scrollback.push_block(RenderBlock::AgentMessage(
-                            AgentMessageBlock::streaming(),
-                        ));
+                        let id = self
+                            .scrollback
+                            .push_block(RenderBlock::AgentMessage(AgentMessageBlock::streaming()));
                         self.scrollback.set_entry_running(id, true);
                         self.active.agent = Some(id);
                         id
@@ -302,12 +289,13 @@ impl App {
             }
             UiCmd::TurnEnd { ok: false, error } => {
                 self.active.close_all(&mut self.scrollback);
-                self.scrollback.push_block(RenderBlock::SessionEvent(SessionEventBlock::new(
-                    SessionEvent::TurnFailed {
-                        error,
-                        elapsed: None,
-                    },
-                )));
+                self.scrollback
+                    .push_block(RenderBlock::SessionEvent(SessionEventBlock::new(
+                        SessionEvent::TurnFailed {
+                            error,
+                            elapsed: None,
+                        },
+                    )));
                 self.running = false;
             }
         }
@@ -391,8 +379,12 @@ fn render(frame: &mut Frame, app: &mut App) {
     // 对话区:rutui ScrollbackPane
     // 渲染前必须 prepare_layout(计算各 entry 高度 / 布局缓存),否则 render panic
     app.scrollback.prepare_layout(conv.width, conv.height);
-    ScrollbackPane::new()
-        .render_with_scratch(conv, frame.buffer_mut(), &mut app.scrollback, &mut app.scratch);
+    ScrollbackPane::new().render_with_scratch(
+        conv,
+        frame.buffer_mut(),
+        &mut app.scrollback,
+        &mut app.scratch,
+    );
 
     // 记录对话区位置(拖选约束鼠标坐标用),并在其上叠加选区高亮。
     app.conv_area = conv;
@@ -425,7 +417,9 @@ fn render(frame: &mut Frame, app: &mut App) {
         show_borders: true,
         ..PromptStyle::default()
     };
-    let result = app.prompt.draw(frame.buffer_mut(), input, None, &style, None, None);
+    let result = app
+        .prompt
+        .draw(frame.buffer_mut(), input, None, &style, None, None);
     if let Some((col, row)) = result.cursor_pos {
         frame.set_cursor_position((col, row));
     }
@@ -486,7 +480,7 @@ fn selection_text(buf: &Buffer, sel: &Selection, area: Rect) -> Option<String> {
         let mut col = c0;
         while col <= c1 {
             let Some(cell) = buf.cell((col, row)) else {
-                break
+                break;
             };
             let sym = cell.symbol();
             let w = sym.width();
@@ -521,7 +515,11 @@ fn base64_encode(data: &[u8]) -> String {
         } else {
             '='
         });
-        out.push(if ch.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+        out.push(if ch.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -695,9 +693,7 @@ impl Plugin for TuiPlugin {
                     let outcome: Result<(), CordisError> = loop {
                         let _ = app.scrollback.tick();
                         if let Err(e) = terminal.draw(|f| render(f, &mut app)) {
-                            break Err(CordisError::PluginFailed(
-                                format!("tui draw: {e}").into(),
-                            ));
+                            break Err(CordisError::PluginFailed(format!("tui draw: {e}").into()));
                         }
                         // 非阻塞收取消息;无消息时短暂 park 等下一帧
                         match thread_rx.recv_timeout(Duration::from_millis(50)) {
@@ -754,9 +750,11 @@ impl Plugin for TuiPlugin {
                                 MouseEventKind::Up(MouseButton::Left) => {
                                     if let Some(sel) = app.selection {
                                         if sel.start != sel.end {
-                                            if let Some(text) =
-                                                selection_text(terminal.current_buffer_mut(), &sel, app.conv_area)
-                                            {
+                                            if let Some(text) = selection_text(
+                                                terminal.current_buffer_mut(),
+                                                &sel,
+                                                app.conv_area,
+                                            ) {
                                                 copy_to_clipboard_os52(&text);
                                             }
                                         } else {
@@ -958,10 +956,7 @@ mod tests {
             .expect("session event pushed")
             .block
             .clone();
-        assert!(matches!(
-            last,
-            RenderBlock::SessionEvent(_)
-        ));
+        assert!(matches!(last, RenderBlock::SessionEvent(_)));
     }
 
     /// 工具结果到达后,结果数据应合并进原 toolcall block(默认折叠,不强制展开)。
@@ -1059,7 +1054,11 @@ mod tests {
             .filter_map(|i| app.scrollback.get(i).map(|e| e.block.clone()))
             .collect();
         // 期望: user, thinking, agent(答案1), user, thinking, agent(答案2)
-        assert_eq!(blocks.len(), 6, "expected 2 turns each with user/thinking/agent");
+        assert_eq!(
+            blocks.len(),
+            6,
+            "expected 2 turns each with user/thinking/agent"
+        );
         // 第二轮正文是独立块
         let last = match &blocks[5] {
             RenderBlock::AgentMessage(a) => a,
@@ -1121,11 +1120,14 @@ mod tests {
 
         let chunks = |s: &str| {
             let cs: Vec<char> = s.chars().collect();
-            cs.chunks(4).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>()
+            cs.chunks(4)
+                .map(|c| c.iter().collect::<String>())
+                .collect::<Vec<_>>()
         };
         let reason1 = "用户想知道天气。我需要先查一下奥斯陆的天气,调用 get_weather 工具。";
         let reason2 = "工具已返回,现在直接回答用户。";
-        let content = "奥斯陆今天 18 度,晴。较长的中文文本——用来验证 TUI 的 流式渲染与按显示宽度折行。";
+        let content =
+            "奥斯陆今天 18 度,晴。较长的中文文本——用来验证 TUI 的 流式渲染与按显示宽度折行。";
 
         // step 1: reasoning + 工具
         for d in chunks(reason1) {
@@ -1166,7 +1168,11 @@ mod tests {
             .collect();
 
         // 恰好一个 agent 块(未被 reasoning 交错切碎)
-        assert_eq!(agents.len(), 1, "正文应合并进单个 agent 块,即使 reasoning 交错");
+        assert_eq!(
+            agents.len(),
+            1,
+            "正文应合并进单个 agent 块,即使 reasoning 交错"
+        );
         // 且文本 = 完整正文(顺序正确,未被截断)
         let agent_text = match agents[0] {
             RenderBlock::AgentMessage(a) => a.text(),
@@ -1181,12 +1187,30 @@ mod tests {
     fn selection_rows_single_and_multi_line() {
         let area = Rect::new(0, 0, 10, 5);
         assert_eq!(
-            selection_rows(&Selection { start: (2, 3), end: (6, 3) }, area),
+            selection_rows(
+                &Selection {
+                    start: (2, 3),
+                    end: (6, 3)
+                },
+                area
+            ),
             vec![(3, 2, 6)]
         );
-        let top_down = selection_rows(&Selection { start: (3, 1), end: (4, 3) }, area);
+        let top_down = selection_rows(
+            &Selection {
+                start: (3, 1),
+                end: (4, 3),
+            },
+            area,
+        );
         assert_eq!(top_down, vec![(1, 3, 9), (2, 0, 9), (3, 0, 4)]);
-        let bottom_up = selection_rows(&Selection { start: (4, 3), end: (3, 1) }, area);
+        let bottom_up = selection_rows(
+            &Selection {
+                start: (4, 3),
+                end: (3, 1),
+            },
+            area,
+        );
         assert_eq!(bottom_up, top_down, "选区应与拖动方向无关");
     }
 
@@ -1202,14 +1226,20 @@ mod tests {
         buf.set_stringn(0, 1, "hello world", 24, Style::default());
 
         // 单行整段 CJK
-        let sel = Selection { start: (0, 0), end: (13, 0) };
+        let sel = Selection {
+            start: (0, 0),
+            end: (13, 0),
+        };
         assert_eq!(
             selection_text(&buf, &sel, area).as_deref(),
             Some("奥斯陆天气晴朗")
         );
 
         // 跨行:第 0 行 cols 4.. 到行尾 + 第 1 行 cols 0..=7
-        let sel = Selection { start: (4, 0), end: (7, 1) };
+        let sel = Selection {
+            start: (4, 0),
+            end: (7, 1),
+        };
         assert_eq!(
             selection_text(&buf, &sel, area).as_deref(),
             Some("陆天气晴朗\nhello wo")

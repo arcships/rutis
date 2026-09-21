@@ -50,7 +50,10 @@ impl TestHost {
             .await
             .expect("send hello");
         let frame = self.next().await;
-        let Frame::Res { ok, result, error, .. } = frame else {
+        let Frame::Res {
+            ok, result, error, ..
+        } = frame
+        else {
             panic!("expected hello res, got {frame:?}")
         };
         assert!(ok, "hello rejected: {:?}", error);
@@ -89,7 +92,8 @@ async fn setup_with(expected: ExpectedHost) -> (Bridge, TestHost, Value) {
         json!({ "services": ["observe"], "wfKinds": [], "scopes": [] }),
     );
     let host = TestHost { wire: host_wire };
-    host.hello_ok(caps(&["tools", "shell", "systemPrompt"])).await;
+    host.hello_ok(caps(&["tools", "shell", "systemPrompt"]))
+        .await;
     let params = bridge.ready().await.expect("handshake");
     (bridge, host, params)
 }
@@ -106,7 +110,13 @@ async fn roundtrip_ok_and_remote_error() {
         let bridge = bridge.clone();
         async move { bridge.request("svc/call", json!({ "a": 1 }), None).await }
     });
-    let Frame::Req { id: id_ok, method, params, .. } = host.next().await else {
+    let Frame::Req {
+        id: id_ok,
+        method,
+        params,
+        ..
+    } = host.next().await
+    else {
         panic!("expected req")
     };
     assert_eq!(method, "svc/call");
@@ -155,7 +165,11 @@ async fn concurrent_calls_complete_out_of_order() {
             tokio::spawn({
                 let bridge = bridge.clone();
                 let name = name.to_string();
-                async move { bridge.request("svc/call", json!({ "name": name }), None).await }
+                async move {
+                    bridge
+                        .request("svc/call", json!({ "name": name }), None)
+                        .await
+                }
             }),
         ));
     }
@@ -191,7 +205,10 @@ async fn cancel_settles_as_cancelled_and_late_res_counts_orphan() {
         panic!("expected req")
     };
 
-    bridge.cancel(CancelTarget::call(id)).await.expect("cancel notify");
+    bridge
+        .cancel(CancelTarget::call(id))
+        .await
+        .expect("cancel notify");
     // 取消以 Cancelled 结算,与远端错误可区分(F2)。
     match call.await.unwrap().unwrap_err() {
         ProtoError::Cancelled { id: cid, method } => {
@@ -215,7 +232,10 @@ async fn cancel_settles_as_cancelled_and_late_res_counts_orphan() {
 
 #[tokio::test]
 async fn caller_declared_timeout_fails_without_waiting() {
-    let config = BridgeConfig { default_timeout_ms: 25, max_timeout_ms: 500 };
+    let config = BridgeConfig {
+        default_timeout_ms: 25,
+        max_timeout_ms: 500,
+    };
     let (bridge_wire, host_wire) = MemoryWire::pair(64);
     let mut bridge = Bridge::start(
         Box::new(bridge_wire),
@@ -236,7 +256,11 @@ async fn caller_declared_timeout_fails_without_waiting() {
         panic!("expected req")
     };
     match call.await.unwrap().unwrap_err() {
-        ProtoError::Timeout { id: tid, method: tmethod, timeout_ms } => {
+        ProtoError::Timeout {
+            id: tid,
+            method: tmethod,
+            timeout_ms,
+        } => {
             assert_eq!(tid, id);
             assert_eq!(tmethod, "svc/call");
             assert_eq!(timeout_ms, 40);
@@ -310,7 +334,11 @@ async fn handshake_protocol_mismatch_fails_at_handshake() {
     assert!(!ok);
     let error = error.expect("error payload");
     assert_eq!(error.code, "handshake");
-    assert!(error.message.contains("protocol version mismatch"), "{}", error.message);
+    assert!(
+        error.message.contains("protocol version mismatch"),
+        "{}",
+        error.message
+    );
     match bridge.ready().await {
         Err(ProtoError::Handshake(reason)) => {
             assert!(reason.contains("protocol version mismatch"), "{reason}")
@@ -326,7 +354,11 @@ async fn handshake_base_pin_rejects_wrong_base() {
         Box::new(bridge_wire),
         BridgeConfig::default(),
         InboundHooks::default(),
-        ExpectedHost { protocol: 1, base: Some("min-cordis".into()), verify: None },
+        ExpectedHost {
+            protocol: 1,
+            base: Some("min-cordis".into()),
+            verify: None,
+        },
         serde_json::json!({}),
     );
     let host = TestHost { wire: host_wire };
@@ -350,7 +382,10 @@ async fn handshake_base_pin_rejects_wrong_base() {
         panic!("expected error res")
     };
     assert!(!ok);
-    assert!(error.expect("error payload").message.contains("base mismatch"));
+    assert!(error
+        .expect("error payload")
+        .message
+        .contains("base mismatch"));
     match bridge.ready().await {
         Err(ProtoError::Handshake(reason)) => assert!(reason.contains("base mismatch")),
         e => panic!("expected Handshake, got {e:?}"),
@@ -445,7 +480,10 @@ async fn first_frame_req_must_be_hello() {
         panic!("expected error res")
     };
     assert!(!ok);
-    assert!(error.expect("error payload").message.contains("first frame must be hello"));
+    assert!(error
+        .expect("error payload")
+        .message
+        .contains("first frame must be hello"));
     match bridge.ready().await {
         Err(ProtoError::Handshake(reason)) => {
             assert!(reason.contains("first frame must be hello"), "{reason}")
@@ -473,7 +511,10 @@ async fn handshake_replies_symmetric_capability_set() {
     assert_eq!(reply["caps"]["wfKinds"], json!(["decide"]));
     let params = bridge.ready().await.expect("handshake");
     let peer = PeerCaps::from_hello_params(&params).expect("parse caps");
-    assert_eq!(peer.services, ["tools"].into_iter().map(str::to_owned).collect());
+    assert_eq!(
+        peer.services,
+        ["tools"].into_iter().map(str::to_owned).collect()
+    );
 }
 
 #[tokio::test]
@@ -495,12 +536,20 @@ async fn capability_diff_rejects_load_with_missing_services() {
 #[test]
 fn plugin_ledger_arbitration() {
     let mut ledger = PluginLedger::default();
-    ledger.load("tool-bash", "npm:@deepseek-ai/dsh-tool-bash").expect("first load");
+    ledger
+        .load("tool-bash", "npm:@deepseek-ai/dsh-tool-bash")
+        .expect("first load");
     // 同 id 同 entry:幂等重载。
-    ledger.load("tool-bash", "npm:@deepseek-ai/dsh-tool-bash").expect("idempotent reload");
+    ledger
+        .load("tool-bash", "npm:@deepseek-ai/dsh-tool-bash")
+        .expect("idempotent reload");
     // 同 id 异 entry:拒绝后者,指名已有者。
     match ledger.load("tool-bash", "file:/local/tool-bash") {
-        Err(ProtoError::DuplicatePlugin { plugin_id, existing_entry, attempted_entry }) => {
+        Err(ProtoError::DuplicatePlugin {
+            plugin_id,
+            existing_entry,
+            attempted_entry,
+        }) => {
             assert_eq!(plugin_id, "tool-bash");
             assert_eq!(existing_entry, "npm:@deepseek-ai/dsh-tool-bash");
             assert_eq!(attempted_entry, "file:/local/tool-bash");
@@ -509,7 +558,9 @@ fn plugin_ledger_arbitration() {
     }
     // 卸载后可换 entry。
     assert!(ledger.unload("tool-bash"));
-    ledger.load("tool-bash", "file:/local/tool-bash").expect("load after unload");
+    ledger
+        .load("tool-bash", "file:/local/tool-bash")
+        .expect("load after unload");
     assert_eq!(ledger.entry("tool-bash"), Some("file:/local/tool-bash"));
     assert!(!ledger.unload("absent"));
 }
@@ -552,7 +603,11 @@ async fn reentrant_events_processed_before_call_settles() {
 
     let call = tokio::spawn({
         let bridge = bridge.clone();
-        async move { bridge.request("svc/call", json!({ "m": "llm" }), None).await }
+        async move {
+            bridge
+                .request("svc/call", json!({ "m": "llm" }), None)
+                .await
+        }
     });
     let Frame::Req { id, .. } = host.next().await else {
         panic!("expected req")
@@ -613,10 +668,14 @@ async fn host_death_fails_pending_calls_and_records_continuity() {
     assert!(record.frames_received >= 1); // 宿主发的 hello(两个 svc/call 是桥发出去的)
 
     // 死亡后的新调用立即 HostGone,不挂起(F4:notify 同样有终态门)。
-    assert!(
-        matches!(bridge.request("svc/call", json!({}), None).await, Err(ProtoError::HostGone))
-    );
-    assert!(matches!(bridge.notify("evt/emit", json!({})).await, Err(ProtoError::HostGone)));
+    assert!(matches!(
+        bridge.request("svc/call", json!({}), None).await,
+        Err(ProtoError::HostGone)
+    ));
+    assert!(matches!(
+        bridge.notify("evt/emit", json!({})).await,
+        Err(ProtoError::HostGone)
+    ));
     assert!(matches!(
         bridge.cancel(CancelTarget::call(1)).await,
         Err(ProtoError::HostGone)
@@ -652,7 +711,10 @@ fn frame_reserved_fields_roundtrip() {
         turn_id: None,
     })
     .expect("serialize");
-    assert!(!bare.contains("scopeId") && !bare.contains("sessionId") && !bare.contains("turnId"), "{bare}");
+    assert!(
+        !bare.contains("scopeId") && !bare.contains("sessionId") && !bare.contains("turnId"),
+        "{bare}"
+    );
 }
 
 #[test]
@@ -661,13 +723,18 @@ fn evt_mode_accepts_three_dispatch_semantics_and_rejects_others() {
         serde_json::from_value(json!({ "name": "agent/tool-call", "mode": "emit" })).expect("emit");
     assert_eq!(emit.mode, EvtMode::Emit);
     let parallel: EvtDeclaration =
-        serde_json::from_value(json!({ "name": "session/flush", "mode": "parallel" })).expect("parallel");
+        serde_json::from_value(json!({ "name": "session/flush", "mode": "parallel" }))
+            .expect("parallel");
     assert_eq!(parallel.mode, EvtMode::Parallel);
     let serial: EvtDeclaration =
-        serde_json::from_value(json!({ "name": "agent/turn-stopping", "mode": "serial" })).expect("serial");
+        serde_json::from_value(json!({ "name": "agent/turn-stopping", "mode": "serial" }))
+            .expect("serial");
     assert_eq!(serial.mode, EvtMode::Serial);
     // waterfall 不是 evt 分发模式(它在 wf/register 的 kind 里)。
-    assert!(serde_json::from_value::<EvtDeclaration>(json!({ "name": "x", "mode": "waterfall" })).is_err());
+    assert!(
+        serde_json::from_value::<EvtDeclaration>(json!({ "name": "x", "mode": "waterfall" }))
+            .is_err()
+    );
 }
 
 /// F5:wf/register 的 kind 三型是 v1.1 冻结字段,与 evt mode 对称。
@@ -686,6 +753,11 @@ fn wf_kind_three_shapes_frozen() {
             .expect("stream");
     assert_eq!(stream.kind, WfKind::Stream);
     // kind 值域封闭:未知拒绝,不静默字符串化。
-    assert!(serde_json::from_value::<WfDeclaration>(json!({ "name": "x", "kind": "waterfall" })).is_err());
-    assert!(serde_json::from_value::<WfDeclaration>(json!({ "name": "x", "kind": "emit" })).is_err());
+    assert!(
+        serde_json::from_value::<WfDeclaration>(json!({ "name": "x", "kind": "waterfall" }))
+            .is_err()
+    );
+    assert!(
+        serde_json::from_value::<WfDeclaration>(json!({ "name": "x", "kind": "emit" })).is_err()
+    );
 }
