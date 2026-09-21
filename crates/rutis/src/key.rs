@@ -3,8 +3,10 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// 限定名(D33):双轨——静态路径零分配,动态路径(Arc)承接运行时名字。
-/// Hash/Eq 按字符串内容:Static 与 Dynamic 同名等值互通。
-#[derive(Debug, Clone)]
+/// PartialEq/Eq/Hash 按**字符串内容**:Static 与 Dynamic 同名等值互通;
+/// Debug 同样只显示内容(不显示变体),与 Eq 语义一致——变体是实现细节,
+/// 打出来会误导调试。
+#[derive(Clone)]
 pub(crate) enum Qualifier {
     Static(&'static str),
     Dynamic(Arc<str>),
@@ -16,6 +18,12 @@ impl Qualifier {
             Qualifier::Static(s) => s,
             Qualifier::Dynamic(s) => s,
         }
+    }
+}
+
+impl std::fmt::Debug for Qualifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.as_str(), f)
     }
 }
 

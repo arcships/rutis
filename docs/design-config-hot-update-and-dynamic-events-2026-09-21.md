@@ -115,7 +115,7 @@ impl FiberView {
 - **D32d 不做 `internal/update` waterfall**:持久化归宿主层。`noSave` 语义无对应物。
 - **D32e config 不进依赖身份**:变化经 restart 换代体现,消费者看 provider_gen。与 cordis 四元组语义一致。
 
-### 1.7 测试计划(契约测试,目标 ~10 条)
+### 1.7 测试计划(契约测试)
 
 1. Active 态 update:新 config 生效(提供的服务值变)、generation+1、旧代清理恰好一次(LIFO 顺序断言);
 2. dry-run 失败三种(validate_config / build / 实例 validate):返回 Err,状态与服务不变;
@@ -125,8 +125,10 @@ impl FiberView {
 6. 并发 update × dispose / update × update(FIFO、join 均正确落定);
 7. 工厂模式 `injects(config)` 门控:依赖缺失时 Pending,不 apply;
 8. config 类型不匹配的 update 报 Validation;
-9. 工厂 build 失败(依赖已满足):Failed,config 保留,再次 update 修复;
-10. 与 parity 对拍:`update config while injected service reloads` 的内核(原列"部分对拍",载体 update config——本设计落地后可全拍)。
+9. 依赖驱动重载用当前 config 重造实例(provider 摘除 → 重提供 → 重载仍用当前 config;update 后再驱逐则用新 config);
+10. `current_config` 快照与类型不符路径。
+
+**评审增补(§八 之 2)**:11. Loading 态 update(apply 运行中,协作取消后重载新 config);12. Unloading 态 update(慢清理中排队,收敛后重新提供依赖装载新 config);13. update × 驱逐并发(provider 换代与消费者热更新并发,双方收敛);14. injects 随 config 漂移被 dry-run 拒绝;15. build panic → Failed 且驱动存活/join 不挂起;16. injects(config) panic → 视为不就绪留 Pending。
 
 ---
 
@@ -169,15 +171,22 @@ impl EventBus {
     // 注册面
     pub fn on_keyed<E: Event>(&self, ctx: &Ctx, name: impl Into<Arc<str>>,
                               l: impl Listener<E>) -> Result<Disposer, CordisError>;
-    pub fn on_keyed_opt<E: Event>(.., opts: EventOptions) -> ..;   // prepend/once 同现有
-    pub fn once_keyed<E: Event>(..) -> ..;
-    pub fn on_waterfall_keyed<E: Event>(.., l: impl WaterfallListener<E>) -> ..;
+    pub fn on_keyed_opt<E: Event>(&self, ctx: &Ctx, name: impl Into<Arc<str>>,
+                                  l: impl Listener<E>, opts: EventOptions) -> Result<Disposer, CordisError>;
+    pub fn once_keyed<E: Event>(&self, ctx: &Ctx, name: impl Into<Arc<str>>,
+                                l: impl Listener<E>) -> Result<Disposer, CordisError>;
+    pub fn on_waterfall_keyed<E: Event>(&self, ctx: &Ctx, name: impl Into<Arc<str>>,
+                                        l: impl WaterfallListener<E>) -> Result<Disposer, CordisError>;
 
-    // 分发面(四语义全套)
+    // 分发面(四语义全套;签名与非 keyed 对齐,多 name 参数)
     pub fn emit_keyed<E: Event>(&self, ctx: &Ctx, name: impl Into<Arc<str>>, e: Arc<E>);
-    pub async fn parallel_keyed<E: Event>(..) -> Result<(), CordisError>;
-    pub async fn serial_keyed<E: Event>(..) -> Result<Option<E::Value>, CordisError>;
-    pub fn waterfall_keyed<'a, E: Event, T: Terminal<E> + 'a>(..) -> BoxFuture<'a, ..>;
+    pub async fn parallel_keyed<E: Event>(&self, ctx: &Ctx, name: impl Into<Arc<str>>,
+                                          e: Arc<E>) -> Result<(), CordisError>;
+    pub async fn serial_keyed<E: Event>(&self, ctx: &Ctx, name: impl Into<Arc<str>>,
+                                        e: &E) -> Result<Option<E::Value>, CordisError>;
+    pub fn waterfall_keyed<'a, E: Event, T: Terminal<E> + 'a>(
+        &self, ctx: &'a Ctx, name: impl Into<Arc<str>>, e: &'a E, terminal: T,
+    ) -> BoxFuture<'a, Result<E::Value, CordisError>>;
 }
 ```
 
@@ -204,7 +213,7 @@ impl Event for HostEvent {
 
 - `InboundHooks` 增 evt 转发缝:`on_event(ctx, name, payload)`;`Bridge::start` 需持有 `Ctx`(runner 侧传入,rutis_dsh.rs 组装时已有);
 - 泵的 `dispatch_notify` 对 `evt/emit` 调 `ctx.events().emit_keyed::<HostEvent>(name, HostEvent{ name, payload: params })`;其余 Ntf 维持现状;
-- 三字段透传(scopeId/sessionId/turnId, rpc.rs:41-46 预留)进 payload 或独立字段,实施时随 proto 定;
+- 三字段透传(scopeId/sessionId/turnId,rpc.rs 预留)——**实施已定**(评审补):`EventOrigin{scope_id, session_id, turn_id}` 独立结构体,泵解构 Ntf 时构造并随 `NotifyHook(method, params, origin)` 下传;`HostEvent.origin` 携带,订阅方区分同事件名下不同会话/回合;
 - 订阅方用法:`ctx.events().on_keyed::<HostEvent>("session/event", |ctx, e| ..)`,随注册方 fiber 卸载自动清理(D28 照旧)。
 
 ### 2.5 决策点
@@ -253,18 +262,53 @@ M1/M2 可并行(不同文件为主,fiber.rs 仅 M1 触及)。每阶段独立提�
 - Context.filter 事件过滤(D33d);
 - loader(插件名→工厂注册表、配置文件驱动装载)(D33e)——D32 的 PluginFactory 是其底座,本期不建注册表;
 - `internal/*` 协议面整体(维持原对拍裁决);
-- 事件名通配符/glob 订阅(宿主侧真需要再加,当前无需求证据)。
+- 事件名通配符/glob 订阅(宿主侧真需要再加,当前无需求证据);
+- **dispatch_tail 已完成 JoinHandle 的清理**(评审遗留:存量问题,键数量有界,非本设计引入;动 D31 结构的改造留后续简化批次)。
 
 ## 六 实施顺序建议
 
 M1 → M2 → M3。M1 先行的理由:独立收益最大、不动总线;M2 改 TypeKey 触碰全仓签名,单独一个提交便于 review 与回滚。
 
-## 七 实施记录(2026-09-21 执行完毕)
+## 七 实施记录(2026-09-21 执行完毕;§八 为评审修复轮)
 
-**全部落地,全 workspace 261 项测试全绿(新增 22:config_update 10 + event_keys 11 + host_events 1)**,clippy 对新增代码零警告(存量警告未动)。
+**全部落地,全 workspace 测试全绿(新增 29:config_update 16 + event_keys 11 + host_events 2)**,clippy 对新增代码零警告(存量警告未动)。
 
 - **M1(D32)**:`PluginFactory`(plugin.rs)+ `Ctx::plugin_with/plugin_from`(ctx.rs,与 `plugin()` 共享 mount 收尾)+ `FiberView::update/current_config`(fiber.rs)。内部:`FiberInner.factory/config` 双字段,`ErasedFactory` 擦除适配;`load()` 经 `current_plugin()` 统一取实例,工厂模式每代重造。**实施中补的一个设计缺口**:`resolve_deps` 原从 `plugin` 实例读 injects,工厂模式 plugin 为 None → 门控失效(直接装载);已改为工厂模式从当前 config 派生(config 先 clone 出锁再进用户回调,防重入死锁)。`update` 的 dry-run 用户回调裹 catch_unwind。测试 10 条:tests/config_update.rs。
 - **M2(D33)**:`Qualifier` 双轨 enum(key.rs,Static 零分配 / Dynamic `Arc<str>`;**Eq/Hash 手写按字符串内容**,derive 会按变体判等——测试抓出);bus 三个注册面键 `TypeId` → `TypeKey`,keyed API 全家桶(`on/once/on_waterfall/emit/parallel/serial/waterfall` 的 `_keyed` 变体,内部共享一条 TypeKey 路径)。TypeKey 失 `Copy` 的连锁由编译器全量暴露,registry 的 lookup/consumers_of/notify_key_changed 顺势改吃借用。测试 11 条:tests/event_keys.rs(含 parity 补拍:cordis events.spec 字符串事件名内核,原判"部分对拍"升级为可全拍)。
 - **M3**:rutis-cordis 新模块 events.rs(`HostEvent{name, payload}` + `forward_host_events(ctx, observe)`——observe 收全部 Ntf 与转发并行,恶形 evt 静默丢弃);rutis_dsh runner 的 on_notify 换装(stderr 摘要降为观察者)。e2e:tests/host_events.rs(MemoryWire 双名订阅 + 恶形不进总线 + 观察者全量)。
 
-**与设计的偏差**:无实质偏差。一个 API 形态微调:`current_config` 返回 `Option<Arc<C>>`(设计草案写 `Option<Box<C>>`;Arc 存储使快照零拷贝,且 update 的存入也走 Arc)。
+**与设计的偏差**:
+- `current_config` 返回 `Option<Arc<C>>`(设计草案写 `Option<Box<C>>`;Arc 存储使快照零拷贝,且 update 的存入也走 Arc);
+- `PluginFactory` 增加了带默认实现的 `name()` 方法(fiber 显示名,工厂模式 spawn 时取用)——草案未列,补此申报。
+
+## 八 评审轮记录(2026-09-21,4 个独立评审员并行)
+
+评审对象:PR #1(feat/config-hot-update-and-dynamic-events)。**阻断 0**;分层纪律、键机制正确性、数字声明(README 136 / 全绿 / clippy)全部核实通过。
+
+### 已修(全部)
+
+1. **`load()` 的 build 无 panic 边界**(并发评审,应修):build panic 穿透驱动 → fiber 卡 Loading、join 永等。修复:`current_plugin()` 的 `build_erased` 包 catch_unwind,panic 转 `fail_load`,与 validate 对称;补契约测试 15(build panic → Failed、restart 可重试不挂起)。
+2. **injects 随 config 漂移的静默失效**(并发评审,应修):registry 只在 spawn 注册一次,`injects(&config)` 漂移会让 notify/驱逐静默失效,且与 resolve_deps 每代重派生自相矛盾。修复:update dry-run 校验新 config 派生声明与 spawn 快照(`FiberInner.spawn_injects`)集合相等,不等 `Validation` 拒绝;`plugin.rs` 文档写明契约与替代方案。补契约测试 14。
+3. **三字段透传缺失**(桥层评审,应修):泵 `Frame::Ntf { .. }` 丢弃 scopeId/sessionId/turnId 且未记录决定。修复:`EventOrigin` 独立结构体,`NotifyHook(method, params, origin)` 三参签名,`HostEvent.origin` 携带;e2e 断言透传。
+4. **observe panic 吞事件**(桥层评审,应修):observe 先 await,panic 则该 Ntf 的转发静默丢失。修复:**转发先于 observe**(emit_keyed 只入队尾链);恶形帧由静默丢弃改为 eprintln 一行(可观测性)。
+5. **测试 sleep 等待的 flaky 风险**(事件评审,应修):全部换 Notify 信号化等待;负断言改走确定性路径(无监听器键的 take_hooks 同步返回空,不产生任务;dispose await 返回即注册表摘除)——event_keys/host_events 全文件零 sleep。
+6. **Loading 态 update 无测试**(一致性评审,应修)→ 契约测试 11(apply 运行中协作取消后重载新 config,兼覆盖 §1.5 "update × 运行中 apply")。
+7. **update×驱逐 无测试**(一致性评审,应修)→ 契约测试 13(provider 换代与消费者热更新并发,双方收敛,末次重载读到 provider 新代值)。
+8. **`injects_erased` 无 panic 边界**(并发评审,建议,与 1 同类):resolve_deps 与 spawn 两处调用均包 catch_unwind,panic 视为依赖不就绪(哨兵键 `InjectsUnavailable` 留 Pending,错误路由 ErrorSink;同 check() 既有语义)。补契约测试 16。
+9. **桥断连场景无测试**(桥层评审,建议)→ host_events 增 `event_bus_survives_bridge_drop`(ctx 独立于 bridge 存活)。
+10. **Qualifier Debug 打印变体名但 Eq 按内容**(事件评审,建议):手写 Debug 只显示字符串内容,与 Eq 一致。
+11. **Unloading 态 update 无测试**(一致性评审,建议)→ 契约测试 12(慢清理中排队,收敛后重提供依赖装载新 config)。
+
+### 文档修正
+
+- §1.7 计划条目 #9/#10 与初版实施的映射错位已重写(原 #9"build 失败恢复"并入 #4 的 apply 失败路径语义,原 #10 parity 对拍由 event_keys 第 8 条承担);
+- §2.3 分发面补全签名;§2.4 三字段的 proto 决定落档(见上);§五 增补 dispatch_tail 遗留项;
+- parity 补拍测试注明 dispose 断言由 `keyed_listener_removed_with_owner_fiber` 承担(跨测试拼合覆盖)。
+
+### 归档无行动
+
+- update×dispose 的 TOCTOU 窗口:与 restart 完全同构,mailbox + post_join 复查封死,无坏状态无永等(并发评审明确结论);
+- build 纯构造契约的并发双跑窗口:D32b 已声明契约,维持;
+- `dispatch_tail` 已完成 JoinHandle 不清理:存量,键有界,记入 §五 遗留。
+
+**修复后状态**:config_update 16 条 + event_keys 11 条(信号化)+ host_events 2 条 = 全 workspace 测试全绿,clippy 对新增代码零警告。

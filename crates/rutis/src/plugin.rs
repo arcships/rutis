@@ -37,7 +37,12 @@ pub trait PluginFactory<C: Send + Sync + 'static>: Send + Sync + 'static {
         std::any::type_name::<Self>()
     }
 
-    /// 依赖门控声明(工厂模式:从 config 派生,spawn 时注册)。
+    /// 依赖门控声明(工厂模式:从 config 派生,spawn 时注册一次)。
+    ///
+    /// **必须对 config 稳定**:`FiberView::update` 会校验新 config 派生的
+    /// 声明与 spawn 时集合相等,不等直接 `Validation` 拒绝——注册表只
+    /// 在 spawn 注册一次,漂移会让 notify/驱逐静默失效。需要按配置改变
+    /// 依赖的插件应拆成多个插件或声明超集。
     fn injects(&self, _config: &C) -> Vec<TypeKey> {
         Vec::new()
     }

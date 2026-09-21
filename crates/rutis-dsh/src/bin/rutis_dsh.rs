@@ -141,7 +141,7 @@ async fn up() {
     // (M3 事件链路,订阅方用 ctx.events().on_keyed::<HostEvent>(ctx, name, ..))。
     hooks.on_notify = Some(forward_host_events(
         &ctx,
-        Some(Arc::new(|method, params| {
+        Some(Arc::new(|method, params, _origin| {
             Box::pin(async move {
                 if method == "evt/emit" {
                     // 载荷摘要(截断):形状级可见性;保真断言在测试里做。

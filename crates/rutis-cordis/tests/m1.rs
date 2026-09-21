@@ -576,7 +576,7 @@ async fn reentrant_events_processed_before_call_settles() {
     let (seen_tx, mut seen_rx) = tokio::sync::mpsc::channel::<()>(1);
     let notify_seen = Arc::new(Mutex::new(seen_tx));
     let hooks = InboundHooks {
-        on_notify: Some(Arc::new(move |method, _params| {
+        on_notify: Some(Arc::new(move |method, _params, _origin| {
             Box::pin({
                 let notify_seen = Arc::clone(&notify_seen);
                 async move {

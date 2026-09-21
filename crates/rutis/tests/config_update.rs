@@ -497,3 +497,377 @@ async fn current_config_returns_snapshot() {
     // 类型不符 → None
     assert!(view.current_config::<String>().is_none());
 }
+
+// ── 状态等待助手(watch,无 sleep) ─────────────────────────────
+
+async fn wait_until_state(view: &FiberView, want: FiberState) {
+    let mut rx = view.watch();
+    loop {
+        if rx.borrow().state == want {
+            return;
+        }
+        rx.changed().await.expect("fiber driver alive");
+    }
+}
+
+// ── 11. Loading 态 update(apply 运行中)──────────────────────────
+// 状态矩阵 Loading 行 + §1.5 "update × 运行中 apply":cancel 使 apply
+// 协作退出 → 卸载重载新 config。
+
+#[tokio::test]
+async fn update_during_loading_converges_to_new_config() {
+    use tokio::sync::Notify;
+
+    // apply 等门:制造 Loading 窗口(v1 的 apply 在此挂起等待,直到
+    // update 的 cancel_current 触发协作退出;v2 代即时完成)。
+    struct SlowFactory {
+        gate: Arc<Notify>,
+        seen: Arc<Mutex<Vec<String>>>,
+    }    impl PluginFactory<TestConfig> for SlowFactory {
+        fn build(&self, config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
+            let gate = self.gate.clone();
+            let seen = self.seen.clone();
+            let label = config.label.clone();
+            Ok(Box::new(SlowPlugin { gate, seen, label }))
+        }
+    }
+    struct SlowPlugin {
+        gate: Arc<Notify>,
+        seen: Arc<Mutex<Vec<String>>>,
+        label: String,
+    }
+    impl Plugin for SlowPlugin {
+        fn name(&self) -> &str {
+            "slow"
+        }
+        fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+            let gate = self.gate.clone();
+            let seen = self.seen.clone();
+            let label = self.label.clone();
+            Box::pin(async move {
+                seen.lock().unwrap().push(format!("apply:{label}"));
+                let _ = ctx.provide(ConfigSvc {
+                    label: label.clone(),
+                    n: 1,
+                });
+                // 只有 v1 慢(制造 Loading 窗口);v2 即时完成——
+                // 测试主线程无法在 update 的 await 期间发 gate 信号。
+                if label != "v1" {
+                    return Ok(Effect::Done);
+                }
+                tokio::select! {
+                    // 协作取消:update 的 cancel_current 让这里返回
+                    _ = ctx.cancelled() => Err(CordisError::PluginFailed("cancelled".into())),
+                    _ = gate.notified() => Ok(Effect::Done),
+                }
+            })
+        }
+    }
+
+    let ctx = Ctx::root().unwrap();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new(Notify::new());
+    let view = ctx.plugin_with(
+        SlowFactory {
+            gate: gate.clone(),
+            seen: seen.clone(),
+        },
+        cfg("v1", 1),
+    );
+    // 等装载进入 Loading(apply 已启动)
+    wait_until_state(&view, FiberState::Loading).await;
+    assert_eq!(seen.lock().unwrap().as_slice(), ["apply:v1"]);
+
+    // Loading 态热更新:cancel → apply v1 协作退出 → 重载新 config
+    // (v2 的 apply 即时完成,无需 gate 信号)
+    view.update(cfg("v2", 2))
+        .await
+        .expect("update during loading");
+    assert_eq!(view.state().state, FiberState::Active);
+    assert_eq!(seen.lock().unwrap().as_slice(), ["apply:v1", "apply:v2"]);
+    assert_eq!(ctx.get::<ConfigSvc>().unwrap().label.clone(), "v2");
+}
+
+// ── 12. Unloading 态 update(清理进行中)─────────────────────────
+// 状态矩阵 Unloading 行:update 排队,驱动串行处理完卸载后收敛新 config。
+
+#[tokio::test]
+async fn update_during_unloading_converges_to_new_config() {
+    use tokio::sync::Notify;
+
+    #[derive(Debug)]
+    struct Dep;
+    let drain_gate = Arc::new(Notify::new());
+
+    struct GatedFactory {
+        gate: Arc<Notify>,
+    }
+    impl PluginFactory<TestConfig> for GatedFactory {
+        fn injects(&self, _config: &TestConfig) -> Vec<TypeKey> {
+            vec![TypeKey::of::<Dep>()]
+        }
+        fn build(&self, config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
+            let gate = self.gate.clone();
+            let label = config.label.clone();
+            Ok(Box::new(GatedPlugin { gate, label }))
+        }
+    }
+    struct GatedPlugin {
+        gate: Arc<Notify>,
+        label: String,
+    }
+    impl Plugin for GatedPlugin {
+        fn name(&self) -> &str {
+            "gated"
+        }
+        fn injects(&self) -> &[TypeKey] {
+            Box::leak(Box::new([TypeKey::of::<Dep>()]))
+        }
+        fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+            let gate = self.gate.clone();
+            let label = self.label.clone();
+            Box::pin(async move {
+                ctx.provide(ConfigSvc { label, n: 1 })?;
+                Ok(Effect::AsyncDisposer(Box::new(move || {
+                    let gate = gate.clone();
+                    Box::pin(async move {
+                        gate.notified().await;
+                        Ok(())
+                    })
+                })))
+            })
+        }
+    }
+
+    let ctx = Ctx::root().unwrap();
+    let view = ctx.plugin_with(
+        GatedFactory {
+            gate: drain_gate.clone(),
+        },
+        cfg("v1", 1),
+    );
+    let d = ctx.provide(Dep).unwrap();
+    view.clone().await.expect("loads");
+    assert_eq!(ctx.get::<ConfigSvc>().unwrap().label.clone(), "v1");
+
+    // 驱逐 → 卸载(慢清理卡在 Unloading)。dispose future 必须 spawn 跑,
+    // 否则 evict 流程未启动、Unloading 永不出现。
+    let d_dispose = d.dispose();
+    let evicted = tokio::spawn(async move {
+        let _ = d_dispose.await;
+    });
+    wait_until_state(&view, FiberState::Unloading).await;
+
+    // Unloading 态 update:排队等清理完成后收敛新 config
+    drain_gate.notify_one();
+    let _ = evicted.await;
+    view.update(cfg("v2", 2))
+        .await
+        .expect("update during unloading");
+    assert_eq!(view.state().state, FiberState::Pending); // 依赖仍缺(Dep 已摘)
+                                                         // 重新提供依赖 → 用新 config 装载
+    let _d2 = ctx.provide(Dep).unwrap();
+    view.clone().await.expect("reload");
+    assert_eq!(ctx.get::<ConfigSvc>().unwrap().label.clone(), "v2");
+}
+
+// ── 13. update × 驱逐并发:双方收敛 ────────────────────────────
+// §1.5 "update × 驱逐":provider 换代驱逐消费者,消费者自身也在热更新,
+// mailbox FIFO 收敛到"双方都用各自当前 config 重载"。
+
+#[tokio::test]
+async fn concurrent_provider_reload_and_consumer_update_settle() {
+    #[derive(Debug, Clone)]
+    struct Dep(String);
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // provider 工厂:config 决定 Dep 的值(热更新换值)
+    struct ProviderFactory;
+    impl PluginFactory<TestConfig> for ProviderFactory {
+        fn build(&self, config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
+            let value = config.label.clone();
+            Ok(Box::new(DepProvider { value }))
+        }
+    }
+    struct DepProvider {
+        value: String,
+    }
+    impl Plugin for DepProvider {
+        fn name(&self) -> &str {
+            "dep-provider"
+        }
+        fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+            let dep = Dep(self.value.clone());
+            Box::pin(async move {
+                ctx.provide(dep)?;
+                Ok(Effect::Done)
+            })
+        }
+    }
+
+    // 消费者工厂:注入 Dep,apply 记录 (自身 config label, Dep 值)
+    struct ConsumerFactory {
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+    impl PluginFactory<TestConfig> for ConsumerFactory {
+        fn injects(&self, _config: &TestConfig) -> Vec<TypeKey> {
+            vec![TypeKey::of::<Dep>()]
+        }
+        fn build(&self, config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
+            let seen = self.seen.clone();
+            let label = config.label.clone();
+            Ok(Box::new(Consumer { seen, label }))
+        }
+    }
+    struct Consumer {
+        seen: Arc<Mutex<Vec<String>>>,
+        label: String,
+    }
+    impl Plugin for Consumer {
+        fn name(&self) -> &str {
+            "consumer"
+        }
+        fn injects(&self) -> &[TypeKey] {
+            Box::leak(Box::new([TypeKey::of::<Dep>()]))
+        }
+        fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+            let seen = self.seen.clone();
+            let mine = self.label.clone();
+            let dep = ctx.get::<Dep>().unwrap();
+            Box::pin(async move {
+                seen.lock().unwrap().push(format!("{mine}/{}", dep.0));
+                Ok(Effect::Done)
+            })
+        }
+    }
+
+    let ctx = Ctx::root().unwrap();
+    let provider = ctx.plugin_with(ProviderFactory, cfg("p1", 1));
+    let consumer = ctx.plugin_with(ConsumerFactory { seen: seen.clone() }, cfg("c1", 1));
+    consumer.clone().await.expect("consumer loads on p1");
+    assert_eq!(seen.lock().unwrap().as_slice(), ["c1/p1"]);
+
+    // 并发:provider 热更新(换代驱逐消费者)+ 消费者自身热更新
+    let pu = provider.update(cfg("p2", 2));
+    let cu = consumer.update(cfg("c2", 2));
+    let (a, b) = tokio::join!(pu, cu);
+    a.expect("provider update");
+    b.expect("consumer update");
+    // 消费者最终用自身新 config(c2)重载,且读到 provider 新代值(p2)
+    wait_until_state(&consumer, FiberState::Active).await;
+    consumer.clone().await.expect("consumer settled");
+    let log = seen.lock().unwrap().clone();
+    assert_eq!(
+        log.last().unwrap(),
+        "c2/p2",
+        "final reload reads new provider gen: {log:?}"
+    );
+}
+
+// ── 14. injects 随 config 漂移 → update 拒绝(fail fast) ─────────
+// 评审 #2:registry 只在 spawn 注册一次,漂移会让 notify/驱逐静默失效;
+// dry-run 校验集合相等,不等即 Validation。
+
+#[tokio::test]
+async fn update_rejects_injects_drift() {
+    #[derive(Debug)]
+    struct DriftDep;
+    struct DriftFactory;
+    impl PluginFactory<TestConfig> for DriftFactory {
+        fn injects(&self, config: &TestConfig) -> Vec<TypeKey> {
+            // n==1 依赖 DriftDep;n==2 无依赖 —— 声明随 config 漂移
+            if config.n == 1 {
+                vec![TypeKey::of::<DriftDep>()]
+            } else {
+                Vec::new()
+            }
+        }
+        fn build(&self, _config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
+            Ok(Box::new(NoopPlugin))
+        }
+    }
+    struct NoopPlugin;
+    impl Plugin for NoopPlugin {
+        fn name(&self) -> &str {
+            "noop"
+        }
+        fn apply<'a>(&'a self, _ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+            Box::pin(async move { Ok(Effect::Done) })
+        }
+    }
+
+    let ctx = Ctx::root().unwrap();
+    let view = ctx.plugin_with(DriftFactory, cfg("gated", 1));
+    // 依赖未到:Pending(injects(n=1) 声明生效)
+    wait_until_state(&view, FiberState::Pending).await;
+
+    // update 到 n=2(声明漂移为空集):dry-run 拒绝,现状不动
+    let err = view.update(cfg("ungated", 2)).await.err().unwrap();
+    assert!(matches!(*err, CordisError::Validation { .. }), "{err:?}");
+    assert_eq!(view.state().state, FiberState::Pending);
+
+    // 补上依赖后仍能按原声明装载(拒绝未产生副作用)
+    ctx.provide(DriftDep).unwrap();
+    view.clone().await.expect("loads with original injects");
+}
+
+// ── 15. build panic → Failed,驱动存活、join 不挂起 ──────────────
+// 评审 #1:build 是用户回调,panic 边界与 validate 对称。
+
+#[tokio::test]
+async fn factory_build_panic_fails_load_without_hanging() {
+    struct PanicFactory;
+    impl PluginFactory<TestConfig> for PanicFactory {
+        fn build(&self, _config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
+            panic!("build boom");
+        }
+    }
+
+    let ctx = Ctx::root().unwrap();
+    let view = ctx.plugin_with(PanicFactory, cfg("v1", 1));
+    // settle 返回错误(而非永等):panic 被转为装载失败
+    let err = view.clone().await.expect_err("build panic fails load");
+    assert!(
+        matches!(*err, CordisError::PluginFailed(ref m) if m.to_string().contains("build boom")),
+        "{err:?}"
+    );
+    assert_eq!(view.state().state, FiberState::Failed);
+    // 驱动仍存活:restart 可重试(build 再 panic 则再 Failed,不挂起)
+    let err2 = view.restart().await.expect_err("restart fails again");
+    assert!(matches!(*err2, CordisError::PluginFailed(_)));
+    assert_eq!(view.state().state, FiberState::Failed);
+}
+
+// ── 16. injects(config) panic → 视为依赖不就绪,驱动存活 ──────────
+
+#[tokio::test]
+async fn factory_injects_panic_leaves_fiber_pending() {
+    struct PanicInjectsFactory;
+    impl PluginFactory<TestConfig> for PanicInjectsFactory {
+        fn injects(&self, _config: &TestConfig) -> Vec<TypeKey> {
+            panic!("injects boom");
+        }
+        fn build(&self, _config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
+            Ok(Box::new(NoopPlugin))
+        }
+    }
+    struct NoopPlugin;
+    impl Plugin for NoopPlugin {
+        fn name(&self) -> &str {
+            "noop"
+        }
+        fn apply<'a>(&'a self, _ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+            Box::pin(async move { Ok(Effect::Done) })
+        }
+    }
+
+    let ctx = Ctx::root().unwrap();
+    let view = ctx.plugin_with(PanicInjectsFactory, cfg("v1", 1));
+    // 不 panic、不装载:Pending 等待(哨兵键永远无 provider)
+    wait_until_state(&view, FiberState::Pending).await;
+    // 驱动存活:dispose 正常收敛
+    view.dispose()
+        .await
+        .expect("dispose works after injects panic");
+    assert_eq!(view.state().state, FiberState::Disposed);
+}

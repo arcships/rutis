@@ -116,6 +116,11 @@ fn complete_intent(intent: &Intent, err: Option<Arc<CordisError>>) {
     }
 }
 
+/// 哨兵键:`injects(config)` panic 时的占位声明——永远无 provider,
+/// fiber 因此留 Pending(不就绪),错误已路由 ErrorSink。
+#[derive(Debug)]
+struct InjectsUnavailable;
+
 enum NextState {
     Pending,
     Disposed,
@@ -139,6 +144,11 @@ pub(crate) struct FiberInner {
     pub factory: Option<Arc<dyn ErasedFactory>>,
     /// 工厂模式的当前 config(Arc 存储便于快照;update 原子替换)。
     pub config: Mutex<Option<Arc<dyn Any + Send + Sync>>>,
+    /// 工厂模式 spawn 时注册的依赖声明快照(D32 评审:防 injects 随
+    /// config 漂移——registry 的 inject_index 只注册一次,漂移会让
+    /// notify/驱逐静默失效。update 时新 config 派生的声明必须与
+    /// 之集合相等,否则 Validation 拒绝,fail fast)。
+    pub spawn_injects: Mutex<Vec<TypeKey>>,
     pub ctx: Ctx,
     pub parent_fiber: Option<Weak<FiberInner>>,
     /// 当前 fiber 代的取消 token(D27):每次 load 新建一代;卸载第②步取消。
@@ -219,6 +229,9 @@ where
 impl FiberInner {
     /// 当前代插件实例(D32):静态模式克隆既有实例;工厂模式用当前
     /// config 构造(每代一个新实例 = 配置热更新生效点)。
+    /// `build` 是用户回调且 panic 概率高于 validate(评审:三处用户回调
+    /// 唯独此处漏边界会杀驱动 → fiber 卡 Loading、join 永等)——panic
+    /// 转 `fail_load`,与 validate 的边界对称。
     fn current_plugin(&self) -> Result<Arc<dyn Plugin>, CordisError> {
         if let Some(plugin) = &self.plugin {
             return Ok(plugin.clone());
@@ -233,7 +246,11 @@ impl FiberInner {
             .unwrap()
             .clone()
             .ok_or_else(|| CordisError::PluginFailed("factory fiber has no config".into()))?;
-        factory.build_erased(config.as_ref()).map(Arc::from)
+        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            factory.build_erased(config.as_ref())
+        }))
+        .unwrap_or_else(|p| Err(panic_error(p)));
+        built.map(Arc::from)
     }
 
     /// 当前代 token(`ctx.cancellation_token()`/`ctx.cancelled()` 暴露给插件)。
@@ -348,11 +365,24 @@ impl FiberInner {
         let mut missing: Vec<TypeKey> = Vec::new();
         // 依赖声明来源:静态模式取实例;工厂模式从当前 config 派生(D32)。
         // config 先 clone 出锁再进用户回调,防重入 update 死锁。
+        // 用户回调 panic 视为"依赖不就绪"(同 check() 的既有语义,
+        // registry.rs):哨兵键永远无 provider → fiber 留 Pending,不杀驱动。
         let inject_keys: Vec<TypeKey> = if let Some(plugin) = &self.plugin {
             plugin.injects().to_vec()
         } else if let Some(factory) = &self.factory {
             match self.config.lock().unwrap().clone() {
-                Some(config) => factory.injects_erased(config.as_ref()),
+                Some(config) => {
+                    let derived = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        factory.injects_erased(config.as_ref())
+                    }));
+                    match derived {
+                        Ok(keys) => keys,
+                        Err(p) => {
+                            self.ctx.error_sink()(Arc::new(panic_error(p)));
+                            vec![TypeKey::of::<InjectsUnavailable>()]
+                        }
+                    }
+                }
                 None => Vec::new(),
             }
         } else {
@@ -663,11 +693,20 @@ where
         factory,
         _marker: std::marker::PhantomData,
     });
-    let injects = erased.injects_erased(&config);
+    // spawn 时派生依赖声明:用户回调 panic 视为不就绪(哨兵键,
+    // fiber 留 Pending)——同 resolve_deps 的既有语义,不杀调用方。
+    let injects = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        erased.injects_erased(&config)
+    })) {
+        Ok(keys) => keys,
+        Err(_p) => vec![TypeKey::of::<InjectsUnavailable>()],
+    };
     let boxed: Arc<dyn Any + Send + Sync> = Arc::new(config);
     let this = spawn_fiber_inner(shared, parent_ctx, None, Some(erased), Some(boxed), is_root);
-    // 工厂模式门控声明从 config 派生(spawn 时注册一次;config 变化
-    // 不重注册——injects 声明须对 config 稳定,派生键变化属误用)。
+    // 工厂模式门控声明从 config 派生,spawn 时注册一次。声明快照留档:
+    // update 时新 config 派生的声明须集合相等(fail-fast 校验,
+    // 见 FiberView::update),防 inject_index 陈旧导致 notify/驱逐静默失效。
+    *this.spawn_injects.lock().unwrap() = injects.clone();
     for key in injects {
         shared.registry.register_inject(key, &this);
     }
@@ -717,6 +756,7 @@ fn spawn_fiber_inner(
             plugin,
             factory,
             config: Mutex::new(config),
+            spawn_injects: Mutex::new(Vec::new()),
             ctx,
             parent_fiber,
             token: Mutex::new(token),
@@ -867,10 +907,26 @@ impl FiberView {
                     issues: vec![reason.into()],
                 }));
             };
-            // dry-run(D32b):validate_config → build → 实例 validate,
-            // 产物丢弃(build 纯构造契约)。用户回调 panic 转错误不杀调用方。
+            // dry-run(D32b):injects 稳定性 → validate_config → build →
+            // 实例 validate,产物丢弃(build 纯构造契约)。用户回调 panic
+            // 转错误不杀调用方。injects 校验:新 config 派生的声明必须与
+            // spawn 时注册的集合相等(评审:registry 只在 spawn 注册一次,
+            // 漂移会让 notify/驱逐静默失效——fail fast 优于静默)。
             let boxed: Arc<dyn Any + Send + Sync> = Arc::new(new_config);
+            let spawn_injects: HashSet<TypeKey> =
+                this.spawn_injects.lock().unwrap().iter().cloned().collect();
             let dry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let derived: HashSet<TypeKey> =
+                    factory.injects_erased(boxed.as_ref()).into_iter().collect();
+                if derived != spawn_injects {
+                    return Err(CordisError::Validation {
+                        issues: vec![
+                            "injects(config) must be stable across configs (spawn-time keys \
+                             differ from new config)"
+                                .into(),
+                        ],
+                    });
+                }
                 factory.validate_config_erased(boxed.as_ref())?;
                 let instance = factory.build_erased(boxed.as_ref())?;
                 instance.validate()?;

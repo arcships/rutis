@@ -56,7 +56,7 @@ async fn event_seam_end_to_end_with_min_cordis_host() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<(String, Value)>(8);
     let mut hooks = InboundHooks::default();
     let tx = Arc::new(event_tx);
-    hooks.on_notify = Some(Arc::new(move |method, params| {
+    hooks.on_notify = Some(Arc::new(move |method, params, _origin| {
         Box::pin({
             let tx = Arc::clone(&tx);
             async move {

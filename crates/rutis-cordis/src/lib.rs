@@ -22,8 +22,8 @@ pub use proto::{
     WfDeclaration, WfKind,
 };
 pub use rpc::{
-    Bridge, BridgeConfig, BridgeStats, CancelPrefix, CancelTarget, Frame, HostGoneRecord,
-    InboundHooks, MemoryWire, Outcome, ProtoError, RemoteError, SessionState, Wire,
+    Bridge, BridgeConfig, BridgeStats, CancelPrefix, CancelTarget, EventOrigin, Frame,
+    HostGoneRecord, InboundHooks, MemoryWire, Outcome, ProtoError, RemoteError, SessionState, Wire,
 };
 pub use services::{CordisService, ServiceDispatch, ServiceReply};
 pub use tcp::TcpWire;

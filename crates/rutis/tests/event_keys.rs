@@ -2,6 +2,9 @@
 //!
 //! 覆盖:keyed 通道隔离 / 动态名 / D31 尾链保序 / 四语义 keyed 变体 /
 //! once·prepend / fiber 卸载清理 / parity 补拍(cordis events.spec 字符串名内核)。
+//!
+//! 等待全部用 Notify 信号(评审:固定 sleep 在 CI 高负载下有假红风险);
+//! 负断言走确定性路径——无监听器的键 take_hooks 同步返回空,不产生任务。
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -10,6 +13,7 @@ use rutis::{
     BoxFuture, CordisError, Ctx, Effect, Event, FiberState, Listener, Next, Plugin, Terminal,
     TypeKey, WaterfallListener,
 };
+use tokio::sync::Notify;
 
 // ── 测试事件与监听器(命名 struct,同 contract.rs 模式) ──────────────
 
@@ -38,10 +42,21 @@ fn hits() -> Hits {
     Arc::new(AtomicUsize::new(0))
 }
 
-/// 计数并可选记录事件值。
+/// 等待条件成立(监听器完成动作后 notify_one;检查先行,permit 不丢失)。
+async fn wait_until(cond: impl Fn() -> bool, notify: Arc<Notify>) {
+    loop {
+        if cond() {
+            return;
+        }
+        notify.notified().await;
+    }
+}
+
+/// 计数并可选记录事件值,完成后发信号。
 struct Counting {
     hits: Hits,
     log: Option<Log>,
+    done: Option<Arc<Notify>>,
 }
 
 impl Listener<Ping> for Counting {
@@ -53,10 +68,14 @@ impl Listener<Ping> for Counting {
         let hits = self.hits.clone();
         let v = e.value;
         let log = self.log.clone();
+        let done = self.done.clone();
         Box::pin(async move {
             hits.fetch_add(1, Ordering::SeqCst);
             if let Some(log) = log {
                 log.lock().unwrap().push(v);
+            }
+            if let Some(done) = done {
+                done.notify_one();
             }
             Ok(None)
         })
@@ -137,17 +156,15 @@ impl Terminal<Ping> for TerminalCount {
     }
 }
 
-async fn soon(ms: u64) {
-    tokio::time::sleep(std::time::Duration::from_millis(ms)).await
-}
-
 // ── 1. keyed 通道隔离 + 静态/动态同名互通 ──────────────────────────
 
 #[tokio::test]
 async fn keyed_channels_are_isolated_by_name() {
     let ctx = Ctx::root().unwrap();
     let log: Log = Arc::new(Mutex::new(Vec::new()));
+    let done = Arc::new(Notify::new());
     let h_b = hits();
+    let b_done = Arc::new(Notify::new());
 
     ctx.events()
         .on_keyed::<Ping>(
@@ -156,6 +173,7 @@ async fn keyed_channels_are_isolated_by_name() {
             Counting {
                 hits: hits(),
                 log: Some(log.clone()),
+                done: Some(done.clone()),
             },
         )
         .unwrap();
@@ -166,23 +184,23 @@ async fn keyed_channels_are_isolated_by_name() {
             Counting {
                 hits: h_b.clone(),
                 log: None,
+                done: Some(b_done.clone()),
             },
         )
         .unwrap();
 
-    // 只发 a:b 通道不收
+    // 只发 a:b 通道无任务(a 的链处理完即确定)
     ctx.events()
         .emit_keyed(&ctx, "chan/a", Arc::new(Ping { value: 7 }));
-    soon(30).await;
+    wait_until(|| log.lock().unwrap().len() == 1, done.clone()).await;
     assert_eq!(log.lock().unwrap().as_slice(), [7]);
     assert_eq!(h_b.load(Ordering::SeqCst), 0);
 
-    // 发 b:a 通道不收
+    // 发 b:a 通道无任务(此前 a 的链已排干)
     ctx.events()
         .emit_keyed(&ctx, "chan/b", Arc::new(Ping { value: 9 }));
-    soon(30).await;
+    wait_until(|| h_b.load(Ordering::SeqCst) == 1, b_done.clone()).await;
     assert_eq!(log.lock().unwrap().as_slice(), [7]);
-    assert_eq!(h_b.load(Ordering::SeqCst), 1);
 
     // 静态/动态同名互通:TypeKey::keyed 与 keyed_dynamic 按内容等值
     let k_static = TypeKey::keyed::<Ping>("chan/a");
@@ -201,6 +219,7 @@ async fn keyed_channels_are_isolated_by_name() {
 async fn runtime_constructed_name_dispatches() {
     let ctx = Ctx::root().unwrap();
     let h = hits();
+    let done = Arc::new(Notify::new());
     // 名字运行时才知道(如桥转发宿主事件)
     let name = format!("host/session-{}", 42);
     ctx.events()
@@ -210,13 +229,13 @@ async fn runtime_constructed_name_dispatches() {
             Counting {
                 hits: h.clone(),
                 log: None,
+                done: Some(done.clone()),
             },
         )
         .unwrap();
     ctx.events()
         .emit_keyed(&ctx, name, Arc::new(Ping { value: 1 }));
-    soon(30).await;
-    assert_eq!(h.load(Ordering::SeqCst), 1);
+    wait_until(|| h.load(Ordering::SeqCst) == 1, done.clone()).await;
 }
 
 // ── 3. D31 尾链:同名保序 ─────────────────────────────────────────
@@ -225,6 +244,7 @@ async fn runtime_constructed_name_dispatches() {
 async fn keyed_emit_preserves_emission_order_per_name() {
     let ctx = Ctx::root().unwrap();
     let log: Log = Arc::new(Mutex::new(Vec::new()));
+    let done = Arc::new(Notify::new());
 
     ctx.events()
         .on_keyed::<Ping>(
@@ -233,6 +253,7 @@ async fn keyed_emit_preserves_emission_order_per_name() {
             Counting {
                 hits: hits(),
                 log: Some(log.clone()),
+                done: Some(done.clone()),
             },
         )
         .unwrap();
@@ -247,7 +268,7 @@ async fn keyed_emit_preserves_emission_order_per_name() {
     })
     .await
     .unwrap();
-    soon(100).await;
+    wait_until(|| log.lock().unwrap().len() == 20, done.clone()).await;
     let got = log.lock().unwrap().clone();
     assert_eq!(got, (0..20).collect::<Vec<u32>>());
 }
@@ -332,6 +353,7 @@ async fn keyed_parallel_runs_all_and_aggregates() {
             Counting {
                 hits: h.clone(),
                 log: None,
+                done: None,
             },
         )
         .unwrap();
@@ -351,6 +373,7 @@ async fn keyed_parallel_runs_all_and_aggregates() {
 async fn keyed_once_fires_exactly_once() {
     let ctx = Ctx::root().unwrap();
     let h = hits();
+    let done = Arc::new(Notify::new());
     ctx.events()
         .once_keyed::<Ping>(
             &ctx,
@@ -358,6 +381,7 @@ async fn keyed_once_fires_exactly_once() {
             Counting {
                 hits: h.clone(),
                 log: None,
+                done: Some(done.clone()),
             },
         )
         .unwrap();
@@ -365,7 +389,9 @@ async fn keyed_once_fires_exactly_once() {
         ctx.events()
             .emit_keyed(&ctx, "once", Arc::new(Ping { value: 1 }));
     }
-    soon(50).await;
+    // 第一次派发取走 once 条目后,后续 emit 的 take_hooks 同步拿空,
+    // 不再产生任务——h==1 即为终态(无"稍后再触发"的路径)。
+    wait_until(|| h.load(Ordering::SeqCst) == 1, done.clone()).await;
     assert_eq!(h.load(Ordering::SeqCst), 1);
 }
 
@@ -373,8 +399,9 @@ async fn keyed_once_fires_exactly_once() {
 async fn keyed_prepend_runs_first() {
     let ctx = Ctx::root().unwrap();
     let order: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+    let done = Arc::new(Notify::new());
 
-    struct Named(&'static str, Arc<Mutex<Vec<&'static str>>>);
+    struct Named(&'static str, Arc<Mutex<Vec<&'static str>>>, Arc<Notify>);
     impl Listener<Ping> for Named {
         fn call<'a>(
             &'a self,
@@ -383,8 +410,10 @@ async fn keyed_prepend_runs_first() {
         ) -> BoxFuture<'a, Result<Option<u32>, CordisError>> {
             let order = self.1.clone();
             let name = self.0;
+            let done = self.2.clone();
             Box::pin(async move {
                 order.lock().unwrap().push(name);
+                done.notify_one();
                 Ok(None)
             })
         }
@@ -392,20 +421,20 @@ async fn keyed_prepend_runs_first() {
 
     // 先注册 base,再 prepend front
     ctx.events()
-        .on_keyed::<Ping>(&ctx, "prep", Named("base", order.clone()))
+        .on_keyed::<Ping>(&ctx, "prep", Named("base", order.clone(), done.clone()))
         .unwrap();
     ctx.events()
         .on_keyed_opt::<Ping>(
             &ctx,
             "prep",
-            Named("front", order.clone()),
+            Named("front", order.clone(), done.clone()),
             rutis::EventOptions { prepend: true },
         )
         .unwrap();
 
     ctx.events()
         .emit_keyed(&ctx, "prep", Arc::new(Ping { value: 1 }));
-    soon(30).await;
+    wait_until(|| order.lock().unwrap().len() == 2, done.clone()).await;
     assert_eq!(order.lock().unwrap().as_slice(), ["front", "base"]);
 }
 
@@ -422,13 +451,14 @@ async fn same_name_different_event_types_do_not_cross() {
             Counting {
                 hits: h_ping.clone(),
                 log: None,
+                done: None,
             },
         )
         .unwrap();
-    // Other 类型同名 emit:Ping 通道不收
+    // Other 类型同名 emit:Ping 通道的注册表无此键(类型烙在键里),
+    // take_hooks 同步拿空、不产生任务——无需等待,断言即确定性。
     ctx.events()
         .emit_keyed(&ctx, "shared-name", Arc::new(Other));
-    soon(30).await;
     assert_eq!(h_ping.load(Ordering::SeqCst), 0);
 }
 
@@ -438,38 +468,50 @@ async fn same_name_different_event_types_do_not_cross() {
 async fn keyed_listener_removed_with_owner_fiber() {
     let ctx = Ctx::root().unwrap();
     let h = hits();
+    let done = Arc::new(Notify::new());
 
     struct Owner {
-        h: Hits,
+        hits: Hits,
+        done: Arc<Notify>,
     }
     impl Plugin for Owner {
         fn name(&self) -> &str {
             "owner"
         }
         fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-            let h = self.h.clone();
+            let hits = self.hits.clone();
+            let done = self.done.clone();
             Box::pin(async move {
-                ctx.events()
-                    .on_keyed::<Ping>(ctx, "owned", Counting { hits: h, log: None })?;
+                ctx.events().on_keyed::<Ping>(
+                    ctx,
+                    "owned",
+                    Counting {
+                        hits,
+                        log: None,
+                        done: Some(done),
+                    },
+                )?;
                 Ok(Effect::Done)
             })
         }
     }
 
-    let owner = ctx.plugin(Owner { h: h.clone() });
+    let owner = ctx.plugin(Owner {
+        hits: h.clone(),
+        done: done.clone(),
+    });
     owner.clone().await.expect("owner loads");
 
     ctx.events()
         .emit_keyed(&ctx, "owned", Arc::new(Ping { value: 1 }));
-    soon(30).await;
-    assert_eq!(h.load(Ordering::SeqCst), 1);
+    wait_until(|| h.load(Ordering::SeqCst) == 1, done.clone()).await;
 
     owner.dispose().await.unwrap();
     assert_eq!(owner.state().state, FiberState::Disposed);
-
+    // dispose().await 返回 = 卸载五步完成,监听器已从注册表摘除;
+    // 再 emit 走 take_hooks 空快照的同步路径——不触发即确定性,无需等待。
     ctx.events()
         .emit_keyed(&ctx, "owned", Arc::new(Ping { value: 2 }));
-    soon(30).await;
     assert_eq!(h.load(Ordering::SeqCst), 1); // 卸载后不再收
 }
 
@@ -477,12 +519,16 @@ async fn keyed_listener_removed_with_owner_fiber() {
 // cordis 原用例(events.spec.ts `ctx.on()` / `ctx.once()` / `ctx.waterfall()`)
 // 原判"部分对拍(载体:字符串事件名)";keyed 落地后字符串名内核可全拍:
 // 名字 → keyed 通道,语义(注册→触发、once 恰好一次、waterfall next 链)不变。
+// dispose 后不再触发的另一半内核见上节 keyed_listener_removed_with_owner_fiber
+// (dispose await 完成即注册表摘除,确定性)。
 
 #[tokio::test]
 async fn parity_string_event_name_on_once_waterfall() {
     let ctx = Ctx::root().unwrap();
     let h_on = hits();
     let h_once = hits();
+    let on_done = Arc::new(Notify::new());
+    let once_done = Arc::new(Notify::new());
 
     ctx.events()
         .on_keyed::<Ping>(
@@ -491,6 +537,7 @@ async fn parity_string_event_name_on_once_waterfall() {
             Counting {
                 hits: h_on.clone(),
                 log: None,
+                done: Some(on_done.clone()),
             },
         )
         .unwrap();
@@ -501,6 +548,7 @@ async fn parity_string_event_name_on_once_waterfall() {
             Counting {
                 hits: h_once.clone(),
                 log: None,
+                done: Some(once_done.clone()),
             },
         )
         .unwrap();
@@ -511,9 +559,8 @@ async fn parity_string_event_name_on_once_waterfall() {
         .emit_keyed(&ctx, "evt/bar", Arc::new(Ping { value: 1 }));
     ctx.events()
         .emit_keyed(&ctx, "evt/bar", Arc::new(Ping { value: 1 }));
-    soon(50).await;
-    assert_eq!(h_on.load(Ordering::SeqCst), 1);
-    assert_eq!(h_once.load(Ordering::SeqCst), 1);
+    wait_until(|| h_on.load(Ordering::SeqCst) == 1, on_done.clone()).await;
+    wait_until(|| h_once.load(Ordering::SeqCst) == 1, once_done.clone()).await;
 
     // waterfall:无中间件直落终态(空链 = 注册序语义的最简内核)
     let out = ctx

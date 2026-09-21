@@ -288,8 +288,18 @@ impl Default for BridgeConfig {
 pub type RequestHook =
     Arc<dyn Fn(u64, String, Value) -> BoxFuture<'static, Result<Value, RemoteError>> + Send + Sync>;
 
-/// 入站通知钩子(evt/emit 等走这里)。
-pub type NotifyHook = Arc<dyn Fn(String, Value) -> BoxFuture<'static, ()> + Send + Sync>;
+/// 入站通知钩子(evt/emit 等走这里)。三预留字段以 [`EventOrigin`] 透传。
+pub type NotifyHook =
+    Arc<dyn Fn(String, Value, EventOrigin) -> BoxFuture<'static, ()> + Send + Sync>;
+
+/// 入站帧的三预留字段(`Frame` 的 scopeId/sessionId/turnId,v1 全透传)。
+/// 事件链路用它区分同事件名下不同会话/回合的来源。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EventOrigin {
+    pub scope_id: Option<String>,
+    pub session_id: Option<String>,
+    pub turn_id: Option<String>,
+}
 
 /// 宿主 → Rust 方向的入站分发面。`on_request` 缺省时回 `unhandled` 错误
 /// (显式不静默)。
@@ -621,10 +631,10 @@ impl Shared {
         });
     }
 
-    fn dispatch_notify(&self, method: String, params: Value) {
+    fn dispatch_notify(&self, method: String, origin: EventOrigin, params: Value) {
         if let Some(hook) = self.hooks.on_notify.clone() {
             tokio::spawn(async move {
-                hook(method, params).await;
+                hook(method, params, origin).await;
             });
         }
     }
@@ -768,8 +778,21 @@ async fn pump(shared: Arc<Shared>) {
             } => {
                 Shared::serve_request(Arc::clone(&shared), id, method, params);
             }
-            Frame::Ntf { method, params, .. } => {
-                shared.dispatch_notify(method, params);
+            Frame::Ntf {
+                method,
+                params,
+                scope_id,
+                session_id,
+                turn_id,
+            } => {
+                // 三预留字段透传给入站钩子(M3 评审:不得静默丢弃——
+                // 宿主会话语义靠它们区分来源)。
+                let origin = EventOrigin {
+                    scope_id,
+                    session_id,
+                    turn_id,
+                };
+                shared.dispatch_notify(method, origin, params);
             }
         }
     }
