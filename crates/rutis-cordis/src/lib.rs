@@ -10,11 +10,13 @@
 //! - [`proto`]:cordis 协议词汇——hello 基座面、能力集、evt mode、
 //!   wf kind、装载仲裁。
 
+pub mod events;
 pub mod proto;
 pub mod rpc;
 pub mod services;
 pub mod tcp;
 
+pub use events::{forward_host_events, HostEvent};
 pub use proto::{
     EvtDeclaration, EvtMode, ExpectedHost, HelloCaps, HelloVerify, PeerCaps, PluginLedger,
     WfDeclaration, WfKind,

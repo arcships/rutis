@@ -1188,8 +1188,8 @@ async fn keyed_multi_instance() {
 async fn isolate_scoping() {
     let key = TypeKey::of::<LlmSvc>();
     let ctx = Ctx::root().unwrap();
-    let scope_a = ctx.isolate(key, "A");
-    let scope_b = ctx.isolate(key, "B");
+    let scope_a = ctx.isolate(key.clone(), "A");
+    let scope_b = ctx.isolate(key.clone(), "B");
     scope_a.provide(LlmSvc { n: 10 }).unwrap();
     scope_b.provide(LlmSvc { n: 20 }).unwrap();
     // 同类型跨作用域并存(支柱 3)
@@ -1197,7 +1197,7 @@ async fn isolate_scoping() {
     assert_eq!(scope_b.get::<LlmSvc>().unwrap().n, 20);
     assert!(ctx.get::<LlmSvc>().is_none()); // 默认作用域不受影响
                                             // 同 label 合并作用域(TS 语义)
-    let a_again = ctx.isolate(key, "A");
+    let a_again = ctx.isolate(key.clone(), "A");
     assert_eq!(a_again.get::<LlmSvc>().unwrap().n, 10);
 }
 
@@ -1327,8 +1327,8 @@ async fn reentrant_provide_fails() {
 async fn isolate_no_cross_evict() {
     let key = TypeKey::of::<Dep1>();
     let ctx = Ctx::root().unwrap();
-    let scope_a = ctx.isolate(key, "A");
-    let scope_b = ctx.isolate(key, "B");
+    let scope_a = ctx.isolate(key.clone(), "A");
+    let scope_b = ctx.isolate(key.clone(), "B");
     let pa = scope_a.plugin(simple("PA", move |ctx: &Ctx| {
         Box::pin(async move {
             ctx.provide(Dep1)?;
@@ -1343,7 +1343,7 @@ async fn isolate_no_cross_evict() {
         })
     }));
     (&pb).await.expect("PB active");
-    let consumer = scope_b.plugin(simple_dep("C", vec![key], move |_ctx: &Ctx| {
+    let consumer = scope_b.plugin(simple_dep("C", vec![key.clone()], move |_ctx: &Ctx| {
         Box::pin(async { Ok(Effect::Done) })
     }));
     (&consumer).await.expect("C active via B");

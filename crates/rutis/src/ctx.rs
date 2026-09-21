@@ -14,6 +14,7 @@ use crate::fiber::{
 use crate::key::{ScopeId, TypeKey};
 use crate::registry::{Binding, CheckFn, Registry, StoredValue};
 use crate::Plugin;
+use crate::PluginFactory;
 
 pub(crate) struct Shared {
     pub handle: Handle,
@@ -161,7 +162,7 @@ impl Ctx {
     ) -> Option<Arc<T>> {
         let key = key.into();
         let scope = self.scope_for(&key);
-        let binding = self.0.shared.registry.lookup(key, scope.as_ref())?;
+        let binding = self.0.shared.registry.lookup(&key, scope.as_ref())?;
         let provider = binding.provider.upgrade()?;
         let self_access = self.in_subtree_of(&provider);
         if !self_access {
@@ -243,7 +244,7 @@ impl Ctx {
         // 同步原子插入为主操作(评审 #9):重复注册直接把错误返给调用方,
         // 不再丢进 error sink 后假报 Ok
         let stored = self.0.shared.registry.insert_binding(
-            key,
+            key.clone(),
             scope.clone(),
             Binding {
                 value: StoredValue::new(value),
@@ -254,22 +255,27 @@ impl Ctx {
                 removing: std::sync::atomic::AtomicBool::new(false),
             },
         )?;
-        fiber.provided.lock().unwrap().push((key, scope.clone()));
+        fiber
+            .provided
+            .lock()
+            .unwrap()
+            .push((key.clone(), scope.clone()));
         if fiber.state() == FiberState::Active {
-            self.0.shared.registry.notify_key_changed(key);
+            self.0.shared.registry.notify_key_changed(&key);
         }
 
         // 清理 effect 只负责删除:驱逐该三元组精确匹配的消费者并最终摘除
         let shared = self.0.shared.clone();
         let pid = fiber.id;
         let evict_scope = scope.clone();
+        let evict_key = key.clone();
         match self.effect(move || {
             Effect::AsyncDisposer(Box::new(move || {
                 let shared = shared.clone();
                 let scope = evict_scope.clone();
-                Box::pin(
-                    async move { evict_and_finalize(&shared, pid, provider_gen, key, scope).await },
-                )
+                Box::pin(async move {
+                    evict_and_finalize(&shared, pid, provider_gen, evict_key, scope).await
+                })
             }))
         }) {
             Ok(disposer) => Ok(disposer),
@@ -278,7 +284,7 @@ impl Ctx {
                 self.0
                     .shared
                     .registry
-                    .finalize_binding_if(key, scope, &stored);
+                    .finalize_binding_if(key.clone(), scope, &stored);
                 Err(e)
             }
         }
@@ -322,6 +328,46 @@ impl Ctx {
     /// parent fiber 的 effect(D28:child plugin 自动归 parent fiber 所有)。
     pub fn plugin(&self, p: impl Plugin) -> FiberView {
         let fiber = spawn_fiber(&self.0.shared, Some(self), Some(Arc::new(p)), false);
+        self.mount_fiber(fiber)
+    }
+
+    /// 工厂模式装载(D32:配置热更新):依赖门控声明从 config 派生,
+    /// 每代装载用当前 config 构造实例;返回的 FiberView 可 `update(config)`。
+    pub fn plugin_with<C: Send + Sync + 'static>(
+        &self,
+        factory: impl PluginFactory<C>,
+        config: C,
+    ) -> FiberView {
+        let fiber =
+            crate::fiber::spawn_factory_fiber(&self.0.shared, Some(self), factory, config, false);
+        self.mount_fiber(fiber)
+    }
+
+    /// 工厂模式装载的闭包便捷形态(D32):零依赖声明的单方法工厂。
+    /// 需要声明 `injects`/`validate_config` 时实现 [`PluginFactory`]。
+    pub fn plugin_from<C: Send + Sync + 'static>(
+        &self,
+        build: impl Fn(&C) -> Result<Box<dyn Plugin>, CordisError> + Send + Sync + 'static,
+        config: C,
+    ) -> FiberView {
+        struct ClosureFactory<F> {
+            build: F,
+        }
+        impl<C, F> PluginFactory<C> for ClosureFactory<F>
+        where
+            C: Send + Sync + 'static,
+            F: Fn(&C) -> Result<Box<dyn Plugin>, CordisError> + Send + Sync + 'static,
+        {
+            fn build(&self, config: &C) -> Result<Box<dyn Plugin>, CordisError> {
+                (self.build)(config)
+            }
+        }
+        self.plugin_with(ClosureFactory { build }, config)
+    }
+
+    /// 装配收尾:级联卸载 effect + 初始装载意图(评审 #10:parent 失活时
+    /// 处置子 fiber,不再触发装载)。
+    fn mount_fiber(&self, fiber: std::sync::Arc<crate::fiber::FiberInner>) -> FiberView {
         let view = FiberView::from_inner(fiber.clone());
         let child = view.clone();
         let sink = self.error_sink();
@@ -386,7 +432,7 @@ async fn evict_and_finalize(
 ) -> Result<(), CordisError> {
     let old = shared
         .registry
-        .lookup(key, scope.as_ref())
+        .lookup(&key, scope.as_ref())
         .filter(|b| b.provider_id == pid && b.provider_gen == provider_gen);
     if let Some(binding) = &old {
         binding
@@ -395,7 +441,7 @@ async fn evict_and_finalize(
     }
     let consumers: Vec<Arc<FiberInner>> = shared
         .registry
-        .consumers_of(key, (pid, provider_gen, key, scope.clone()));
+        .consumers_of(&key, (pid, provider_gen, key.clone(), scope.clone()));
     let mut tasks = Vec::new();
     for fiber in &consumers {
         fiber.cancel_current();
@@ -405,7 +451,7 @@ async fn evict_and_finalize(
         tasks.push(task);
     }
     // 其它注入该键的 fiber(Pending 者)也重查(不取消:可能是等值合并)
-    shared.registry.notify_key_changed(key);
+    shared.registry.notify_key_changed(&key);
     for task in tasks {
         let _ = join_task(&task).await;
     }

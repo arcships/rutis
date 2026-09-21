@@ -26,7 +26,7 @@ pub use error::{CordisError, ErrorSink};
 pub use event::{Event, EventOptions, Listener, Next, Terminal, WaterfallListener};
 pub use fiber::{FiberState, FiberStatusChanged, FiberView, PluginId, Snapshot};
 pub use key::{Key, ServiceKey, TypeKey};
-pub use plugin::Plugin;
+pub use plugin::{Plugin, PluginFactory};
 
 /// dyn 兼容的 future 别名(与 `futures::future::BoxFuture` 同一定义,D1)。
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;

@@ -5,7 +5,7 @@
 //!    从注册表推导,不硬编码;
 //! 3. spawn 官方 dsh CLI(`RUTIS_DSH_BIN` 或 PATH 的 `dsh`),经
 //!    `RUTIS_BRIDGE_PORT` 告知桥端口;stdio 继承;
-//! 4. 事件观察日志(`evt/emit` → stderr);
+//! 4. 事件链路:`evt/emit` → 内核 keyed 事件(`HostEvent`,stderr 摘要并行);
 //! 5. dsh 退出且桥断连即收敛。
 //!
 //! 本文件零 dsh 知识:dsh 只是它拉起的一个进程。
@@ -13,9 +13,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use aimux_llm::{AimuxLlmPlugin, LlmService, llm_service_key};
+use aimux_llm::{llm_service_key, AimuxLlmPlugin, LlmService};
 use rutis::{Ctx, FiberState, FiberView};
-use rutis_cordis::{Bridge, BridgeConfig, ExpectedHost, ServiceDispatch, TcpWire};
+use rutis_cordis::{
+    forward_host_events, Bridge, BridgeConfig, ExpectedHost, ServiceDispatch, TcpWire,
+};
 use serde_json::json;
 
 #[tokio::main]
@@ -45,7 +47,7 @@ fn shell_split(s: &str) -> Vec<String> {
 /// 按 char 边界截断(日志摘要用;`floor_char_boundary` 尚未稳定)。
 fn truncate_chars(s: &str, max: usize) -> String {
     if s.len() <= max {
-        return s.to_owned()
+        return s.to_owned();
     }
     let mut end = max;
     while end > 0 && !s.is_char_boundary(end) {
@@ -59,7 +61,7 @@ async fn wait_state(view: &FiberView, want: FiberState) {
     let mut rx = view.watch();
     loop {
         if rx.borrow().state == want {
-            return
+            return;
         }
         rx.changed().await.expect("fiber driver alive");
     }
@@ -79,10 +81,15 @@ async fn up() {
     let dsh_bin = std::env::var("RUTIS_DSH_BIN").unwrap_or_else(|_| "dsh".into());
     // RUTIS_DSH_BIN 支持空格分隔的多段命令(如 "node --import tsx bin.js")。
     let mut dsh_command: Vec<String> = shell_split(&dsh_bin);
-    let dsh_display = dsh_command.first().cloned().unwrap_or_else(|| dsh_bin.clone());
+    let dsh_display = dsh_command
+        .first()
+        .cloned()
+        .unwrap_or_else(|| dsh_bin.clone());
     dsh_command.extend(std::env::args().skip(2));
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind bridge channel");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind bridge channel");
     let port = listener.local_addr().expect("addr").port();
     eprintln!("[rutis-dsh] bridge channel on 127.0.0.1:{port} (services from registry)");
 
@@ -116,27 +123,36 @@ async fn up() {
             }
         }
     };
-    eprintln!("[rutis-dsh] dsh started (pid {:?}) — stdio is the app's own", dsh.id());
+    eprintln!(
+        "[rutis-dsh] dsh started (pid {:?}) — stdio is the app's own",
+        dsh.id()
+    );
 
     let (stream, _) = tokio::time::timeout(Duration::from_secs(60), listener.accept())
         .await
         .expect("dsh connects within 60s (is the rutis-bridge plugin in the profile?)")
         .expect("accept");
 
-    // ── 桥:注册表驱动的服务分发 + 事件观察,合并为一套钩子 ──
+    // ── 桥:注册表驱动的服务分发 + 事件转发,合并为一套钩子 ──
     let face = rutis_dsh::LlmFace::new(llm);
     let dispatch = ServiceDispatch::new(vec![face]);
     let mut hooks = dispatch.hooks();
-    hooks.on_notify = Some(Arc::new(|method, params| {
-        Box::pin(async move {
-            if method == "evt/emit" {
-                // 载荷摘要(截断):形状级可见性;保真断言在测试里做。
-                let summary = serde_json::to_string(&params["params"]).unwrap_or_else(|_| "?".into());
-                let summary = truncate_chars(&summary, 160);
-                eprintln!("[rutis-dsh] evt {} {}", params["event"], summary);
-            }
-        })
-    }));
+    // evt/emit → 内核 keyed 事件(HostEvent);stderr 摘要作为观察者并行保留
+    // (M3 事件链路,订阅方用 ctx.events().on_keyed::<HostEvent>(ctx, name, ..))。
+    hooks.on_notify = Some(forward_host_events(
+        &ctx,
+        Some(Arc::new(|method, params| {
+            Box::pin(async move {
+                if method == "evt/emit" {
+                    // 载荷摘要(截断):形状级可见性;保真断言在测试里做。
+                    let summary =
+                        serde_json::to_string(&params["params"]).unwrap_or_else(|_| "?".into());
+                    let summary = truncate_chars(&summary, 160);
+                    eprintln!("[rutis-dsh] evt {} {}", params["event"], summary);
+                }
+            })
+        })),
+    ));
     let mut bridge = Bridge::start(
         Box::new(TcpWire::from_stream(stream)),
         BridgeConfig::default(),
@@ -147,7 +163,10 @@ async fn up() {
     dispatch.attach(bridge.clone());
     match bridge.ready().await {
         Ok(hello) => {
-            eprintln!("[rutis-dsh] handshake ok: {} — bridged", hello["base"].as_str().unwrap_or("?"))
+            eprintln!(
+                "[rutis-dsh] handshake ok: {} — bridged",
+                hello["base"].as_str().unwrap_or("?")
+            )
         }
         Err(e) => {
             eprintln!("[rutis-dsh] handshake failed: {e}");
