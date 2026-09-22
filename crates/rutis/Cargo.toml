@@ -2,8 +2,8 @@
 name = "rutis"
 description = "Cordis core paradigms in idiomatic Rust: plugin assembly, fiber lifecycle, typed service registry, dependency-driven reload"
 edition.workspace = true
-# 0.2.1: transient child residue release (docs/fix-transient-child-release-2026-09-22.md)
-version = "0.2.1"
+# 0.2.2: readable TypeKey diagnostics (type_name captured at construction)
+version = "0.2.2"
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
