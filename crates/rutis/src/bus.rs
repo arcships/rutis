@@ -258,9 +258,12 @@ impl EventBus {
                     None => false,
                 };
                 // 空通道条目即摘(0.2.1):keyed 通道随实例 churn 不残留;
-                // 再次注册经 or_default 重建,行为不变
+                // 再次注册经 or_default 重建,行为不变。表空即收缩(0.2.4)。
                 if stale {
                     inner.hooks.remove(&key);
+                    if inner.hooks.is_empty() {
+                        inner.hooks.shrink_to_fit();
+                    }
                 }
                 Ok(())
             }))
@@ -297,6 +300,9 @@ impl EventBus {
                 };
                 if stale {
                     inner.wf_hooks.remove(&key);
+                    if inner.wf_hooks.is_empty() {
+                        inner.wf_hooks.shrink_to_fit();
+                    }
                 }
                 Ok(())
             }))
@@ -315,6 +321,9 @@ impl EventBus {
         };
         if inner.hooks.get(key).is_some_and(|l| l.is_empty()) {
             inner.hooks.remove(key);
+            if inner.hooks.is_empty() {
+                inner.hooks.shrink_to_fit();
+            }
         }
         snapshot
     }
@@ -327,6 +336,9 @@ impl EventBus {
         };
         if inner.wf_hooks.get(key).is_some_and(|l| l.is_empty()) {
             inner.wf_hooks.remove(key);
+            if inner.wf_hooks.is_empty() {
+                inner.wf_hooks.shrink_to_fit();
+            }
         }
         snapshot.into_iter().map(|h| h.call.clone()).collect()
     }
@@ -382,6 +394,9 @@ impl EventBus {
             let mut inner = bus.inner.lock().unwrap();
             if matches!(inner.dispatch_tail.get(&tail_key), Some((cur, _)) if *cur == gen) {
                 inner.dispatch_tail.remove(&tail_key);
+                if inner.dispatch_tail.is_empty() {
+                    inner.dispatch_tail.shrink_to_fit();
+                }
             }
         });
         inner.dispatch_tail.insert(key, (gen, tail));
