@@ -91,6 +91,12 @@ fn insert_hook<C>(list: &mut Vec<Arc<Hook<C>>>, hook: Arc<Hook<C>>, prepend: boo
     }
 }
 
+/// 稀疏即收缩(0.2.5):同 registry `shrink_if_sparse`。
+fn shrink_if_sparse<V>(map: &mut HashMap<TypeKey, V>) {
+    if map.capacity() > 64 && map.len() * 4 < map.capacity() {
+        map.shrink_to_fit();
+    }
+}
 fn retain_hook<C>(list: &mut Vec<Arc<Hook<C>>>, hook: &Arc<Hook<C>>) {
     list.retain(|h| !Arc::ptr_eq(h, hook));
 }
@@ -261,9 +267,7 @@ impl EventBus {
                 // 再次注册经 or_default 重建,行为不变。表空即收缩(0.2.4)。
                 if stale {
                     inner.hooks.remove(&key);
-                    if inner.hooks.is_empty() {
-                        inner.hooks.shrink_to_fit();
-                    }
+                    shrink_if_sparse(&mut inner.hooks);
                 }
                 Ok(())
             }))
@@ -300,9 +304,7 @@ impl EventBus {
                 };
                 if stale {
                     inner.wf_hooks.remove(&key);
-                    if inner.wf_hooks.is_empty() {
-                        inner.wf_hooks.shrink_to_fit();
-                    }
+                    shrink_if_sparse(&mut inner.wf_hooks);
                 }
                 Ok(())
             }))
@@ -321,9 +323,7 @@ impl EventBus {
         };
         if inner.hooks.get(key).is_some_and(|l| l.is_empty()) {
             inner.hooks.remove(key);
-            if inner.hooks.is_empty() {
-                inner.hooks.shrink_to_fit();
-            }
+            shrink_if_sparse(&mut inner.hooks);
         }
         snapshot
     }
@@ -336,9 +336,7 @@ impl EventBus {
         };
         if inner.wf_hooks.get(key).is_some_and(|l| l.is_empty()) {
             inner.wf_hooks.remove(key);
-            if inner.wf_hooks.is_empty() {
-                inner.wf_hooks.shrink_to_fit();
-            }
+            shrink_if_sparse(&mut inner.wf_hooks);
         }
         snapshot.into_iter().map(|h| h.call.clone()).collect()
     }
@@ -394,9 +392,7 @@ impl EventBus {
             let mut inner = bus.inner.lock().unwrap();
             if matches!(inner.dispatch_tail.get(&tail_key), Some((cur, _)) if *cur == gen) {
                 inner.dispatch_tail.remove(&tail_key);
-                if inner.dispatch_tail.is_empty() {
-                    inner.dispatch_tail.shrink_to_fit();
-                }
+                shrink_if_sparse(&mut inner.dispatch_tail);
             }
         });
         inner.dispatch_tail.insert(key, (gen, tail));

@@ -58,3 +58,7 @@ rutis 0.2.0 的若干结构只在 fiber 自身卸载时清理。在长寿 root �
 ## 0.2.4 补充：空表收缩（容量滞留）
 
 0.2.1–0.2.3 清掉了条目，但长寿 root 上的 `inject_index`/`bindings`/bus 通道表与 fiber 的 `provided`/`effects` 容器只删条目不收缩容量——顺序创建/销毁 N 个实例后表逻辑为空、桶容量仍按历史峰值滞留（实测约 7KB/实例）。0.2.4 起容器清空时 `shrink_to_fit`；非空时容量以并发实例峰值为界。行为与 API 不变。
+
+## 0.2.5 补充：稀疏收缩替代空表收缩
+
+0.2.4 只在表空时收缩，但常驻键（如 Agent 级服务绑定与 root 记账）使 `bindings` 与 fiber `provided` 永不为空，容量仍按历史峰值滞留。0.2.5 改为浪费率阈值：容量超过 64 槽且长度不足容量 1/4 即 `shrink_to_fit`（表空自然命中）；小表不抖动，收缩成本分摊在跨阈值时。覆盖 `inject_index`、`bindings`、bus 三张通道表与 fiber `provided`/`effects`。

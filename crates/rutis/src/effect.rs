@@ -105,7 +105,7 @@ impl EffectRecord {
                     let present = effects.iter().any(|r| Arc::ptr_eq(r, &this));
                     if present {
                         effects.retain(|r| !Arc::ptr_eq(r, &this));
-                        if effects.is_empty() {
+                        if effects.capacity() > 64 && effects.len() * 4 < effects.capacity() {
                             effects.shrink_to_fit();
                         }
                         drop(effects);
