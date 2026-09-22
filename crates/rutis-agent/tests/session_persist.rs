@@ -204,14 +204,8 @@ async fn session_restored_after_driver_restart() {
     let calls = llm2.calls.lock().unwrap();
     let texts = calls[0].message_texts();
     let flat: Vec<String> = texts.iter().map(|(_, t)| t.clone()).collect();
-    assert!(
-        flat.iter().any(|t| t == "q1"),
-        "第二轮看到 q1: {flat:?}"
-    );
-    assert!(
-        flat.iter().any(|t| t == "q2"),
-        "第二轮看到 q2: {flat:?}"
-    );
+    assert!(flat.iter().any(|t| t == "q1"), "第二轮看到 q1: {flat:?}");
+    assert!(flat.iter().any(|t| t == "q2"), "第二轮看到 q2: {flat:?}");
     assert!(
         flat.iter().any(|t| t == "first answer"),
         "第二轮看到 first answer: {flat:?}"
@@ -253,12 +247,8 @@ async fn persist_error_does_not_break_turn() {
     // 路径指向不存在目录 → persist 失败,但 turn 正常返回(turn 不阻断)
     let root = Ctx::root().unwrap();
     let bad = "/nonexistent/rutis-no-such-dir/session.json";
-    let (tools_view, driver_view, _llm) = load_driver(
-        &root,
-        Some(bad),
-        vec![LlmResponse::content("still works")],
-    )
-    .await;
+    let (tools_view, driver_view, _llm) =
+        load_driver(&root, Some(bad), vec![LlmResponse::content("still works")]).await;
     let agent = root.get_as::<dyn Agent>(agent_key()).unwrap();
     let out = soon(agent.followup("q")).await.unwrap();
     assert_eq!(out, "still works");
@@ -289,12 +279,8 @@ async fn dependency_reload_keeps_identity_when_persisted() {
     let root = Ctx::root().unwrap();
     let id1;
     {
-        let (tools_view, driver_view, _llm) = load_driver(
-            &root,
-            Some(&path),
-            vec![LlmResponse::content("gen1")],
-        )
-        .await;
+        let (tools_view, driver_view, _llm) =
+            load_driver(&root, Some(&path), vec![LlmResponse::content("gen1")]).await;
         let agent = root.get_as::<dyn Agent>(agent_key()).unwrap();
         id1 = agent.id();
         let _ = soon(agent.followup("g1")).await.unwrap();
@@ -307,12 +293,8 @@ async fn dependency_reload_keeps_identity_when_persisted() {
 
     // 第二代(新 root,模拟进程重启):identity 稳定 + 历史连续
     let root2 = Ctx::root().unwrap();
-    let (tools_view2, driver_view2, _llm2) = load_driver(
-        &root2,
-        Some(&path),
-        vec![LlmResponse::content("gen2")],
-    )
-    .await;
+    let (tools_view2, driver_view2, _llm2) =
+        load_driver(&root2, Some(&path), vec![LlmResponse::content("gen2")]).await;
     let agent2 = root2.get_as::<dyn Agent>(agent_key()).unwrap();
     assert_eq!(agent2.id().as_u64(), id1.as_u64(), "持久化时 identity 稳定");
     assert_eq!(agent2.id().generation(), id1.generation() + 1);
@@ -401,7 +383,10 @@ async fn fresh_session_never_has_memory_pointer() {
     let (tools_view, driver_view, llm) = load_driver(
         &root,
         None,
-        vec![LlmResponse::content("first"), LlmResponse::content("second")],
+        vec![
+            LlmResponse::content("first"),
+            LlmResponse::content("second"),
+        ],
     )
     .await;
     let agent = root.get_as::<dyn Agent>(agent_key()).unwrap();
@@ -635,12 +620,8 @@ async fn todo_survives_restart_and_injects() {
 
     // 第一代:一轮 + 设待办,落盘
     let root1 = Ctx::root().unwrap();
-    let (tv1, dv1, _llm1) = load_driver(
-        &root1,
-        Some(&path),
-        vec![LlmResponse::content("a1")],
-    )
-    .await;
+    let (tv1, dv1, _llm1) =
+        load_driver(&root1, Some(&path), vec![LlmResponse::content("a1")]).await;
     let agent1 = root1.get_as::<dyn Agent>(agent_key()).unwrap();
     let _ = soon(agent1.followup("q1")).await.unwrap();
     agent1.set_todo("finish the self-todo feature".to_string());
@@ -652,14 +633,13 @@ async fn todo_survives_restart_and_injects() {
 
     // 第二代:恢复 → 第一轮 prompt 含待办(自动接续)
     let root2 = Ctx::root().unwrap();
-    let (tv2, dv2, llm2) = load_driver(
-        &root2,
-        Some(&path),
-        vec![LlmResponse::content("resumed")],
-    )
-    .await;
+    let (tv2, dv2, llm2) =
+        load_driver(&root2, Some(&path), vec![LlmResponse::content("resumed")]).await;
     let agent2 = root2.get_as::<dyn Agent>(agent_key()).unwrap();
-    assert_eq!(agent2.session().todo(), Some("finish the self-todo feature"));
+    assert_eq!(
+        agent2.session().todo(),
+        Some("finish the self-todo feature")
+    );
     let _ = soon(agent2.followup("resume")).await.unwrap();
     let calls = llm2.calls.lock().unwrap();
     let joined: String = calls[0]
@@ -702,16 +682,17 @@ async fn cross_generation_memory_retention_keeps_facts() {
     let gen1 = load_driver(
         &root1,
         Some(&path),
-        facts.iter()
+        facts
+            .iter()
             .flat_map(|f| vec![LlmResponse::content(format!("ok, recorded: {f}"))])
             .collect(),
     )
     .await;
-    let agent1 = root1
-        .get_as::<dyn Agent>(agent_key())
-        .unwrap();
+    let agent1 = root1.get_as::<dyn Agent>(agent_key()).unwrap();
     for q in 1..=4 {
-        let _ = soon(agent1.followup(&format!("remember fact {q}"))).await.unwrap();
+        let _ = soon(agent1.followup(&format!("remember fact {q}")))
+            .await
+            .unwrap();
     }
     soon(async {
         gen1.0.dispose().await.unwrap();
@@ -748,7 +729,10 @@ async fn cross_generation_memory_retention_keeps_facts() {
     assert!(
         rate >= 0.75,
         "跨代记忆保持率过低: {:.0}% (kept {}/{}). prompt: {}",
-        rate, kept, facts.len(), all
+        rate,
+        kept,
+        facts.len(),
+        all
     );
 }
 
@@ -790,14 +774,26 @@ fn compact_information_fidelity_keeps_key_facts_via_summary() {
     let summarized = s.summary().unwrap_or_default();
     let kept = facts.iter().filter(|f| summarized.contains(**f)).count();
     let fidelity = kept as f64 / facts.len() as f64;
-    eprintln!("[compact-fidelity] high-quality summary kept {kept}/{} = {fidelity:.0}%", facts.len());
-    assert_eq!(fidelity, 1.0, "高质量摘要应 100% 保真关键事实; 摘要: {summarized}");
+    eprintln!(
+        "[compact-fidelity] high-quality summary kept {kept}/{} = {fidelity:.0}%",
+        facts.len()
+    );
+    assert_eq!(
+        fidelity, 1.0,
+        "高质量摘要应 100% 保真关键事实; 摘要: {summarized}"
+    );
 
     // 对照组:模板摘要(driver auto_compact 空路径)不保留任何关键事实
-    let (_, _) = s.compact("（早期对话因超出模型上下文窗口被自动裁剪,细节不可恢复）".to_string(), 2);
+    let (_, _) = s.compact(
+        "（早期对话因超出模型上下文窗口被自动裁剪,细节不可恢复）".to_string(),
+        2,
+    );
     let tmpl = s.summary().unwrap_or_default();
     let kept_t = facts.iter().filter(|f| tmpl.contains(**f)).count();
-    eprintln!("[compact-fidelity] template summary kept {kept_t}/{}", facts.len());
+    eprintln!(
+        "[compact-fidelity] template summary kept {kept_t}/{}",
+        facts.len()
+    );
     assert_eq!(kept_t, 0, "模板摘要不保留关键事实(证明优质摘要的必要性)");
 }
 
@@ -852,28 +848,46 @@ async fn driver_accumulates_llm_token_usage_from_finish() {
     struct UsageLlm;
     #[async_trait::async_trait]
     impl LanguageModel for UsageLlm {
-        fn provider(&self) -> &str { "usage-test" }
-        fn model_id(&self) -> &str { "usage-test" }
-        async fn do_generate(&self, _o: &CallOptions) -> Result<GenerateResult, aimux_core::error::AiMuxError> {
+        fn provider(&self) -> &str {
+            "usage-test"
+        }
+        fn model_id(&self) -> &str {
+            "usage-test"
+        }
+        async fn do_generate(
+            &self,
+            _o: &CallOptions,
+        ) -> Result<GenerateResult, aimux_core::error::AiMuxError> {
             Err(aimux_core::error::AiMuxError::Other("stream-only".into()))
         }
-        async fn do_stream(&self, _o: &CallOptions) -> Result<StreamResult, aimux_core::error::AiMuxError> {
-            let stream: std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamPart, aimux_core::error::AiMuxError>> + Send>> =
-                Box::pin(async_stream::stream! {
-                    yield Ok(StreamPart::StreamStart { warnings: Vec::new() });
-                    yield Ok(StreamPart::TextDelta { id: "t0".into(), delta: "hi".into(), provider_metadata: None });
-                    // input 10 + output 5 = 15 tokens
-                    yield Ok(StreamPart::Finish {
-                        finish_reason: FinishReason { unified: FinishReasonUnified::Stop, raw: None },
-                        usage: Usage {
-                            input_tokens: TokenUsage { total: Some(10), no_cache: None, cache_read: None, cache_write: None, text: None, reasoning: None },
-                            output_tokens: TokenUsage { total: Some(5), no_cache: None, cache_read: None, cache_write: None, text: None, reasoning: None },
-                            raw: None,
-                        },
-                        provider_metadata: None,
-                    });
+        async fn do_stream(
+            &self,
+            _o: &CallOptions,
+        ) -> Result<StreamResult, aimux_core::error::AiMuxError> {
+            let stream: std::pin::Pin<
+                Box<
+                    dyn futures::Stream<Item = Result<StreamPart, aimux_core::error::AiMuxError>>
+                        + Send,
+                >,
+            > = Box::pin(async_stream::stream! {
+                yield Ok(StreamPart::StreamStart { warnings: Vec::new() });
+                yield Ok(StreamPart::TextDelta { id: "t0".into(), delta: "hi".into(), provider_metadata: None });
+                // input 10 + output 5 = 15 tokens
+                yield Ok(StreamPart::Finish {
+                    finish_reason: FinishReason { unified: FinishReasonUnified::Stop, raw: None },
+                    usage: Usage {
+                        input_tokens: TokenUsage { total: Some(10), no_cache: None, cache_read: None, cache_write: None, text: None, reasoning: None },
+                        output_tokens: TokenUsage { total: Some(5), no_cache: None, cache_read: None, cache_write: None, text: None, reasoning: None },
+                        raw: None,
+                    },
+                    provider_metadata: None,
                 });
-            Ok(StreamResult { stream, request_body: None, response_headers: None })
+            });
+            Ok(StreamResult {
+                stream,
+                request_body: None,
+                response_headers: None,
+            })
         }
     }
 
@@ -918,27 +932,45 @@ async fn token_budget_limit_interrupts_turn() {
     struct UsageLlm2;
     #[async_trait::async_trait]
     impl LanguageModel for UsageLlm2 {
-        fn provider(&self) -> &str { "budget-test" }
-        fn model_id(&self) -> &str { "budget-test" }
-        async fn do_generate(&self, _o: &CallOptions) -> Result<GenerateResult, aimux_core::error::AiMuxError> {
+        fn provider(&self) -> &str {
+            "budget-test"
+        }
+        fn model_id(&self) -> &str {
+            "budget-test"
+        }
+        async fn do_generate(
+            &self,
+            _o: &CallOptions,
+        ) -> Result<GenerateResult, aimux_core::error::AiMuxError> {
             Err(aimux_core::error::AiMuxError::Other("stream-only".into()))
         }
-        async fn do_stream(&self, _o: &CallOptions) -> Result<StreamResult, aimux_core::error::AiMuxError> {
-            let stream: std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamPart, aimux_core::error::AiMuxError>> + Send>> =
-                Box::pin(async_stream::stream! {
-                    yield Ok(StreamPart::StreamStart { warnings: Vec::new() });
-                    yield Ok(StreamPart::TextDelta { id: "t0".into(), delta: "hi".into(), provider_metadata: None });
-                    yield Ok(StreamPart::Finish {
-                        finish_reason: FinishReason { unified: FinishReasonUnified::Stop, raw: None },
-                        usage: Usage {
-                            input_tokens: TokenUsage { total: Some(100), no_cache: None, cache_read: None, cache_write: None, text: None, reasoning: None },
-                            output_tokens: TokenUsage { total: Some(50), no_cache: None, cache_read: None, cache_write: None, text: None, reasoning: None },
-                            raw: None,
-                        },
-                        provider_metadata: None,
-                    });
+        async fn do_stream(
+            &self,
+            _o: &CallOptions,
+        ) -> Result<StreamResult, aimux_core::error::AiMuxError> {
+            let stream: std::pin::Pin<
+                Box<
+                    dyn futures::Stream<Item = Result<StreamPart, aimux_core::error::AiMuxError>>
+                        + Send,
+                >,
+            > = Box::pin(async_stream::stream! {
+                yield Ok(StreamPart::StreamStart { warnings: Vec::new() });
+                yield Ok(StreamPart::TextDelta { id: "t0".into(), delta: "hi".into(), provider_metadata: None });
+                yield Ok(StreamPart::Finish {
+                    finish_reason: FinishReason { unified: FinishReasonUnified::Stop, raw: None },
+                    usage: Usage {
+                        input_tokens: TokenUsage { total: Some(100), no_cache: None, cache_read: None, cache_write: None, text: None, reasoning: None },
+                        output_tokens: TokenUsage { total: Some(50), no_cache: None, cache_read: None, cache_write: None, text: None, reasoning: None },
+                        raw: None,
+                    },
+                    provider_metadata: None,
                 });
-            Ok(StreamResult { stream, request_body: None, response_headers: None })
+            });
+            Ok(StreamResult {
+                stream,
+                request_body: None,
+                response_headers: None,
+            })
         }
     }
 

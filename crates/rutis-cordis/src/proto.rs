@@ -40,7 +40,10 @@ impl PeerCaps {
     /// 从宿主 hello 原始参数解析基座能力集(`ready()` 返回的就是原始参数)。
     pub fn from_hello_params(params: &Value) -> Result<PeerCaps, ProtoError> {
         serde_json::from_value(
-            params.get("caps").cloned().unwrap_or_else(|| serde_json::json!({})),
+            params
+                .get("caps")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
         )
         .map_err(|e| ProtoError::Wire(format!("hello caps malformed: {e}")))
     }
@@ -76,7 +79,11 @@ pub struct ExpectedHost {
 
 impl ExpectedHost {
     pub fn protocol(protocol: u32) -> ExpectedHost {
-        ExpectedHost { protocol, base: None, verify: None }
+        ExpectedHost {
+            protocol,
+            base: None,
+            verify: None,
+        }
     }
 }
 

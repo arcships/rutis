@@ -17,7 +17,7 @@ fn env_or_skip(name: &str) -> Option<String> {
 
 fn node_binary() -> Option<String> {
     if let Ok(node) = std::env::var("NODE") {
-        return Some(node)
+        return Some(node);
     }
     let output = std::process::Command::new("where")
         .arg("node")
@@ -25,7 +25,7 @@ fn node_binary() -> Option<String> {
         .or_else(|_| std::process::Command::new("which").arg("node").output())
         .ok()?;
     if !output.status.success() {
-        return None
+        return None;
     }
     String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -40,7 +40,7 @@ async fn event_seam_end_to_end_with_min_cordis_host() {
     // 提供显式逃生门。
     if std::env::var("RUTIS_SKIP_NODE_E2E").as_deref() == Ok("1") {
         eprintln!("RUTIS_SKIP_NODE_E2E=1 — skipping min-cordis host e2e");
-        return
+        return;
     }
     let Some(dsh_root) = env_or_skip("DSH_ROOT") else {
         panic!("DSH_ROOT not set (deepseek-harness checkout) — required for min-cordis host e2e")
@@ -56,7 +56,7 @@ async fn event_seam_end_to_end_with_min_cordis_host() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<(String, Value)>(8);
     let mut hooks = InboundHooks::default();
     let tx = Arc::new(event_tx);
-    hooks.on_notify = Some(Arc::new(move |method, params| {
+    hooks.on_notify = Some(Arc::new(move |method, params, _origin| {
         Box::pin({
             let tx = Arc::clone(&tx);
             async move {
@@ -82,7 +82,9 @@ async fn event_seam_end_to_end_with_min_cordis_host() {
         })
     }));
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
     let port = listener.local_addr().expect("addr").port();
     let script = format!("{dsh_root}/experiments/m2-host/bridge-host.mjs");
     let mut child = tokio::process::Command::new(node)
@@ -108,11 +110,17 @@ async fn event_seam_end_to_end_with_min_cordis_host() {
         ExpectedHost::protocol(1),
         json!({ "services": ["observe"], "wfKinds": [], "scopes": [] }),
     );
-    let hello = bridge.ready().await.expect("handshake with min-cordis host");
+    let hello = bridge
+        .ready()
+        .await
+        .expect("handshake with min-cordis host");
     assert_eq!(hello["base"], "min-cordis");
 
     // plugin/load:装载即 emit 的测试插件,声明转发 test/fired。
-    let entry = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/emit-plugin.mjs");
+    let entry = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/emit-plugin.mjs"
+    );
     let loaded = bridge
         .request(
             "plugin/load",

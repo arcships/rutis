@@ -58,7 +58,7 @@ impl Registry {
         binding: Binding,
     ) -> Result<Arc<Binding>, CordisError> {
         let mut bindings = self.bindings.lock().unwrap();
-        let entry = (key, scope.clone());
+        let entry = (key.clone(), scope.clone());
         if let Some(existing) = bindings.get(&entry) {
             if !existing.removing.load(std::sync::atomic::Ordering::SeqCst) {
                 let scope_desc = entry.1.as_deref().unwrap_or("<default>");
@@ -75,9 +75,9 @@ impl Registry {
         Ok(stored)
     }
 
-    pub(crate) fn lookup(&self, key: TypeKey, scope: Option<&ScopeId>) -> Option<Arc<Binding>> {
+    pub(crate) fn lookup(&self, key: &TypeKey, scope: Option<&ScopeId>) -> Option<Arc<Binding>> {
         let bindings = self.bindings.lock().unwrap();
-        bindings.get(&(key, scope.cloned())).cloned()
+        bindings.get(&(key.clone(), scope.cloned())).cloned()
     }
 
     /// 标记摘除开始:严格解析立即失败;绑定保留至 [`Registry::finalize_binding`]
@@ -93,7 +93,7 @@ impl Registry {
     ) {
         let mut bindings = self.bindings.lock().unwrap();
         let still_old = bindings
-            .get(&(key, scope.clone()))
+            .get(&(key.clone(), scope.clone()))
             .is_some_and(|b| Arc::ptr_eq(b, expected));
         if still_old {
             bindings.remove(&(key, scope));
@@ -108,11 +108,11 @@ impl Registry {
     /// 互不为对方的消费者(isolate 语义)。
     pub(crate) fn consumers_of(
         &self,
-        key: TypeKey,
+        key: &TypeKey,
         quad: (PluginId, u64, TypeKey, Option<ScopeId>),
     ) -> Vec<Arc<FiberInner>> {
         let index = self.inject_index.lock().unwrap();
-        let Some(list) = index.get(&key) else {
+        let Some(list) = index.get(key) else {
             return Vec::new();
         };
         list.iter()
@@ -139,11 +139,11 @@ impl Registry {
     }
 
     /// 通知所有注入该键的 fiber 重查依赖。
-    pub(crate) fn notify_key_changed(&self, key: TypeKey) {
+    pub(crate) fn notify_key_changed(&self, key: &TypeKey) {
         let fibers: Vec<Arc<FiberInner>> = {
             let index = self.inject_index.lock().unwrap();
             index
-                .get(&key)
+                .get(key)
                 .map(|list| list.iter().filter_map(|w| w.upgrade()).collect())
                 .unwrap_or_default()
         };
@@ -170,7 +170,7 @@ impl Registry {
     /// 门控解析(支柱 2):存在 + 未在摘除 + provider Active + `check()` 通过。
     pub(crate) fn resolve_dep(
         &self,
-        key: TypeKey,
+        key: &TypeKey,
         scope: Option<&ScopeId>,
     ) -> Option<(PluginId, u64)> {
         let binding = self.lookup(key, scope)?;

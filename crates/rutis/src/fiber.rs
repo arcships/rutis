@@ -1,3 +1,4 @@
+use std::any::{Any, TypeId};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -10,7 +11,7 @@ use crate::effect::{Effect, EffectRecord};
 use crate::error::{aggregate_arcs, panic_error, CordisError};
 use crate::event::{CatchUnwind, Event};
 use crate::key::{ScopeId, TypeKey};
-use crate::{BoxFuture, Plugin};
+use crate::{BoxFuture, Plugin, PluginFactory};
 
 /// 六态状态机(§四:保留 TS 六态)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +135,10 @@ pub(crate) struct FiberInner {
     pub name: String,
     pub is_root: bool,
     pub plugin: Option<Arc<dyn Plugin>>,
+    /// 工厂模式(D32):与 `plugin` 互斥(工厂模式 plugin 为 None)。
+    pub factory: Option<Arc<dyn ErasedFactory>>,
+    /// 工厂模式的当前 config(Arc 存储便于快照;update 原子替换)。
+    pub config: Mutex<Option<Arc<dyn Any + Send + Sync>>>,
     pub ctx: Ctx,
     pub parent_fiber: Option<Weak<FiberInner>>,
     /// 当前 fiber 代的取消 token(D27):每次 load 新建一代;卸载第②步取消。
@@ -157,7 +162,84 @@ pub(crate) struct FiberInner {
     pub last_deps: Mutex<Option<HashSet<(PluginId, u64, TypeKey, Option<crate::key::ScopeId>)>>>,
 }
 
+/// 工厂擦除面(D32):泛型 `PluginFactory<C>` 的类型擦除适配层内部协议。
+pub(crate) trait ErasedFactory: Send + Sync + 'static {
+    fn config_type_id(&self) -> TypeId;
+    fn name(&self) -> &str;
+    fn injects(&self) -> &[TypeKey];
+    fn validate_config_erased(&self, config: &dyn Any) -> Result<(), CordisError>;
+    fn build_erased(&self, config: &dyn Any) -> Result<Box<dyn Plugin>, CordisError>;
+}
+
+/// 泛型工厂的擦除包装(同 registry `StoredValue` 手法)。
+struct FactoryAdapter<F, C> {
+    factory: F,
+    _marker: std::marker::PhantomData<fn() -> C>,
+}
+
+impl<F, C> ErasedFactory for FactoryAdapter<F, C>
+where
+    F: PluginFactory<C>,
+    C: Send + Sync + 'static,
+{
+    fn config_type_id(&self) -> TypeId {
+        TypeId::of::<C>()
+    }
+
+    fn name(&self) -> &str {
+        self.factory.name()
+    }
+
+    fn injects(&self) -> &[TypeKey] {
+        self.factory.injects()
+    }
+
+    fn validate_config_erased(&self, config: &dyn Any) -> Result<(), CordisError> {
+        config
+            .downcast_ref::<C>()
+            .ok_or_else(|| CordisError::Validation {
+                issues: vec!["config type mismatch".into()],
+            })
+            .and_then(|c| self.factory.validate_config(c))
+    }
+
+    fn build_erased(&self, config: &dyn Any) -> Result<Box<dyn Plugin>, CordisError> {
+        config
+            .downcast_ref::<C>()
+            .ok_or_else(|| CordisError::Validation {
+                issues: vec!["config type mismatch".into()],
+            })
+            .and_then(|c| self.factory.build(c))
+    }
+}
+
 impl FiberInner {
+    /// 当前代插件实例(D32):静态模式克隆既有实例;工厂模式用当前
+    /// config 构造(每代一个新实例 = 配置热更新生效点)。
+    /// `build` 是用户回调且 panic 概率高于 validate(评审:三处用户回调
+    /// 唯独此处漏边界会杀驱动 → fiber 卡 Loading、join 永等)——panic
+    /// 转 `fail_load`,与 validate 的边界对称。
+    fn current_plugin(&self) -> Result<Arc<dyn Plugin>, CordisError> {
+        if let Some(plugin) = &self.plugin {
+            return Ok(plugin.clone());
+        }
+        let factory = self
+            .factory
+            .as_ref()
+            .ok_or_else(|| CordisError::PluginFailed("fiber has no plugin or factory".into()))?;
+        let config = self
+            .config
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| CordisError::PluginFailed("factory fiber has no config".into()))?;
+        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            factory.build_erased(config.as_ref())
+        }))
+        .unwrap_or_else(|p| Err(panic_error(p)));
+        built.map(Arc::from)
+    }
+
     /// 当前代 token(`ctx.cancellation_token()`/`ctx.cancelled()` 暴露给插件)。
     pub(crate) fn current_token(&self) -> CancellationToken {
         self.token.lock().unwrap().clone()
@@ -191,19 +273,23 @@ impl FiberInner {
     /// 投递携带完成信号的意图。发送后复查 alive:若发送落在驱动排空之后
     /// (该意图无人处理),任务即刻自完成——与退出排空的重复完成同值,无害
     ///(封住"查过 alive → 驱动退出排空 → send 才落地"的竞态,简化红线)。
+    /// 自完成携带 fiber 终态错误而非凭空 Ok(评审 3:Failed 态下驱动退出,
+    /// None 会把真实错误覆盖成伪装成功)。
     pub(crate) fn post_join(
         &self,
         task: Arc<TransitionTask>,
         make: impl FnOnce(Arc<TransitionTask>) -> Intent,
     ) -> bool {
         if !self.alive.load(Ordering::SeqCst) {
-            task.complete(None);
+            let err = self.transition.lock().unwrap().error.clone();
+            task.complete(err);
             return false;
         }
         match self.intents_tx.send(make(task.clone())) {
             Ok(()) => {
                 if !self.alive.load(Ordering::SeqCst) {
-                    task.complete(None);
+                    let err = self.transition.lock().unwrap().error.clone();
+                    task.complete(err);
                 }
                 true
             }
@@ -268,24 +354,30 @@ impl FiberInner {
     ) {
         let mut satisfied: HashSet<(PluginId, u64, TypeKey, Option<ScopeId>)> = HashSet::new();
         let mut missing: Vec<TypeKey> = Vec::new();
-        let Some(plugin) = &self.plugin else {
+        // 依赖声明来源:静态模式取实例,工厂模式取工厂(两形态同形,
+        // D32f:声明终身静态,与 cordis 的构造固化 inject 一致)。
+        let inject_keys: Vec<TypeKey> = if let Some(plugin) = &self.plugin {
+            plugin.injects().to_vec()
+        } else if let Some(factory) = &self.factory {
+            factory.injects().to_vec()
+        } else {
             return (satisfied, missing);
         };
         let registry = &self.ctx.shared().registry;
-        for key in plugin.injects() {
-            let scope = self.ctx.scope_for(key);
-            match registry.resolve_dep(*key, scope.as_ref()) {
+        for key in inject_keys {
+            let scope = self.ctx.scope_for(&key);
+            match registry.resolve_dep(&key, scope.as_ref()) {
                 Some((provider_id, provider_gen)) => {
-                    satisfied.insert((provider_id, provider_gen, *key, scope));
+                    satisfied.insert((provider_id, provider_gen, key, scope));
                 }
-                None => missing.push(*key),
+                None => missing.push(key),
             }
         }
         (satisfied, missing)
     }
 
     async fn refresh_deps(this: &Arc<Self>) {
-        if this.plugin.is_none() {
+        if this.plugin.is_none() && this.factory.is_none() {
             return;
         }
         if this.state() == FiberState::Disposed {
@@ -295,8 +387,13 @@ impl FiberInner {
         // 被取消的 Loading 代视同"已装载":排干后再定去留
         let loaded = !matches!(this.state(), FiberState::Pending | FiberState::Disposed);
         if !missing.is_empty() {
-            // 依赖缺失:已装载则卸载回 Pending;缺依赖长期 Pending 不报错(D22)
-            if loaded {
+            // 依赖缺失:Active/Loading 卸载回 Pending;缺依赖长期 Pending
+            // 不报错(D22)。**Failed 保持 Failed**(cordis FAILED 粘性:
+            // epoch 已是 INACTIVE,`_setEpoch` 早退不迁移,错误持续可见
+            // ——fiber.ts:611-639;审计 #2:此前被算作 loaded 降级 Pending,
+            // 错误隐入 settle 通道)。依赖恢复走下方装载路径,Failed 照常
+            // 重试(cordis 同:epoch 变化触发 reload)。
+            if matches!(this.state(), FiberState::Active | FiberState::Loading) {
                 Self::unload(this, NextState::Pending).await;
             }
             return;
@@ -326,7 +423,15 @@ impl FiberInner {
         }
         this.flush_status();
 
-        let plugin = this.plugin.as_ref().unwrap().clone();
+        // 当前代实例(D32):静态模式既有实例;工厂模式从当前 config 构造,
+        // 构造失败按装载失败回滚(fail_load 保持装配原子性)。
+        let plugin = match this.current_plugin() {
+            Ok(p) => p,
+            Err(e) => {
+                Self::fail_load(this, e).await;
+                return;
+            }
+        };
 
         // validate-before-store(D12):validate 失败 → Failed;
         // validate 是用户回调,panic 同样转入 Failed(评审 #6:不杀驱动)
@@ -374,10 +479,10 @@ impl FiberInner {
                     .lock()
                     .unwrap()
                     .iter()
-                    .map(|(k, _)| *k)
+                    .map(|(k, _)| k.clone())
                     .collect();
                 for key in provided {
-                    shared.registry.notify_key_changed(key);
+                    shared.registry.notify_key_changed(&key);
                 }
             }
             Err(e) => Self::fail_load(this, e).await,
@@ -412,6 +517,9 @@ impl FiberInner {
     }
 
     /// ④ EffectRecord 严格 LIFO 串行清理 + 消费边/依赖快照/提供表复位。
+    /// 对照声明(审计):cordis 跨顶层 effect **并发**清理(`Promise.all`,
+    /// fiber.ts:676),仅单 effect 内部 LIFO;此处跨 effect 也串行 LIFO——
+    /// 完成顺序确定、错误聚合可预期,方向性强化而非语义缺失。
     async fn drain_effects(this: &Arc<Self>) -> Vec<Arc<CordisError>> {
         let handle = this.ctx.handle().clone();
         let effects: Vec<Arc<EffectRecord>> = std::mem::take(&mut *this.effects.lock().unwrap());
@@ -549,6 +657,44 @@ pub(crate) fn spawn_fiber(
     plugin: Option<Arc<dyn Plugin>>,
     is_root: bool,
 ) -> Arc<FiberInner> {
+    spawn_fiber_inner(shared, parent_ctx, plugin, None, None, is_root)
+}
+
+/// 工厂模式 spawn(D32:`Ctx::plugin_with` 入口)。
+pub(crate) fn spawn_factory_fiber<F, C>(
+    shared: &Arc<Shared>,
+    parent_ctx: Option<&Ctx>,
+    factory: F,
+    config: C,
+    is_root: bool,
+) -> Arc<FiberInner>
+where
+    F: PluginFactory<C>,
+    C: Send + Sync + 'static,
+{
+    let erased: Arc<dyn ErasedFactory> = Arc::new(FactoryAdapter {
+        factory,
+        _marker: std::marker::PhantomData,
+    });
+    // 依赖声明静态(D32f):spawn 注册一次,终身不变——与静态模式
+    // spawn_fiber_inner 的注册完全同形。
+    let injects = erased.injects().to_vec();
+    let boxed: Arc<dyn Any + Send + Sync> = Arc::new(config);
+    let this = spawn_fiber_inner(shared, parent_ctx, None, Some(erased), Some(boxed), is_root);
+    for key in injects {
+        shared.registry.register_inject(key, &this);
+    }
+    this
+}
+
+fn spawn_fiber_inner(
+    shared: &Arc<Shared>,
+    parent_ctx: Option<&Ctx>,
+    plugin: Option<Arc<dyn Plugin>>,
+    factory: Option<Arc<dyn ErasedFactory>>,
+    config: Option<Arc<dyn Any + Send + Sync>>,
+    is_root: bool,
+) -> Arc<FiberInner> {
     let id = PluginId(
         shared
             .next_plugin_id
@@ -578,9 +724,12 @@ pub(crate) fn spawn_fiber(
             name: plugin
                 .as_ref()
                 .map(|p| p.name().to_string())
+                .or_else(|| factory.as_ref().map(|f| f.name().to_string()))
                 .unwrap_or_else(|| "root".to_string()),
             is_root,
             plugin,
+            factory,
+            config: Mutex::new(config),
             ctx,
             parent_fiber,
             token: Mutex::new(token),
@@ -604,7 +753,7 @@ pub(crate) fn spawn_fiber(
 
     if let Some(plugin) = &this.plugin {
         for key in plugin.injects() {
-            shared.registry.register_inject(*key, &this);
+            shared.registry.register_inject(key.clone(), &this);
         }
     }
 
@@ -692,6 +841,87 @@ impl FiberView {
             this.post_join(task.clone(), Intent::Restart);
             join_task(&task).await
         })
+    }
+
+    /// 配置热更新(D32):dry-run 通过后存入并按状态矩阵重启。
+    ///
+    /// - dry-run = `validate_config` + `build` + 实例 `validate`,任一失败
+    ///   返回 Err,**不存不重启**(现状不动);
+    /// - 通过后存 config,经 `Intent::Restart` 收敛:Active/Loading/Failed
+    ///   → 卸载重载(新 config 构造新实例);Pending → 直接重查,依赖就绪
+    ///   即用新 config 装载,未就绪则存着等门控;
+    /// - 非工厂 fiber(静态 `plugin()` 装载)返回 `Validation` 错;
+    /// - 与 restart 同款终态拒绝(Disposed/终态已登记/驱动已退出)。
+    pub fn update<C: Send + Sync + 'static>(
+        &self,
+        new_config: C,
+    ) -> BoxFuture<'static, Result<(), Arc<CordisError>>> {
+        let this = self.inner.clone();
+        Box::pin(async move {
+            {
+                let tr = this.transition.lock().unwrap();
+                if !this.is_root
+                    && (tr.terminal_task.is_some() || !this.alive.load(Ordering::SeqCst))
+                {
+                    return Err(Arc::new(CordisError::InactiveEffect));
+                }
+            }
+            let factory = this
+                .factory
+                .as_ref()
+                .and_then(|f| (f.config_type_id() == TypeId::of::<C>()).then(|| f.clone()));
+            let Some(factory) = factory else {
+                let reason = if this.factory.is_some() {
+                    "config type mismatch"
+                } else {
+                    "fiber has no factory (static plugin cannot update)"
+                };
+                return Err(Arc::new(CordisError::Validation {
+                    issues: vec![reason.into()],
+                }));
+            };
+            // dry-run(D32b):validate_config → build → 实例 validate,产物丢弃
+            // (build 纯构造契约)。用户回调 panic 转错误不杀调用方。
+            // 对照声明(审计):cordis 在非 ACTIVE 态**延迟** config 校验到激活时
+            // (fiber.ts:739 只存 `_config`);此处无条件 dry-run(D32b,尽早暴露)。
+            // 通过后:二次终态检查(dry-run 无锁同步,期间并发 dispose 可完整
+            // 执行,评审 3 探针实测窗口存在)→ 存 config → restart。
+            // 依赖声明静态(D32f),update 不触碰注册表。
+            let boxed: Arc<dyn Any + Send + Sync> = Arc::new(new_config);
+            let dry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                factory.validate_config_erased(boxed.as_ref())?;
+                let instance = factory.build_erased(boxed.as_ref())?;
+                instance.validate()?;
+                Ok::<(), CordisError>(())
+            }));
+            match dry {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return Err(Arc::new(e)),
+                Err(p) => return Err(Arc::new(panic_error(p))),
+            }
+            // 二次终态检查:dry-run 期间并发 dispose 可能已登记 terminal_task
+            // 并完成卸载——此时不存,现状交由 dispose 收敛(评审 3 探针:dry-run
+            // 后存 config 会落进已死 fiber)。
+            {
+                let tr = this.transition.lock().unwrap();
+                if !this.is_root
+                    && (tr.terminal_task.is_some() || !this.alive.load(Ordering::SeqCst))
+                {
+                    return Err(Arc::new(CordisError::InactiveEffect));
+                }
+            }
+            *this.config.lock().unwrap() = Some(boxed);
+            this.cancel_current(); // 预取消:运行中的 apply 协作退出(同 restart)
+            let task = TransitionTask::new();
+            this.post_join(task.clone(), Intent::Restart);
+            join_task(&task).await
+        })
+    }
+
+    /// 当前 config 快照(D32,诊断用)。非工厂 fiber 或类型不符返回 None。
+    pub fn current_config<C: Send + Sync + 'static>(&self) -> Option<Arc<C>> {
+        let boxed = self.inner.config.lock().unwrap().clone()?;
+        boxed.downcast::<C>().ok()
     }
 }
 

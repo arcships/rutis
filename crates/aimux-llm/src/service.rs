@@ -17,7 +17,10 @@ pub struct LlmServiceError {
 
 impl LlmServiceError {
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self { code: code.into(), message: message.into() }
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
     }
 }
 
@@ -48,8 +51,11 @@ pub trait LlmService: Send + Sync {
     async fn stream(&self, req: StreamRequest) -> Result<PartStream, LlmServiceError>;
 
     /// 某路由(= aimux provider 名)的模型目录。
-    async fn list_models(&self, provider: &str, api_key: Option<&str>)
-        -> Result<Vec<ModelBrief>, LlmServiceError>;
+    async fn list_models(
+        &self,
+        provider: &str,
+        api_key: Option<&str>,
+    ) -> Result<Vec<ModelBrief>, LlmServiceError>;
 }
 
 /// `stream` 的中性 DTO。`provider`/`model` 缺省回落宿主构造时的兜底;
@@ -92,7 +98,8 @@ pub struct ToolSpec {
 
 impl StreamRequest {
     pub fn from_value(value: &Value) -> Result<Self, LlmServiceError> {
-        serde_json::from_value(value.clone())
-            .map_err(|e| LlmServiceError::new("badRequest", format!("stream request malformed: {e}")))
+        serde_json::from_value(value.clone()).map_err(|e| {
+            LlmServiceError::new("badRequest", format!("stream request malformed: {e}"))
+        })
     }
 }

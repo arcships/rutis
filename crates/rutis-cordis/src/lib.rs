@@ -9,19 +9,23 @@
 //!   在飞表、超时、取消、孤儿应答计数。任何 JSON 帧对端可用。
 //! - [`proto`]:cordis 协议词汇——hello 基座面、能力集、evt mode、
 //!   wf kind、装载仲裁。
+//! - [`events`]:宿主事件链路——`evt/emit` 通知帧 → 内核 keyed 事件
+//!   (`HostEvent` + `forward_host_events` 翻译缝,含 `EventOrigin` 三字段透传)。
 
+pub mod events;
 pub mod proto;
 pub mod rpc;
 pub mod services;
 pub mod tcp;
 
+pub use events::{forward_host_events, HostEvent};
 pub use proto::{
     EvtDeclaration, EvtMode, ExpectedHost, HelloCaps, HelloVerify, PeerCaps, PluginLedger,
     WfDeclaration, WfKind,
 };
 pub use rpc::{
-    Bridge, BridgeConfig, BridgeStats, CancelPrefix, CancelTarget, Frame, HostGoneRecord,
-    InboundHooks, MemoryWire, Outcome, ProtoError, RemoteError, SessionState, Wire,
+    Bridge, BridgeConfig, BridgeStats, CancelPrefix, CancelTarget, EventOrigin, Frame,
+    HostGoneRecord, InboundHooks, MemoryWire, Outcome, ProtoError, RemoteError, SessionState, Wire,
 };
 pub use services::{CordisService, ServiceDispatch, ServiceReply};
 pub use tcp::TcpWire;

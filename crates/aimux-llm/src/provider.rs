@@ -66,13 +66,22 @@ pub struct AimuxLlm {
 }
 
 impl AimuxLlm {
-    pub fn new(fallback: Arc<dyn LanguageModel>, provider_name: impl Into<String>, fallback_model: impl Into<String>) -> Self {
+    pub fn new(
+        fallback: Arc<dyn LanguageModel>,
+        provider_name: impl Into<String>,
+        fallback_model: impl Into<String>,
+    ) -> Self {
         let provider_name = provider_name.into();
-        Self::with_factory(fallback, provider_name.clone(), fallback_model, Arc::new(move |provider, key, model| {
-            aimux_providers::provider(provider, Some(key.to_owned()), model, None)
-                .map(|m| Arc::from(m) as Arc<dyn LanguageModel>)
-                .map_err(|e| e.to_string())
-        }))
+        Self::with_factory(
+            fallback,
+            provider_name.clone(),
+            fallback_model,
+            Arc::new(move |provider, key, model| {
+                aimux_providers::provider(provider, Some(key.to_owned()), model, None)
+                    .map(|m| Arc::from(m) as Arc<dyn LanguageModel>)
+                    .map_err(|e| e.to_string())
+            }),
+        )
     }
 
     /// 工厂注入版(测试)。
@@ -105,7 +114,9 @@ impl AimuxLlm {
                 eprintln!("[aimux-llm] the host still boots; model calls will surface this error.");
                 eprintln!("[aimux-llm] set the provider key (e.g. DEEPSEEK_API_KEY) and restart to enable them.");
                 Self::new(
-                    Arc::new(UnconfiguredModel { reason: format!("provider {provider_name}/{model_id} not configured: {e}") }),
+                    Arc::new(UnconfiguredModel {
+                        reason: format!("provider {provider_name}/{model_id} not configured: {e}"),
+                    }),
                     provider_name,
                     model_id,
                 )
@@ -129,7 +140,7 @@ impl AimuxLlm {
                 let cache_key = format!("{api_key}\u{0}{wire_provider}\u{0}{wire_model}");
                 let mut keyed = self.keyed.lock().unwrap();
                 if let Some(model) = keyed.get(&cache_key) {
-                    return Ok(Arc::clone(model))
+                    return Ok(Arc::clone(model));
                 }
                 match (self.factory)(&wire_provider, api_key, &wire_model) {
                     Ok(model) => {
@@ -175,13 +186,20 @@ fn to_call_options(spec: &PromptSpec) -> CallOptions {
             })
         })
         .collect::<Vec<_>>();
-    CallOptions { prompt, tools: (!tools.is_empty()).then_some(tools), ..CallOptions::default() }
+    CallOptions {
+        prompt,
+        tools: (!tools.is_empty()).then_some(tools),
+        ..CallOptions::default()
+    }
 }
 
 fn text_message(role: Role, text: &str) -> LanguageModelPromptMessage {
     LanguageModelPromptMessage {
         role,
-        content: vec![ContentPart::Text { text: text.to_owned(), provider_options: None }],
+        content: vec![ContentPart::Text {
+            text: text.to_owned(),
+            provider_options: None,
+        }],
         provider_options: None,
     }
 }
@@ -189,8 +207,16 @@ fn text_message(role: Role, text: &str) -> LanguageModelPromptMessage {
 #[async_trait::async_trait]
 impl LlmService for AimuxLlm {
     async fn stream(&self, req: StreamRequest) -> Result<PartStream, LlmServiceError> {
-        let provider = req.provider.clone().filter(|p| !p.is_empty()).unwrap_or_else(|| "-".into());
-        let model = req.model.clone().filter(|m| !m.is_empty()).unwrap_or_else(|| "-".into());
+        let provider = req
+            .provider
+            .clone()
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| "-".into());
+        let model = req
+            .model
+            .clone()
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| "-".into());
         // 入口/出口日志(调用方可观察性;stderr 不占用任何宿主的 stdout)。
         eprintln!(
             "[aimux-llm] stream provider={provider} model={model} msgs={} tools={} system={} key={}",
@@ -244,11 +270,15 @@ impl LlmService for AimuxLlm {
         let key = api_key.unwrap_or_default().to_owned();
         let cache_key = format!("list\u{0}{provider}\u{0}{key}");
         if let Some(cached) = self.list_cache.lock().unwrap().get(&cache_key).cloned() {
-            return Ok(serde_json::from_value(cached).unwrap_or_default())
+            return Ok(serde_json::from_value(cached).unwrap_or_default());
         }
         let handle = aimux_providers::provider_handle(
             provider,
-            if key.is_empty() { None } else { Some(key.clone()) },
+            if key.is_empty() {
+                None
+            } else {
+                Some(key.clone())
+            },
             None,
         )
         .map_err(|e| LlmServiceError::new("llmProvider", e.to_string()))?;
@@ -258,11 +288,18 @@ impl LlmService for AimuxLlm {
             .map_err(|e| LlmServiceError::new("llmListModels", e.to_string()))?;
         let models: Vec<ModelBrief> = listed
             .into_iter()
-            .map(|m| ModelBrief { id: m.id, owned_by: m.owned_by, created: m.created.map(|c| c as i64) })
+            .map(|m| ModelBrief {
+                id: m.id,
+                owned_by: m.owned_by,
+                created: m.created.map(|c| c as i64),
+            })
             .collect();
         let cached = serde_json::to_value(&models).unwrap_or(Value::Null);
         self.list_cache.lock().unwrap().insert(cache_key, cached);
-        eprintln!("[aimux-llm] listModels provider={provider} models={}", models.len());
+        eprintln!(
+            "[aimux-llm] listModels provider={provider} models={}",
+            models.len()
+        );
         Ok(models)
     }
 }

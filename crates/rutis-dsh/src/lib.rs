@@ -31,7 +31,10 @@ impl LlmFace {
 }
 
 fn remote(e: LlmServiceError) -> RemoteError {
-    RemoteError { code: e.code, message: e.message }
+    RemoteError {
+        code: e.code,
+        message: e.message,
+    }
 }
 
 #[async_trait::async_trait]
@@ -46,8 +49,12 @@ impl CordisService for LlmFace {
                 let req = StreamRequest::from_value(&params).map_err(remote)?;
                 let parts = self.service.stream(req).await.map_err(remote)?;
                 Ok(ServiceReply::Stream(Box::pin(parts.map(|part| {
-                    part.map_err(remote)
-                        .and_then(|p| serde_json::to_value(&p).map_err(|e| RemoteError { code: "encode".into(), message: e.to_string() }))
+                    part.map_err(remote).and_then(|p| {
+                        serde_json::to_value(&p).map_err(|e| RemoteError {
+                            code: "encode".into(),
+                            message: e.to_string(),
+                        })
+                    })
                 }))))
             }
             "listModels" => {

@@ -25,8 +25,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::{Agent, AgentError, AgentStatus, SessionSnapshot, StatusCell};
 use crate::events::{
     AgentPreStep, AgentReasoning, AgentStepEvent, AgentTextDelta, AgentToolCall, AgentToolResult,
-    AgentTurnEnd,
-    PreStepDecision, ToolPostExecute, ToolPreExecute,
+    AgentTurnEnd, PreStepDecision, ToolPostExecute, ToolPreExecute,
 };
 use crate::session::{Session, SessionId};
 use crate::tools::{ToolOutput, ToolRegistry};
@@ -149,7 +148,8 @@ impl AgentDriver {
             session.persist(&path)
         };
         if let Err(e) = result {
-            let err: Box<dyn std::error::Error + Send + Sync> = format!("session persist failed: {e}").into();
+            let err: Box<dyn std::error::Error + Send + Sync> =
+                format!("session persist failed: {e}").into();
             self.ctx.error_sink()(Arc::new(CordisError::PluginFailed(err)));
         }
     }
@@ -160,10 +160,9 @@ impl AgentDriver {
     fn auto_compact(&self, keep: usize) {
         let summary = {
             let session = self.session.lock().unwrap();
-            session
-                .summary()
-                .map(str::to_string)
-                .unwrap_or_else(|| "（早期对话因超出模型上下文窗口被自动裁剪,细节不可恢复）".to_string())
+            session.summary().map(str::to_string).unwrap_or_else(|| {
+                "（早期对话因超出模型上下文窗口被自动裁剪,细节不可恢复）".to_string()
+            })
         };
         let (before, after) = self.compact(summary, keep);
         eprintln!("[driver] auto-compact: messages {before} -> {after} (kept last {keep})");
@@ -415,7 +414,9 @@ impl AgentDriver {
                         let msg = e.to_string();
                         if ctx_retry < 2 && is_context_overflow(&msg) {
                             ctx_retry += 1;
-                            eprintln!("[driver] context overflow, auto-compact & retry ({ctx_retry}/2)");
+                            eprintln!(
+                                "[driver] context overflow, auto-compact & retry ({ctx_retry}/2)"
+                            );
                             self.auto_compact(if ctx_retry == 1 { 40 } else { 8 });
                             continue 'llm;
                         }
@@ -476,7 +477,8 @@ impl AgentDriver {
                             .input_tokens
                             .total
                             .unwrap_or(0)
-                            .saturating_add(usage.output_tokens.total.unwrap_or(0)) as u64;
+                            .saturating_add(usage.output_tokens.total.unwrap_or(0))
+                            as u64;
                         if n > 0 {
                             // turn_lock 互斥保证同一时刻仅本 followup 在改 session,
                             // 循环内无其它 session 持锁 → lock() 安全;try_lock 在
@@ -624,9 +626,7 @@ fn tool_call_ids(m: &ModelMessage) -> Vec<String> {
         MessageContent::Parts(parts) => parts
             .iter()
             .filter_map(|p| match p {
-                ContentPart::ToolCall {
-                    tool_call_id, ..
-                } => Some(tool_call_id.clone()),
+                ContentPart::ToolCall { tool_call_id, .. } => Some(tool_call_id.clone()),
                 _ => None,
             })
             .collect(),
@@ -639,9 +639,7 @@ fn tool_result_ids(m: &ModelMessage) -> Vec<String> {
         MessageContent::Parts(parts) => parts
             .iter()
             .filter_map(|p| match p {
-                ContentPart::ToolResult {
-                    tool_call_id, ..
-                } => Some(tool_call_id.clone()),
+                ContentPart::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
                 _ => None,
             })
             .collect(),
@@ -678,11 +676,8 @@ pub(crate) fn sanitize_history(msgs: &[ModelMessage]) -> Vec<ModelMessage> {
             block.push(&msgs[j]);
             j += 1;
         }
-        let block_results: std::collections::HashSet<String> = block
-            .iter()
-            .map(|t| tool_result_ids(t))
-            .flatten()
-            .collect();
+        let block_results: std::collections::HashSet<String> =
+            block.iter().map(|t| tool_result_ids(t)).flatten().collect();
         let kept_calls: std::collections::HashSet<String> = tool_call_ids(m)
             .into_iter()
             .filter(|c| block_results.contains(c))
@@ -693,9 +688,9 @@ pub(crate) fn sanitize_history(msgs: &[ModelMessage]) -> Vec<ModelMessage> {
             MessageContent::Parts(parts) => parts
                 .iter()
                 .filter_map(|p| match p {
-                    ContentPart::ToolCall {
-                        tool_call_id, ..
-                    } => kept_calls.contains(tool_call_id).then(|| p.clone()),
+                    ContentPart::ToolCall { tool_call_id, .. } => {
+                        kept_calls.contains(tool_call_id).then(|| p.clone())
+                    }
                     other => Some(other.clone()),
                 })
                 .collect(),
@@ -784,7 +779,13 @@ mod tests {
         let roles: Vec<Role> = out.iter().map(|m| m.role).collect();
         assert_eq!(
             roles,
-            vec![Role::Assistant, Role::Assistant, Role::Tool, Role::User, Role::User]
+            vec![
+                Role::Assistant,
+                Role::Assistant,
+                Role::Tool,
+                Role::User,
+                Role::User
+            ]
         );
         // 只有 B 的结果留下,A(孤儿)被丢弃
         let tool_ids: Vec<String> = out
@@ -830,7 +831,10 @@ mod tests {
         use crate::tools::ToolOutput;
         let call = crate::scripted::tool_call("t1", "big", serde_json::json!({}));
         // 短输出:原样
-        let short = ToolOutput { ok: true, output: "hello".into() };
+        let short = ToolOutput {
+            ok: true,
+            output: "hello".into(),
+        };
         let m = tool_result_message(&call, &short);
         match &m.content {
             MessageContent::Parts(parts) => match &parts[0] {
@@ -843,7 +847,10 @@ mod tests {
         }
         // 超长输出:保头 + marker + 保尾,总长 < 输入
         let long_body: String = "x".repeat(5000);
-        let long = ToolOutput { ok: true, output: long_body.clone() };
+        let long = ToolOutput {
+            ok: true,
+            output: long_body.clone(),
+        };
         let m2 = tool_result_message(&call, &long);
         match &m2.content {
             MessageContent::Parts(parts) => match &parts[0] {
@@ -895,15 +902,25 @@ mod tests {
 
     #[test]
     fn context_overflow_detection() {
-        assert!(is_context_overflow("context length exceeded: 350000 > 128000"));
+        assert!(is_context_overflow(
+            "context length exceeded: 350000 > 128000"
+        ));
         assert!(is_context_overflow("prompt is too long: 50000 tokens"));
-        assert!(is_context_overflow("This model's maximum context window is 128K"));
-        assert!(is_context_overflow("400 Bad Request: Request too large for model gpt-4o"));
-        assert!(is_context_overflow("This model supports at most 128000 tokens"));
+        assert!(is_context_overflow(
+            "This model's maximum context window is 128K"
+        ));
+        assert!(is_context_overflow(
+            "400 Bad Request: Request too large for model gpt-4o"
+        ));
+        assert!(is_context_overflow(
+            "This model supports at most 128000 tokens"
+        ));
         // 反向:明显非上下文超限不应误判。注意"at most"+"too large"是安全
         // 的过匹配(注释:误判最多一次多余 compact,有界);真正的反例是
         // 不含任何关键词的普通失败。
-        assert!(!is_context_overflow("tool execution rejected: unauthorized access"));
+        assert!(!is_context_overflow(
+            "tool execution rejected: unauthorized access"
+        ));
         assert!(!is_context_overflow("network timeout, retry later"));
         assert!(!is_context_overflow("file not found"));
     }
@@ -1021,7 +1038,8 @@ mod tests {
         }
 
         // 预置 50 条历史的 session 文件(> 40,确保触发裁剪)
-        let path = std::env::temp_dir().join(format!("rutis-overflow-test-{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("rutis-overflow-test-{}.json", std::process::id()));
         {
             let mut s = Session::new();
             for i in 0..50 {
@@ -1041,8 +1059,7 @@ mod tests {
         });
         let llm_d = root.provide_as(llm_key(), llm).unwrap();
         let tools_v = root.plugin(ToolsPlugin::new(Vec::new()));
-        let driver_v = root
-            .plugin(AgentDriverPlugin::new(16).with_session_path(path.clone()));
+        let driver_v = root.plugin(AgentDriverPlugin::new(16).with_session_path(path.clone()));
         (&tools_v).await.expect("tools loads");
         (&driver_v).await.expect("driver loads");
         let agent = root.get_as::<dyn Agent>(agent_key()).unwrap();
@@ -1050,7 +1067,10 @@ mod tests {
 
         let res = soon(agent.followup("go")).await;
         assert!(res.is_ok(), "compact 后应成功: {res:?}");
-        assert!(agent.session().summary().is_some(), "超限应触发自动 compact");
+        assert!(
+            agent.session().summary().is_some(),
+            "超限应触发自动 compact"
+        );
         assert!(
             agent.session().messages().len() <= 42,
             "compact 后应大幅缩减,实际={}",
@@ -1221,7 +1241,10 @@ impl Plugin for AgentDriverPlugin {
             ));
             ctx.provide_as::<dyn Agent>(agent_key(), driver.clone())?;
             // 持久化路径服务:自我控制工具(`self_status`/`self_persist`)读取
-            ctx.provide_as::<Option<PathBuf>>(session_path_key(), Arc::new(self.session_path.clone()))?;
+            ctx.provide_as::<Option<PathBuf>>(
+                session_path_key(),
+                Arc::new(self.session_path.clone()),
+            )?;
 
             // fiber 卸载 → 落盘 session(持久化路径已配置时)。
             // 保存时机 ②:挂 effect disposer,后注册→先清理(LIFO),

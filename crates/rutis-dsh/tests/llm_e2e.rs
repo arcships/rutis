@@ -42,53 +42,59 @@ impl LanguageModel for TwoTurnLlm {
     }
 
     async fn do_stream(&self, options: &CallOptions) -> Result<StreamResult, AiMuxError> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(serde_json::from_value(serde_json::to_value(options).expect("encode")).expect("decode"));
+        self.calls.lock().unwrap().push(
+            serde_json::from_value(serde_json::to_value(options).expect("encode")).expect("decode"),
+        );
         let fed_tool_result = options.prompt.iter().any(|m| {
-            m.content.iter().any(|p| matches!(p, ContentPart::Text { text, .. } if text.contains("TOOL_RESULT:")))
+            m.content.iter().any(
+                |p| matches!(p, ContentPart::Text { text, .. } if text.contains("TOOL_RESULT:")),
+            )
         });
-        let stream: std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamPart, AiMuxError>> + Send>> =
-            if fed_tool_result {
-                Box::pin(async_stream::stream! {
-                yield Ok(StreamPart::TextDelta { id: "text-0".to_string(), delta: "all ".to_string(), provider_metadata: None });
-                yield Ok(StreamPart::TextDelta { id: "text-0".to_string(), delta: "done".to_string(), provider_metadata: None });
-                yield Ok(StreamPart::Finish {
-                    finish_reason: FinishReason { unified: FinishReasonUnified::Stop, raw: None },
-                    usage: Usage {
-                        input_tokens: TokenUsage { total: Some(11), no_cache: Some(9), cache_read: Some(2), ..TokenUsage::default() },
-                        output_tokens: TokenUsage { total: Some(7), ..TokenUsage::default() },
-                        raw: None,
-                    },
-                    provider_metadata: None,
-                });
-                })
-            } else {
-                Box::pin(async_stream::stream! {
-                yield Ok(StreamPart::ToolCall {
-                    tool_call_id: "call-1".to_string(),
-                    tool_name: "echo_tool".to_string(),
-                    input: json!({ "text": "m2" }),
-                    provider_executed: None,
-                    dynamic: None,
-                    thought_signature: None,
-                    provider_metadata: None,
-                });
-                yield Ok(StreamPart::Finish {
-                    finish_reason: FinishReason { unified: FinishReasonUnified::ToolCalls, raw: None },
-                    usage: Usage::default(),
-                    provider_metadata: None,
-                });
-                })
-            };
-        Ok(StreamResult { stream, request_body: None, response_headers: None })
+        let stream: std::pin::Pin<
+            Box<dyn futures::Stream<Item = Result<StreamPart, AiMuxError>> + Send>,
+        > = if fed_tool_result {
+            Box::pin(async_stream::stream! {
+            yield Ok(StreamPart::TextDelta { id: "text-0".to_string(), delta: "all ".to_string(), provider_metadata: None });
+            yield Ok(StreamPart::TextDelta { id: "text-0".to_string(), delta: "done".to_string(), provider_metadata: None });
+            yield Ok(StreamPart::Finish {
+                finish_reason: FinishReason { unified: FinishReasonUnified::Stop, raw: None },
+                usage: Usage {
+                    input_tokens: TokenUsage { total: Some(11), no_cache: Some(9), cache_read: Some(2), ..TokenUsage::default() },
+                    output_tokens: TokenUsage { total: Some(7), ..TokenUsage::default() },
+                    raw: None,
+                },
+                provider_metadata: None,
+            });
+            })
+        } else {
+            Box::pin(async_stream::stream! {
+            yield Ok(StreamPart::ToolCall {
+                tool_call_id: "call-1".to_string(),
+                tool_name: "echo_tool".to_string(),
+                input: json!({ "text": "m2" }),
+                provider_executed: None,
+                dynamic: None,
+                thought_signature: None,
+                provider_metadata: None,
+            });
+            yield Ok(StreamPart::Finish {
+                finish_reason: FinishReason { unified: FinishReasonUnified::ToolCalls, raw: None },
+                usage: Usage::default(),
+                provider_metadata: None,
+            });
+            })
+        };
+        Ok(StreamResult {
+            stream,
+            request_body: None,
+            response_headers: None,
+        })
     }
 }
 
 fn node_binary() -> String {
     if let Ok(node) = std::env::var("NODE") {
-        return node
+        return node;
     }
     let output = std::process::Command::new("where")
         .arg("node")
@@ -107,7 +113,7 @@ fn node_binary() -> String {
 async fn full_turn_with_tool_call_and_backfeed_end_to_end() {
     if std::env::var("RUTIS_SKIP_NODE_E2E").as_deref() == Ok("1") {
         eprintln!("RUTIS_SKIP_NODE_E2E=1 — skipping full turn e2e");
-        return
+        return;
     }
     let host_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../host");
     let host_main = format!("{host_dir}/src/main.ts");
@@ -117,7 +123,9 @@ async fn full_turn_with_tool_call_and_backfeed_end_to_end() {
     );
     let node = node_binary();
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
     let port = listener.local_addr().expect("addr").port();
     let mut child = tokio::process::Command::new(&node)
         .arg("--import")
@@ -134,9 +142,14 @@ async fn full_turn_with_tool_call_and_backfeed_end_to_end() {
         .await
         .expect("host connects within 30s")
         .expect("accept");
-    let llm = Arc::new(TwoTurnLlm { calls: Mutex::new(Vec::new()) });
-    let service: Arc<dyn aimux_llm::LlmService> =
-        Arc::new(aimux_llm::AimuxLlm::new(llm.clone(), "scripted", "two-turn"));
+    let llm = Arc::new(TwoTurnLlm {
+        calls: Mutex::new(Vec::new()),
+    });
+    let service: Arc<dyn aimux_llm::LlmService> = Arc::new(aimux_llm::AimuxLlm::new(
+        llm.clone(),
+        "scripted",
+        "two-turn",
+    ));
     let dispatch = ServiceDispatch::new(vec![rutis_dsh::LlmFace::new(service)]);
     let mut bridge = Bridge::start(
         Box::new(TcpWire::from_stream(stream)),
@@ -153,16 +166,25 @@ async fn full_turn_with_tool_call_and_backfeed_end_to_end() {
         .await
         .expect("host finishes within 120s")
         .expect("wait host");
-    assert!(status.success(), "vitest host failed — see TS-side output above");
+    assert!(
+        status.success(),
+        "vitest host failed — see TS-side output above"
+    );
 
     // Rust 侧 L3 映射断言:记录的调用(it2 两轮 + it3 注入流一次)。
     let calls = llm.calls.lock().unwrap();
     assert_eq!(calls.len(), 2, "two-turn flow recorded");
     let first = serde_json::to_value(&calls[0]).expect("encode");
     assert_eq!(first["prompt"][0]["role"], "system", "system 映射: {first}");
-    assert_eq!(first["prompt"][0]["content"][0]["text"], "You are the m2 acceptance host.");
+    assert_eq!(
+        first["prompt"][0]["content"][0]["text"],
+        "You are the m2 acceptance host."
+    );
     assert_eq!(first["prompt"][1]["role"], "user");
-    assert_eq!(first["prompt"][1]["content"][0]["text"], "run the acceptance turn");
+    assert_eq!(
+        first["prompt"][1]["content"][0]["text"],
+        "run the acceptance turn"
+    );
     assert_eq!(first["tools"][0]["type"], "function", "tools 映射: {first}");
     assert_eq!(first["tools"][0]["name"], "echo_tool");
     assert_eq!(first["tools"][0]["input_schema"]["type"], "object");

@@ -34,7 +34,10 @@ pub struct ServiceDispatch {
 impl ServiceDispatch {
     pub fn new(services: Vec<Arc<dyn CordisService>>) -> Arc<Self> {
         Arc::new(Self {
-            services: services.into_iter().map(|s| (s.name().to_owned(), s)).collect(),
+            services: services
+                .into_iter()
+                .map(|s| (s.name().to_owned(), s))
+                .collect(),
             bridge: OnceLock::new(),
         })
     }
@@ -67,7 +70,7 @@ impl ServiceDispatch {
             return Err(RemoteError {
                 code: "unhandled".into(),
                 message: format!("service dispatch only serves svc/call, got {method}"),
-            })
+            });
         }
         let (service, op) = (params["service"].as_str(), params["method"].as_str());
         let service = service.ok_or_else(|| RemoteError {
@@ -97,7 +100,10 @@ impl ServiceDispatch {
                     bridge
                         .notify("svc/part", json!({ "dispatchId": id, "part": part }))
                         .await
-                        .map_err(|e| RemoteError { code: "hostGone".into(), message: e.to_string() })?;
+                        .map_err(|e| RemoteError {
+                            code: "hostGone".into(),
+                            message: e.to_string(),
+                        })?;
                 }
                 Ok(json!({ "parts": count }))
             }

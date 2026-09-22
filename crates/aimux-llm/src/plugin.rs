@@ -20,7 +20,9 @@ pub struct AimuxLlmPlugin {
 impl AimuxLlmPlugin {
     /// env 兜底构造(见 [`AimuxLlm::from_env`])。
     pub fn from_env() -> Self {
-        Self { service: Arc::new(AimuxLlm::from_env()) }
+        Self {
+            service: Arc::new(AimuxLlm::from_env()),
+        }
     }
 
     /// 服务注入版(测试/组合根定制)。

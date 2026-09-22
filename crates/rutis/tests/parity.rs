@@ -336,7 +336,7 @@ async fn distinguishes_provider_incarnations_without_a_global_counter() {
     let values1: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
     let values2: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
     let v1 = values1.clone();
-    let fiber1 = root1.plugin(simple_dep("c1", vec![key], move |ctx: &Ctx| {
+    let fiber1 = root1.plugin(simple_dep("c1", vec![key.clone()], move |ctx: &Ctx| {
         let v1 = v1.clone();
         Box::pin(async move {
             // 记录本代实际看到的 provider 值( incarnation )
@@ -345,7 +345,7 @@ async fn distinguishes_provider_incarnations_without_a_global_counter() {
         })
     }));
     let v2 = values2.clone();
-    let fiber2 = root2.plugin(simple_dep("c2", vec![key], move |ctx: &Ctx| {
+    let fiber2 = root2.plugin(simple_dep("c2", vec![key.clone()], move |ctx: &Ctx| {
         let v2 = v2.clone();
         Box::pin(async move {
             v2.lock().unwrap().push(ctx.get::<Foo>().expect("foo").bar);
@@ -2291,15 +2291,15 @@ async fn service_compare_snapshot() {
 async fn isolate_isolated_context() {
     let key = TypeKey::of::<Foo>();
     let ctx = Ctx::root().unwrap();
-    let scope_a = ctx.isolate(key, "A");
-    let scope_b = ctx.isolate(key, "B");
+    let scope_a = ctx.isolate(key.clone(), "A");
+    let scope_b = ctx.isolate(key.clone(), "B");
     let callbacks = counter();
     let disposes = counter();
 
     let mk_consumer = |_ctx: &Ctx| {
         let cb = callbacks.clone();
         let dp = disposes.clone();
-        simple_dep("iso-consumer", vec![key], move |_c: &Ctx| {
+        simple_dep("iso-consumer", vec![key.clone()], move |_c: &Ctx| {
             let cb = cb.clone();
             let dp = dp.clone();
             Box::pin(async move {
@@ -2348,15 +2348,15 @@ async fn isolate_isolated_context() {
 async fn isolate_shared_label() {
     let key = TypeKey::of::<Foo>();
     let ctx = Ctx::root().unwrap();
-    let scope_l1 = ctx.isolate(key, "L");
-    let scope_l2 = ctx.isolate(key, "L"); // 同 label → 同作用域
+    let scope_l1 = ctx.isolate(key.clone(), "L");
+    let scope_l2 = ctx.isolate(key.clone(), "L"); // 同 label → 同作用域
     let callbacks = counter();
     let disposes = counter();
 
     let mk_consumer = |_ctx: &Ctx| {
         let cb = callbacks.clone();
         let dp = disposes.clone();
-        simple_dep("shared-consumer", vec![key], move |_c: &Ctx| {
+        simple_dep("shared-consumer", vec![key.clone()], move |_c: &Ctx| {
             let cb = cb.clone();
             let dp = dp.clone();
             Box::pin(async move {

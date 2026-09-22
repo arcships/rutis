@@ -1,4 +1,3 @@
-use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -8,6 +7,7 @@ use crate::event::{
     CatchUnwind, DynEvent, ErasedValue, Event, EventOptions, Listener, ListenerAdapter, Terminal,
     TerminalAdapter, WaterfallAdapter, WaterfallListener,
 };
+use crate::key::TypeKey;
 use crate::{BoxFuture, Disposer, Effect};
 
 /// waterfall 链上的擦除续延:调用下一个监听器,最终落到终态续延。
@@ -105,11 +105,12 @@ fn claim_once<C>(list: &mut Vec<Arc<Hook<C>>>) -> Vec<Arc<Hook<C>>> {
 
 #[derive(Default)]
 struct BusInner {
-    hooks: HashMap<TypeId, Vec<Arc<Hook<Arc<dyn ErasedCall>>>>>,
-    wf_hooks: HashMap<TypeId, Vec<Arc<Hook<Arc<dyn ErasedWaterfallCall>>>>>,
-    /// 同事件类型的派发尾链(D31):每次 emit 的派发任务 await 上一个,
-    /// 保证同事件多次 emit 按发射序执行(修 spawn 调度乱序)。
-    dispatch_tail: HashMap<TypeId, tokio::task::JoinHandle<()>>,
+    /// 注册面键 = TypeKey(D33:限定名通道;非 keyed 注册 qualifier 为 None)。
+    hooks: HashMap<TypeKey, Vec<Arc<Hook<Arc<dyn ErasedCall>>>>>,
+    wf_hooks: HashMap<TypeKey, Vec<Arc<Hook<Arc<dyn ErasedWaterfallCall>>>>>,
+    /// 同事件键的派发尾链(D31):每次 emit 的派发任务 await 上一个,
+    /// 保证同键多次 emit 按发射序执行(修 spawn 调度乱序)。
+    dispatch_tail: HashMap<TypeKey, tokio::task::JoinHandle<()>>,
 }
 
 /// 类型化事件总线(D3:回调注册表;D16:四分发,无同步 bail)。
@@ -129,7 +130,7 @@ impl EventBus {
 
     /// 注册监听器(默认追加在后)。
     pub fn on<E: Event>(&self, ctx: &Ctx, l: impl Listener<E>) -> Result<Disposer, CordisError> {
-        self.add_hook(ctx, l, EventOptions::default(), false)
+        self.add_hook(TypeKey::of::<E>(), ctx, l, EventOptions::default(), false)
     }
 
     /// 注册监听器(带选项)。
@@ -139,12 +140,56 @@ impl EventBus {
         l: impl Listener<E>,
         opts: EventOptions,
     ) -> Result<Disposer, CordisError> {
-        self.add_hook(ctx, l, opts, false)
+        self.add_hook(TypeKey::of::<E>(), ctx, l, opts, false)
     }
 
     /// 注册一次性监听器:至多调用一次。
     pub fn once<E: Event>(&self, ctx: &Ctx, l: impl Listener<E>) -> Result<Disposer, CordisError> {
-        self.add_hook(ctx, l, EventOptions::default(), true)
+        self.add_hook(TypeKey::of::<E>(), ctx, l, EventOptions::default(), true)
+    }
+
+    /// 注册带动态限定名的监听器(D33):同事件类型多通道互不串扰。
+    /// name 与 `emit_keyed` 按字符串内容匹配。
+    pub fn on_keyed<E: Event>(
+        &self,
+        ctx: &Ctx,
+        name: impl Into<std::sync::Arc<str>>,
+        l: impl Listener<E>,
+    ) -> Result<Disposer, CordisError> {
+        self.add_hook(
+            TypeKey::keyed_dynamic::<E>(name),
+            ctx,
+            l,
+            EventOptions::default(),
+            false,
+        )
+    }
+
+    /// 注册带动态限定名的监听器(带选项)。
+    pub fn on_keyed_opt<E: Event>(
+        &self,
+        ctx: &Ctx,
+        name: impl Into<std::sync::Arc<str>>,
+        l: impl Listener<E>,
+        opts: EventOptions,
+    ) -> Result<Disposer, CordisError> {
+        self.add_hook(TypeKey::keyed_dynamic::<E>(name), ctx, l, opts, false)
+    }
+
+    /// 注册带动态限定名的一次性监听器。
+    pub fn once_keyed<E: Event>(
+        &self,
+        ctx: &Ctx,
+        name: impl Into<std::sync::Arc<str>>,
+        l: impl Listener<E>,
+    ) -> Result<Disposer, CordisError> {
+        self.add_hook(
+            TypeKey::keyed_dynamic::<E>(name),
+            ctx,
+            l,
+            EventOptions::default(),
+            true,
+        )
     }
 
     /// 注册 waterfall 监听器(D17:独立注册面)。
@@ -153,7 +198,7 @@ impl EventBus {
         ctx: &Ctx,
         l: impl WaterfallListener<E>,
     ) -> Result<Disposer, CordisError> {
-        self.add_wf_hook(ctx, l, EventOptions::default(), false)
+        self.add_wf_hook(TypeKey::of::<E>(), ctx, l, EventOptions::default(), false)
     }
 
     /// 注册 waterfall 监听器(带选项)。
@@ -163,11 +208,28 @@ impl EventBus {
         l: impl WaterfallListener<E>,
         opts: EventOptions,
     ) -> Result<Disposer, CordisError> {
-        self.add_wf_hook(ctx, l, opts, false)
+        self.add_wf_hook(TypeKey::of::<E>(), ctx, l, opts, false)
+    }
+
+    /// 注册带动态限定名的 waterfall 监听器(D33)。
+    pub fn on_waterfall_keyed<E: Event>(
+        &self,
+        ctx: &Ctx,
+        name: impl Into<std::sync::Arc<str>>,
+        l: impl WaterfallListener<E>,
+    ) -> Result<Disposer, CordisError> {
+        self.add_wf_hook(
+            TypeKey::keyed_dynamic::<E>(name),
+            ctx,
+            l,
+            EventOptions::default(),
+            false,
+        )
     }
 
     fn add_hook<E: Event>(
         &self,
+        key: TypeKey,
         ctx: &Ctx,
         l: impl Listener<E>,
         opts: EventOptions,
@@ -181,12 +243,12 @@ impl EventBus {
         ctx.effect(move || {
             {
                 let mut inner = bus.inner.lock().unwrap();
-                let list = inner.hooks.entry(TypeId::of::<E>()).or_default();
+                let list = inner.hooks.entry(key.clone()).or_default();
                 insert_hook(list, hook.clone(), opts.prepend);
             }
             Effect::Disposer(Box::new(move || {
                 let mut inner = bus.inner.lock().unwrap();
-                if let Some(list) = inner.hooks.get_mut(&TypeId::of::<E>()) {
+                if let Some(list) = inner.hooks.get_mut(&key) {
                     retain_hook(list, &hook);
                 }
                 Ok(())
@@ -196,6 +258,7 @@ impl EventBus {
 
     fn add_wf_hook<E: Event>(
         &self,
+        key: TypeKey,
         ctx: &Ctx,
         l: impl WaterfallListener<E>,
         opts: EventOptions,
@@ -209,12 +272,12 @@ impl EventBus {
         ctx.effect(move || {
             {
                 let mut inner = bus.inner.lock().unwrap();
-                let list = inner.wf_hooks.entry(TypeId::of::<E>()).or_default();
+                let list = inner.wf_hooks.entry(key.clone()).or_default();
                 insert_hook(list, hook.clone(), opts.prepend);
             }
             Effect::Disposer(Box::new(move || {
                 let mut inner = bus.inner.lock().unwrap();
-                if let Some(list) = inner.wf_hooks.get_mut(&TypeId::of::<E>()) {
+                if let Some(list) = inner.wf_hooks.get_mut(&key) {
                     retain_hook(list, &hook);
                 }
                 Ok(())
@@ -226,17 +289,17 @@ impl EventBus {
     /// 无需第二套原子认领)。**快照保持注册序**(§四:顺序控制影响
     /// serial/waterfall 结果);once 从注册表删除后,Disposer/卸载的
     /// 移除自然变 no-op。
-    fn take_hooks<E: Event>(&self, _waterfall: bool) -> Vec<Arc<Hook<Arc<dyn ErasedCall>>>> {
+    fn take_hooks(&self, key: &TypeKey) -> Vec<Arc<Hook<Arc<dyn ErasedCall>>>> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(list) = inner.hooks.get_mut(&TypeId::of::<E>()) else {
+        let Some(list) = inner.hooks.get_mut(key) else {
             return Vec::new();
         };
         claim_once(list)
     }
 
-    fn take_wf_hooks<E: Event>(&self) -> Vec<Arc<dyn ErasedWaterfallCall>> {
+    fn take_wf_hooks(&self, key: &TypeKey) -> Vec<Arc<dyn ErasedWaterfallCall>> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(list) = inner.wf_hooks.get_mut(&TypeId::of::<E>()) else {
+        let Some(list) = inner.wf_hooks.get_mut(key) else {
             return Vec::new();
         };
         claim_once(list)
@@ -245,16 +308,25 @@ impl EventBus {
             .collect()
     }
 
-    /// emit:触发即忘(D16/D30)。**同事件类型按发射序串行派发**(D31):
+    /// emit:触发即忘(D16/D30)。**同事件键按发射序串行派发**(D31):
     /// 单次持锁内"取上一派发任务句柄 → spawn 新任务 → 存为尾"(原子,
-    /// 防 remove/insert 两段锁在并发同类型 emit 下分叉链);任务内先
+    /// 防 remove/insert 两段锁在并发同键 emit 下分叉链);任务内先
     /// await 上一个,再按注册序逐个 await 监听器。监听器 panic 经
     /// CatchUnwind 捕获路由 ErrorSink,`prev.await` 正常返回,链不断;
-    /// 监听器内重入 emit 同类事件仅排到链尾,不死锁。跨事件类型不保证
+    /// 监听器内重入 emit 同键事件仅排到链尾,不死锁。跨事件键不保证
     /// 顺序(已知边界,见 D31)。spawn 在临界区内只入队不同步执行,
     /// std Mutex 无重入,故 `take_hooks` 的锁必须已释放。
     pub fn emit<E: Event>(&self, ctx: &Ctx, e: Arc<E>) {
-        let hooks = self.take_hooks::<E>(false);
+        self.emit_keyed_inner(TypeKey::of::<E>(), ctx, e)
+    }
+
+    /// emit 的 keyed 通道(D33):同类型不同名互不串扰,同名共享尾链。
+    pub fn emit_keyed<E: Event>(&self, ctx: &Ctx, name: impl Into<std::sync::Arc<str>>, e: Arc<E>) {
+        self.emit_keyed_inner(TypeKey::keyed_dynamic::<E>(name), ctx, e)
+    }
+
+    fn emit_keyed_inner<E: Event>(&self, key: TypeKey, ctx: &Ctx, e: Arc<E>) {
+        let hooks = self.take_hooks(&key);
         if hooks.is_empty() {
             return; // 不进链:无监听器不产生派发任务
         }
@@ -262,9 +334,9 @@ impl EventBus {
         let sink = ctx.error_sink();
         let handle = ctx.handle().clone();
         let mut inner = self.inner.lock().unwrap();
-        let prev = inner.dispatch_tail.remove(&TypeId::of::<E>());
+        let prev = inner.dispatch_tail.remove(&key);
         let tail = handle.spawn(async move {
-            // 等同事件上一次派发完成(链式保序)
+            // 等同键上一次派发完成(链式保序)
             if let Some(prev) = prev {
                 let _ = prev.await;
             }
@@ -278,12 +350,32 @@ impl EventBus {
                 }
             }
         });
-        inner.dispatch_tail.insert(TypeId::of::<E>(), tail);
+        inner.dispatch_tail.insert(key, tail);
     }
 
     /// parallel:并发全等,聚合全部错误(JoinSet,D16)。
     pub async fn parallel<E: Event>(&self, ctx: &Ctx, e: Arc<E>) -> Result<(), CordisError> {
-        let hooks = self.take_hooks::<E>(false);
+        self.parallel_keyed_inner(TypeKey::of::<E>(), ctx, e).await
+    }
+
+    /// parallel 的 keyed 通道(D33)。
+    pub async fn parallel_keyed<E: Event>(
+        &self,
+        ctx: &Ctx,
+        name: impl Into<std::sync::Arc<str>>,
+        e: Arc<E>,
+    ) -> Result<(), CordisError> {
+        self.parallel_keyed_inner(TypeKey::keyed_dynamic::<E>(name), ctx, e)
+            .await
+    }
+
+    async fn parallel_keyed_inner<E: Event>(
+        &self,
+        key: TypeKey,
+        ctx: &Ctx,
+        e: Arc<E>,
+    ) -> Result<(), CordisError> {
+        let hooks = self.take_hooks(&key);
         if hooks.is_empty() {
             return Ok(());
         }
@@ -311,7 +403,6 @@ impl EventBus {
         }
     }
 
-    /// serial:顺序调用至首个短路值 `Ok(Some(v))`(JoinSet 顺序 await,任务 `'static`,D16)。
     /// serial:顺序调用至首个短路值 `Ok(Some(v))`(TS serial 语义:
     /// 上一个监听器完成才调用下一个,按注册序短路)。
     /// 内联顺序 await,不 spawn(载荷可借用,`&E` 对齐 §二 草案);
@@ -321,7 +412,27 @@ impl EventBus {
         ctx: &Ctx,
         e: &E,
     ) -> Result<Option<E::Value>, CordisError> {
-        for hook in self.take_hooks::<E>(false) {
+        self.serial_keyed_inner(TypeKey::of::<E>(), ctx, e).await
+    }
+
+    /// serial 的 keyed 通道(D33)。
+    pub async fn serial_keyed<E: Event>(
+        &self,
+        ctx: &Ctx,
+        name: impl Into<std::sync::Arc<str>>,
+        e: &E,
+    ) -> Result<Option<E::Value>, CordisError> {
+        self.serial_keyed_inner(TypeKey::keyed_dynamic::<E>(name), ctx, e)
+            .await
+    }
+
+    async fn serial_keyed_inner<E: Event>(
+        &self,
+        key: TypeKey,
+        ctx: &Ctx,
+        e: &E,
+    ) -> Result<Option<E::Value>, CordisError> {
+        for hook in self.take_hooks(&key) {
             let outcome = CatchUnwind::new(hook.call.call(ctx, e as &DynEvent)).await;
             match outcome {
                 Ok(Ok(Some(boxed))) => {
@@ -348,9 +459,30 @@ impl EventBus {
         e: &'a E,
         terminal: T,
     ) -> BoxFuture<'a, Result<E::Value, CordisError>> {
+        self.waterfall_keyed_inner(TypeKey::of::<E>(), ctx, e, terminal)
+    }
+
+    /// waterfall 的 keyed 通道(D33)。
+    pub fn waterfall_keyed<'a, E: Event, T: Terminal<E> + 'a>(
+        &self,
+        ctx: &'a Ctx,
+        name: impl Into<std::sync::Arc<str>>,
+        e: &'a E,
+        terminal: T,
+    ) -> BoxFuture<'a, Result<E::Value, CordisError>> {
+        self.waterfall_keyed_inner(TypeKey::keyed_dynamic::<E>(name), ctx, e, terminal)
+    }
+
+    fn waterfall_keyed_inner<'a, E: Event, T: Terminal<E> + 'a>(
+        &self,
+        key: TypeKey,
+        ctx: &'a Ctx,
+        e: &'a E,
+        terminal: T,
+    ) -> BoxFuture<'a, Result<E::Value, CordisError>> {
         let bus = self.clone();
         Box::pin(async move {
-            let chain = bus.take_wf_hooks::<E>();
+            let chain = bus.take_wf_hooks(&key);
             let mut terminal: Box<dyn ErasedTerminal + 'a> =
                 Box::new(TerminalAdapter(terminal, std::marker::PhantomData));
             let next = ErasedNext {

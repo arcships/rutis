@@ -1,11 +1,53 @@
 use std::any::TypeId;
 use std::marker::PhantomData;
+use std::sync::Arc;
+
+/// 限定名(D33):双轨——静态路径零分配,动态路径(Arc)承接运行时名字。
+/// PartialEq/Eq/Hash 按**字符串内容**:Static 与 Dynamic 同名等值互通;
+/// Debug 同样只显示内容(不显示变体),与 Eq 语义一致——变体是实现细节,
+/// 打出来会误导调试。
+#[derive(Clone)]
+pub(crate) enum Qualifier {
+    Static(&'static str),
+    Dynamic(Arc<str>),
+}
+
+impl Qualifier {
+    fn as_str(&self) -> &str {
+        match self {
+            Qualifier::Static(s) => s,
+            Qualifier::Dynamic(s) => s,
+        }
+    }
+}
+
+impl std::fmt::Debug for Qualifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl PartialEq for Qualifier {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for Qualifier {}
+
+impl std::hash::Hash for Qualifier {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state);
+    }
+}
 
 /// 服务键 = TypeId + 可选限定名(D21:`ServiceKey = TypeKey`)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// D33:限定名放宽为双轨,支持运行时构造的名字(桥事件等);
+/// 代价是失去 `Copy`——克隆装载/注册路径,频率低。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeKey {
     type_id: TypeId,
-    qualifier: Option<&'static str>,
+    qualifier: Option<Qualifier>,
 }
 
 impl TypeKey {
@@ -17,18 +59,27 @@ impl TypeKey {
         }
     }
 
-    /// 带限定名的键:同接口多实例(shaku Keyed 模式)。
+    /// 带限定名的键:同接口多实例(shaku Keyed 模式)。静态名零分配。
     pub fn keyed<T: ?Sized + 'static>(qualifier: &'static str) -> Self {
         Self {
             type_id: TypeId::of::<T>(),
-            qualifier: Some(qualifier),
+            qualifier: Some(Qualifier::Static(qualifier)),
+        }
+    }
+
+    /// 带动态限定名的键(D33):运行时构造的名字(桥事件名等)。
+    /// 与 `keyed` 同名等值互通。
+    pub fn keyed_dynamic<T: ?Sized + 'static>(name: impl Into<Arc<str>>) -> Self {
+        Self {
+            type_id: TypeId::of::<T>(),
+            qualifier: Some(Qualifier::Dynamic(name.into())),
         }
     }
 
     /// 诊断描述(不参与分发)。
     pub fn describe(&self) -> String {
-        match self.qualifier {
-            Some(q) => format!("{}#{q}", self.type_id_debug()),
+        match &self.qualifier {
+            Some(q) => format!("{}#{}", self.type_id_debug(), q.as_str()),
             None => self.type_id_debug(),
         }
     }

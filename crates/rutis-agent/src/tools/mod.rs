@@ -96,7 +96,10 @@ impl ToolRegistry {
     /// 运行时注册/替换工具(热加载):运行中的 agent 可现场加入新能力,
     /// 后续 turn 的 schema 立即包含它。同名覆盖。
     pub fn register(&self, def: ToolDef) {
-        self.tools.lock().unwrap().insert(def.tool.name.clone(), def);
+        self.tools
+            .lock()
+            .unwrap()
+            .insert(def.tool.name.clone(), def);
     }
 
     pub fn get(&self, name: &str) -> Option<ToolDef> {

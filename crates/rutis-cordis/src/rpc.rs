@@ -87,7 +87,13 @@ impl Frame {
     /// 违规);载荷与 `ok` 冲突才是违规。非 `Res` 帧返回 `None`。
     pub fn outcome(&self) -> Option<Result<Outcome, ProtoError>> {
         match self {
-            Frame::Res { id, ok, result, error, .. } => Some(match (*ok, result, error) {
+            Frame::Res {
+                id,
+                ok,
+                result,
+                error,
+                ..
+            } => Some(match (*ok, result, error) {
                 (true, Some(result), None) => Ok(Outcome::Ok(result.clone())),
                 (true, None, None) => Ok(Outcome::Ok(Value::Null)),
                 (false, None, Some(error)) => Ok(Outcome::Err(error.clone())),
@@ -132,8 +138,14 @@ impl MemoryWire {
         let (host_tx, bridge_rx) = mpsc::channel(buffer);
         // 桥收宿主发的帧(bridge_rx),宿主收桥发的帧(host_rx)。
         (
-            MemoryWire { out: bridge_tx, r#in: std::sync::Arc::new(tokio::sync::Mutex::new(bridge_rx)) },
-            MemoryWire { out: host_tx, r#in: std::sync::Arc::new(tokio::sync::Mutex::new(host_rx)) },
+            MemoryWire {
+                out: bridge_tx,
+                r#in: std::sync::Arc::new(tokio::sync::Mutex::new(bridge_rx)),
+            },
+            MemoryWire {
+                out: host_tx,
+                r#in: std::sync::Arc::new(tokio::sync::Mutex::new(host_rx)),
+            },
         )
     }
 }
@@ -141,9 +153,7 @@ impl MemoryWire {
 impl Wire for MemoryWire {
     fn send(&self, frame: Frame) -> BoxFuture<'static, Result<(), ProtoError>> {
         let out = self.out.clone();
-        Box::pin(async move {
-            out.send(frame).await.map_err(|_| ProtoError::HostGone)
-        })
+        Box::pin(async move { out.send(frame).await.map_err(|_| ProtoError::HostGone) })
     }
 
     fn recv(&self) -> BoxFuture<'static, Option<Frame>> {
@@ -173,7 +183,10 @@ pub struct CancelTarget {
 
 impl CancelTarget {
     pub fn call(id: u64) -> CancelTarget {
-        CancelTarget { prefix: CancelPrefix::Call, id }
+        CancelTarget {
+            prefix: CancelPrefix::Call,
+            id,
+        }
     }
 }
 
@@ -200,7 +213,11 @@ pub enum ProtoError {
     #[error("handshake failed: {0}")]
     Handshake(String),
     #[error("call {method} (id {id}) timed out after {timeout_ms}ms")]
-    Timeout { id: u64, method: String, timeout_ms: u64 },
+    Timeout {
+        id: u64,
+        method: String,
+        timeout_ms: u64,
+    },
     #[error("timeout {requested}ms exceeds bridge cap {max}ms")]
     TimeoutTooLarge { requested: u64, max: u64 },
     #[error("call {method} (id {id}) cancelled")]
@@ -210,7 +227,11 @@ pub enum ProtoError {
     #[error("host is gone")]
     HostGone,
     #[error("duplicate plugin {plugin_id}: existing entry {existing_entry}, attempted {attempted_entry}")]
-    DuplicatePlugin { plugin_id: String, existing_entry: String, attempted_entry: String },
+    DuplicatePlugin {
+        plugin_id: String,
+        existing_entry: String,
+        attempted_entry: String,
+    },
     #[error("bridge not ready: {0}")]
     NotReady(String),
 }
@@ -256,17 +277,29 @@ pub struct BridgeConfig {
 
 impl Default for BridgeConfig {
     fn default() -> BridgeConfig {
-        BridgeConfig { default_timeout_ms: 30_000, max_timeout_ms: 120_000 }
+        BridgeConfig {
+            default_timeout_ms: 30_000,
+            max_timeout_ms: 120_000,
+        }
     }
 }
 
 /// 入站请求钩子:返回 `Ok`/`Err` 都会作为 res 回给宿主。
-pub type RequestHook = Arc<
-    dyn Fn(u64, String, Value) -> BoxFuture<'static, Result<Value, RemoteError>> + Send + Sync,
->;
+pub type RequestHook =
+    Arc<dyn Fn(u64, String, Value) -> BoxFuture<'static, Result<Value, RemoteError>> + Send + Sync>;
 
-/// 入站通知钩子(evt/emit 等走这里)。
-pub type NotifyHook = Arc<dyn Fn(String, Value) -> BoxFuture<'static, ()> + Send + Sync>;
+/// 入站通知钩子(evt/emit 等走这里)。三预留字段以 [`EventOrigin`] 透传。
+pub type NotifyHook =
+    Arc<dyn Fn(String, Value, EventOrigin) -> BoxFuture<'static, ()> + Send + Sync>;
+
+/// 入站帧的三预留字段(`Frame` 的 scopeId/sessionId/turnId,v1 全透传)。
+/// 事件链路用它区分同事件名下不同会话/回合的来源。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EventOrigin {
+    pub scope_id: Option<String>,
+    pub session_id: Option<String>,
+    pub turn_id: Option<String>,
+}
 
 /// 宿主 → Rust 方向的入站分发面。`on_request` 缺省时回 `unhandled` 错误
 /// (显式不静默)。
@@ -349,9 +382,7 @@ impl Bridge {
     fn check_open(&self) -> Result<(), ProtoError> {
         match &*self.state_rx.borrow() {
             SessionState::Ready(_) => Ok(()),
-            SessionState::Connecting => {
-                Err(ProtoError::NotReady("handshake not completed".into()))
-            }
+            SessionState::Connecting => Err(ProtoError::NotReady("handshake not completed".into())),
             SessionState::Failed(reason) => {
                 Err(ProtoError::NotReady(format!("handshake failed: {reason}")))
             }
@@ -365,14 +396,12 @@ impl Bridge {
         loop {
             match &*self.state_rx.borrow() {
                 SessionState::Ready(hello) => return Ok(hello.clone()),
-                SessionState::Failed(reason) => {
-                    return Err(ProtoError::Handshake(reason.clone()))
-                }
+                SessionState::Failed(reason) => return Err(ProtoError::Handshake(reason.clone())),
                 SessionState::Disconnected(_) => return Err(ProtoError::HostGone),
                 SessionState::Connecting => {}
             }
             if self.state_rx.changed().await.is_err() {
-                return Err(ProtoError::HostGone)
+                return Err(ProtoError::HostGone);
             }
         }
     }
@@ -387,7 +416,7 @@ impl Bridge {
             }
             if self.state_rx.changed().await.is_err() {
                 // 发送端只在 Shared drop 时消失,而泵持有 Arc,不可达;防御。
-                return self.gone_record()
+                return self.gone_record();
             }
         }
     }
@@ -427,7 +456,13 @@ impl Bridge {
         };
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.shared.pending.lock().unwrap().insert(id, Pending { method: method.clone(), tx });
+        self.shared.pending.lock().unwrap().insert(
+            id,
+            Pending {
+                method: method.clone(),
+                tx,
+            },
+        );
         let frame = Frame::Req {
             id,
             method: method.clone(),
@@ -438,7 +473,7 @@ impl Bridge {
         };
         if let Err(e) = self.shared.send_frame(frame).await {
             self.shared.pending.lock().unwrap().remove(&id);
-            return Err(e)
+            return Err(e);
         }
         match tokio::time::timeout(Duration::from_millis(timeout_ms), rx).await {
             Ok(Ok(CallSettled::Res(outcome))) => outcome
@@ -450,7 +485,11 @@ impl Bridge {
                 // 超时按失败处理,不等待)。res 恰在窗口内完成的竞态同样以
                 // 超时结论交付。
                 self.shared.pending.lock().unwrap().remove(&id);
-                Err(ProtoError::Timeout { id, method, timeout_ms })
+                Err(ProtoError::Timeout {
+                    id,
+                    method,
+                    timeout_ms,
+                })
             }
         }
     }
@@ -477,11 +516,18 @@ impl Bridge {
         if target.prefix == CancelPrefix::Call {
             if let Some(pending) = self.shared.pending.lock().unwrap().remove(&target.id) {
                 if pending.tx.send(CallSettled::Cancelled).is_err() {
-                    self.shared.stats.orphan_responses.fetch_add(1, Ordering::Relaxed);
+                    self.shared
+                        .stats
+                        .orphan_responses
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
-        self.notify("cancel", serde_json::json!({ "target": target.to_string() })).await
+        self.notify(
+            "cancel",
+            serde_json::json!({ "target": target.to_string() }),
+        )
+        .await
     }
 
     /// 当前计数快照。
@@ -508,7 +554,7 @@ impl Shared {
     fn host_gone(&self, publish: bool) {
         let mut gone = self.stats.gone.lock().unwrap();
         if gone.is_some() {
-            return
+            return;
         }
         let drained: Vec<_> = self.pending.lock().unwrap().drain().collect();
         let mut pending = Vec::new();
@@ -585,10 +631,10 @@ impl Shared {
         });
     }
 
-    fn dispatch_notify(&self, method: String, params: Value) {
+    fn dispatch_notify(&self, method: String, origin: EventOrigin, params: Value) {
         if let Some(hook) = self.hooks.on_notify.clone() {
             tokio::spawn(async move {
-                hook(method, params).await;
+                hook(method, params, origin).await;
             });
         }
     }
@@ -603,14 +649,14 @@ impl Shared {
             return Err(format!(
                 "protocol version mismatch: host declared {}, bridge expects {}",
                 caps.protocol, self.expected.protocol
-            ))
+            ));
         }
         if let Some(expected) = &self.expected.base {
             if &caps.base != expected {
                 return Err(format!(
                     "base mismatch: host declared {}, bridge expects {expected}",
                     caps.base
-                ))
+                ));
             }
         }
         if let Some(verify) = &self.expected.verify {
@@ -636,7 +682,7 @@ impl Shared {
             turn_id: None,
         };
         if self.send_frame(frame).await.is_err() {
-            return Err("host closed during handshake".into())
+            return Err("host closed during handshake".into());
         }
         let _ = self.state.send(SessionState::Ready(params));
         Ok(())
@@ -647,13 +693,15 @@ async fn pump(shared: Arc<Shared>) {
     loop {
         let Some(frame) = shared.wire.recv().await else {
             shared.host_gone(true);
-            return
+            return;
         };
         shared.stats.frames_received.fetch_add(1, Ordering::Relaxed);
         // 首帧纪律(F1):握手前只有 hello(Req)合法,其余三类一律终态拒绝。
         if matches!(&*shared.state.borrow(), SessionState::Connecting) {
             match frame {
-                Frame::Req { id, method, params, .. } if method == "hello" => {
+                Frame::Req {
+                    id, method, params, ..
+                } if method == "hello" => {
                     if let Err(reason) = shared.handle_hello(id, params).await {
                         let frame = Frame::Res {
                             id,
@@ -670,7 +718,7 @@ async fn pump(shared: Arc<Shared>) {
                         let _ = shared.send_frame(frame).await;
                         let _ = shared.state.send(SessionState::Failed(reason));
                         shared.host_gone(false);
-                        return
+                        return;
                     }
                 }
                 other => {
@@ -705,10 +753,10 @@ async fn pump(shared: Arc<Shared>) {
                     }
                     let _ = shared.state.send(SessionState::Failed(reason));
                     shared.host_gone(false);
-                    return
+                    return;
                 }
             }
-            continue
+            continue;
         }
         match frame {
             Frame::Res { id, .. } => {
@@ -718,15 +766,33 @@ async fn pump(shared: Arc<Shared>) {
                     Ok(Outcome::Ok(result)) => shared.complete(id, Ok(result)),
                     Ok(Outcome::Err(error)) => shared.complete(id, Err(error)),
                     Err(_malformed) => {
-                        shared.stats.orphan_responses.fetch_add(1, Ordering::Relaxed);
+                        shared
+                            .stats
+                            .orphan_responses
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
-            Frame::Req { id, method, params, .. } => {
+            Frame::Req {
+                id, method, params, ..
+            } => {
                 Shared::serve_request(Arc::clone(&shared), id, method, params);
             }
-            Frame::Ntf { method, params, .. } => {
-                shared.dispatch_notify(method, params);
+            Frame::Ntf {
+                method,
+                params,
+                scope_id,
+                session_id,
+                turn_id,
+            } => {
+                // 三预留字段透传给入站钩子(M3 评审:不得静默丢弃——
+                // 宿主会话语义靠它们区分来源)。
+                let origin = EventOrigin {
+                    scope_id,
+                    session_id,
+                    turn_id,
+                };
+                shared.dispatch_notify(method, origin, params);
             }
         }
     }
