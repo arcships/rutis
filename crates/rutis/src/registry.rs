@@ -138,6 +138,24 @@ impl Registry {
             .push(Arc::downgrade(fiber));
     }
 
+    /// 注销终态 fiber 的依赖声明(0.2.1 瞬态释放):驱动已退出的 fiber
+    /// 不再参与门控解析与重查通知;条目清空的键一并删除,keyed 声明
+    /// (每实例唯一限定名)在长寿 root 下不累积。
+    pub(crate) fn unregister_injects(&self, fiber: &Arc<FiberInner>, keys: &[TypeKey]) {
+        let weak = Arc::downgrade(fiber);
+        let mut index = self.inject_index.lock().unwrap();
+        for key in keys {
+            let mut empty = false;
+            if let Some(list) = index.get_mut(key) {
+                list.retain(|w| !Weak::ptr_eq(w, &weak));
+                empty = list.is_empty();
+            }
+            if empty {
+                index.remove(key);
+            }
+        }
+    }
+
     /// 通知所有注入该键的 fiber 重查依赖。
     pub(crate) fn notify_key_changed(&self, key: &TypeKey) {
         let fibers: Vec<Arc<FiberInner>> = {
@@ -193,3 +211,6 @@ impl Registry {
         Some((binding.provider_id, binding.provider_gen))
     }
 }
+
+#[cfg(test)]
+mod transient_tests;

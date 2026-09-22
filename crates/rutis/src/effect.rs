@@ -1,9 +1,10 @@
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use tokio::sync::Notify;
 
 use crate::error::{aggregate_arcs, join_panic_error, panic_error, CordisError};
+use crate::fiber::FiberInner;
 use crate::BoxFuture;
 
 /// 插件装配交回的清理(D18:清理可报错;闭包捕获 owned `Ctx`,不传 `&Ctx`)。
@@ -40,9 +41,12 @@ enum Cleanup {
 
 /// EffectRecord(§四):执行与清理分离;清理恰好一次,重复调用 join 同一结果;
 /// 严格 LIFO 串行;单错原样、多错聚合不压平;一个清理失败不阻止其余清理。
+/// 宿主 fiber(`owner`):清理进 Done 后从宿主 effects 列表自摘——长寿
+/// parent 下反复注册/清理的瞬态记录不残留(0.2.1 瞬态子插件释放)。
 pub(crate) struct EffectRecord {
     st: Mutex<EffectState>,
     notify: Notify,
+    owner: Option<Weak<FiberInner>>,
 }
 
 enum EffectState {
@@ -52,12 +56,13 @@ enum EffectState {
 }
 
 impl EffectRecord {
-    pub(crate) fn new(effect: Effect) -> Arc<Self> {
+    pub(crate) fn new(effect: Effect, owner: Weak<FiberInner>) -> Arc<Self> {
         let mut cleanups = Vec::new();
         effect.into_cleanups(&mut cleanups);
         Arc::new(Self {
             st: Mutex::new(EffectState::Live(cleanups)),
             notify: Notify::new(),
+            owner: Some(owner),
         })
     }
 
@@ -91,6 +96,21 @@ impl EffectRecord {
                 // PluginFailed 错误,任务必定写回 Done,不卡 Draining
                 let err = run_cleanups(&mut cleanups, &runner).await;
                 *this.st.lock().unwrap() = EffectState::Done(err.clone());
+                // 自摘与寄存(0.2.1)先于 notify:join 返回时宿主列表已无本记录。
+                // 仅当记录仍在宿主 effects 列表(提前 drain,收集者不是 fiber
+                // 级卸载)才寄存错误并自摘;drain_effects 整表收走的记录由其
+                // join 直接收集,不重复寄存。锁内判定与 mem::take 互斥,无竞态。
+                if let Some(owner) = this.owner.as_ref().and_then(Weak::upgrade) {
+                    let mut effects = owner.effects.lock().unwrap();
+                    let present = effects.iter().any(|r| Arc::ptr_eq(r, &this));
+                    if present {
+                        effects.retain(|r| !Arc::ptr_eq(r, &this));
+                        drop(effects);
+                        if let Some(e) = &err {
+                            owner.drained_errors.lock().unwrap().push(e.clone());
+                        }
+                    }
+                }
                 this.notify.notify_waiters();
             });
         }

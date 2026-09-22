@@ -267,14 +267,16 @@ impl Ctx {
         // 清理 effect 只负责删除:驱逐该三元组精确匹配的消费者并最终摘除
         let shared = self.0.shared.clone();
         let pid = fiber.id;
+        let provider = Arc::downgrade(&fiber);
         let evict_scope = scope.clone();
         let evict_key = key.clone();
         match self.effect(move || {
             Effect::AsyncDisposer(Box::new(move || {
                 let shared = shared.clone();
+                let provider = provider.clone();
                 let scope = evict_scope.clone();
                 Box::pin(async move {
-                    evict_and_finalize(&shared, pid, provider_gen, evict_key, scope).await
+                    evict_and_finalize(&shared, provider, pid, provider_gen, evict_key, scope).await
                 })
             }))
         }) {
@@ -293,11 +295,26 @@ impl Ctx {
     /// 注册清理效应(D23):`f` 立即执行,返回的清理在卸载时 LIFO 执行。
     /// fiber 已 Disposed/Unloading 时返回 `InactiveEffect`(§四:重入报错)。
     pub fn effect(&self, f: impl FnOnce() -> Effect) -> Result<Disposer, CordisError> {
+        let record = self.register_effect(f)?;
+        let handle = self.handle().clone();
+        Ok(Disposer::new(Box::new(move || {
+            let record = record.clone();
+            let handle = handle.clone();
+            Box::pin(async move { record.drain(&handle).await })
+        })))
+    }
+
+    /// `effect` 的内部形态:返回记录本体,供 mount 登记等持有引用。
+    /// Disposer 语义不变:drop 不触发清理,fiber 卸载仍兜底(D28)。
+    pub(crate) fn register_effect(
+        &self,
+        f: impl FnOnce() -> Effect,
+    ) -> Result<Arc<EffectRecord>, CordisError> {
         let fiber = self.0.fiber.upgrade().ok_or(CordisError::InactiveEffect)?;
         // factory 锁外执行;但"状态检查 + effects 入队"必须在同一临界区
         //(transition → effects 嵌套,锁序无反向):否则检查通过后驱动恰好
         // 卸载取走 effects,新记录漏掉本轮清理而泄漏(评审 P1)
-        let record = EffectRecord::new(f());
+        let record = EffectRecord::new(f(), self.0.fiber.clone());
         let handle = self.handle().clone();
         {
             let tr = fiber.transition.lock().unwrap();
@@ -306,7 +323,6 @@ impl Ctx {
                 // 生命周期已越过登记点:f() 可能已有副作用(如插入了监听器),
                 // 立即排干该记录的清理并返失败
                 let sink = self.error_sink();
-                let record = record.clone();
                 let drain_handle = handle.clone();
                 handle.spawn(async move {
                     if let Err(e) = record.drain(&drain_handle).await {
@@ -317,11 +333,7 @@ impl Ctx {
             }
             fiber.effects.lock().unwrap().push(record.clone());
         }
-        Ok(Disposer::new(Box::new(move || {
-            let record = record.clone();
-            let handle = handle.clone();
-            Box::pin(async move { record.drain(&handle).await })
-        })))
+        Ok(record)
     }
 
     /// 装载插件(支柱 1)。返回 FiberView;级联卸载:child dispose 注册为
@@ -371,24 +383,36 @@ impl Ctx {
         let view = FiberView::from_inner(fiber.clone());
         let child = view.clone();
         let sink = self.error_sink();
-        let registered = self.effect(move || {
+        let registered = self.register_effect(move || {
             Effect::AsyncDisposer(Box::new(move || {
                 let child = child.clone();
                 let sink = sink.clone();
                 Box::pin(async move {
+                    // 级联 dispose:parent 卸载时子尚未处置,错误仅经 sink 可见;
+                    // 子已 Disposed(调用方已从 dispose() 收到同一错误)则不再
+                    // 重复上报——0.2.1 子终态退出也会 drain 本记录
+                    let delivered = matches!(child.state().state, FiberState::Disposed);
                     if let Err(e) = child.dispose().await {
-                        sink(e);
+                        if !delivered {
+                            sink(e);
+                        }
                     }
                     Ok(())
                 })
             }))
         });
-        if registered.is_err() {
-            // parent 已失活:处置子 fiber,且不再触发装载(评审 #10:
-            // 避免 Dispose 之后入队的重载意图无人处理)
-            fiber.post(Intent::Dispose);
-        } else {
-            fiber.post(Intent::RefreshDeps);
+        match registered {
+            Ok(record) => {
+                // 子终态退出时经此引用 drain,记录从本 fiber 的 effects
+                // 列表自摘(0.2.1:长寿 parent 下瞬态子插件不残留 mount 记录)
+                *fiber.mount.lock().unwrap() = Some(record);
+                fiber.post(Intent::RefreshDeps);
+            }
+            Err(_) => {
+                // parent 已失活:处置子 fiber,且不再触发装载(评审 #10:
+                // 避免 Dispose 之后入队的重载意图无人处理)
+                fiber.post(Intent::Dispose);
+            }
         }
         view
     }
@@ -422,9 +446,11 @@ impl Ctx {
 /// 清理期自访问)→ ②预取消 + 可 join 的依赖重查(驱动已退出的消费者任务即刻
 /// 完成,不 join 永等,评审 #3)→ ③并发排干后按 Arc 身份最终摘除——
 /// 摘除窗口内被新 provide 替换过的槽位不动(TS dispose 同步释放槽位语义,
-/// 对拍 fiber.spec inertia lock 2)。
+/// 对拍 fiber.spec inertia lock 2)→ ④摘除 provider 的 `provided` 记账
+/// (0.2.1:长寿 root 上反复 provide/dispose 不累积)。
 async fn evict_and_finalize(
     shared: &Arc<Shared>,
+    provider: Weak<FiberInner>,
     pid: crate::PluginId,
     provider_gen: u64,
     key: TypeKey,
@@ -457,7 +483,17 @@ async fn evict_and_finalize(
     }
     // 清理期自访问结束,最终摘除(仅当槽位未被替换)
     if let Some(binding) = old {
-        shared.registry.finalize_binding_if(key, scope, &binding);
+        shared
+            .registry
+            .finalize_binding_if(key.clone(), scope.clone(), &binding);
+    }
+    // ④摘除 provider 的 provided 记账:仅移除本键本作用域的一条(同键
+    // 新 provide 的条目保留;fiber 卸载整表清空后此处自然 no-op)
+    if let Some(fiber) = provider.upgrade() {
+        let mut provided = fiber.provided.lock().unwrap();
+        if let Some(pos) = provided.iter().position(|(k, s)| *k == key && *s == scope) {
+            provided.swap_remove(pos);
+        }
     }
     Ok(())
 }
