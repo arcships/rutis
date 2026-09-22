@@ -43,6 +43,14 @@ pub(crate) struct Registry {
     inject_index: Mutex<HashMap<TypeKey, Vec<Weak<FiberInner>>>>,
 }
 
+/// 稀疏即收缩(0.2.5):条目逻辑删除后容器容量不随历史峰值滞留。
+/// 阈值:容量超过 64 槽且长度不足容量 1/4——避免小表抖动,
+/// 收缩分摊在每次跨过阈值时。表空(长度 0)自然命中。
+fn shrink_if_sparse<K, V>(map: &mut HashMap<K, V>) {
+    if map.capacity() > 64 && map.len() * 4 < map.capacity() {
+        map.shrink_to_fit();
+    }
+}
 impl Registry {
     pub(crate) fn new() -> Self {
         Self {
@@ -97,9 +105,7 @@ impl Registry {
             .is_some_and(|b| Arc::ptr_eq(b, expected));
         if still_old {
             bindings.remove(&(key, scope));
-        }
-        if bindings.is_empty() {
-            bindings.shrink_to_fit();
+            shrink_if_sparse(&mut bindings);
         }
     }
 
@@ -157,11 +163,7 @@ impl Registry {
                 index.remove(key);
             }
         }
-        // 长寿 root 的瞬态键:表空即收缩,容量不随历史实例数滞留
-        //(非空时容量以并发峰值 为界)。
-        if index.is_empty() {
-            index.shrink_to_fit();
-        }
+        shrink_if_sparse(&mut index);
     }
 
     /// 通知所有注入该键的 fiber 重查依赖。
