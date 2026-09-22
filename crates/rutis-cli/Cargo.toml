@@ -15,8 +15,8 @@ name = "rutis-cli"
 path = "src/main.rs"
 
 [dependencies]
-rutis = { path = "../rutis", version = "0.1.0" }
-rutis-agent = { path = "../rutis-agent", version = "0.1.0" }
+rutis = { path = "../rutis", version = "0.2.0" }
+rutis-agent = { path = "../rutis-agent", version = "0.2.0" }
 aimux-core = "0.3.0"
 aimux-providers = "0.3.0"
 serde_json = "1"

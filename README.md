@@ -1,87 +1,176 @@
 # rutis
 
-Cordis 核心范式的 Rust 惯用实现(自 [min-cordis](https://github.com/eric8810/min-cordis) 的 Rust 工作区独立成库)——插件化内核 + 配置热更新 + 动态事件 + LLM agent 框架 + dsh 宿主桥,一条 workspaces 六个 crate。
+**Rust 插件框架**——类型安全的服务容器、fiber 生命周期、四分发事件总线、依赖驱动的热重载。Cordis 核心范式的 Rust 惯用实现。
 
-## 核心范式(五支柱)
+[English](README.en.md)
+
+## 为什么需要它
+
+当你的应用需要插件化架构(编辑器、机器人、agent 宿主、可组合服务端),自己拼装通常意味着手写:服务注册与查找、插件启停顺序、资源清理、依赖变化后的重建。rutis 把这些变成声明:
+
+- **装配一次完成**——插件的 `apply` 同时提供服务 / 监听 / 清理,框架保证恰好一次执行
+- **编译期类型键**——服务以类型为键(`ctx.get::<Database>()`),没有字符串魔法
+- **资源不泄漏**——每个 fiber(插件容器)卸载时严格 LIFO 清理,中途失败也回滚
+- **换 provider,消费者自动重载**——依赖关系是数据,不是散落各处的回调
+- **运行中改配置**——`update(config)` 自动卸载重载,受影响的下游自动跟随
+
+## 快速上手
+
+```bash
+cargo add rutis@0.2
+cargo run -p rutis --example quickstart   # 本仓库内直接跑
+```
+
+完整示例([crates/rutis/examples/quickstart.rs](crates/rutis/examples/quickstart.rs))——一个 provider 插件、一个声明依赖的 consumer,换 provider 后 consumer 自动重载:
+
+```rust
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, TypeKey};
+
+/// 服务:类型即键,注册槽全局唯一。
+struct Greeting(String);
+
+/// provider:apply 时提供服务,卸载时框架自动摘除。
+struct Greeter { version: u32 }
+
+impl Plugin for Greeter {
+    fn name(&self) -> &str { "greeter" }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        let greeting = Greeting(format!("hello from greeter v{}", self.version));
+        Box::pin(async move {
+            ctx.provide(greeting)?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// consumer:声明依赖 Greeting——声明了,装载时机就交给框架。
+struct Listener { deps: Vec<TypeKey> }
+
+impl Plugin for Listener {
+    fn name(&self) -> &str { "listener" }
+    fn injects(&self) -> &[TypeKey] { &self.deps }  // 未就绪则停在 Pending
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        let greeting = ctx.get::<Greeting>().unwrap().0.clone();
+        Box::pin(async move {
+            println!("[listener] loaded: {greeting}");
+            Ok(Effect::Done)
+        })
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = Ctx::root()?;
+    let listener = ctx.plugin(Listener {
+        deps: vec![TypeKey::of::<Greeting>()],
+    });
+    // provider 到位 → 门控放行,consumer 自动装载
+    let v1 = ctx.plugin(Greeter { version: 1 });
+    wait_active(&listener).await;                 // [listener] loaded: hello from greeter v1
+
+    // 换 provider:旧的卸载、consumer 被驱逐、新的提供 → 自动重载。
+    // 全程没有碰过 consumer。
+    v1.dispose().await?;
+    let _v2 = ctx.plugin(Greeter { version: 2 });
+    wait_active(&listener).await;                 // [listener] loaded: hello from greeter v2
+    Ok(())
+}
+```
+
+## 核心概念:五支柱
 
 1. **插件 = 装配单元**:一次 `apply`,提供服务 / 监听 / 清理
 2. **fiber = 生命周期容器**:六态状态机 + 依赖门控 + 级联卸载 + 恰好一次清理
-3. **服务 = 类型键注册表 + isolate 作用域**
-4. **事件总线 = 四分发语义**(emit / parallel / serial / waterfall)
+3. **服务 = 类型键注册表 + isolate 作用域**(同接口多实例走限定名键)
+4. **事件总线 = 四分发语义**:emit(触发即忘,同键保序)/ parallel(并发全等)/ serial(首值短路)/ waterfall(中间件链)
 5. **依赖驱动重载**:provider 卸载 → 消费者驱逐并自动重载
 
-## 支柱之上的两块生产语义
+一句话心智模型:**声明依赖 → 门控装载 → provider 变 → 消费者自动重载**。
 
-**配置热更新(D32)**——运行中改配置、自动重启生效,复用 fiber 状态机的恰好一次清理与消费者驱逐,零新事务逻辑:
+fiber 的六态生命周期(装载失败原子回滚,Failed 粘性直到依赖恢复或热更新):
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending : spawn(依赖未齐)
+    Pending --> Loading : 依赖就绪
+    Loading --> Active : apply 成功
+    Loading --> Failed : validate / apply 失败(半注册资源回滚)
+    Active --> Unloading : 依赖消失 / dispose / update
+    Failed --> Unloading : restart / update / 依赖恢复
+    Unloading --> Pending : 清理完成(恰好一次,LIFO)
+    Unloading --> Disposed : dispose 终态
+    Disposed --> [*]
+```
+
+依赖驱动重载的完整时序(上例第 3 步展开):
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant R as Registry(类型键)
+    participant P as Provider fiber
+    participant C as Consumer fiber
+    App->>P: dispose()
+    P->>R: 服务摘除(evict)
+    R-->>C: 驱逐:预取消 + 重查依赖
+    C->>C: Active → Pending
+    App->>P: plugin(Greeter v2)
+    P->>R: provide Greeting
+    R-->>C: 依赖就绪通知
+    C->>C: Pending → Loading → Active(重新 apply)
+```
+
+## 能力一览
+
+**配置热更新**——运行中改配置,复用状态机的恰好一次清理,受影响的消费者自动跟随:
 
 ```rust
-// 工厂:每代从当前 config 构造实例;injects 静态声明(与 Plugin::injects 对称)
 struct MyFactory;
 impl PluginFactory<MyConfig> for MyFactory {
     fn build(&self, cfg: &MyConfig) -> Result<Box<dyn Plugin>, CordisError> { /* ... */ }
 }
 
 let view = ctx.plugin_with(MyFactory, cfg_v1);
-(&view).await?;                       // 装载
-view.update(cfg_v2).await?;           // dry-run 不过则现状不动;通过则卸载重载,消费者自动驱逐
+view.update(cfg_v2).await?;   // dry-run 不过则现状不动;通过则卸载重载
 ```
 
-**动态事件键(D33)**——运行时才知道名字的事件(宿主事件名等)走类型化事件 + 动态限定名,四分发与生命周期清理免费继承:
+**动态事件名**——运行时才知道名字的事件(宿主事件、脚本注册),类型化事件 + 动态限定名,四分发与生命周期清理免费继承:
 
 ```rust
 ctx.events().on_keyed::<HostEvent>(&ctx, "session/event", listener)?;
-ctx.events().emit_keyed(&ctx, name, Arc::new(HostEvent { /* ... */ }));
+ctx.events().emit_keyed(&ctx, name, Arc::new(event));
 ```
 
-两项设计对齐 cordis 语义:依赖声明静态固化(源码对照验证),96 个原版 spec 中 58 个语言无关不变量全自动化对拍(详见 [cordis-spec-parity](docs/cordis-spec-parity-2026-08-18.md) 与 [D32/D33 设计](docs/design-config-hot-update-and-dynamic-events-2026-09-21.md) 的决策表与审计记录)。
+**与 cordis 的关系**——rutis 是 [Cordis](https://github.com/shigma/cordis) 范式的 Rust 惯用实现,不是翻译:96 个原版 spec 逐条审阅,58 个语言无关不变量全部自动化对拍(fiber 时序、恰好一次清理、依赖门控、驱逐重载);其余差异全部显式声明(决策表 + 不移植清单 + 对照审计,见[文档](#文档))。已知的刻意强化:跨 effect 清理严格串行 LIFO(cordis 并发)、emit 同键保序显式重建。
 
-## Crates
+## 用 rutis 做的东西
 
-| crate | 内容 |
+| 项目 | 说明 |
 |---|---|
-| [`rutis`](crates/rutis) | 内核:Ctx / fiber / registry / event bus / effect / `PluginFactory` 配置热更新 / keyed 动态事件(141 项契约与对拍测试) |
-| [`rutis-cordis`](crates/rutis-cordis) | 业务无关基座桥:协议机制(`Wire` 传输接缝 / 在飞表 / 取消 / 超时 / 孤儿计数)+ cordis 词汇(hello 能力集 / evt mode / wf kind / 装载仲裁)+ 通用服务分发(`svc/call` + 流式 `svc/part`)+ 宿主事件链路(`evt/emit` → `HostEvent` keyed 事件,`EventOrigin` 三字段透传),零 dsh 知识 |
-| [`aimux-llm`](crates/aimux-llm) | 独立 llm 服务插件:rutis 插件形态(apply → 注册 `llm` 服务),aimux 原生 DTO/StreamPart 即中性协议 schema;工厂/keyed 缓存/listModels 缓存/回落全在此,零桥零 dsh 知识 |
-| [`rutis-dsh`](crates/rutis-dsh) | 入口与组合根:起 rutis 运行时、装载 aimux-llm、把注册表中的服务经基座桥供给宿主进程,宿主事件转发进内核总线(`rutis-dsh up`);`LlmFace` 是纯形状胶水,零 dsh 知识 |
-| [`rutis-agent`](crates/rutis-agent) | 最小 agent 框架:aimux `LanguageModel` 服务 + `ToolsPlugin` + `AgentDriverPlugin`(流式 `followup` + waterfall 中间件 + `agent/*` 事件广播)+ 内存 session(原子持久化)+ ratatui TUI;minimal mode 内置 `bash` + `replace_text` 工具 |
-| [`rutis-cli`](crates/rutis-cli) | 命令行形态:最小 coding agent TUI(源码构建 `cargo build -p rutis-cli`;crates.io 的 `cargo install rutis-cli` 为旧版,不含 rutui TUI) |
+| [rutis-agent](crates/rutis-agent) / [rutis-cli](crates/rutis-cli) | 最小 coding agent:aimux `LanguageModel` 服务 + 工具插件 + 流式 driver 插件 + ratatui TUI;`cargo install rutis-cli` |
+| [rutis-dsh](crates/rutis-dsh) + [host/](host) | 给 dsh 宿主进程供 LLM 服务的桥:Rust 组合根 ↔ loopback TCP ↔ TS 桥插件;宿主事件经 `evt/emit` → `HostEvent` 进内核总线 |
+| [aimux-llm](crates/aimux-llm) | 独立 LLM 服务插件:apply → 注册 `llm` 服务,329 provider |
 
-agent crate 一句话:**一个 aimux [`LanguageModel`](https://crates.io/crates/aimux-core) 服务 + 一个 `ToolRegistry` 插件 + 一个实现 `Agent` 接口的 driver 插件 + 一个内存 session(连续 loop 的事实源)**。
-
-## 依赖布局
-
-agent / cli crate 经 crates.io 版本消费 [aimux](https://crates.io/crates/aimux-core)(LLM 统一访问层,`LanguageModel` / `CallOptions`,329 provider),**无需并列检出**。要 hack 本地 aimux,在工作区根加未提交的 `[patch]` 指向本地路径即可。
-
-## 快速开始
+仓库内运行样例:
 
 ```bash
-cargo test                                    # 全量 267 项:内核契约+对拍 / 事件键 / 配置热更新 / 桥 e2e / agent 三层中的前两层
-cargo run -p rutis-cli -- --scripted          # 无 key 离线演示
-cargo run -p rutis-agent --example demo       # 真实后端两轮对话 + 依赖驱动驱逐(需 DEEPSEEK_API_KEY)
-cargo run -p rutis-agent --example tui        # 交互式 TUI,流式逐字 / 工具可见 / Esc 取消
-cargo run -p rutis-agent --example tui_scripted   # 离线脚本后端,无需 key
-cargo test -p rutis-agent --test real_backend -- --ignored   # 真实端到端(不进 CI)
+cargo test                                    # 全量:内核契约+对拍 / 热更新 / 事件键 / 桥 e2e / agent
+cargo run -p rutis-cli -- --scripted          # 无 key 离线 agent 演示
+cargo run -p rutis-agent --example tui_scripted   # 离线脚本后端 TUI
 ```
 
-provider / model 可用 `AIMUX_PROVIDER` / `AIMUX_MODEL` 覆盖(如本地 `AIMUX_PROVIDER=ollama AIMUX_MODEL=qwen3:8b`)。
-
-## 验证体系
-
-- **内核**:141 项契约与对拍(fiber 状态机时序 / 恰好一次清理 LIFO/聚合不压平 / 依赖门控 / 级联卸载 / 依赖驱动重载 / 事件四分发),另加配置热更新 15 条与动态事件键 11 条契约测试;D32/D33 经三轮独立评审 + 设计复盘 + cordis 全量对照审计,全部差异显式化(设计文档 §八-§十二)
-- **agent 三层**:单元(`ScriptedLlm` 实现真 `LanguageModel`)→ 集成(aimux `MockReplayModel` 录制回放;双门控、卸载驱逐重载、fiber 卸载取消)→ 真实端到端(`#[ignore]`,需 key 手动触发)
-- **桥**:MemoryWire 进程内 e2e + loopback TCP 真 Node e2e
+> agent / cli 经 crates.io 消费 [aimux](https://crates.io/crates/aimux-core)(LLM 统一访问层),无需并列检出;hack 本地 aimux 用工作区根的 `[patch]`。
 
 ## 文档
 
 **内核与范式**
 - [design-rust-port.md](docs/design-rust-port.md) — 内核设计(D1-D31 决策表)
 - [cordis-spec-parity-2026-08-18.md](docs/cordis-spec-parity-2026-08-18.md) — 与 cordis 原版 96 spec 对拍判定
-- [design-config-hot-update-and-dynamic-events-2026-09-21.md](docs/design-config-hot-update-and-dynamic-events-2026-09-21.md) — D32 配置热更新 + D33 动态事件键(设计 / 实施 / 三轮评审 / D32f 复盘 / cordis 对照审计,§一-§十二)
-- [review-rust-impl-2026-08-17.md](docs/review-rust-impl-2026-08-17.md) — 实现评审
+- [design-config-hot-update-and-dynamic-events-2026-09-21.md](docs/design-config-hot-update-and-dynamic-events-2026-09-21.md) — 配置热更新 + 动态事件键(设计 / 实施 / 三轮评审 / 复盘 / cordis 对照审计)
 
 **桥与宿主**
-- [design-dual-core-2026-08-20.md](docs/design-dual-core-2026-08-20.md) — 双核架构与经验锈化路线(rutis Rust 脊柱 × dsh TS 功能面)
-- [design-dsh-bridge-2026-08-21.md](docs/design-dsh-bridge-2026-08-21.md) — dsh 桥 v1 设计(TS 插件接入 + 编排 API)
+- [design-dual-core-2026-08-20.md](docs/design-dual-core-2026-08-20.md) — 双核架构与经验锈化路线
+- [design-dsh-bridge-2026-08-21.md](docs/design-dsh-bridge-2026-08-21.md) — dsh 桥 v1 设计
 - [decision-aimux-llm-plugin-2026-08-23.md](docs/decision-aimux-llm-plugin-2026-08-23.md) — aimux-llm 独立插件裁决
 
 **agent**
