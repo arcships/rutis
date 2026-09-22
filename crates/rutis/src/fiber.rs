@@ -116,11 +116,6 @@ fn complete_intent(intent: &Intent, err: Option<Arc<CordisError>>) {
     }
 }
 
-/// 哨兵键:`injects(config)` panic 时的占位声明——永远无 provider,
-/// fiber 因此留 Pending(不就绪),错误已路由 ErrorSink。
-#[derive(Debug)]
-struct InjectsUnavailable;
-
 enum NextState {
     Pending,
     Disposed,
@@ -144,15 +139,6 @@ pub(crate) struct FiberInner {
     pub factory: Option<Arc<dyn ErasedFactory>>,
     /// 工厂模式的当前 config(Arc 存储便于快照;update 原子替换)。
     pub config: Mutex<Option<Arc<dyn Any + Send + Sync>>>,
-    /// 工厂模式 spawn 时的依赖声明基线(D32/评审 3):
-    /// - `Some(keys)` — spawn 时声明成功(含明确的空集 = 无依赖),update
-    ///   按此严格校验漂移(derived 必须集合相等,空集亦然);
-    /// - `None` — spawn 时 `injects(config)` panic,基线未知,不注册任何键
-    ///   (fiber 由 resolve_deps 的哨兵路径维持 Pending);update 跳过漂移
-    ///   校验并补注册 derived(恢复路径),成功后写回 `Some(derived)` 成为
-    ///   新基线——后续 update 恢复严格校验(评审 3 证伪:基线若永不写回,
-    ///   后续所有 update 都逃逸校验,inject_index 累积过期条目)。
-    pub spawn_injects: Mutex<Option<Vec<TypeKey>>>,
     pub ctx: Ctx,
     pub parent_fiber: Option<Weak<FiberInner>>,
     /// 当前 fiber 代的取消 token(D27):每次 load 新建一代;卸载第②步取消。
@@ -180,7 +166,7 @@ pub(crate) struct FiberInner {
 pub(crate) trait ErasedFactory: Send + Sync + 'static {
     fn config_type_id(&self) -> TypeId;
     fn name(&self) -> &str;
-    fn injects_erased(&self, config: &dyn Any) -> Vec<TypeKey>;
+    fn injects(&self) -> &[TypeKey];
     fn validate_config_erased(&self, config: &dyn Any) -> Result<(), CordisError>;
     fn build_erased(&self, config: &dyn Any) -> Result<Box<dyn Plugin>, CordisError>;
 }
@@ -204,11 +190,8 @@ where
         self.factory.name()
     }
 
-    fn injects_erased(&self, config: &dyn Any) -> Vec<TypeKey> {
-        config
-            .downcast_ref::<C>()
-            .map(|c| self.factory.injects(c))
-            .unwrap_or_default()
+    fn injects(&self) -> &[TypeKey] {
+        self.factory.injects()
     }
 
     fn validate_config_erased(&self, config: &dyn Any) -> Result<(), CordisError> {
@@ -371,31 +354,12 @@ impl FiberInner {
     ) {
         let mut satisfied: HashSet<(PluginId, u64, TypeKey, Option<ScopeId>)> = HashSet::new();
         let mut missing: Vec<TypeKey> = Vec::new();
-        // 依赖声明来源:静态模式取实例;工厂模式从当前 config 派生(D32)。
-        // config 先 clone 出锁再进用户回调,防重入 update 死锁。
-        // 用户回调 panic 视为"依赖不就绪"(同 check() 的既有语义,
-        // registry.rs):哨兵键永远无 provider → fiber 留 Pending,不杀驱动。
+        // 依赖声明来源:静态模式取实例,工厂模式取工厂(两形态同形,
+        // D32f:声明终身静态,与 cordis 的构造固化 inject 一致)。
         let inject_keys: Vec<TypeKey> = if let Some(plugin) = &self.plugin {
             plugin.injects().to_vec()
         } else if let Some(factory) = &self.factory {
-            match self.config.lock().unwrap().clone() {
-                Some(config) => {
-                    let derived = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        factory.injects_erased(config.as_ref())
-                    }));
-                    match derived {
-                        Ok(keys) => keys,
-                        Err(p) => {
-                            self.ctx.error_sink()(Arc::new(panic_error(p)));
-                            vec![TypeKey::of::<InjectsUnavailable>()]
-                        }
-                    }
-                }
-                // 正常流程 config 恒为 Some(spawn/update 都必设);此分支
-                // 当前不可达,留哨兵防"未来引入 config=None 路径时被当成
-                // 无依赖直接装载"(评审 3 建议)。
-                None => vec![TypeKey::of::<InjectsUnavailable>()],
-            }
+            factory.injects().to_vec()
         } else {
             return (satisfied, missing);
         };
@@ -704,29 +668,13 @@ where
         factory,
         _marker: std::marker::PhantomData,
     });
-    // spawn 时派生依赖声明。用户回调 panic:基线记 None(未知,update 的
-    // 恢复路径跳过漂移校验并写回新基线),**不注册任何键**(防 append-only
-    // 死 Weak 泄漏),fiber 由 resolve_deps 的哨兵路径维持 Pending。
-    // panic 本身路由 ErrorSink(与 resolve_deps 路径一致,可观测)。
-    let (injects, injects_panic) =
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            erased.injects_erased(&config)
-        })) {
-            Ok(keys) => (Some(keys), None),
-            Err(p) => (None, Some(panic_error(p))),
-        };
+    // 依赖声明静态(D32f):spawn 注册一次,终身不变——与静态模式
+    // spawn_fiber_inner 的注册完全同形。
+    let injects = erased.injects().to_vec();
     let boxed: Arc<dyn Any + Send + Sync> = Arc::new(config);
     let this = spawn_fiber_inner(shared, parent_ctx, None, Some(erased), Some(boxed), is_root);
-    if let Some(err) = injects_panic {
-        this.ctx.error_sink()(Arc::new(err));
-    }
-    // 基线:Some(keys) = spawn 声明成功(空集亦是明确声明"无依赖",
-    // update 严格校验);None = panic 未知(见上)。
-    *this.spawn_injects.lock().unwrap() = injects.clone();
-    if let Some(keys) = injects {
-        for key in keys {
-            shared.registry.register_inject(key, &this);
-        }
+    for key in injects {
+        shared.registry.register_inject(key, &this);
     }
     this
 }
@@ -774,7 +722,6 @@ fn spawn_fiber_inner(
             plugin,
             factory,
             config: Mutex::new(config),
-            spawn_injects: Mutex::new(None),
             ctx,
             parent_fiber,
             token: Mutex::new(token),
@@ -925,40 +872,12 @@ impl FiberView {
                     issues: vec![reason.into()],
                 }));
             };
-            // dry-run(D32b):injects 派生(独立 panic 边界)→ 基线校验 →
-            // validate_config → build → 实例 validate,产物丢弃(build 纯构造
-            // 契约)。用户回调 panic 转错误不杀调用方。
-            // 基线校验:新 config 派生的声明必须与基线集合相等(registry 的
-            // 注册以基线为准,漂移会让 notify/驱逐静默失效——fail fast 优于
-            // 静默)。**None 基线例外**:spawn 时 injects panic 的工厂基线未知,
-            // 跳过校验——update 是它的唯一恢复路径(resolve_deps 的哨兵路径
-            // 维持 Pending,装不上)。注意区分:Some(空集) 是**明确的**无依赖
-            // 声明,照常严格校验(空→非空即漂移,拒绝)。
-            // 校验通过/跳过后:二次终态检查(dry-run 期间并发 dispose 可完整
-            // 执行,评审 3 探针实测窗口存在)→ 存 config → 写回基线(None 基线
-            // 恢复后成为正常基线,后续 update 不再逃逸校验)→ 补注册 derived
-            // (去重:正常工厂为 no-op,panic 恢复工厂由此获得 notify 能力)。
+            // dry-run(D32b):validate_config → build → 实例 validate,产物丢弃
+            // (build 纯构造契约)。用户回调 panic 转错误不杀调用方。
+            // 通过后:二次终态检查(dry-run 无锁同步,期间并发 dispose 可完整
+            // 执行,评审 3 探针实测窗口存在)→ 存 config → restart。
+            // 依赖声明静态(D32f),update 不触碰注册表。
             let boxed: Arc<dyn Any + Send + Sync> = Arc::new(new_config);
-            let baseline: Option<Vec<TypeKey>> = this.spawn_injects.lock().unwrap().clone();
-            let derived: HashSet<TypeKey> =
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    factory.injects_erased(boxed.as_ref())
-                })) {
-                    Ok(keys) => keys.into_iter().collect(),
-                    Err(p) => return Err(Arc::new(panic_error(p))),
-                };
-            if let Some(keys) = &baseline {
-                let expected: HashSet<TypeKey> = keys.iter().cloned().collect();
-                if derived != expected {
-                    return Err(Arc::new(CordisError::Validation {
-                        issues: vec![
-                            "injects(config) must be stable across configs (spawn-time keys \
-                             differ from new config)"
-                                .into(),
-                        ],
-                    }));
-                }
-            }
             let dry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 factory.validate_config_erased(boxed.as_ref())?;
                 let instance = factory.build_erased(boxed.as_ref())?;
@@ -970,9 +889,9 @@ impl FiberView {
                 Ok(Err(e)) => return Err(Arc::new(e)),
                 Err(p) => return Err(Arc::new(panic_error(p))),
             }
-            // 二次终态检查:dry-run 无锁同步,期间并发 dispose 可能已登记
-            // terminal_task 并完成卸载——此时不存不注册,现状交由 dispose 收敛
-            // (评审 3 探针:dry-run 后存 config 会落进已死 fiber 并注册死 Weak)。
+            // 二次终态检查:dry-run 期间并发 dispose 可能已登记 terminal_task
+            // 并完成卸载——此时不存,现状交由 dispose 收敛(评审 3 探针:dry-run
+            // 后存 config 会落进已死 fiber)。
             {
                 let tr = this.transition.lock().unwrap();
                 if !this.is_root
@@ -982,14 +901,6 @@ impl FiberView {
                 }
             }
             *this.config.lock().unwrap() = Some(boxed);
-            // 写回基线:None(panic 未知)恢复后以 derived 为新基线;
-            // Some 基线下 derived == 基线,写回无变化。
-            *this.spawn_injects.lock().unwrap() = Some(derived.iter().cloned().collect());
-            // 补注册(见上注释):去重保证正常工厂 no-op。
-            let registry = &this.ctx.shared().registry;
-            for key in derived {
-                registry.register_inject(key, &this);
-            }
             this.cancel_current(); // 预取消:运行中的 apply 协作退出(同 restart)
             let task = TransitionTask::new();
             this.post_join(task.clone(), Intent::Restart);

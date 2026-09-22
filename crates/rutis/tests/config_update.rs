@@ -189,21 +189,30 @@ async fn update_pending_uses_new_config_when_gate_opens() {
     let _f = factory.clone();
 
     let ctx = Ctx::root().unwrap();
-    // 工厂模式 + injects 从 config 派生
-    struct GatedFactory(TestFactory);
+    // 工厂模式 + 静态 injects 声明(D32f)
+    struct GatedFactory {
+        inner: TestFactory,
+        injects: Vec<TypeKey>,
+    }
     impl PluginFactory<TestConfig> for GatedFactory {
         fn name(&self) -> &str {
             "gated-factory"
         }
-        fn injects(&self, _config: &TestConfig) -> Vec<TypeKey> {
-            vec![TypeKey::of::<GateDep>()]
+        fn injects(&self) -> &[TypeKey] {
+            &self.injects
         }
         fn build(&self, config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
-            self.0.build(config)
+            self.inner.build(config)
         }
     }
 
-    let view = ctx.plugin_with(GatedFactory(factory), cfg("v1", 1));
+    let view = ctx.plugin_with(
+        GatedFactory {
+            inner: factory,
+            injects: vec![TypeKey::of::<GateDep>()],
+        },
+        cfg("v1", 1),
+    );
     // 依赖未到:Pending
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     assert_eq!(view.state().state, FiberState::Pending);
@@ -353,10 +362,12 @@ async fn concurrent_update_and_dispose_settle_correctly() {
 async fn factory_injects_gate_plugin_until_ready() {
     #[derive(Debug)]
     struct Need;
-    struct F;
+    struct F {
+        injects: Vec<TypeKey>,
+    }
     impl PluginFactory<TestConfig> for F {
-        fn injects(&self, _config: &TestConfig) -> Vec<TypeKey> {
-            vec![TypeKey::of::<Need>()]
+        fn injects(&self) -> &[TypeKey] {
+            &self.injects
         }
         fn build(&self, config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
             Ok(Box::new(ConfigPlugin {
@@ -371,7 +382,12 @@ async fn factory_injects_gate_plugin_until_ready() {
         }
     }
     let ctx = Ctx::root().unwrap();
-    let view = ctx.plugin_with(F, cfg("v1", 1));
+    let view = ctx.plugin_with(
+        F {
+            injects: vec![TypeKey::of::<Need>()],
+        },
+        cfg("v1", 1),
+    );
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     assert_eq!(view.state().state, FiberState::Pending);
     assert!(ctx.get::<ConfigSvc>().is_none());
@@ -422,6 +438,7 @@ async fn dependency_reload_rebuilds_with_current_config() {
     struct Dep;
     struct RecordFactory {
         seen: Arc<Mutex<Vec<u32>>>,
+        injects: Vec<TypeKey>,
     }
     struct RecordingPlugin {
         n: u32,
@@ -448,8 +465,8 @@ async fn dependency_reload_rebuilds_with_current_config() {
         }
     }
     impl PluginFactory<TestConfig> for RecordFactory {
-        fn injects(&self, _config: &TestConfig) -> Vec<TypeKey> {
-            vec![TypeKey::of::<Dep>()]
+        fn injects(&self) -> &[TypeKey] {
+            &self.injects
         }
         fn build(&self, config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
             Ok(Box::new(RecordingPlugin {
@@ -461,7 +478,13 @@ async fn dependency_reload_rebuilds_with_current_config() {
 
     let ctx = Ctx::root().unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let view = ctx.plugin_with(RecordFactory { seen: seen.clone() }, cfg("v1", 1));
+    let view = ctx.plugin_with(
+        RecordFactory {
+            seen: seen.clone(),
+            injects: vec![TypeKey::of::<Dep>()],
+        },
+        cfg("v1", 1),
+    );
     // 依赖未到:Pending
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     assert_eq!(seen.lock().unwrap().len(), 0);
@@ -605,10 +628,11 @@ async fn update_during_unloading_converges_to_new_config() {
 
     struct GatedFactory {
         gate: Arc<Notify>,
+        injects: Vec<TypeKey>,
     }
     impl PluginFactory<TestConfig> for GatedFactory {
-        fn injects(&self, _config: &TestConfig) -> Vec<TypeKey> {
-            vec![TypeKey::of::<Dep>()]
+        fn injects(&self) -> &[TypeKey] {
+            &self.injects
         }
         fn build(&self, config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
             let gate = self.gate.clone();
@@ -647,6 +671,7 @@ async fn update_during_unloading_converges_to_new_config() {
     let view = ctx.plugin_with(
         GatedFactory {
             gate: drain_gate.clone(),
+            injects: vec![TypeKey::of::<Dep>()],
         },
         cfg("v1", 1),
     );
@@ -712,10 +737,11 @@ async fn concurrent_provider_reload_and_consumer_update_settle() {
     // 消费者工厂:注入 Dep,apply 记录 (自身 config label, Dep 值)
     struct ConsumerFactory {
         seen: Arc<Mutex<Vec<String>>>,
+        injects: Vec<TypeKey>,
     }
     impl PluginFactory<TestConfig> for ConsumerFactory {
-        fn injects(&self, _config: &TestConfig) -> Vec<TypeKey> {
-            vec![TypeKey::of::<Dep>()]
+        fn injects(&self) -> &[TypeKey] {
+            &self.injects
         }
         fn build(&self, config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
             let seen = self.seen.clone();
@@ -747,7 +773,13 @@ async fn concurrent_provider_reload_and_consumer_update_settle() {
 
     let ctx = Ctx::root().unwrap();
     let provider = ctx.plugin_with(ProviderFactory, cfg("p1", 1));
-    let consumer = ctx.plugin_with(ConsumerFactory { seen: seen.clone() }, cfg("c1", 1));
+    let consumer = ctx.plugin_with(
+        ConsumerFactory {
+            seen: seen.clone(),
+            injects: vec![TypeKey::of::<Dep>()],
+        },
+        cfg("c1", 1),
+    );
     consumer.clone().await.expect("consumer loads on p1");
     assert_eq!(seen.lock().unwrap().as_slice(), ["c1/p1"]);
 
@@ -766,53 +798,6 @@ async fn concurrent_provider_reload_and_consumer_update_settle() {
         "c2/p2",
         "final reload reads new provider gen: {log:?}"
     );
-}
-
-// ── 14. injects 随 config 漂移 → update 拒绝(fail fast) ─────────
-// 评审 #2:registry 只在 spawn 注册一次,漂移会让 notify/驱逐静默失效;
-// dry-run 校验集合相等,不等即 Validation。
-
-#[tokio::test]
-async fn update_rejects_injects_drift() {
-    #[derive(Debug)]
-    struct DriftDep;
-    struct DriftFactory;
-    impl PluginFactory<TestConfig> for DriftFactory {
-        fn injects(&self, config: &TestConfig) -> Vec<TypeKey> {
-            // n==1 依赖 DriftDep;n==2 无依赖 —— 声明随 config 漂移
-            if config.n == 1 {
-                vec![TypeKey::of::<DriftDep>()]
-            } else {
-                Vec::new()
-            }
-        }
-        fn build(&self, _config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
-            Ok(Box::new(NoopPlugin))
-        }
-    }
-    struct NoopPlugin;
-    impl Plugin for NoopPlugin {
-        fn name(&self) -> &str {
-            "noop"
-        }
-        fn apply<'a>(&'a self, _ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-            Box::pin(async move { Ok(Effect::Done) })
-        }
-    }
-
-    let ctx = Ctx::root().unwrap();
-    let view = ctx.plugin_with(DriftFactory, cfg("gated", 1));
-    // 依赖未到:Pending(injects(n=1) 声明生效)
-    wait_until_state(&view, FiberState::Pending).await;
-
-    // update 到 n=2(声明漂移为空集):dry-run 拒绝,现状不动
-    let err = view.update(cfg("ungated", 2)).await.err().unwrap();
-    assert!(matches!(*err, CordisError::Validation { .. }), "{err:?}");
-    assert_eq!(view.state().state, FiberState::Pending);
-
-    // 补上依赖后仍能按原声明装载(拒绝未产生副作用)
-    ctx.provide(DriftDep).unwrap();
-    view.clone().await.expect("loads with original injects");
 }
 
 // ── 15. build panic → Failed,驱动存活、join 不挂起 ──────────────
@@ -840,166 +825,4 @@ async fn factory_build_panic_fails_load_without_hanging() {
     let err2 = view.restart().await.expect_err("restart fails again");
     assert!(matches!(*err2, CordisError::PluginFailed(_)));
     assert_eq!(view.state().state, FiberState::Failed);
-}
-
-// ── 16. injects(config) panic → 视为依赖不就绪,驱动存活 ──────────
-
-#[tokio::test]
-async fn factory_injects_panic_leaves_fiber_pending() {
-    struct PanicInjectsFactory;
-    impl PluginFactory<TestConfig> for PanicInjectsFactory {
-        fn injects(&self, _config: &TestConfig) -> Vec<TypeKey> {
-            panic!("injects boom");
-        }
-        fn build(&self, _config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
-            Ok(Box::new(NoopPlugin))
-        }
-    }
-    struct NoopPlugin;
-    impl Plugin for NoopPlugin {
-        fn name(&self) -> &str {
-            "noop"
-        }
-        fn apply<'a>(&'a self, _ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-            Box::pin(async move { Ok(Effect::Done) })
-        }
-    }
-
-    let ctx = Ctx::root().unwrap();
-    let view = ctx.plugin_with(PanicInjectsFactory, cfg("v1", 1));
-    // 不 panic、不装载:Pending 等待(哨兵键永远无 provider);
-    // panic 已路由 ErrorSink(spawn 路径,见 17 的恢复场景)。
-    wait_until_state(&view, FiberState::Pending).await;
-    // 驱动存活:dispose 正常收敛
-    view.dispose()
-        .await
-        .expect("dispose works after injects panic");
-    assert_eq!(view.state().state, FiberState::Disposed);
-}
-
-// ── 17. spawn 期 injects panic 的 update 恢复(评审 2 复审:交互盲区) ──
-// spawn panic → 基线空集且不注册;update 换 config 后 injects 成功 →
-// 跳过漂移校验 + 补注册 derived → Restart 重查装载。全程不再死等。
-
-#[tokio::test]
-async fn update_recovers_from_spawn_time_injects_panic() {
-    #[derive(Debug)]
-    struct RecDep;
-    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-
-    // injects:n==1 panic(spawn 基线未知);n==2 正常声明 [RecDep](None
-    // 基线下允许,恢复);n==3 声明空集(与恢复后的基线 [RecDep] 漂移,
-    // 拒绝——封死基线逃逸链)。
-    struct FlakyFactory {
-        seen: Arc<Mutex<Vec<String>>>,
-    }
-    impl PluginFactory<TestConfig> for FlakyFactory {
-        fn injects(&self, config: &TestConfig) -> Vec<TypeKey> {
-            if config.n == 1 {
-                panic!("injects boom at spawn");
-            }
-            if config.n == 3 {
-                return Vec::new();
-            }
-            vec![TypeKey::of::<RecDep>()]
-        }
-        fn build(&self, config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
-            let seen = self.seen.clone();
-            let label = config.label.clone();
-            Ok(Box::new(RecPlugin { seen, label }))
-        }
-    }
-    struct RecPlugin {
-        seen: Arc<Mutex<Vec<String>>>,
-        label: String,
-    }
-    impl Plugin for RecPlugin {
-        fn name(&self) -> &str {
-            "rec"
-        }
-        fn apply<'a>(&'a self, _ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-            let seen = self.seen.clone();
-            let label = self.label.clone();
-            Box::pin(async move {
-                seen.lock().unwrap().push(format!("apply:{label}"));
-                Ok(Effect::Done)
-            })
-        }
-    }
-
-    let ctx = Ctx::root().unwrap();
-    let view = ctx.plugin_with(FlakyFactory { seen: seen.clone() }, cfg("v1", 1));
-    // spawn panic → Pending,基线空,inject_index 无此 fiber
-    wait_until_state(&view, FiberState::Pending).await;
-    assert!(seen.lock().unwrap().is_empty());
-
-    // 提供依赖(此时无人注册,pending 不动——不靠 notify,靠 update 的重查)
-    let _dep = ctx.provide(RecDep).unwrap();
-    wait_until_state(&view, FiberState::Pending).await;
-    assert!(seen.lock().unwrap().is_empty());
-
-    // update:新 config 的 injects 成功 → None 基线跳过漂移校验 + 补注册 +
-    // Restart 重查 → 装载。注:mailbox 时序决定装载 1 或 2 次(spawn 排队的
-    // RefreshDeps 若落在存 config 之后,会先装载一次,Restart 再换代一次)
-    // ——两次都是 v2,终态收敛,断言按终态语义而非计数。
-    view.update(cfg("v2", 2))
-        .await
-        .expect("update recovers from spawn-time injects panic");
-    assert_eq!(view.state().state, FiberState::Active);
-    let log = seen.lock().unwrap().clone();
-    assert!(
-        !log.is_empty() && log.iter().all(|e| e == "apply:v2"),
-        "all loads use recovered config v2: {log:?}"
-    );
-
-    // 恢复后基线写回 Some([RecDep]):再次 update 漂移(派生空集)被严格
-    // 校验拒绝——基线逃逸链封死(评审 3 证伪:基线若永不写回,后续所有
-    // update 都逃逸校验,inject_index 累积过期条目)。
-    // FlakyFactory 的 injects: n==3 → 空集(与基线 [RecDep] 不等)。
-    let err = view.update(cfg("v3", 3)).await.err().unwrap();
-    assert!(matches!(*err, CordisError::Validation { .. }), "{err:?}");
-    assert_eq!(view.state().state, FiberState::Active);
-}
-
-// ── 18. 真空声明的漂移被拒(Some(空集) 是明确基线,非 panic 未知) ──
-
-#[tokio::test]
-async fn update_rejects_drift_from_explicit_empty_declaration() {
-    #[derive(Debug)]
-    struct DriftDep2;
-    // injects: n==1 返回空(明确声明"无依赖");n==2 派生 [DriftDep2]。
-    // spawn n=1 → 基线 Some([]);update n=2 → derived 非空 → 必须拒绝
-    //(评审 3 阻断:此前空基线不区分来源,无依赖工厂漂移被当"恢复"放行)。
-    struct EmptyThenDriftFactory;
-    impl PluginFactory<TestConfig> for EmptyThenDriftFactory {
-        fn injects(&self, config: &TestConfig) -> Vec<TypeKey> {
-            if config.n == 1 {
-                Vec::new()
-            } else {
-                vec![TypeKey::of::<DriftDep2>()]
-            }
-        }
-        fn build(&self, _config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
-            Ok(Box::new(NoopPlugin))
-        }
-    }
-    struct NoopPlugin;
-    impl Plugin for NoopPlugin {
-        fn name(&self) -> &str {
-            "noop"
-        }
-        fn apply<'a>(&'a self, _ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-            Box::pin(async move { Ok(Effect::Done) })
-        }
-    }
-
-    let ctx = Ctx::root().unwrap();
-    let view = ctx.plugin_with(EmptyThenDriftFactory, cfg("nodeps", 1));
-    view.clone().await.expect("loads with no deps");
-    assert_eq!(view.state().state, FiberState::Active);
-
-    // 漂移(无依赖 → 有依赖):明确基线严格校验,拒绝
-    let err = view.update(cfg("wants-dep", 2)).await.err().unwrap();
-    assert!(matches!(*err, CordisError::Validation { .. }), "{err:?}");
-    assert_eq!(view.state().state, FiberState::Active);
 }

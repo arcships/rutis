@@ -28,23 +28,23 @@ pub trait Plugin: Send + Sync + 'static {
 /// `build` 必须是纯构造(无副作用或幂等)——`FiberView::update` 的 dry-run
 /// 与实际装载各调用一次,两次产物不要求同一实例但要求等价。
 ///
-/// 与 [`Plugin`] 的差异:工厂模式无实例可问依赖,门控声明由
-/// `injects(&config)` 从配置派生;config 级校验由 `validate_config`
-/// 承担(实例级 `Plugin::validate` 仍在装载期执行)。
+/// 与 [`Plugin`] 的差异:config 级校验由 `validate_config` 承担(实例级
+/// `Plugin::validate` 仍在装载期执行)。
+///
+/// 依赖声明与 [`Plugin::injects`] 同形:**静态**,spawn 时注册一次、终身
+/// 不变(D32f 修订,对齐 cordis:TS 的 `inject` 是 fiber 构造固化字段,
+/// `update(config)` 从不改变声明)。此前"从 config 派生"的设计没有用例
+/// 支撑,且引入了漂移/基线/恢复一整族无法收敛的边界(三轮评审记录,
+/// §八-§十);按配置选依赖的标准形态是拆成多个插件、配置决定装哪个。
 pub trait PluginFactory<C: Send + Sync + 'static>: Send + Sync + 'static {
     /// 显示名(日志/诊断,fiber 创建时取用,不再随代变化)。
     fn name(&self) -> &str {
         std::any::type_name::<Self>()
     }
 
-    /// 依赖门控声明(工厂模式:从 config 派生,spawn 时注册一次)。
-    ///
-    /// **必须对 config 稳定**:`FiberView::update` 会校验新 config 派生的
-    /// 声明与 spawn 时集合相等,不等直接 `Validation` 拒绝——注册表只
-    /// 在 spawn 注册一次,漂移会让 notify/驱逐静默失效。需要按配置改变
-    /// 依赖的插件应拆成多个插件或声明超集。
-    fn injects(&self, _config: &C) -> Vec<TypeKey> {
-        Vec::new()
+    /// 依赖门控声明(静态,spawn 时注册一次;与 [`Plugin::injects`] 对称)。
+    fn injects(&self) -> &[TypeKey] {
+        &[]
     }
 
     /// config 级校验(不构造实例;`update` 的 dry-run 第一步)。

@@ -44,12 +44,13 @@
 ### 1.3 API 草案
 
 ```rust
-// plugin.rs 新增
+// plugin.rs 新增(D32f 修订后)
 /// 工厂:每代从当前 config 构造插件实例。build 必须是纯构造(D32b 契约):
 /// 无副作用或幂等——dry-run 与 load 各调用一次。
 pub trait PluginFactory<C: Send + Sync + 'static>: Send + Sync + 'static {
-    /// 依赖门控声明(工厂模式无实例可问,由工厂从 config 派生)。
-    fn injects(&self, _config: &C) -> Vec<TypeKey> { Vec::new() }
+    /// 依赖门控声明(静态,spawn 注册一次终身不变,与 Plugin::injects 对称;
+    /// 初版为 injects(&config) 派生,由 D32f 撤销,见 §十一)。
+    fn injects(&self) -> &[TypeKey] { &[] }
     /// config 级校验(不构造实例)。
     fn validate_config(&self, _config: &C) -> Result<(), CordisError> { Ok(()) }
     /// 构造插件实例。失败 = config 无法产出可用实例。
@@ -123,13 +124,13 @@ impl FiberView {
 4. Failed 态 update:修复配置后重启成功回 Active;
 5. update 后消费者重载:provider update → 依赖它的消费者自动驱逐并用其当前 config 重载;
 6. 并发 update × dispose / update × update(FIFO、join 均正确落定);
-7. 工厂模式 `injects(config)` 门控:依赖缺失时 Pending,不 apply;
+7. 工厂模式 `injects`(静态声明)门控:依赖缺失时 Pending,不 apply;
 8. config 类型不匹配的 update 报 Validation(测试实际捆了"静态 fiber 拒绝"断言——同为 Validation 路径的设计行为);
 9. 依赖驱动重载用当前 config 重造实例(provider 摘除 → 重提供 → 重载仍用当前 config;update 后再驱逐则用新 config);
 10. `current_config` 快照与类型不符路径。
 
-**评审增补(§八 之 2)**:11. Loading 态 update(apply 运行中,协作取消后重载新 config);12. Unloading 态 update(慢清理中排队,收敛后重新提供依赖装载新 config);13. update × 驱逐并发(provider 换代与消费者热更新并发,双方收敛);14. injects 随 config 漂移被 dry-run 拒绝;15. build panic → Failed 且驱动存活/join 不挂起;16. injects(config) panic → 视为不就绪留 Pending。
-**第二轮增补(§九)**:17. spawn 期 injects panic 的 update 恢复(空基线跳过漂移校验 + 补注册,装载次数随 mailbox 时序为 1-2 次,断言按终态)。
+**评审增补(§八 之 2)**:11. Loading 态 update(apply 运行中,协作取消后重载新 config);12. Unloading 态 update(慢清理中排队,收敛后重新提供依赖装载新 config);13. update × 驱逐并发(provider 换代与消费者热更新并发,双方收敛);15. build panic → Failed 且驱动存活/join 不挂起。
+**第二轮增补(§九)与第三轮增补(§十)的 14/16/17/18(injects 漂移/panic/恢复族)随 D32f 撤销一并删除**——它们测的是被删机制的缺陷类,机制不存在则缺陷类不存在(§十一)。
 
 ---
 
@@ -355,3 +356,21 @@ M1 → M2 → M3。M1 先行的理由:独立收益最大、不动总线;M2 改 T
 - 证伪确认封住的不变量:死 Weak 幽灵消费者(upgrade 过滤)、EventOrigin 串扰(独立 Arc)、emit 重入/dispose/注册交叉(尾链快照语义)、测试 17 在 multi_thread 下的断言稳定性(所有 apply 均 v2)。
 
 **修复后状态**:config_update 18 条 + event_keys 11 + host_events 2 = 全 workspace 270 项全绿;clippy 存量 3 条不变。
+
+## 十一 D32f 修订:撤销 injects(config) 派生,声明改静态(2026-09-22)
+
+**触发**:三轮评审修复(§八-§十)的复盘。6 个核心修复——哨兵键、基线快照、漂移校验、空基线歧义、逃逸链封堵、补注册去重——全部在防御同一个设计决定:`injects(&config)` 让依赖声明从配置派生。
+
+**对照源码验证**:cordis(上游与 fork)的 `inject` 是 fiber 构造时固化的 `Dict` 字段(fiber.ts:125 构造注入,全文件无重新赋值;依赖门控 `Object.keys(this.inject)`,fiber.ts:166/388);fork 的 `update(config)`(fiber.ts:478)只改 `fiber.config`,从不触碰 inject 声明;懒 config 解析(internal/config waterfall)延迟的也只是**配置值**的解析时机。运行时换依赖集合的 cordis 形态是 `registry.inject(deps, cb)` 注册**新 fiber**(拆插件),不是改现有声明。"依赖随 config 变"在本仓库与 cordis 生态均无用例——**无中生有的能力**。
+
+**修订内容**:
+
+- `PluginFactory::injects` 改 `fn injects(&self) -> &[TypeKey]`,与 `Plugin::injects` 完全对称;spawn 注册一次、终身不变。按配置选依赖的标准形态 = 拆多个插件、配置决定装哪个(与 cordis loader 生态一致)。
+- **删除的机制族**(约 -150 行):`FiberInner.spawn_injects` 基线快照、update 的漂移校验/基线写回/补注册、`register_inject` 指针去重、`InjectsUnavailable` 哨兵键、resolve_deps/spawn/update 对 injects 的三处 panic 边界、resolve_deps 的 config=None 分支。
+- **保留的修复**(与被删机制无关,各自独立成立):dry-run 三步(§1.3)、二次终态检查(§十-3 的 dispose 竞态)、post_join 终态错误(§十-4)、EventOrigin/observe/truncate 全套。
+- **测试影响**:删除 14/16/17/18(它们锁定的是被删机制的缺陷类——机制不存在则缺陷类不存在,这是优于"防住"的修复);config_update 18 → 14 条。
+- `update()` 瘦回 ~50 行:终态检查 → factory 匹配 → dry-run → 二次终态检查 → 存 config → restart。
+
+**教训(写给后续批次)**:修复轮引入的新语义(哨兵/基线/恢复)复杂度与原设计同级,却没有走设计审视——三轮评审打出的全部第三层问题(歧义/逃逸/竞态)都源于此。**修复的语义复杂度达到设计级时,修复也必须先写清楚语义再动手。**
+
+**§八-§十 的修复记录保留为历史**;其中被 D32f 撤销的条目(§八-2/8、§九-1/2、§十-1/2)以本节为准。
