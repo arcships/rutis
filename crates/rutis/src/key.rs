@@ -173,7 +173,10 @@ mod describe_tests {
         let keyed = TypeKey::keyed_dynamic::<ReadableService>("session-1/main");
         assert_eq!(
             keyed.describe(),
-            format!("{}#session-1/main", std::any::type_name::<ReadableService>())
+            format!(
+                "{}#session-1/main",
+                std::any::type_name::<ReadableService>()
+            )
         );
         // 相等仍只由 TypeId + 限定名决定;诊断字段不参与。
         assert_eq!(plain, TypeKey::of::<ReadableService>());
