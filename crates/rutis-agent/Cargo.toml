@@ -27,9 +27,9 @@ ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 # 选区取文本时需按 unicode 宽度跳过 CJK 宽字符的尾格;对齐 ratatui-core 的版本。
 unicode-width = "0.2"
-rutui-core = { path = "../../../rutui/rutui-core" }
-rutui-prompt = { path = "../../../rutui/rutui-prompt" }
-rutui-theme = { path = "../../../rutui/rutui-theme" }
+rutui-core = { path = "../../../rutui/rutui-core", version = "0.1.0" }
+rutui-prompt = { path = "../../../rutui/rutui-prompt", version = "0.1.0" }
+rutui-theme = { path = "../../../rutui/rutui-theme", version = "0.1.0" }
 
 [dev-dependencies]
 aimux-providers = "0.3.0"
