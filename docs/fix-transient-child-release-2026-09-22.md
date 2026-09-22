@@ -46,3 +46,7 @@ rutis 0.2.0 的若干结构只在 fiber 自身卸载时清理。在长寿 root �
 
 - 非 root 终态释放尾随 dispose 的 TaskDone 完成点，有界但不零延迟；需要确定性断言时按有界等待处理。
 - root fiber 自身不退出：单 root 场景下 root driver 随进程存活是有界残留（每 root 一个任务），不在本修复范围。
+
+## 0.2.2 补充：TypeKey 诊断可读
+
+`TypeKey::describe` 此前打印 `TypeId` 的 Debug（不透明十六进制），keyed 多实例下的错误消息与装配图标签不可读。0.2.2 起键在构造时捕获 `type_name::<T>()`，`describe`/`Debug` 输出 `类型名#限定名`；相等与哈希仍只由 TypeId + 限定名决定（类型名是 TypeId 的纯函数，诊断字段不参与匹配）。公共签名不变。
