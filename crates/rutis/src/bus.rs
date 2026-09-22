@@ -110,7 +110,9 @@ struct BusInner {
     wf_hooks: HashMap<TypeKey, Vec<Arc<Hook<Arc<dyn ErasedWaterfallCall>>>>>,
     /// 同事件键的派发尾链(D31):每次 emit 的派发任务 await 上一个,
     /// 保证同键多次 emit 按发射序执行(修 spawn 调度乱序)。
-    dispatch_tail: HashMap<TypeKey, tokio::task::JoinHandle<()>>,
+    /// 值 = (代次, 任务):任务完成后自摘;代次防旧任务误删新尾链
+    /// (0.2.1:keyed 通道随实例 churn,空尾链条目不残留)。
+    dispatch_tail: HashMap<TypeKey, (u64, tokio::task::JoinHandle<()>)>,
 }
 
 /// 类型化事件总线(D3:回调注册表;D16:四分发,无同步 bail)。
@@ -248,8 +250,17 @@ impl EventBus {
             }
             Effect::Disposer(Box::new(move || {
                 let mut inner = bus.inner.lock().unwrap();
-                if let Some(list) = inner.hooks.get_mut(&key) {
-                    retain_hook(list, &hook);
+                let stale = match inner.hooks.get_mut(&key) {
+                    Some(list) => {
+                        retain_hook(list, &hook);
+                        list.is_empty()
+                    }
+                    None => false,
+                };
+                // 空通道条目即摘(0.2.1):keyed 通道随实例 churn 不残留;
+                // 再次注册经 or_default 重建,行为不变
+                if stale {
+                    inner.hooks.remove(&key);
                 }
                 Ok(())
             }))
@@ -277,8 +288,15 @@ impl EventBus {
             }
             Effect::Disposer(Box::new(move || {
                 let mut inner = bus.inner.lock().unwrap();
-                if let Some(list) = inner.wf_hooks.get_mut(&key) {
-                    retain_hook(list, &hook);
+                let stale = match inner.wf_hooks.get_mut(&key) {
+                    Some(list) => {
+                        retain_hook(list, &hook);
+                        list.is_empty()
+                    }
+                    None => false,
+                };
+                if stale {
+                    inner.wf_hooks.remove(&key);
                 }
                 Ok(())
             }))
@@ -291,21 +309,26 @@ impl EventBus {
     /// 移除自然变 no-op。
     fn take_hooks(&self, key: &TypeKey) -> Vec<Arc<Hook<Arc<dyn ErasedCall>>>> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(list) = inner.hooks.get_mut(key) else {
-            return Vec::new();
+        let snapshot = match inner.hooks.get_mut(key) {
+            None => return Vec::new(),
+            Some(list) => claim_once(list),
         };
-        claim_once(list)
+        if inner.hooks.get(key).is_some_and(|l| l.is_empty()) {
+            inner.hooks.remove(key);
+        }
+        snapshot
     }
 
     fn take_wf_hooks(&self, key: &TypeKey) -> Vec<Arc<dyn ErasedWaterfallCall>> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(list) = inner.wf_hooks.get_mut(key) else {
-            return Vec::new();
+        let snapshot = match inner.wf_hooks.get_mut(key) {
+            None => return Vec::new(),
+            Some(list) => claim_once(list),
         };
-        claim_once(list)
-            .into_iter()
-            .map(|h| h.call.clone())
-            .collect()
+        if inner.wf_hooks.get(key).is_some_and(|l| l.is_empty()) {
+            inner.wf_hooks.remove(key);
+        }
+        snapshot.into_iter().map(|h| h.call.clone()).collect()
     }
 
     /// emit:触发即忘(D16/D30)。**同事件键按发射序串行派发**(D31):
@@ -333,8 +356,13 @@ impl EventBus {
         let ctx2 = ctx.clone();
         let sink = ctx.error_sink();
         let handle = ctx.handle().clone();
+        let bus = self.clone();
+        let tail_key = key.clone();
         let mut inner = self.inner.lock().unwrap();
-        let prev = inner.dispatch_tail.remove(&key);
+        let (gen, prev) = match inner.dispatch_tail.remove(&key) {
+            Some((gen, tail)) => (gen + 1, Some(tail)),
+            None => (0, None),
+        };
         let tail = handle.spawn(async move {
             // 等同键上一次派发完成(链式保序)
             if let Some(prev) = prev {
@@ -349,8 +377,14 @@ impl EventBus {
                     Err(p) => sink(Arc::new(panic_error(p))),
                 }
             }
+            // 完成后自摘(0.2.1):仅当仍是本代尾链——监听器内重入 emit 同键
+            // 已插入新一代时不误删,保序链不断;keyed 通道随实例 churn 不残留
+            let mut inner = bus.inner.lock().unwrap();
+            if matches!(inner.dispatch_tail.get(&tail_key), Some((cur, _)) if *cur == gen) {
+                inner.dispatch_tail.remove(&tail_key);
+            }
         });
-        inner.dispatch_tail.insert(key, tail);
+        inner.dispatch_tail.insert(key, (gen, tail));
     }
 
     /// parallel:并发全等,聚合全部错误(JoinSet,D16)。
@@ -502,3 +536,6 @@ impl EventBus {
         })
     }
 }
+
+#[cfg(test)]
+mod transient_tests;

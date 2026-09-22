@@ -150,6 +150,16 @@ pub(crate) struct FiberInner {
     /// 常驻 receiver:保活 watch 通道(无 receiver 时通道视为关闭,send 静默失败)。
     pub snapshot_rx: watch::Receiver<Snapshot>,
     pub effects: Mutex<Vec<Arc<EffectRecord>>>,
+    /// 已 drain 记录寄存的清理错误(0.2.1):记录 Done 自摘后,错误在此
+    /// 等待 fiber 级卸载/重启统一观察——单一错误保持 Arc 同一性,
+    /// 与记录留在列表中被再次 join 的旧语义等价。
+    pub drained_errors: Mutex<Vec<Arc<CordisError>>>,
+    /// 本 fiber 在 parent 上的 mount 记录(级联 dispose 的 effect,
+    /// 0.2.1:终态退出时主动 drain,记录自摘,长寿 parent 不残留)。
+    pub mount: Mutex<Option<Arc<EffectRecord>>>,
+    /// 注册时捕获的依赖声明快照(spawn 边界一次性读取;终态退出时据此注销
+    /// `inject_index`,不再回调用户 `injects()`)。
+    pub declared_injects: Vec<TypeKey>,
     pub intents_tx: mpsc::UnboundedSender<Intent>,
     /// 驱动存活标志:置 false 后 post 拒绝投递并即刻完成携带的任务
     ///(评审 #2/#3:驱动退出后的排队意图不得让 join 永等)。
@@ -458,7 +468,7 @@ impl FiberInner {
         let result: Result<Effect, CordisError> = outcome.unwrap_or_else(|p| Err(panic_error(p)));
         match result {
             Ok(effect) => {
-                let record = EffectRecord::new(effect);
+                let record = EffectRecord::new(effect, Arc::downgrade(this));
                 this.effects.lock().unwrap().push(record);
                 // 惯性锁 2(fiber.spec:LOADING 期同 fiber 被重新 provide,in-flight
                 // 加载直接完成进 ACTIVE):装载窗口内依赖集若已整体翻新且无缺失,
@@ -529,6 +539,9 @@ impl FiberInner {
                 errors.push(e);
             }
         }
+        // 已自摘记录的寄存错误并入(0.2.1):fiber 级观察等价于记录留在
+        // 列表中被再次 join——单一错误同一 Arc,多错误进入聚合
+        errors.extend(std::mem::take(&mut *this.drained_errors.lock().unwrap()));
         *this.last_deps.lock().unwrap() = None;
         this.provided.lock().unwrap().clear();
         errors
@@ -634,6 +647,10 @@ pub(crate) async fn drive(this: Arc<FiberInner>, mut rx: mpsc::UnboundedReceiver
                     while let Ok(intent) = rx.try_recv() {
                         complete_intent(&intent, None);
                     }
+                    // 瞬态残留释放(0.2.1):依赖声明注销 + parent mount 记录
+                    // drain(终态后清理幂等,记录 Done 自摘)。TaskDone 已发,
+                    // mount 清理里的 dispose() join 缓存终态,即刻完成。
+                    release_transient(&this).await;
                     return; // 非 root 终态后驱动退出(句柄仍可 join 缓存终态)
                 }
             }
@@ -649,6 +666,25 @@ fn complete_task(this: &Arc<FiberInner>, task: Arc<TransitionTask>) {
         tr.error.clone()
     };
     task.complete(err);
+}
+
+/// 终态 fiber 的瞬态残留释放(0.2.1,长寿 parent 下的瞬态子插件):
+/// ①注销 `inject_index` 中的依赖声明(死 driver 不再收门控/重查通知);
+/// ②drain parent 上的 mount 记录——清理闭包内的 `dispose()` 返回缓存
+/// 终态即刻完成,EffectRecord 进 Done 后从 parent 的 effects 列表自摘。
+/// parent 先行卸载(mem::take 整表清理)时两步均自然 no-op。
+async fn release_transient(this: &Arc<FiberInner>) {
+    let shared = this.ctx.shared().clone();
+    shared
+        .registry
+        .unregister_injects(this, &this.declared_injects);
+    let record = this.mount.lock().unwrap().take();
+    if let Some(record) = record {
+        let handle = this.ctx.handle().clone();
+        if let Err(e) = record.drain(&handle).await {
+            (this.ctx.error_sink())(e);
+        }
+    }
 }
 
 pub(crate) fn spawn_fiber(
@@ -676,15 +712,10 @@ where
         factory,
         _marker: std::marker::PhantomData,
     });
-    // 依赖声明静态(D32f):spawn 注册一次,终身不变——与静态模式
-    // spawn_fiber_inner 的注册完全同形。
-    let injects = erased.injects().to_vec();
+    // 依赖声明静态(D32f):spawn 注册一次,终身不变——由
+    // spawn_fiber_inner 从擦除面一次性读取并注册,与静态模式完全同形。
     let boxed: Arc<dyn Any + Send + Sync> = Arc::new(config);
-    let this = spawn_fiber_inner(shared, parent_ctx, None, Some(erased), Some(boxed), is_root);
-    for key in injects {
-        shared.registry.register_inject(key, &this);
-    }
-    this
+    spawn_fiber_inner(shared, parent_ctx, None, Some(erased), Some(boxed), is_root)
 }
 
 fn spawn_fiber_inner(
@@ -704,6 +735,15 @@ fn spawn_fiber_inner(
         FiberState::Active
     } else {
         FiberState::Pending
+    };
+    // 依赖声明快照:spawn 边界一次性读取(静态取实例、工厂取工厂,D32f
+    // 终身静态);此后门控解析与终态注销都用这一份,不再回调用户代码。
+    let declared_injects: Vec<TypeKey> = if let Some(plugin) = &plugin {
+        plugin.injects().to_vec()
+    } else if let Some(factory) = &factory {
+        factory.injects().to_vec()
+    } else {
+        Vec::new()
     };
     let (snapshot_tx, snapshot_rx) = watch::channel(Snapshot {
         generation: 0,
@@ -744,6 +784,9 @@ fn spawn_fiber_inner(
             snapshot_tx: snapshot_tx.clone(),
             snapshot_rx,
             effects: Mutex::new(Vec::new()),
+            drained_errors: Mutex::new(Vec::new()),
+            mount: Mutex::new(None),
+            declared_injects,
             intents_tx: tx.clone(),
             alive: AtomicBool::new(true),
             provided: Mutex::new(Vec::new()),
@@ -751,10 +794,8 @@ fn spawn_fiber_inner(
         }
     });
 
-    if let Some(plugin) = &this.plugin {
-        for key in plugin.injects() {
-            shared.registry.register_inject(key.clone(), &this);
-        }
+    for key in &this.declared_injects {
+        shared.registry.register_inject(key.clone(), &this);
     }
 
     shared.handle.spawn(drive(this.clone(), rx));
@@ -967,3 +1008,6 @@ impl std::future::IntoFuture for &FiberView {
         settle(&self.inner)
     }
 }
+
+#[cfg(test)]
+mod transient_tests;
