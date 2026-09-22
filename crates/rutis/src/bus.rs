@@ -92,7 +92,7 @@ fn insert_hook<C>(list: &mut Vec<Arc<Hook<C>>>, hook: Arc<Hook<C>>, prepend: boo
 }
 
 /// 稀疏即收缩(0.2.5):同 registry `shrink_if_sparse`。
-fn shrink_if_sparse<K, V>(map: &mut HashMap<K, V>) {
+fn shrink_if_sparse<K: Eq + std::hash::Hash, V>(map: &mut HashMap<K, V>) {
     if map.capacity() > 64 && map.len() * 4 < map.capacity() {
         map.shrink_to_fit();
     }
