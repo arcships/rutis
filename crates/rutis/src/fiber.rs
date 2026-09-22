@@ -502,7 +502,9 @@ impl FiberInner {
 
     /// 失败装载的回滚(评审 #1,对齐 TS fiber.ts:749-779 的失败路径):
     /// 经 UNLOADING 排干 apply 半注册的资源(监听/服务/子插件),再进 Failed。
-    /// 装配失败保持原子性(支柱 1);清理错误路由 ErrorSink,Failed 携带装载错误。
+    /// 装配失败保持原子性(支柱 1);清理错误路由 ErrorSink 且并入终态错误
+    ///(0.2.3:原始装载错误在前、回滚错误随后聚合——join 方拿到完整失败
+    /// 画面,sink 仍是额外观察者)。
     async fn fail_load(this: &Arc<Self>, error: CordisError) {
         {
             let mut tr = this.transition.lock().unwrap();
@@ -513,11 +515,12 @@ impl FiberInner {
 
         let cleanup_errors = Self::drain_effects(this).await;
         let sink = this.ctx.error_sink();
-        for e in cleanup_errors {
-            sink(e);
+        for e in &cleanup_errors {
+            sink(e.clone());
         }
-
-        let arc = Arc::new(error);
+        let mut combined = vec![Arc::new(error)];
+        combined.extend(cleanup_errors);
+        let arc = aggregate_arcs(combined).expect("failure present");
         {
             let mut tr = this.transition.lock().unwrap();
             tr.error = Some(arc);
