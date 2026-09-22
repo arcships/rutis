@@ -826,3 +826,74 @@ async fn factory_build_panic_fails_load_without_hanging() {
     assert!(matches!(*err2, CordisError::PluginFailed(_)));
     assert_eq!(view.state().state, FiberState::Failed);
 }
+
+// ── 19. Failed 粘性:依赖摘除保持 Failed,依赖恢复重试装载(审计 #2) ──
+// cordis:FAILED + 依赖摘除 → epoch 早退,状态保持 Failed、错误持续可见;
+// 依赖恢复 → epoch 变化 → reload。此前 rutis 把 Failed 算作 loaded,
+// 摘除时降级 Pending 把错误藏进 settle 通道——已修。
+
+#[tokio::test]
+async fn failed_stays_failed_when_dependency_removed_but_retries_when_restored() {
+    use rutis::TypeKey;
+
+    #[derive(Debug)]
+    struct FlakyDep;
+    // 工厂声明依赖 FlakyDep;build 只在 n==1 时失败(apply 失败路径)
+    struct FlakyFactory2;
+    impl PluginFactory<TestConfig> for FlakyFactory2 {
+        fn injects(&self) -> &[TypeKey] {
+            Box::leak(Box::new([TypeKey::of::<FlakyDep>()]))
+        }
+        fn build(&self, config: &TestConfig) -> Result<Box<dyn Plugin>, CordisError> {
+            if config.n == 1 {
+                Ok(Box::new(BoomPlugin))
+            } else {
+                Ok(Box::new(ConfigPlugin {
+                    svc: ConfigSvc {
+                        label: config.label.clone(),
+                        n: config.n,
+                    },
+                    apply_log: Arc::new(Mutex::new(Vec::new())),
+                    cleanups: Arc::new(AtomicUsize::new(0)),
+                    fail_apply: false,
+                }))
+            }
+        }
+    }
+    struct BoomPlugin;
+    impl Plugin for BoomPlugin {
+        fn name(&self) -> &str {
+            "boom"
+        }
+        fn apply<'a>(&'a self, _ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+            Box::pin(async move { Err(CordisError::PluginFailed("boom".into())) })
+        }
+    }
+
+    let ctx = Ctx::root().unwrap();
+    let dep = ctx.provide(FlakyDep).unwrap();
+    let view = ctx.plugin_with(FlakyFactory2, cfg("bad", 1));
+    // 依赖满足但 apply 失败 → Failed
+    view.clone().await.expect_err("loads then fails");
+    assert_eq!(view.state().state, FiberState::Failed);
+
+    // 依赖摘除:保持 Failed(错误仍可见,不降级 Pending)。
+    // dep.dispose().await 返回 = 驱逐流程 join 完消费者 RefreshDepsJoin,
+    // 状态已收敛——直接断言,无需等待。
+    dep.dispose().await.expect("evict dep");
+    assert_eq!(
+        view.state().state,
+        FiberState::Failed,
+        "FAILED is sticky on dep removal"
+    );
+    let err = view
+        .clone()
+        .await
+        .expect_err("settle still reports the load error");
+    assert!(matches!(*err, CordisError::PluginFailed(_)));
+
+    // 依赖恢复:Failed 重试装载(仍失败 → 仍 Failed,错误持续)
+    let _dep2 = ctx.provide(FlakyDep).unwrap();
+    view.clone().await.expect_err("retries and fails again");
+    assert_eq!(view.state().state, FiberState::Failed);
+}

@@ -374,3 +374,22 @@ M1 → M2 → M3。M1 先行的理由:独立收益最大、不动总线;M2 改 T
 **教训(写给后续批次)**:修复轮引入的新语义(哨兵/基线/恢复)复杂度与原设计同级,却没有走设计审视——三轮评审打出的全部第三层问题(歧义/逃逸/竞态)都源于此。**修复的语义复杂度达到设计级时,修复也必须先写清楚语义再动手。**
 
 **§八-§十 的修复记录保留为历史**;其中被 D32f 撤销的条目(§八-2/8、§九-1/2、§十-1/2)以本节为准。
+
+## 十二 cordis 对照偏差审计(2026-09-22,D32f 后全量)
+
+独立审计员三方源码对照(rutis / cordis 上游 / dsh fork)逐机制核对。**未声明的意外偏差仅 2 处**,其余全部落在已声明面(D1-D33 + 38 项不移植)或语言差异。
+
+### 已修(审计 #2)
+
+**Failed 纤维的依赖摘除行为**:cordis 的 FAILED 粘性——依赖摘除时 `_setEpoch(INACTIVE)` 因 epoch 已是 INACTIVE 早退,状态保持 Failed、错误持续可见(fiber.ts:611-639);依赖恢复时 epoch 变化触发 reload。rutis 此前把 Failed 算作 loaded,摘除时 `unload(Pending)` 降级,错误隐入 settle 通道。修复:`refresh_deps` 的 missing 分支只对 Active/Loading 卸载回 Pending,Failed 保持;依赖恢复路径(下方装载分支)不变——Failed 照常重试,与 cordis 的 reload 语义一致。测试 19:摘除保持 Failed(settle 持续报错)+ 恢复重试再失败仍 Failed。
+
+### 封口声明(不修,注释落档)
+
+- **审计 #1 跨 effect 清理并发性**:cordis 跨顶层 effect `Promise.all` 并发(fiber.ts:676)、单 effect 内 LIFO;rutis 跨 effect 也严格串行 LIFO——完成序确定、错误聚合可预期,方向性强化。drain_effects 注释已补对照。
+- **审计 #7 update 非 ACTIVE 态校验时机**:cordis 延迟到激活时 `_resolveConfig`(fiber.ts:739);rutis 无条件 dry-run(D32b,尽早暴露)。update 注释已补对照。
+
+### 语言差异(合理,不修)
+
+serial 短路值(typed Option 替代 JS truthiness)、`check()` 谓词无 this 绑定(闭包等价)、`injects` 为方法而非构造固化字段(契约静态,D32f 已对齐语义)、依赖通知不做 isolate 前置过滤(各 fiber `scope_for` 解析时过滤,语义等价)。
+
+**结论**:三方对照后,rutis 与 cordis 的差异全部显式化——要么在决策表/不移植清单里,要么在本节/源码注释有对照声明。

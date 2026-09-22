@@ -387,8 +387,13 @@ impl FiberInner {
         // 被取消的 Loading 代视同"已装载":排干后再定去留
         let loaded = !matches!(this.state(), FiberState::Pending | FiberState::Disposed);
         if !missing.is_empty() {
-            // 依赖缺失:已装载则卸载回 Pending;缺依赖长期 Pending 不报错(D22)
-            if loaded {
+            // 依赖缺失:Active/Loading 卸载回 Pending;缺依赖长期 Pending
+            // 不报错(D22)。**Failed 保持 Failed**(cordis FAILED 粘性:
+            // epoch 已是 INACTIVE,`_setEpoch` 早退不迁移,错误持续可见
+            // ——fiber.ts:611-639;审计 #2:此前被算作 loaded 降级 Pending,
+            // 错误隐入 settle 通道)。依赖恢复走下方装载路径,Failed 照常
+            // 重试(cordis 同:epoch 变化触发 reload)。
+            if matches!(this.state(), FiberState::Active | FiberState::Loading) {
                 Self::unload(this, NextState::Pending).await;
             }
             return;
@@ -512,6 +517,9 @@ impl FiberInner {
     }
 
     /// ④ EffectRecord 严格 LIFO 串行清理 + 消费边/依赖快照/提供表复位。
+    /// 对照声明(审计):cordis 跨顶层 effect **并发**清理(`Promise.all`,
+    /// fiber.ts:676),仅单 effect 内部 LIFO;此处跨 effect 也串行 LIFO——
+    /// 完成顺序确定、错误聚合可预期,方向性强化而非语义缺失。
     async fn drain_effects(this: &Arc<Self>) -> Vec<Arc<CordisError>> {
         let handle = this.ctx.handle().clone();
         let effects: Vec<Arc<EffectRecord>> = std::mem::take(&mut *this.effects.lock().unwrap());
@@ -874,6 +882,8 @@ impl FiberView {
             };
             // dry-run(D32b):validate_config → build → 实例 validate,产物丢弃
             // (build 纯构造契约)。用户回调 panic 转错误不杀调用方。
+            // 对照声明(审计):cordis 在非 ACTIVE 态**延迟** config 校验到激活时
+            // (fiber.ts:739 只存 `_config`);此处无条件 dry-run(D32b,尽早暴露)。
             // 通过后:二次终态检查(dry-run 无锁同步,期间并发 dispose 可完整
             // 执行,评审 3 探针实测窗口存在)→ 存 config → restart。
             // 依赖声明静态(D32f),update 不触碰注册表。
