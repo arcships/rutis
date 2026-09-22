@@ -46,7 +46,7 @@ pub(crate) struct Registry {
 /// 稀疏即收缩(0.2.5):条目逻辑删除后容器容量不随历史峰值滞留。
 /// 阈值:容量超过 64 槽且长度不足容量 1/4——避免小表抖动,
 /// 收缩分摊在每次跨过阈值时。表空(长度 0)自然命中。
-fn shrink_if_sparse<V>(map: &mut HashMap<TypeKey, V>) {
+fn shrink_if_sparse<K, V>(map: &mut HashMap<K, V>) {
     if map.capacity() > 64 && map.len() * 4 < map.capacity() {
         map.shrink_to_fit();
     }
