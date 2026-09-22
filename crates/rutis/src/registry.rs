@@ -98,6 +98,9 @@ impl Registry {
         if still_old {
             bindings.remove(&(key, scope));
         }
+        if bindings.is_empty() {
+            bindings.shrink_to_fit();
+        }
     }
 
     /// 该依赖四元组的当前消费者(D21 简化:唯一事实源是各 fiber 的
@@ -153,6 +156,11 @@ impl Registry {
             if empty {
                 index.remove(key);
             }
+        }
+        // 长寿 root 的瞬态键:表空即收缩,容量不随历史实例数滞留
+        //(非空时容量以并发峰值 为界)。
+        if index.is_empty() {
+            index.shrink_to_fit();
         }
     }
 

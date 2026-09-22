@@ -105,6 +105,9 @@ impl EffectRecord {
                     let present = effects.iter().any(|r| Arc::ptr_eq(r, &this));
                     if present {
                         effects.retain(|r| !Arc::ptr_eq(r, &this));
+                        if effects.is_empty() {
+                            effects.shrink_to_fit();
+                        }
                         drop(effects);
                         if let Some(e) = &err {
                             owner.drained_errors.lock().unwrap().push(e.clone());

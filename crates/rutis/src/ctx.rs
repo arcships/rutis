@@ -494,6 +494,10 @@ async fn evict_and_finalize(
         if let Some(pos) = provided.iter().position(|(k, s)| *k == key && *s == scope) {
             provided.swap_remove(pos);
         }
+        // 表空即收缩(0.2.4):长寿 root 的瞬态记账容量不随历史 provide 滞留。
+        if provided.is_empty() {
+            provided.shrink_to_fit();
+        }
     }
     Ok(())
 }
