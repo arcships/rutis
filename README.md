@@ -147,7 +147,7 @@ ctx.events().emit_keyed(&ctx, name, Arc::new(event));
 
 | 项目 | 说明 |
 |---|---|
-| [rutis-agent](crates/rutis-agent) / [rutis-cli](crates/rutis-cli) | 最小 coding agent:aimux `LanguageModel` 服务 + 工具插件 + 流式 driver 插件 + ratatui TUI;`cargo install rutis-cli` |
+| [rutis-agent](crates/rutis-agent) / [rutis-cli](crates/rutis-cli) | 最小 coding agent 样例:aimux `LanguageModel` 服务 + 工具插件 + 流式 driver 插件 + ratatui TUI;源码构建 `cargo run -p rutis-cli -- --scripted`(crates.io 的 0.1.0 为不含 rutui TUI 的旧版) |
 | [rutis-dsh](crates/rutis-dsh) + [host/](host) | 给 dsh 宿主进程供 LLM 服务的桥:Rust 组合根 ↔ loopback TCP ↔ TS 桥插件;宿主事件经 `evt/emit` → `HostEvent` 进内核总线 |
 | [aimux-llm](crates/aimux-llm) | 独立 LLM 服务插件:apply → 注册 `llm` 服务,329 provider |
 
