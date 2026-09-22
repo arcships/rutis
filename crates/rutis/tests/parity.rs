@@ -145,6 +145,14 @@ fn failing_effect(msg: &'static str) -> Effect {
     Effect::Disposer(Box::new(move || Err(err(msg))))
 }
 
+/// 0.2.3:失败装载的终态错误聚合原始错误与回滚清理错误(sink 仍为观察者)。
+fn failure_contains(e: &CordisError, msg: &str) -> bool {
+    match e {
+        CordisError::ServiceNotFound(m) => m == msg,
+        CordisError::Aggregate { errors } => errors.iter().any(|e| failure_contains(e, msg)),
+        _ => false,
+    }
+}
 fn err(msg: &'static str) -> CordisError {
     CordisError::ServiceNotFound(msg.to_string())
 }
@@ -291,9 +299,10 @@ async fn keeps_plugin_execution_failure_separate_from_rollback_cleanup_failure()
     let e = (&view)
         .await
         .expect_err("execution failure via await channel");
-    assert!(matches!(*e, CordisError::ServiceNotFound(ref m) if m == "execution failed"));
+    assert!(failure_contains(&e, "execution failed"));
+    assert!(failure_contains(&e, "cleanup failed"));
     assert_eq!(view.state().state, FiberState::Failed);
-    // 回滚清理错误恰好一条进 sink
+    // 回滚清理错误恰好一条进 sink(仍为观察者)
     assert_eq!(sink.lock().unwrap().len(), 1);
     assert!(
         matches!(*sink.lock().unwrap()[0], CordisError::ServiceNotFound(ref m) if m == "cleanup failed")
@@ -898,7 +907,8 @@ async fn separates_synchronous_execution_and_rollback_cleanup_failures() {
         .await
         .unwrap()
         .expect_err("execution failure observed");
-    assert!(matches!(*e, CordisError::ServiceNotFound(ref m) if m == "execution failed"));
+    assert!(failure_contains(&e, "execution failed"));
+    assert!(failure_contains(&e, "cleanup failed"));
 
     wait_state(&view, FiberState::Active).await; // restart 落地
     assert_eq!(sink.lock().unwrap().len(), 1); // 回滚清理错误恰好一条
@@ -1017,8 +1027,9 @@ async fn separates_asynchronous_execution_and_disposal_failures() {
         })
     }));
     let e = (&view).await.expect_err("execution channel");
-    assert!(matches!(*e, CordisError::ServiceNotFound(ref m) if m == "execution failed"));
-    assert_eq!(sink.lock().unwrap().len(), 1); // 清理错误走回滚通道
+    assert!(failure_contains(&e, "execution failed"));
+    assert!(failure_contains(&e, "cleanup failed"));
+    assert_eq!(sink.lock().unwrap().len(), 1); // 清理错误走回滚通道(sink 观察)
     assert!(
         matches!(*sink.lock().unwrap()[0], CordisError::ServiceNotFound(ref m) if m == "cleanup failed")
     );

@@ -50,3 +50,7 @@ rutis 0.2.0 的若干结构只在 fiber 自身卸载时清理。在长寿 root �
 ## 0.2.2 补充：TypeKey 诊断可读
 
 `TypeKey::describe` 此前打印 `TypeId` 的 Debug（不透明十六进制），keyed 多实例下的错误消息与装配图标签不可读。0.2.2 起键在构造时捕获 `type_name::<T>()`，`describe`/`Debug` 输出 `类型名#限定名`；相等与哈希仍只由 TypeId + 限定名决定（类型名是 TypeId 的纯函数，诊断字段不参与匹配）。公共签名不变。
+
+## 0.2.3 补充：失败装载保留回滚错误
+
+`fail_load` 此前只把回滚清理错误送 ErrorSink，终态 Failed 错误只剩装载错误——join 方（settle/dispose/上层装配回滚）拿不到清理失败画面。0.2.3 起终态错误聚合「原始装载错误在前 + 回滚错误随后」（仅在有回滚错误时聚合，单一错误保持原 Arc），ErrorSink 仍是额外观察者。三个 reentrant 对拍用例（reentrant.spec.ts:29/519/158 落点）按此语义更新断言：sink 恰好一条的观察不变，终态错误同时含执行与清理错误。
