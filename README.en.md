@@ -1,27 +1,40 @@
+<div align="center">
+
 # rutis
 
-**A plugin framework for Rust** — a type-safe service container, fiber lifecycles, a four-way event bus, and dependency-driven hot reloading. An idiomatic Rust implementation of the Cordis core paradigm.
+**A plugin framework for Rust**
 
-[中文](README.md)
+Type-safe service container · fiber lifecycles · four-way event bus · dependency-driven hot reloading
 
-## Why
+[![crates.io](https://img.shields.io/crates/v/rutis.svg)](https://crates.io/crates/rutis)
+[![docs.rs](https://docs.rs/rutis/badge.svg)](https://docs.rs/rutis)
+[![CI](https://github.com/arcships/rutis/actions/workflows/ci.yml/badge.svg)](https://github.com/arcships/rutis/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/crates/l/rutis.svg)](LICENSE)
+![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange)
 
-When your application needs a plugin architecture (editors, bots, agent hosts, composable servers), rolling your own usually means hand-writing service registration, plugin start/stop ordering, resource cleanup, and rebuild-on-dependency-change. rutis turns all of that into declarations:
+An idiomatic Rust implementation of the Cordis core paradigm · [中文](README.md)
 
-- **One apply, everything wired** — a plugin's `apply` provides services / listeners / cleanup, guaranteed to run exactly once
-- **Compile-time typed keys** — services are keyed by type (`ctx.get::<Database>()`), no string magic
-- **No resource leaks** — every fiber (plugin container) drains its cleanups in strict LIFO on unload, rolling back even on mid-apply failures
-- **Swap a provider, consumers reload themselves** — dependency relations are data, not callbacks scattered across your codebase
-- **Change config at runtime** — `update(config)` unloads and reloads; affected downstream plugins follow automatically
+</div>
 
-## Getting started
+## ✨ Why
+
+When your application needs a plugin architecture — editors, bots, agent hosts, composable servers — rolling your own means hand-writing a pile of error-prone infrastructure. rutis turns all of it into declarations:
+
+| Hand-rolled pain | What rutis gives you |
+|---|---|
+| String-keyed services scattered everywhere | **Compile-time typed keys**: `ctx.get::<Database>()` — wrong types don't compile |
+| Implicit plugin start/stop ordering conventions | **One apply, everything wired**: provides services / listeners / cleanup, exactly once |
+| Resource leaks and missed cleanups on unload | **Fiber containers**: strict LIFO cleanup, rolling back even mid-apply failures |
+| Manually rebuilding a chain of things when a dependency changes | **Dependency-driven reload**: swap a provider, consumers evict and reload themselves |
+| Restarting the whole process to change config | **Config hot update**: `update(config)` unloads and reloads cleanly, downstream follows |
+
+## 🚀 Getting started
 
 ```bash
 cargo add rutis@0.2
-cargo run -p rutis --example quickstart   # inside this repo
 ```
 
-The full example ([crates/rutis/examples/quickstart.rs](crates/rutis/examples/quickstart.rs)) — a provider plugin, a consumer that declares a dependency on it, and an automatic consumer reload when the provider is swapped:
+A provider, a consumer that declares a dependency, and a provider swap — full code at [crates/rutis/examples/quickstart.rs](crates/rutis/examples/quickstart.rs) (`cargo run -p rutis --example quickstart`):
 
 ```rust
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, TypeKey};
@@ -78,13 +91,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Core concepts: the five pillars
+## 🧩 Core concepts: the five pillars
 
-1. **Plugin = unit of assembly**: one `apply` provides services / listeners / cleanup
-2. **Fiber = lifecycle container**: six-state machine + dependency gating + cascading unload + exactly-once cleanup
-3. **Service = typed registry + isolate scopes** (multiple instances of one interface via qualified keys)
-4. **Event bus = four dispatch semantics**: emit (fire-and-forget, ordered per key) / parallel (concurrent fan-out) / serial (first-value short-circuit) / waterfall (middleware chain)
-5. **Dependency-driven reload**: provider unload → consumers evicted and reloaded automatically
+| Pillar | What it is |
+|---|---|
+| **Plugin = unit of assembly** | one `apply` provides services / listeners / cleanup |
+| **Fiber = lifecycle container** | six-state machine + dependency gating + cascading unload + exactly-once cleanup |
+| **Service = typed registry** | isolate scopes; multiple instances of one interface via qualified keys |
+| **Event bus = four dispatch semantics** | emit (ordered per key) / parallel (concurrent fan-out) / serial (first-value short-circuit) / waterfall (middleware chain) |
+| **Dependency-driven reload** | provider unload → consumers evicted and reloaded automatically |
 
 The mental model in one line: **declare dependencies → gated loading → provider changes → consumers reload themselves**.
 
@@ -121,7 +136,7 @@ sequenceDiagram
     C->>C: Pending → Loading → Active (apply again)
 ```
 
-## Feature tour
+## ⚡ Feature tour
 
 **Config hot update** — change config at runtime, reusing the state machine's exactly-once cleanup; affected consumers follow automatically:
 
@@ -142,41 +157,33 @@ ctx.events().on_keyed::<HostEvent>(&ctx, "session/event", listener)?;
 ctx.events().emit_keyed(&ctx, name, Arc::new(event));
 ```
 
-**Relation to cordis** — rutis is an idiomatic Rust implementation of the [Cordis](https://github.com/shigma/cordis) paradigm, not a translation: all 96 original specs were reviewed line by line; the 58 language-agnostic invariants are locked by automated parity tests (fiber timing, exactly-once cleanup, dependency gating, eviction & reload). Every other difference is explicitly declared (decision table + non-port list + audit record — see the docs below). Known deliberate strengthenings: cross-effect cleanup is strictly serial LIFO (cordis runs concurrently), per-key emit ordering is rebuilt explicitly.
+**Relation to cordis** — rutis is an idiomatic Rust implementation of the [Cordis](https://github.com/shigma/cordis) paradigm, not a translation: all 96 original specs reviewed line by line, the 58 language-agnostic invariants locked by automated parity tests; every other difference is explicitly declared (decision table + non-port list + audit record). Known deliberate strengthenings: cross-effect cleanup is strictly serial LIFO (cordis runs concurrently), per-key emit ordering is rebuilt explicitly.
 
-## Built with rutis
+## 🛠 Built with rutis
 
 | Project | Description |
 |---|---|
-| [rutis-agent](crates/rutis-agent) / [rutis-cli](crates/rutis-cli) | A minimal coding agent sample: aimux `LanguageModel` service + tool plugin + streaming driver plugin + ratatui TUI; build from source with `cargo run -p rutis-cli -- --scripted` (crates.io 0.1.0 is the older pre-rutui version) |
+| [rutis-agent](crates/rutis-agent) / [rutis-cli](crates/rutis-cli) | A minimal coding agent sample: aimux `LanguageModel` service + tool plugin + streaming driver plugin + ratatui TUI (build from source; crates.io 0.1.0 is the older pre-rutui version) |
 | [rutis-dsh](crates/rutis-dsh) + [host/](host) | A bridge feeding LLM services to the dsh host process: Rust composition root ↔ loopback TCP ↔ TS bridge plugin; host events flow `evt/emit` → `HostEvent` into the kernel bus |
 | [aimux-llm](crates/aimux-llm) | A standalone LLM service plugin: apply → registers the `llm` service, 329 providers |
 
 Sample commands inside this repo:
 
 ```bash
-cargo test                                    # full suite: kernel contract+parity / hot update / event keys / bridge e2e / agent
 cargo run -p rutis-cli -- --scripted          # offline agent demo, no API key
 cargo run -p rutis-agent --example tui_scripted   # scripted-backend TUI
+cargo test                                    # full test suite
 ```
 
 > agent / cli consume [aimux](https://crates.io/crates/aimux-core) (unified LLM access layer) from crates.io — no sibling checkout needed; to hack a local aimux, add an uncommitted `[patch]` at the workspace root.
 
-## Documentation
+## 📚 Documentation
 
-**Kernel & paradigm**
-- [design-rust-port.md](docs/design-rust-port.md) — kernel design (D1–D31 decision table)
-- [cordis-spec-parity-2026-08-18.md](docs/cordis-spec-parity-2026-08-18.md) — the 96-spec parity ruling against original cordis
-- [design-config-hot-update-and-dynamic-events-2026-09-21.md](docs/design-config-hot-update-and-dynamic-events-2026-09-21.md) — config hot update + dynamic event keys (design / implementation / three review rounds / post-mortem / cordis audit)
+**Kernel & paradigm** — [kernel design (D1–D31 decision table)](docs/design-rust-port.md) · [96-spec parity ruling](docs/cordis-spec-parity-2026-08-18.md) · [hot update + dynamic events (design / three review rounds / post-mortem / audit)](docs/design-config-hot-update-and-dynamic-events-2026-09-21.md)
 
-**Bridge & host**
-- [design-dual-core-2026-08-20.md](docs/design-dual-core-2026-08-20.md) — dual-core architecture and the incremental-rustification roadmap
-- [design-dsh-bridge-2026-08-21.md](docs/design-dsh-bridge-2026-08-21.md) — dsh bridge v1 design
-- [decision-aimux-llm-plugin-2026-08-23.md](docs/decision-aimux-llm-plugin-2026-08-23.md) — the aimux-llm standalone-plugin ruling
+**Bridge & host** — [dual-core architecture & rustification roadmap](docs/design-dual-core-2026-08-20.md) · [dsh bridge v1 design](docs/design-dsh-bridge-2026-08-21.md) · [aimux-llm plugin ruling](docs/decision-aimux-llm-plugin-2026-08-23.md)
 
-**Agent**
-- [design-min-agent-2026-08-18.md](docs/design-min-agent-2026-08-18.md) / [design-agent-verification-tui-2026-08-18.md](docs/design-agent-verification-tui-2026-08-18.md) — agent framework & TUI design
-- [design-minimal-mode-2026-08-18.md](docs/design-minimal-mode-2026-08-18.md) — minimal mode (bash + replace_text)
+**Agent** — [agent framework](docs/design-min-agent-2026-08-18.md) · [verification & TUI](docs/design-agent-verification-tui-2026-08-18.md) · [minimal mode](docs/design-minimal-mode-2026-08-18.md)
 
 ## License
 
