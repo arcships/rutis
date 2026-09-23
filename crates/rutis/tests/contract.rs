@@ -1762,6 +1762,37 @@ async fn concurrent_shutdown_and_dispose_share_completion() {
     c.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_shutdown_and_dispose_always_converge() {
+    for iteration in 0..2000 {
+        let ctx = Ctx::root().unwrap();
+        let root = ctx.root_view().unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let shutdown = tokio::spawn({
+            let barrier = barrier.clone();
+            async move {
+                barrier.wait().await;
+                ctx.shutdown().await
+            }
+        });
+        let dispose = tokio::spawn({
+            let barrier = barrier.clone();
+            async move {
+                barrier.wait().await;
+                root.dispose().await
+            }
+        });
+        barrier.wait().await;
+        let (shutdown, dispose) = tokio::time::timeout(Duration::from_millis(250), async {
+            tokio::join!(shutdown, dispose)
+        })
+        .await
+        .unwrap_or_else(|_| panic!("shutdown/dispose stalled in iteration {iteration}"));
+        shutdown.unwrap().unwrap();
+        dispose.unwrap().unwrap();
+    }
+}
+
 #[tokio::test]
 async fn cancel_during_loading() {
     let ctx = Ctx::root().unwrap();

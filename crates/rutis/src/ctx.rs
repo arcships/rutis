@@ -154,17 +154,22 @@ impl Ctx {
     ) -> crate::BoxFuture<'static, Result<(), DisposeWaitError>> {
         let root = self.root_view();
         let pending = self.shutdown();
+        let Some(root) = root else {
+            // No root view remains only after its driver has exited; the
+            // cached shutdown result is already available without a deadline.
+            return Box::pin(async move { pending.await.map_err(DisposeWaitError::Failed) });
+        };
         Box::pin(async move {
             let started = Instant::now();
             match tokio::time::timeout(limit, pending).await {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(error)) => Err(DisposeWaitError::Failed(error)),
                 Err(_) => {
-                    let snapshot = root.as_ref().map(FiberView::state);
+                    let snapshot = root.state();
                     Err(DisposeWaitError::TimedOut {
-                        plugin_id: root.as_ref().map_or(crate::PluginId(1), |v| v.id),
-                        generation: snapshot.as_ref().map_or(0, |s| s.generation),
-                        state: snapshot.map_or(FiberState::Disposed, |s| s.state),
+                        plugin_id: root.id,
+                        generation: snapshot.generation,
+                        state: snapshot.state,
                         elapsed: started.elapsed(),
                     })
                 }

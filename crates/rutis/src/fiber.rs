@@ -686,7 +686,8 @@ pub(crate) async fn drive(this: Arc<FiberInner>, mut rx: mpsc::UnboundedReceiver
                     }
                     if !this.is_root {
                         let mut tr = this.transition.lock().unwrap();
-                        tr.error = Some(Arc::new(CordisError::Closed));
+                        tr.error
+                            .get_or_insert_with(|| Arc::new(CordisError::Closed));
                     }
                 }
             }
@@ -699,12 +700,21 @@ pub(crate) async fn drive(this: Arc<FiberInner>, mut rx: mpsc::UnboundedReceiver
         }
         if let Some(task) = shutdown_task {
             this.alive.store(false, Ordering::SeqCst);
-            let err = this.transition.lock().unwrap().error.clone();
+            // dispose() may have passed its closing check before shutdown was
+            // posted, then registered terminal_task while Shutdown was queued.
+            // Its Dispose intent carries no task, so complete the stored task.
+            let (terminal, err) = {
+                let tr = this.transition.lock().unwrap();
+                (tr.terminal_task.clone(), tr.error.clone())
+            };
             while let Ok(intent) = rx.try_recv() {
                 complete_intent(&intent, Some(Arc::new(CordisError::Closed)));
             }
             if !this.is_root {
                 release_transient(&this).await;
+            }
+            if let Some(terminal) = terminal {
+                terminal.complete(err.clone());
             }
             drop(this);
             task.complete(err);
