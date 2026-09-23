@@ -60,3 +60,44 @@ async fn churn_root_provides_release_accounting() {
         "evict cleanups must self-remove after drain"
     );
 }
+
+/// Stage the interleaving where dispose passed the closing check, but its
+/// terminal task and Dispose intent arrive after Shutdown was enqueued.
+#[tokio::test]
+async fn shutdown_completes_dispose_task_queued_behind_it() {
+    let ctx = Ctx::root().unwrap();
+    let root = ctx.weak_fiber().upgrade().unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    ctx.effect({
+        let entered = entered.clone();
+        let release = release.clone();
+        move || {
+            Effect::AsyncDisposer(Box::new(move || {
+                Box::pin(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(())
+                })
+            }))
+        }
+    })
+    .unwrap();
+
+    let shutdown = ctx.shutdown();
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .unwrap();
+    let dispose_task = TransitionTask::new();
+    root.transition.lock().unwrap().terminal_task = Some(dispose_task.clone());
+    root.post(Intent::Dispose);
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), shutdown)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), join_task(&dispose_task))
+        .await
+        .expect("dispose task stranded behind Shutdown")
+        .unwrap();
+}

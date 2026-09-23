@@ -18,6 +18,8 @@ pub enum CordisError {
     },
     #[error("fiber disposed")]
     InactiveEffect,
+    #[error("root has been shut down")]
+    Closed,
     #[error("config validation failed: {issues:?}")]
     Validation { issues: Vec<String> },
     #[error("dependency unsatisfied: {0:?}")]

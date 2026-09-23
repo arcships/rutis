@@ -2,6 +2,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -41,6 +42,22 @@ pub struct Snapshot {
 /// 插件身份(D10:注册返回的显式 id,非闭包指针)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PluginId(pub u64);
+
+/// 等待卸载的结果。超时只结束本次等待；驱动继续执行清理，再次调用
+/// `dispose()` 会 join 同一任务。同步代码若不让出执行权，Tokio 无法
+/// 强制中断，deadline 也无法在该 runtime 线程上及时触发。
+#[derive(Debug, thiserror::Error)]
+pub enum DisposeWaitError {
+    #[error("fiber {plugin_id:?} generation {generation} still {state:?} after {elapsed:?}")]
+    TimedOut {
+        plugin_id: PluginId,
+        generation: u64,
+        state: FiberState,
+        elapsed: Duration,
+    },
+    #[error("fiber disposal failed: {0}")]
+    Failed(Arc<CordisError>),
+}
 
 /// fiber 状态迁移事件(D24:锁内 FIFO 入队、锁外分发;
 /// `seq` 保证提交顺序可识别,不保证 listener 完成顺序)。
@@ -96,14 +113,16 @@ pub(crate) enum Intent {
     Settle(Arc<TransitionTask>),
     Restart(Arc<TransitionTask>),
     Dispose,
+    Shutdown(Arc<TransitionTask>),
 }
 
 impl Intent {
     fn task(&self) -> Option<&Arc<TransitionTask>> {
         match self {
-            Intent::RefreshDepsJoin(task) | Intent::Settle(task) | Intent::Restart(task) => {
-                Some(task)
-            }
+            Intent::RefreshDepsJoin(task)
+            | Intent::Settle(task)
+            | Intent::Restart(task)
+            | Intent::Shutdown(task) => Some(task),
             _ => None,
         }
     }
@@ -269,16 +288,26 @@ impl FiberInner {
     /// 预留给未来可能携带完成信号的意图。
     pub(crate) fn post(&self, intent: Intent) -> bool {
         if !self.alive.load(Ordering::SeqCst) {
-            complete_intent(&intent, self.transition.lock().unwrap().error.clone());
+            complete_intent(&intent, self.stopped_error());
             return false;
         }
         match self.intents_tx.send(intent) {
             Ok(()) => true,
             Err(err) => {
-                complete_intent(&err.0, self.transition.lock().unwrap().error.clone());
+                complete_intent(&err.0, self.stopped_error());
                 false
             }
         }
+    }
+
+    fn stopped_error(&self) -> Option<Arc<CordisError>> {
+        self.transition.lock().unwrap().error.clone().or_else(|| {
+            self.ctx
+                .shared()
+                .closing
+                .load(Ordering::SeqCst)
+                .then(|| Arc::new(CordisError::Closed))
+        })
     }
 
     /// 投递携带完成信号的意图。发送后复查 alive:若发送落在驱动排空之后
@@ -292,20 +321,18 @@ impl FiberInner {
         make: impl FnOnce(Arc<TransitionTask>) -> Intent,
     ) -> bool {
         if !self.alive.load(Ordering::SeqCst) {
-            let err = self.transition.lock().unwrap().error.clone();
-            task.complete(err);
+            task.complete(self.stopped_error());
             return false;
         }
         match self.intents_tx.send(make(task.clone())) {
             Ok(()) => {
                 if !self.alive.load(Ordering::SeqCst) {
-                    let err = self.transition.lock().unwrap().error.clone();
-                    task.complete(err);
+                    task.complete(self.stopped_error());
                 }
                 true
             }
             Err(_) => {
-                task.complete(self.transition.lock().unwrap().error.clone());
+                task.complete(self.stopped_error());
                 false
             }
         }
@@ -594,6 +621,10 @@ pub(crate) async fn drive(this: Arc<FiberInner>, mut rx: mpsc::UnboundedReceiver
     while let Some(intent) = rx.recv().await {
         let current_task = intent.task().cloned();
         let terminal_dispose = matches!(intent, Intent::Dispose) && !this.is_root;
+        let shutdown_task = match &intent {
+            Intent::Shutdown(task) => Some(task.clone()),
+            _ => None,
+        };
         let outcome = CatchUnwind::new(async {
             match intent {
                 Intent::RefreshDeps => FiberInner::refresh_deps(&this).await,
@@ -649,12 +680,44 @@ pub(crate) async fn drive(this: Arc<FiberInner>, mut rx: mpsc::UnboundedReceiver
                         let _ = task.done_tx.send(TaskDone::Done(err));
                     }
                 }
+                Intent::Shutdown(_) => {
+                    if this.state() != FiberState::Disposed {
+                        FiberInner::unload(&this, NextState::Disposed).await;
+                    }
+                    if !this.is_root {
+                        let mut tr = this.transition.lock().unwrap();
+                        tr.error
+                            .get_or_insert_with(|| Arc::new(CordisError::Closed));
+                    }
+                }
             }
             this.flush_status();
         })
         .await;
         if let Err(panic) = outcome {
             recover_driver_panic(&this, &mut rx, current_task, panic).await;
+            return;
+        }
+        if let Some(task) = shutdown_task {
+            this.alive.store(false, Ordering::SeqCst);
+            // dispose() may have passed its closing check before shutdown was
+            // posted, then registered terminal_task while Shutdown was queued.
+            // Its Dispose intent carries no task, so complete the stored task.
+            let (terminal, err) = {
+                let tr = this.transition.lock().unwrap();
+                (tr.terminal_task.clone(), tr.error.clone())
+            };
+            while let Ok(intent) = rx.try_recv() {
+                complete_intent(&intent, Some(Arc::new(CordisError::Closed)));
+            }
+            if !this.is_root {
+                release_transient(&this).await;
+            }
+            if let Some(terminal) = terminal {
+                terminal.complete(err.clone());
+            }
+            drop(this);
+            task.complete(err);
             return;
         }
         if terminal_dispose {
@@ -796,12 +859,20 @@ fn spawn_fiber_inner(
     config: Option<Arc<dyn Any + Send + Sync>>,
     is_root: bool,
 ) -> Arc<FiberInner> {
+    let closed = !is_root && shared.closing.load(Ordering::SeqCst);
+    let (plugin, factory, config) = if closed {
+        (None, None, None)
+    } else {
+        (plugin, factory, config)
+    };
     let id = PluginId(
         shared
             .next_plugin_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
     );
-    let initial = if is_root {
+    let initial = if closed {
+        FiberState::Disposed
+    } else if is_root {
         FiberState::Active
     } else {
         FiberState::Pending
@@ -815,10 +886,16 @@ fn spawn_fiber_inner(
     } else {
         Vec::new()
     };
+    let closed_error = closed.then(|| Arc::new(CordisError::Closed));
+    let closed_task = closed.then(|| {
+        let task = TransitionTask::new();
+        task.complete(closed_error.clone());
+        task
+    });
     let (snapshot_tx, snapshot_rx) = watch::channel(Snapshot {
         generation: 0,
         state: initial,
-        error: None,
+        error: closed_error.clone(),
     });
     let (tx, rx) = mpsc::unbounded_channel();
     let token = CancellationToken::new();
@@ -835,7 +912,7 @@ fn spawn_fiber_inner(
                 .as_ref()
                 .map(|p| p.name().to_string())
                 .or_else(|| factory.as_ref().map(|f| f.name().to_string()))
-                .unwrap_or_else(|| "root".to_string()),
+                .unwrap_or_else(|| if closed { "closed" } else { "root" }.to_string()),
             is_root,
             plugin,
             factory,
@@ -846,10 +923,10 @@ fn spawn_fiber_inner(
             transition: Mutex::new(Trans {
                 generation: 0,
                 state: initial,
-                error: None,
+                error: closed_error,
                 seq: 0,
                 status_queue: Vec::new(),
-                terminal_task: None,
+                terminal_task: closed_task,
             }),
             snapshot_tx: snapshot_tx.clone(),
             snapshot_rx,
@@ -858,17 +935,18 @@ fn spawn_fiber_inner(
             mount: Mutex::new(None),
             declared_injects,
             intents_tx: tx.clone(),
-            alive: AtomicBool::new(true),
+            alive: AtomicBool::new(!closed),
             provided: Mutex::new(Vec::new()),
             last_deps: Mutex::new(None),
         }
     });
 
-    for key in &this.declared_injects {
-        shared.registry.register_inject(key.clone(), &this);
+    if !closed {
+        for key in &this.declared_injects {
+            shared.registry.register_inject(key.clone(), &this);
+        }
+        shared.handle.spawn(drive(this.clone(), rx));
     }
-
-    shared.handle.spawn(drive(this.clone(), rx));
     this
 }
 
@@ -876,7 +954,7 @@ fn spawn_fiber_inner(
 pub struct FiberView {
     /// 插件身份(D10)。
     pub id: PluginId,
-    inner: Arc<FiberInner>,
+    pub(crate) inner: Arc<FiberInner>,
 }
 
 impl Clone for FiberView {
@@ -914,6 +992,19 @@ impl FiberView {
     /// dispose:恰好一次;重复/并发调用 join 同一 `Arc<CordisError>`(D6/D20)。
     /// 入队前预取消当前代 token(运行中的 apply 协作退出,D27 第②步前置)。
     pub fn dispose(&self) -> BoxFuture<'static, Result<(), Arc<CordisError>>> {
+        if self.inner.is_root && self.inner.ctx.shared().closing.load(Ordering::SeqCst) {
+            let task = self
+                .inner
+                .ctx
+                .shared()
+                .shutdown_task
+                .lock()
+                .unwrap()
+                .clone();
+            if let Some(task) = task {
+                return Box::pin(async move { join_task(&task).await });
+            }
+        }
         // 登记在调用点同步完成(评审 #2):dispose() 返回后,并发的
         // restart() 立刻可见终态任务并拒绝,不依赖本 future 被 poll
         let (task, newly_registered) = {
@@ -931,10 +1022,36 @@ impl FiberView {
         if newly_registered {
             self.inner.post(Intent::Dispose);
             if !self.inner.alive.load(Ordering::SeqCst) {
-                task.complete(self.inner.transition.lock().unwrap().error.clone());
+                task.complete(self.inner.stopped_error());
             }
         }
         Box::pin(async move { join_task(&task).await })
+    }
+
+    /// 限制等待时间，不强制终止正在执行的插件或清理任务。
+    /// 超时后再次调用 `dispose()` 可继续等待同一终态任务及其错误。
+    pub fn dispose_with_timeout(
+        &self,
+        limit: Duration,
+    ) -> BoxFuture<'static, Result<(), DisposeWaitError>> {
+        let pending = self.dispose();
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            let started = Instant::now();
+            match tokio::time::timeout(limit, pending).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(DisposeWaitError::Failed(error)),
+                Err(_) => {
+                    let snapshot = inner.state_snapshot();
+                    Err(DisposeWaitError::TimedOut {
+                        plugin_id: inner.id,
+                        generation: snapshot.generation,
+                        state: snapshot.state,
+                        elapsed: started.elapsed(),
+                    })
+                }
+            }
+        })
     }
 
     /// restart:干净卸载后重装配(无状态迁移,Erlang code_change 省略版)。
@@ -946,6 +1063,9 @@ impl FiberView {
         Box::pin(async move {
             {
                 let tr = this.transition.lock().unwrap();
+                if this.ctx.shared().closing.load(Ordering::SeqCst) {
+                    return Err(Arc::new(CordisError::Closed));
+                }
                 if !this.is_root
                     && (tr.terminal_task.is_some() || !this.alive.load(Ordering::SeqCst))
                 {
@@ -976,6 +1096,9 @@ impl FiberView {
         Box::pin(async move {
             {
                 let tr = this.transition.lock().unwrap();
+                if this.ctx.shared().closing.load(Ordering::SeqCst) {
+                    return Err(Arc::new(CordisError::Closed));
+                }
                 if !this.is_root
                     && (tr.terminal_task.is_some() || !this.alive.load(Ordering::SeqCst))
                 {
@@ -1020,6 +1143,9 @@ impl FiberView {
             // 后存 config 会落进已死 fiber)。
             {
                 let tr = this.transition.lock().unwrap();
+                if this.ctx.shared().closing.load(Ordering::SeqCst) {
+                    return Err(Arc::new(CordisError::Closed));
+                }
                 if !this.is_root
                     && (tr.terminal_task.is_some() || !this.alive.load(Ordering::SeqCst))
                 {

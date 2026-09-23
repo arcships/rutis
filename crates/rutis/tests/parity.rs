@@ -731,7 +731,7 @@ async fn returns_one_disposal_promise_and_joins_cleanup_already_in_progress() {
 
     let done = Arc::new(AtomicBool::new(false));
     let d2 = done.clone();
-    let root = ctx.root_view();
+    let root = ctx.root_view().unwrap();
     let restarting = tokio::spawn(async move {
         let _ = root.restart().await;
         d2.store(true, Ordering::SeqCst);
@@ -745,7 +745,7 @@ async fn returns_one_disposal_promise_and_joins_cleanup_already_in_progress() {
     assert_eq!(count.load(Ordering::SeqCst), 1);
 
     // 后续销毁 join 缓存终态,不重跑
-    ctx.root_view().dispose().await.unwrap();
+    ctx.root_view().unwrap().dispose().await.unwrap();
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
@@ -836,6 +836,7 @@ async fn keeps_a_direct_cleanup_failure_observable_through_the_shared_promise() 
     // fiber 级卸载 join 同一记录:同一错误 identity
     let e2 = ctx
         .root_view()
+        .unwrap()
         .dispose()
         .await
         .expect_err("second observation");
@@ -1592,7 +1593,7 @@ async fn dispose_manually() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     d.dispose().await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    ctx.root_view().dispose().await.unwrap(); // 兜底不重跑
+    ctx.root_view().unwrap().dispose().await.unwrap(); // 兜底不重跑
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
@@ -1643,7 +1644,7 @@ async fn yield_dispose() {
     .unwrap();
 
     assert_eq!(*s.lock().unwrap(), Vec::<u32>::new());
-    let root = ctx.root_view();
+    let root = ctx.root_view().unwrap();
     root.dispose().await.unwrap();
     assert_eq!(*s.lock().unwrap(), vec![3, 2, 1]); // LIFO,监听器清理不可见
     root.clone().dispose().await.unwrap(); // 重入 join:不重跑
@@ -2075,7 +2076,7 @@ async fn plugin_root_dispose() {
     }));
     (&view).await.expect("load");
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    let root = ctx.root_view();
+    let root = ctx.root_view().unwrap();
     root.dispose().await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1); // 级联清理恰好一次
     assert_eq!(view.state().state, FiberState::Disposed);

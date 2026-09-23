@@ -1,6 +1,7 @@
 use std::future::Future;
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Weak};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
@@ -9,7 +10,8 @@ use crate::bus::EventBus;
 use crate::effect::{Disposer, Effect, EffectRecord};
 use crate::error::{default_sink, CordisError, ErrorSink};
 use crate::fiber::{
-    join_task, spawn_fiber, FiberInner, FiberState, FiberView, Intent, TransitionTask,
+    join_task, spawn_fiber, DisposeWaitError, FiberInner, FiberState, FiberView, Intent,
+    TransitionTask,
 };
 use crate::key::{ScopeId, TypeKey};
 use crate::registry::{Binding, CheckFn, Registry, StoredValue};
@@ -22,6 +24,8 @@ pub(crate) struct Shared {
     pub registry: Registry,
     pub error_sink: ErrorSink,
     pub next_plugin_id: AtomicU64,
+    pub closing: AtomicBool,
+    pub shutdown_task: Mutex<Option<Arc<TransitionTask>>>,
 }
 
 pub(crate) struct CtxInner {
@@ -101,19 +105,76 @@ impl Ctx {
             registry: Registry::new(),
             error_sink: sink,
             next_plugin_id: AtomicU64::new(1),
+            closing: AtomicBool::new(false),
+            shutdown_task: Mutex::new(None),
         });
         let root_fiber = spawn_fiber(&shared, None, None, true);
         root_fiber.ctx.clone()
     }
 
     /// root fiber 句柄(root dispose 清子树 / root restart,§五 root_restart)。
-    pub fn root_view(&self) -> FiberView {
+    /// 最终 shutdown 并释放所有 `FiberView` 后返回 None。
+    pub fn root_view(&self) -> Option<FiberView> {
         let mut current = self.clone();
         while let Some(parent) = current.0.parent.clone() {
             current = parent;
         }
-        let fiber = current.0.fiber.upgrade().expect("root fiber alive");
-        FiberView::from_inner(fiber)
+        current.0.fiber.upgrade().map(FiberView::from_inner)
+    }
+
+    /// 最终关闭 root。重复或并发调用共享同一完成结果；现有 `dispose`
+    /// 仍可 `restart`。关闭会拒绝新注册并等待当前装载、子树与清理完成。
+    /// 不协作的代码可能使等待无限延长，可用 `shutdown_with_timeout` 限制等待。
+    pub fn shutdown(&self) -> crate::BoxFuture<'static, Result<(), Arc<CordisError>>> {
+        let task = {
+            let mut slot = self.0.shared.shutdown_task.lock().unwrap();
+            if let Some(task) = slot.as_ref() {
+                task.clone()
+            } else {
+                let task = TransitionTask::new();
+                *slot = Some(task.clone());
+                self.0.shared.closing.store(true, Ordering::SeqCst);
+                if let Some(root) = self.root_view() {
+                    root.inner.cancel_current();
+                    root.inner.post(Intent::Shutdown(task.clone()));
+                } else {
+                    task.complete(Some(Arc::new(CordisError::Closed)));
+                }
+                task
+            }
+        };
+        Box::pin(async move { join_task(&task).await })
+    }
+
+    /// 限制等待最终关闭的时间。超时后关闭仍在后台进行，重复调用
+    /// `shutdown()` 可继续 join 同一结果。
+    pub fn shutdown_with_timeout(
+        &self,
+        limit: Duration,
+    ) -> crate::BoxFuture<'static, Result<(), DisposeWaitError>> {
+        let root = self.root_view();
+        let pending = self.shutdown();
+        let Some(root) = root else {
+            // No root view remains only after its driver has exited; the
+            // cached shutdown result is already available without a deadline.
+            return Box::pin(async move { pending.await.map_err(DisposeWaitError::Failed) });
+        };
+        Box::pin(async move {
+            let started = Instant::now();
+            match tokio::time::timeout(limit, pending).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(DisposeWaitError::Failed(error)),
+                Err(_) => {
+                    let snapshot = root.state();
+                    Err(DisposeWaitError::TimedOut {
+                        plugin_id: root.id,
+                        generation: snapshot.generation,
+                        state: snapshot.state,
+                        elapsed: started.elapsed(),
+                    })
+                }
+            }
+        })
     }
 
     /// 事件总线(全局唯一;事件分发不跨 isolate 过滤,D29)。
@@ -238,6 +299,9 @@ impl Ctx {
                 )],
             });
         }
+        if self.0.shared.closing.load(Ordering::SeqCst) {
+            return Err(CordisError::Closed);
+        }
         let fiber = self.0.fiber.upgrade().ok_or(CordisError::InactiveEffect)?;
         {
             // 重入报错检查先于重复注册检查(TS assertActive 语义,fiber.ts:434-436)
@@ -320,6 +384,9 @@ impl Ctx {
         &self,
         f: impl FnOnce() -> Effect,
     ) -> Result<Arc<EffectRecord>, CordisError> {
+        if self.0.shared.closing.load(Ordering::SeqCst) {
+            return Err(CordisError::Closed);
+        }
         let fiber = self.0.fiber.upgrade().ok_or(CordisError::InactiveEffect)?;
         // factory 锁外执行;但"状态检查 + effects 入队"必须在同一临界区
         //(transition → effects 嵌套,锁序无反向):否则检查通过后驱动恰好
@@ -328,7 +395,9 @@ impl Ctx {
         let handle = self.handle().clone();
         {
             let tr = fiber.transition.lock().unwrap();
-            if matches!(tr.state, FiberState::Unloading | FiberState::Disposed) {
+            if self.0.shared.closing.load(Ordering::SeqCst)
+                || matches!(tr.state, FiberState::Unloading | FiberState::Disposed)
+            {
                 drop(tr);
                 // 生命周期已越过登记点:f() 可能已有副作用(如插入了监听器),
                 // 立即排干该记录的清理并返失败
@@ -339,7 +408,11 @@ impl Ctx {
                         sink(e);
                     }
                 });
-                return Err(CordisError::InactiveEffect);
+                return Err(if self.0.shared.closing.load(Ordering::SeqCst) {
+                    CordisError::Closed
+                } else {
+                    CordisError::InactiveEffect
+                });
             }
             fiber.effects.lock().unwrap().push(record.clone());
         }
@@ -391,6 +464,9 @@ impl Ctx {
     /// 处置子 fiber,不再触发装载)。
     fn mount_fiber(&self, fiber: std::sync::Arc<crate::fiber::FiberInner>) -> FiberView {
         let view = FiberView::from_inner(fiber.clone());
+        if !fiber.alive.load(Ordering::SeqCst) {
+            return view;
+        }
         let child = view.clone();
         let sink = self.error_sink();
         let registered = self.register_effect(move || {
@@ -421,7 +497,11 @@ impl Ctx {
             Err(_) => {
                 // parent 已失活:处置子 fiber,且不再触发装载(评审 #10:
                 // 避免 Dispose 之后入队的重载意图无人处理)
-                fiber.post(Intent::Dispose);
+                if self.0.shared.closing.load(Ordering::SeqCst) {
+                    fiber.post(Intent::Shutdown(TransitionTask::new()));
+                } else {
+                    fiber.post(Intent::Dispose);
+                }
             }
         }
         view

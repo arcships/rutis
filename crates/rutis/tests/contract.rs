@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rutis::{
-    BoxFuture, CordisError, Ctx, Effect, Event, FiberState, FiberStatusChanged, FiberView,
-    Listener, Next, Plugin, Terminal, TypeKey, WaterfallListener,
+    BoxFuture, CordisError, Ctx, DisposeWaitError, Effect, Event, FiberState, FiberStatusChanged,
+    FiberView, Listener, Next, Plugin, Terminal, TypeKey, WaterfallListener,
 };
 
 // ── 测试助手 ─────────────────────────────────────────────────────
@@ -226,7 +226,7 @@ async fn effect_yields_disposer() {
     d.dispose().await.unwrap(); // 提前释放(D28)
     assert_eq!(counter.load(Ordering::SeqCst), 1);
     // fiber 卸载不重复执行(恰好一次)
-    ctx.root_view().dispose().await.unwrap();
+    ctx.root_view().unwrap().dispose().await.unwrap();
     assert_eq!(counter.load(Ordering::SeqCst), 1);
 }
 
@@ -328,7 +328,7 @@ async fn root_restart() {
         Box::pin(async { Ok(Effect::Done) })
     }));
     (&view).await.expect("load");
-    let root = ctx.root_view();
+    let root = ctx.root_view().unwrap();
     root.dispose().await.unwrap();
     assert_eq!(view.state().state, FiberState::Disposed);
     // root 可重启,可再装配
@@ -343,7 +343,7 @@ async fn root_restart() {
 async fn root_restart_dispose_cycle() {
     // 重启后的第二次 dispose 必须真正再卸载一轮(终态任务不复用陈旧结果)
     let ctx = Ctx::root().unwrap();
-    let root = ctx.root_view();
+    let root = ctx.root_view().unwrap();
     let counter = Arc::new(AtomicUsize::new(0));
     let c = counter.clone();
     ctx.effect(move || counting_effect(c, None)).unwrap();
@@ -1165,8 +1165,8 @@ async fn typed_roundtrip() {
     let err = ctx.provide(LlmSvc { n: 4 }).unwrap_err();
     assert!(matches!(err, CordisError::ServiceExists(_)));
     // 卸载(root 卸载清空)后可再注册
-    ctx.root_view().dispose().await.unwrap();
-    ctx.root_view().restart().await.unwrap();
+    ctx.root_view().unwrap().dispose().await.unwrap();
+    ctx.root_view().unwrap().restart().await.unwrap();
     ctx.provide(LlmSvc { n: 5 }).unwrap();
     assert_eq!(ctx.get::<LlmSvc>().unwrap().n, 5);
 }
@@ -1554,6 +1554,246 @@ async fn cancel_wakes_awaiters() {
 }
 
 #[tokio::test]
+async fn disposal_deadline_reports_loading_and_later_joins() {
+    let root = Ctx::root().unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let view = root.plugin(simple("blocked-apply", {
+        let started = started.clone();
+        let release = release.clone();
+        move |_ctx: &Ctx| {
+            let started = started.clone();
+            let release = release.clone();
+            Box::pin(async move {
+                started.notify_one();
+                release.notified().await;
+                Ok(Effect::Done)
+            })
+        }
+    }));
+    soon(started.notified()).await;
+    let timeout = view
+        .dispose_with_timeout(Duration::from_millis(20))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        timeout,
+        DisposeWaitError::TimedOut {
+            state: FiberState::Loading,
+            ..
+        }
+    ));
+    release.notify_one();
+    soon(view.dispose()).await.unwrap();
+    assert_eq!(view.state().state, FiberState::Disposed);
+}
+
+#[tokio::test]
+async fn disposal_deadline_reports_async_cleanup_and_preserves_result() {
+    let root = Ctx::root().unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let view = root.plugin(simple("blocked-cleanup", {
+        let release = release.clone();
+        move |_ctx: &Ctx| {
+            let release = release.clone();
+            Box::pin(async move {
+                Ok(Effect::AsyncDisposer(Box::new(move || {
+                    Box::pin(async move {
+                        release.notified().await;
+                        Err(CordisError::ServiceNotFound("cleanup failed".into()))
+                    })
+                })))
+            })
+        }
+    }));
+    soon(async { (&view).await }).await.unwrap();
+    let timeout = view
+        .dispose_with_timeout(Duration::from_millis(20))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        timeout,
+        DisposeWaitError::TimedOut {
+            state: FiberState::Unloading,
+            ..
+        }
+    ));
+    release.notify_one();
+    let first = soon(view.dispose()).await.unwrap_err();
+    let second = soon(view.dispose()).await.unwrap_err();
+    assert!(Arc::ptr_eq(&first, &second));
+}
+
+#[tokio::test]
+async fn disposal_deadline_covers_cleanup_and_consumer_eviction() {
+    let root = Ctx::root().unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let provider = root.plugin(simple("provider", |ctx: &Ctx| {
+        Box::pin(async move {
+            ctx.provide(Dep1)?;
+            Ok(Effect::Done)
+        })
+    }));
+    soon(async { (&provider).await }).await.unwrap();
+    let consumer = root.plugin(simple_dep("consumer", vec![TypeKey::of::<Dep1>()], {
+        let release = release.clone();
+        move |_ctx: &Ctx| {
+            let release = release.clone();
+            Box::pin(async move {
+                Ok(Effect::AsyncDisposer(Box::new(move || {
+                    Box::pin(async move {
+                        release.notified().await;
+                        Ok(())
+                    })
+                })))
+            })
+        }
+    }));
+    soon(async { (&consumer).await }).await.unwrap();
+    let timeout = provider
+        .dispose_with_timeout(Duration::from_millis(20))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        timeout,
+        DisposeWaitError::TimedOut {
+            state: FiberState::Unloading,
+            ..
+        }
+    ));
+    release.notify_one();
+    soon(provider.dispose()).await.unwrap();
+    assert_eq!(consumer.state().state, FiberState::Pending);
+}
+
+#[tokio::test]
+async fn root_shutdown_releases_driver_and_rejects_new_work() {
+    for _ in 0..8 {
+        let marker = Arc::new(());
+        let weak = Arc::downgrade(&marker);
+        let sink_marker = marker.clone();
+        let sink = Arc::new(move |_error: Arc<CordisError>| {
+            let _ = &sink_marker;
+        });
+        drop(marker);
+        let ctx = Ctx::root_with_sink(tokio::runtime::Handle::current(), sink);
+        let root = ctx.root_view().unwrap();
+        ctx.provide(Dep1).unwrap();
+        soon(ctx.shutdown()).await.unwrap();
+        soon(ctx.shutdown()).await.unwrap();
+        assert!(matches!(ctx.provide(Dep2), Err(CordisError::Closed)));
+        assert!(matches!(
+            ctx.effect(|| Effect::Done),
+            Err(CordisError::Closed)
+        ));
+        let rejected = ctx.plugin(simple("late", |_ctx: &Ctx| {
+            Box::pin(async { Ok(Effect::Done) })
+        }));
+        assert!(soon(async { (&rejected).await }).await.is_err());
+        assert!(soon(root.restart()).await.is_err());
+        soon(root.dispose()).await.unwrap();
+        drop(rejected);
+        drop(root);
+        assert!(ctx.root_view().is_none());
+        drop(ctx);
+        assert!(weak.upgrade().is_none(), "shutdown leaked root Shared");
+    }
+}
+
+#[tokio::test]
+async fn shutdown_deadline_can_resume_after_noncooperative_apply() {
+    let ctx = Ctx::root().unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let view = ctx.plugin(simple("slow", {
+        let started = started.clone();
+        let release = release.clone();
+        move |_ctx: &Ctx| {
+            let started = started.clone();
+            let release = release.clone();
+            Box::pin(async move {
+                started.notify_one();
+                release.notified().await;
+                Ok(Effect::Done)
+            })
+        }
+    }));
+    soon(started.notified()).await;
+    let timeout = ctx
+        .shutdown_with_timeout(Duration::from_millis(20))
+        .await
+        .unwrap_err();
+    assert!(matches!(timeout, DisposeWaitError::TimedOut { .. }));
+    assert!(soon(view.restart()).await.is_err());
+    release.notify_one();
+    soon(ctx.shutdown()).await.unwrap();
+    assert_eq!(view.state().state, FiberState::Disposed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_shutdown_and_dispose_share_completion() {
+    let ctx = Ctx::root().unwrap();
+    let root = ctx.root_view().unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    ctx.effect({
+        let started = started.clone();
+        let release = release.clone();
+        move || {
+            Effect::AsyncDisposer(Box::new(move || {
+                Box::pin(async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok(())
+                })
+            }))
+        }
+    })
+    .unwrap();
+    let first = ctx.shutdown();
+    let second = ctx.shutdown();
+    let dispose = root.dispose();
+    soon(started.notified()).await;
+    assert!(soon(root.restart()).await.is_err());
+    release.notify_one();
+    let (a, b, c) = soon(async { tokio::join!(first, second, dispose) }).await;
+    a.unwrap();
+    b.unwrap();
+    c.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_shutdown_and_dispose_always_converge() {
+    for iteration in 0..2000 {
+        let ctx = Ctx::root().unwrap();
+        let root = ctx.root_view().unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let shutdown = tokio::spawn({
+            let barrier = barrier.clone();
+            async move {
+                barrier.wait().await;
+                ctx.shutdown().await
+            }
+        });
+        let dispose = tokio::spawn({
+            let barrier = barrier.clone();
+            async move {
+                barrier.wait().await;
+                root.dispose().await
+            }
+        });
+        barrier.wait().await;
+        let (shutdown, dispose) = tokio::time::timeout(Duration::from_millis(250), async {
+            tokio::join!(shutdown, dispose)
+        })
+        .await
+        .unwrap_or_else(|_| panic!("shutdown/dispose stalled in iteration {iteration}"));
+        shutdown.unwrap().unwrap();
+        dispose.unwrap().unwrap();
+    }
+}
+
+#[tokio::test]
 async fn cancel_during_loading() {
     let ctx = Ctx::root().unwrap();
     let observed = Arc::new(AtomicUsize::new(0));
@@ -1747,7 +1987,7 @@ async fn disposer_drop_is_cancel_safe() {
     .await;
     assert_eq!(counter.load(Ordering::SeqCst), 1);
     // fiber 卸载 join 已缓存终态,不重跑
-    ctx.root_view().dispose().await.unwrap();
+    ctx.root_view().unwrap().dispose().await.unwrap();
     assert_eq!(counter.load(Ordering::SeqCst), 1);
 }
 
