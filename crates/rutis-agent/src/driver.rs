@@ -591,25 +591,28 @@ enum Chunk {
     Part(Result<StreamPart, AiMuxError>),
 }
 
-/// 优先使用 API 状态和 provider code。只有缺少 code 时才对具体上下文
-/// 长度错误文案做窄匹配；限流、认证、传输和取消绝不触发历史缩减。
+/// 已知 provider code 可直接判定；通用类别 code（例如
+/// `invalid_request_error`）仍需检查具体文案。限流、认证和服务错误
+/// 不进入文案回退，codex 的 2xx in-band 失败则可由已知 code 命中。
 pub(crate) fn is_context_overflow(err: &AiMuxError) -> bool {
     match err {
         AiMuxError::ApiCall(api) => {
-            if api
-                .status_code
-                .is_some_and(|status| !matches!(status, 400 | 413 | 422))
-            {
-                return false;
-            }
-            if let Some(code) = &api.provider_code {
-                return matches!(
+            if api.provider_code.as_ref().is_some_and(|code| {
+                matches!(
                     code.to_ascii_lowercase().as_str(),
                     "context_length_exceeded"
                         | "context_window_exceeded"
                         | "prompt_too_long"
                         | "input_tokens_exceeded"
-                );
+                )
+            }) {
+                return true;
+            }
+            if api
+                .status_code
+                .is_some_and(|status| !matches!(status, 400 | 413 | 422))
+            {
+                return false;
             }
             context_length_message(&api.message)
         }
@@ -626,6 +629,7 @@ fn context_length_message(message: &str) -> bool {
         "context length exceeded",
         "context window exceeded",
         "maximum context window",
+        "maximum context length",
         "prompt is too long",
         "request too large for model",
     ]
@@ -943,6 +947,23 @@ mod tests {
             ..Default::default()
         })));
         for message in [
+            "prompt is too long: 208971 tokens > 200000 maximum",
+            "This model's maximum context length is 4097 tokens",
+        ] {
+            assert!(is_context_overflow(&AiMuxError::ApiCall(ApiCallError {
+                status_code: Some(400),
+                provider_code: Some("invalid_request_error".into()),
+                message: message.into(),
+                ..Default::default()
+            })));
+        }
+        assert!(is_context_overflow(&AiMuxError::ApiCall(ApiCallError {
+            status_code: Some(200),
+            provider_code: Some("context_length_exceeded".into()),
+            message: "response.failed".into(),
+            ..Default::default()
+        })));
+        for message in [
             "rate limit exceeded",
             "context canceled",
             "network timeout, retry later",
@@ -955,6 +976,12 @@ mod tests {
             status_code: Some(429),
             provider_code: Some("rate_limit_exceeded".into()),
             message: "context length exceeded".into(),
+            ..Default::default()
+        })));
+        assert!(!is_context_overflow(&AiMuxError::ApiCall(ApiCallError {
+            status_code: Some(500),
+            provider_code: Some("invalid_request_error".into()),
+            message: "maximum context length".into(),
             ..Default::default()
         })));
     }
@@ -1069,6 +1096,8 @@ mod tests {
     /// 上下文超限仅缩短重试请求；成功后原始历史仍可从文件恢复。
     #[tokio::test]
     async fn context_overflow_triggers_auto_compact_then_succeeds() {
+        use aimux_core::error::ApiCallError;
+
         struct OverflowOnce {
             inner: Arc<ScriptedLlm>,
             hit: AtomicBool,
@@ -1092,9 +1121,12 @@ mod tests {
                 o: &CallOptions,
             ) -> Result<aimux_core::result::StreamResult, AiMuxError> {
                 if !self.hit.swap(true, Ordering::SeqCst) {
-                    return Err(AiMuxError::InvalidArgument(
-                        "400: prompt is too long, context length exceeded".into(),
-                    ));
+                    return Err(AiMuxError::ApiCall(ApiCallError {
+                        status_code: Some(400),
+                        provider_code: Some("invalid_request_error".into()),
+                        message: "This model's maximum context length is 4097 tokens".into(),
+                        ..Default::default()
+                    }));
                 }
                 self.inner.do_stream(o).await
             }
