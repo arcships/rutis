@@ -75,6 +75,17 @@ pub struct ToolRegistry {
     handle: tokio::runtime::Handle,
 }
 
+/// Dropping `execute` must also cancel its spawned runner. Tokio dropping a bare
+/// JoinHandle detaches the task; abort requests cooperative cancellation at
+/// the next await and cannot interrupt synchronous code that never yields.
+struct AbortOnDrop(tokio::task::JoinHandle<Result<Value, String>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 impl ToolRegistry {
     pub(crate) fn new(handle: tokio::runtime::Handle, defs: Vec<ToolDef>) -> Self {
         Self {
@@ -129,12 +140,15 @@ impl ToolRegistry {
             Ok(fut) => fut,
             Err(p) => return ToolOutput::err(format!("error: {}", panic_message(&p))),
         };
-        let join = self.handle.spawn(fut);
+        let mut join = AbortOnDrop(self.handle.spawn(fut));
         let outcome = tokio::select! {
+            biased;
+            out = &mut join.0 => out,
             _ = cancel.cancelled() => {
+                join.0.abort();
+                let _ = (&mut join.0).await;
                 return ToolOutput::err("error: tool execution cancelled".to_string())
             }
-            out = join => out,
         };
         match outcome {
             Ok(Ok(value)) => ToolOutput {
@@ -194,5 +208,124 @@ impl Plugin for ToolsPlugin {
             ctx.provide_as(tools_key(), registry)?;
             Ok(Effect::Done)
         })
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use crate::scripted::tool_call;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn cancelled_or_dropped_execute_aborts_async_runner() {
+        for drop_caller in [false, true] {
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let wrote = Arc::new(AtomicBool::new(false));
+            let def = ToolDef::new("waiting", "wait", serde_json::json!({}), {
+                let started = started.clone();
+                let release = release.clone();
+                let wrote = wrote.clone();
+                move |_| {
+                    let started = started.clone();
+                    let release = release.clone();
+                    let wrote = wrote.clone();
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        wrote.store(true, Ordering::SeqCst);
+                        Ok(Value::Null)
+                    }
+                }
+            });
+            let registry = Arc::new(ToolRegistry::new(
+                tokio::runtime::Handle::current(),
+                vec![def],
+            ));
+            let cancel = CancellationToken::new();
+            let task = tokio::spawn({
+                let registry = registry.clone();
+                let cancel = cancel.clone();
+                async move {
+                    registry
+                        .execute(&tool_call("id", "waiting", Value::Null), &cancel)
+                        .await
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(2), started.notified())
+                .await
+                .unwrap();
+            if drop_caller {
+                task.abort();
+                assert!(task.await.is_err());
+            } else {
+                cancel.cancel();
+                let result = task.await.unwrap();
+                assert!(!result.ok);
+                assert!(result.output.contains("cancelled"));
+            }
+            release.notify_one();
+            tokio::task::yield_now().await;
+            assert!(!wrote.load(Ordering::SeqCst));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_bash_stops_background_side_effect() {
+        let dir = std::env::temp_dir().join(format!(
+            "rutis-bash-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let started = dir.join("started");
+        let late = dir.join("late");
+        let command = format!(
+            "echo started > '{}'; (sleep 0.3; echo late > '{}') & wait",
+            started.display(),
+            late.display()
+        );
+        let registry = Arc::new(ToolRegistry::new(
+            tokio::runtime::Handle::current(),
+            vec![bash::bash_tool()],
+        ));
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn({
+            let registry = registry.clone();
+            let cancel = cancel.clone();
+            async move {
+                registry
+                    .execute(
+                        &tool_call(
+                            "id",
+                            "bash",
+                            serde_json::json!({"command": command, "description": "test cancellation"}),
+                        ),
+                        &cancel,
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        cancel.cancel();
+        assert!(!task.await.unwrap().ok);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            !late.exists(),
+            "background descendant survived cancellation"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
