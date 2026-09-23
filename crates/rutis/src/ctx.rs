@@ -7,18 +7,23 @@ use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 use crate::bus::EventBus;
+use crate::diagnostics::{
+    DependencyDiagnostics, DependencyStatus, PluginDiagnostics, ResolvedDependency,
+    RuntimeDiagnostics, ServiceAccess,
+};
 use crate::effect::{Disposer, Effect, EffectRecord};
 use crate::error::{default_sink, CordisError, ErrorSink};
 use crate::fiber::{
     join_task, spawn_fiber, DisposeWaitError, FiberInner, FiberState, FiberView, Intent,
     TransitionTask,
 };
-use crate::key::{ScopeId, TypeKey};
+use crate::key::{InstanceId, ScopeId, TypeKey};
 use crate::registry::{Binding, CheckFn, Registry, StoredValue};
 use crate::Plugin;
 use crate::PluginFactory;
 
 pub(crate) struct Shared {
+    pub admission: Mutex<()>,
     pub handle: Handle,
     pub bus: EventBus,
     pub registry: Registry,
@@ -33,11 +38,20 @@ pub(crate) struct CtxInner {
     pub(crate) parent: Option<Ctx>,
     pub(crate) fiber: Weak<FiberInner>,
     pub(crate) isolate: Option<(TypeKey, ScopeId)>,
+    pub(crate) instance: InstanceId,
 }
 
 /// 上下文 = `Arc<CtxInner>`(所有权模型:Clone 廉价;isolate/plugin 返回共享内核的新 Ctx)。
 #[derive(Clone)]
 pub struct Ctx(Arc<CtxInner>);
+
+struct EffectFactoryLease(Arc<FiberInner>);
+
+impl Drop for EffectFactoryLease {
+    fn drop(&mut self) {
+        self.0.finish_event();
+    }
+}
 
 impl Ctx {
     pub(crate) fn new_child(
@@ -45,21 +59,28 @@ impl Ctx {
         parent: &Ctx,
         fiber: Weak<FiberInner>,
         isolate: Option<(TypeKey, ScopeId)>,
+        instance: InstanceId,
     ) -> Self {
         Self(Arc::new(CtxInner {
             shared,
             parent: Some(parent.clone()),
             fiber,
             isolate,
+            instance,
         }))
     }
 
-    pub(crate) fn new_root(shared: Arc<Shared>, fiber: Weak<FiberInner>) -> Self {
+    pub(crate) fn new_root(
+        shared: Arc<Shared>,
+        fiber: Weak<FiberInner>,
+        instance: InstanceId,
+    ) -> Self {
         Self(Arc::new(CtxInner {
             shared,
             parent: None,
             fiber,
             isolate: None,
+            instance,
         }))
     }
 
@@ -69,6 +90,66 @@ impl Ctx {
 
     pub(crate) fn shared(&self) -> &Arc<Shared> {
         &self.0.shared
+    }
+
+    /// Identity of the fiber owning this context. Isolated contexts retain it.
+    pub fn instance(&self) -> InstanceId {
+        self.0.instance
+    }
+
+    /// True only while a live ancestor fiber owns this identity.
+    pub(crate) fn in_instance(&self, id: InstanceId) -> bool {
+        let mut current = self.0.fiber.upgrade();
+        while let Some(fiber) = current {
+            if fiber.instance == id {
+                return true;
+            }
+            current = fiber.parent_fiber.as_ref().and_then(Weak::upgrade);
+        }
+        false
+    }
+
+    pub(crate) fn instance_owner(&self, id: InstanceId) -> Option<Arc<FiberInner>> {
+        let mut current = self.0.fiber.upgrade();
+        while let Some(fiber) = current {
+            if fiber.instance == id {
+                return Some(fiber);
+            }
+            current = fiber.parent_fiber.as_ref().and_then(Weak::upgrade);
+        }
+        None
+    }
+
+    pub(crate) fn check_instance(&self, key: &TypeKey) -> Result<(), CordisError> {
+        if let Some(id) = key.instance_id() {
+            if !self.in_instance(id) {
+                return Err(CordisError::InstanceOutOfScope { instance: id });
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn in_instance_key(&self, key: &TypeKey) -> bool {
+        key.instance_id().is_none_or(|id| self.in_instance(id))
+    }
+
+    pub(crate) fn subtree_closing(&self) -> bool {
+        let mut current = self.0.fiber.upgrade();
+        while let Some(fiber) = current {
+            if fiber.closing.load(Ordering::SeqCst) {
+                return true;
+            }
+            current = fiber.parent_fiber.as_ref().and_then(Weak::upgrade);
+        }
+        false
+    }
+
+    pub(crate) fn registration_open(&self) -> Result<(), CordisError> {
+        if self.0.shared.closing.load(Ordering::SeqCst) || self.subtree_closing() {
+            Err(CordisError::Closed)
+        } else {
+            Ok(())
+        }
     }
 
     pub fn handle(&self) -> &Handle {
@@ -100,6 +181,7 @@ impl Ctx {
     /// 注入构造 + 自定义 ErrorSink。
     pub fn root_with_sink(handle: Handle, sink: ErrorSink) -> Ctx {
         let shared = Arc::new(Shared {
+            admission: Mutex::new(()),
             handle,
             bus: EventBus::new(),
             registry: Registry::new(),
@@ -122,10 +204,87 @@ impl Ctx {
         current.0.fiber.upgrade().map(FiberView::from_inner)
     }
 
+    /// Read-only snapshot of live fibers and services; no plugin callback runs.
+    pub fn diagnostics(&self) -> RuntimeDiagnostics {
+        let mut plugins = Vec::new();
+        if let Some(root) = self.root_view() {
+            let mut pending = vec![root.inner];
+            while let Some(fiber) = pending.pop() {
+                pending.extend(
+                    fiber
+                        .children
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter_map(Weak::upgrade),
+                );
+                let snapshot = fiber.state_snapshot();
+                let injects = fiber
+                    .declared_injects
+                    .iter()
+                    .map(|key| {
+                        let scope = fiber.ctx.scope_for(key);
+                        let status = if !fiber.ctx.in_instance_key(key) {
+                            DependencyStatus::OutOfScope
+                        } else {
+                            self.0
+                                .shared
+                                .registry
+                                .dependency_status(key, scope.as_ref())
+                        };
+                        DependencyDiagnostics {
+                            key: key.clone(),
+                            scope: scope.as_ref().map(|s| s.to_string()),
+                            status,
+                        }
+                    })
+                    .collect();
+                let resolved_dependencies = fiber
+                    .last_deps
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|deps| {
+                        deps.iter()
+                            .map(|(provider, generation, key, scope)| ResolvedDependency {
+                                key: key.clone(),
+                                scope: scope.as_ref().map(|s| s.to_string()),
+                                provider: *provider,
+                                generation: *generation,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                plugins.push(PluginDiagnostics {
+                    id: fiber.id,
+                    instance: fiber.instance,
+                    parent: fiber
+                        .parent_fiber
+                        .as_ref()
+                        .and_then(Weak::upgrade)
+                        .map(|p| p.id),
+                    name: fiber.name.clone(),
+                    state: snapshot.state,
+                    generation: snapshot.generation,
+                    error: snapshot.error,
+                    injects,
+                    resolved_dependencies,
+                    accesses: fiber.accesses.lock().unwrap().clone(),
+                });
+            }
+        }
+        RuntimeDiagnostics {
+            shutting_down: self.0.shared.closing.load(Ordering::SeqCst),
+            plugins,
+            bindings: self.0.shared.registry.bindings_snapshot(),
+        }
+    }
+
     /// 最终关闭 root。重复或并发调用共享同一完成结果；现有 `dispose`
     /// 仍可 `restart`。关闭会拒绝新注册并等待当前装载、子树与清理完成。
     /// 不协作的代码可能使等待无限延长，可用 `shutdown_with_timeout` 限制等待。
     pub fn shutdown(&self) -> crate::BoxFuture<'static, Result<(), Arc<CordisError>>> {
+        let _admission = self.0.shared.admission.lock().unwrap();
         let task = {
             let mut slot = self.0.shared.shutdown_task.lock().unwrap();
             if let Some(task) = slot.as_ref() {
@@ -204,6 +363,7 @@ impl Ctx {
             self,
             self.0.fiber.clone(),
             Some((key.into(), Arc::from(label))),
+            self.instance(),
         )
     }
 
@@ -223,29 +383,58 @@ impl Ctx {
     ) -> Option<Arc<T>> {
         let key = key.into();
         let scope = self.scope_for(&key);
-        let binding = self.0.shared.registry.lookup(&key, scope.as_ref())?;
-        let provider = binding.provider.upgrade()?;
-        let self_access = self.in_subtree_of(&provider);
-        if !self_access {
-            match self.0.fiber.upgrade() {
-                None => return None,
-                Some(accessor)
-                    if matches!(
-                        accessor.state(),
-                        FiberState::Unloading | FiberState::Disposed
-                    ) =>
-                {
-                    return None;
-                }
-                _ => {}
-            }
-            let visible = provider.state() == FiberState::Active
-                && !binding.removing.load(std::sync::atomic::Ordering::SeqCst);
-            if !visible {
+        let out_of_scope = !self.in_instance_key(&key);
+        let mut found = None;
+        let result = (|| {
+            if out_of_scope {
                 return None;
             }
+            let binding = self.0.shared.registry.lookup(&key, scope.as_ref())?;
+            let provider = binding.provider.upgrade()?;
+            let self_access = self.in_subtree_of(&provider);
+            found = Some((binding.provider_id, binding.provider_gen, !self_access));
+            if !self_access {
+                match self.0.fiber.upgrade() {
+                    None => return None,
+                    Some(accessor)
+                        if matches!(
+                            accessor.state(),
+                            FiberState::Unloading | FiberState::Disposed
+                        ) =>
+                    {
+                        return None
+                    }
+                    _ => {}
+                }
+                let visible = provider.state() == FiberState::Active
+                    && !binding.removing.load(std::sync::atomic::Ordering::SeqCst);
+                if !visible {
+                    return None;
+                }
+            }
+            binding.value.downcast::<T>()
+        })();
+        if let Some(fiber) = self.0.fiber.upgrade() {
+            if fiber.state() == FiberState::Loading {
+                let (provider, generation, external) = found
+                    .map(|(p, g, x)| (Some(p), Some(g), x))
+                    .unwrap_or((None, None, false));
+                let access = ServiceAccess {
+                    key: key.clone(),
+                    scope: scope.as_ref().map(|s| s.to_string()),
+                    provider,
+                    generation,
+                    declared: fiber.declared_injects.contains(&key),
+                    external,
+                    out_of_scope,
+                };
+                let mut accesses = fiber.accesses.lock().unwrap();
+                if !accesses.contains(&access) {
+                    accesses.push(access);
+                }
+            }
         }
-        binding.value.downcast::<T>()
+        result
     }
 
     fn in_subtree_of(&self, other: &Arc<FiberInner>) -> bool {
@@ -289,6 +478,7 @@ impl Ctx {
         value: Arc<T>,
         check: Option<CheckFn>,
     ) -> Result<Disposer, CordisError> {
+        self.check_instance(&key)?;
         if !key.has_type::<T>() {
             return Err(CordisError::Validation {
                 issues: vec![format!(
@@ -299,71 +489,46 @@ impl Ctx {
                 )],
             });
         }
-        if self.0.shared.closing.load(Ordering::SeqCst) {
-            return Err(CordisError::Closed);
-        }
-        let fiber = self.0.fiber.upgrade().ok_or(CordisError::InactiveEffect)?;
-        {
-            // 重入报错检查先于重复注册检查(TS assertActive 语义,fiber.ts:434-436)
-            let tr = fiber.transition.lock().unwrap();
-            if matches!(tr.state, FiberState::Unloading | FiberState::Disposed) {
-                return Err(CordisError::InactiveEffect);
-            }
-        }
         let scope = self.scope_for(&key);
-        let provider_gen = {
-            let tr = fiber.transition.lock().unwrap();
-            tr.generation
-        };
-        // 同步原子插入为主操作(评审 #9):重复注册直接把错误返给调用方,
-        // 不再丢进 error sink 后假报 Ok
-        let stored = self.0.shared.registry.insert_binding(
-            key.clone(),
-            scope.clone(),
-            Binding {
-                value: StoredValue::new(value),
-                provider: Arc::downgrade(&fiber),
-                provider_id: fiber.id,
-                provider_gen,
-                check,
-                removing: std::sync::atomic::AtomicBool::new(false),
-            },
-        )?;
-        fiber
-            .provided
-            .lock()
-            .unwrap()
-            .push((key.clone(), scope.clone()));
-        if fiber.state() == FiberState::Active {
-            self.0.shared.registry.notify_key_changed(&key);
-        }
-
-        // 清理 effect 只负责删除:驱逐该三元组精确匹配的消费者并最终摘除
         let shared = self.0.shared.clone();
-        let pid = fiber.id;
-        let provider = Arc::downgrade(&fiber);
-        let evict_scope = scope.clone();
-        let evict_key = key.clone();
-        match self.effect(move || {
-            Effect::AsyncDisposer(Box::new(move || {
-                let shared = shared.clone();
+        self.register_internal_effect(move |fiber, provider_gen, state| {
+            // Admission and the fiber transition lock cover both the binding and
+            // its cleanup record, so shutdown cannot miss a committed service.
+            shared.registry.insert_binding(
+                key.clone(),
+                scope.clone(),
+                Binding {
+                    value: StoredValue::new(value),
+                    provider: Arc::downgrade(fiber),
+                    provider_id: fiber.id,
+                    provider_gen,
+                    check,
+                    check_status: Mutex::new(None),
+                    removing: AtomicBool::new(false),
+                },
+            )?;
+            fiber
+                .provided
+                .lock()
+                .unwrap()
+                .push((key.clone(), scope.clone()));
+            let cleanup_shared = shared.clone();
+            let provider = Arc::downgrade(fiber);
+            let pid = fiber.id;
+            let evict_scope = scope.clone();
+            let evict_key = key.clone();
+            if state == FiberState::Active {
+                shared.registry.notify_key_changed(&key);
+            }
+            Ok(Effect::AsyncDisposer(Box::new(move || {
+                let shared = cleanup_shared.clone();
                 let provider = provider.clone();
                 let scope = evict_scope.clone();
                 Box::pin(async move {
                     evict_and_finalize(&shared, provider, pid, provider_gen, evict_key, scope).await
                 })
-            }))
-        }) {
-            Ok(disposer) => Ok(disposer),
-            Err(e) => {
-                // 极窄竞态兜底:插入后 fiber 进入卸载——回滚自己的那份插入
-                self.0
-                    .shared
-                    .registry
-                    .finalize_binding_if(key.clone(), scope, &stored);
-                Err(e)
-            }
-        }
+            })))
+        })
     }
 
     /// 注册清理效应(D23):`f` 立即执行,返回的清理在卸载时 LIFO 执行。
@@ -378,16 +543,74 @@ impl Ctx {
         })))
     }
 
+    /// Framework-owned registration: admission, state check, insertion and
+    /// cleanup ownership commit at one synchronous point. `f` must not call
+    /// user code or try to acquire the admission lock again.
+    pub(crate) fn register_internal_effect(
+        &self,
+        f: impl FnOnce(&Arc<FiberInner>, u64, FiberState) -> Result<Effect, CordisError>,
+    ) -> Result<Disposer, CordisError> {
+        let _admission = self.0.shared.admission.lock().unwrap();
+        self.registration_open()?;
+        let fiber = self.0.fiber.upgrade().ok_or(CordisError::InactiveEffect)?;
+        let tr = fiber.transition.lock().unwrap();
+        if matches!(tr.state, FiberState::Unloading | FiberState::Disposed) {
+            return Err(CordisError::InactiveEffect);
+        }
+        let effect = f(&fiber, tr.generation, tr.state)?;
+        let record = EffectRecord::new(effect, self.0.fiber.clone());
+        fiber.effects.lock().unwrap().push(record.clone());
+        drop(tr);
+        let handle = self.handle().clone();
+        Ok(Disposer::new(Box::new(move || {
+            let record = record.clone();
+            let handle = handle.clone();
+            Box::pin(async move { record.drain(&handle).await })
+        })))
+    }
+
+    fn register_mount_effect(
+        &self,
+        child: &Arc<FiberInner>,
+        make: impl FnOnce() -> Effect,
+    ) -> Result<Arc<EffectRecord>, CordisError> {
+        let _admission = self.0.shared.admission.lock().unwrap();
+        self.registration_open()?;
+        if child.closing.load(Ordering::SeqCst) || !child.alive.load(Ordering::SeqCst) {
+            return Err(CordisError::Closed);
+        }
+        let parent = self.0.fiber.upgrade().ok_or(CordisError::InactiveEffect)?;
+        let tr = parent.transition.lock().unwrap();
+        if matches!(tr.state, FiberState::Unloading | FiberState::Disposed) {
+            return Err(CordisError::InactiveEffect);
+        }
+        let record = EffectRecord::new(make(), self.0.fiber.clone());
+        parent.effects.lock().unwrap().push(record.clone());
+        *child.mount.lock().unwrap() = Some(record.clone());
+        Ok(record)
+    }
+
     /// `effect` 的内部形态:返回记录本体,供 mount 登记等持有引用。
     /// Disposer 语义不变:drop 不触发清理,fiber 卸载仍兜底(D28)。
     pub(crate) fn register_effect(
         &self,
         f: impl FnOnce() -> Effect,
     ) -> Result<Arc<EffectRecord>, CordisError> {
-        if self.0.shared.closing.load(Ordering::SeqCst) {
-            return Err(CordisError::Closed);
-        }
         let fiber = self.0.fiber.upgrade().ok_or(CordisError::InactiveEffect)?;
+        let lease = {
+            let _admission = self.0.shared.admission.lock().unwrap();
+            let tr = fiber.transition.lock().unwrap();
+            if self.0.shared.closing.load(Ordering::SeqCst)
+                || (self.subtree_closing() && tr.state != FiberState::Loading)
+            {
+                return Err(CordisError::Closed);
+            }
+            if matches!(tr.state, FiberState::Unloading | FiberState::Disposed) {
+                return Err(CordisError::InactiveEffect);
+            }
+            fiber.begin_event();
+            EffectFactoryLease(fiber.clone())
+        };
         // factory 锁外执行;但"状态检查 + effects 入队"必须在同一临界区
         //(transition → effects 嵌套,锁序无反向):否则检查通过后驱动恰好
         // 卸载取走 effects,新记录漏掉本轮清理而泄漏(评审 P1)
@@ -395,9 +618,7 @@ impl Ctx {
         let handle = self.handle().clone();
         {
             let tr = fiber.transition.lock().unwrap();
-            if self.0.shared.closing.load(Ordering::SeqCst)
-                || matches!(tr.state, FiberState::Unloading | FiberState::Disposed)
-            {
+            if matches!(tr.state, FiberState::Unloading | FiberState::Disposed) {
                 drop(tr);
                 // 生命周期已越过登记点:f() 可能已有副作用(如插入了监听器),
                 // 立即排干该记录的清理并返失败
@@ -407,15 +628,13 @@ impl Ctx {
                     if let Err(e) = record.drain(&drain_handle).await {
                         sink(e);
                     }
+                    drop(lease);
                 });
-                return Err(if self.0.shared.closing.load(Ordering::SeqCst) {
-                    CordisError::Closed
-                } else {
-                    CordisError::InactiveEffect
-                });
+                return Err(CordisError::InactiveEffect);
             }
             fiber.effects.lock().unwrap().push(record.clone());
         }
+        drop(lease);
         Ok(record)
     }
 
@@ -469,11 +688,22 @@ impl Ctx {
         }
         let child = view.clone();
         let sink = self.error_sink();
-        let registered = self.register_effect(move || {
+        let registered = self.register_mount_effect(&fiber, move || {
             Effect::AsyncDisposer(Box::new(move || {
                 let child = child.clone();
                 let sink = sink.clone();
                 Box::pin(async move {
+                    let closing_task = {
+                        let _admission = child.inner.ctx.shared().admission.lock().unwrap();
+                        child.inner.shutdown_inner.lock().unwrap().clone()
+                    };
+                    if let Some(task) = closing_task {
+                        // Wait for the child's own cleanup, not its public
+                        // shutdown result: the latter waits for this mount to
+                        // detach and would form a parent/child cycle.
+                        let _ = join_task(&task).await;
+                        return Ok(());
+                    }
                     // 级联 dispose:parent 卸载时子尚未处置,错误仅经 sink 可见;
                     // 子已 Disposed(调用方已从 dispose() 收到同一错误)则不再
                     // 重复上报——0.2.1 子终态退出也会 drain 本记录
@@ -489,15 +719,16 @@ impl Ctx {
         });
         match registered {
             Ok(record) => {
-                // 子终态退出时经此引用 drain,记录从本 fiber 的 effects
-                // 列表自摘(0.2.1:长寿 parent 下瞬态子插件不残留 mount 记录)
-                *fiber.mount.lock().unwrap() = Some(record);
+                // Mount ownership was committed under the admission lock.
+                drop(record);
                 fiber.post(Intent::RefreshDeps);
             }
             Err(_) => {
                 // parent 已失活:处置子 fiber,且不再触发装载(评审 #10:
                 // 避免 Dispose 之后入队的重载意图无人处理)
-                if self.0.shared.closing.load(Ordering::SeqCst) {
+                if fiber.closing.load(Ordering::SeqCst) {
+                    // The subtree coordinator already owns the terminal intent.
+                } else if self.0.shared.closing.load(Ordering::SeqCst) {
                     fiber.post(Intent::Shutdown(TransitionTask::new()));
                 } else {
                     fiber.post(Intent::Dispose);
@@ -560,7 +791,20 @@ async fn evict_and_finalize(
         .consumers_of(&key, (pid, provider_gen, key.clone(), scope.clone()));
     let mut tasks = Vec::new();
     for fiber in &consumers {
+        if fiber.id == pid {
+            continue;
+        }
         fiber.cancel_current();
+        if fiber.closing.load(Ordering::SeqCst) {
+            let task = {
+                let _admission = shared.admission.lock().unwrap();
+                fiber.shutdown_inner.lock().unwrap().clone()
+            };
+            if let Some(task) = task {
+                tasks.push(task);
+            }
+            continue;
+        }
         let task = TransitionTask::new();
         // post_join 返回 false 时任务已在 post 内即刻完成(评审 #3)
         fiber.post_join(task.clone(), Intent::RefreshDepsJoin);

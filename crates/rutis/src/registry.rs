@@ -2,6 +2,7 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 
+use crate::diagnostics::{BindingDiagnostics, DependencyStatus};
 use crate::error::CordisError;
 use crate::fiber::{FiberInner, FiberState, Intent, PluginId};
 use crate::key::{ScopeId, TypeKey};
@@ -32,6 +33,7 @@ pub(crate) struct Binding {
     pub provider_id: PluginId,
     pub provider_gen: u64,
     pub check: Option<CheckFn>,
+    pub check_status: Mutex<Option<DependencyStatus>>,
     /// 摘除已开始(严格解析立即失败;绑定保留至消费者排干,供 provider 子树自访问,§四)。
     pub removing: std::sync::atomic::AtomicBool,
 }
@@ -57,6 +59,14 @@ impl Registry {
             bindings: Mutex::new(HashMap::new()),
             inject_index: Mutex::new(HashMap::new()),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn table_counts(&self) -> (usize, usize) {
+        (
+            self.bindings.lock().unwrap().len(),
+            self.inject_index.lock().unwrap().len(),
+        )
     }
 
     pub(crate) fn insert_binding(
@@ -86,6 +96,49 @@ impl Registry {
     pub(crate) fn lookup(&self, key: &TypeKey, scope: Option<&ScopeId>) -> Option<Arc<Binding>> {
         let bindings = self.bindings.lock().unwrap();
         bindings.get(&(key.clone(), scope.cloned())).cloned()
+    }
+
+    pub(crate) fn bindings_snapshot(&self) -> Vec<BindingDiagnostics> {
+        self.bindings
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|((key, scope), binding)| BindingDiagnostics {
+                key: key.clone(),
+                scope: scope.as_ref().map(|s| s.to_string()),
+                provider: binding.provider_id,
+                generation: binding.provider_gen,
+                removing: binding.removing.load(std::sync::atomic::Ordering::SeqCst),
+            })
+            .collect()
+    }
+
+    pub(crate) fn dependency_status(
+        &self,
+        key: &TypeKey,
+        scope: Option<&ScopeId>,
+    ) -> DependencyStatus {
+        let Some(binding) = self.lookup(key, scope) else {
+            return DependencyStatus::Missing;
+        };
+        if binding.removing.load(std::sync::atomic::Ordering::SeqCst) {
+            return DependencyStatus::Removing;
+        }
+        let Some(provider) = binding.provider.upgrade() else {
+            return DependencyStatus::Missing;
+        };
+        let state = provider.state();
+        if state != FiberState::Active {
+            return DependencyStatus::ProviderInactive(state);
+        }
+        if binding.check.is_some() {
+            return binding
+                .check_status
+                .lock()
+                .unwrap()
+                .unwrap_or(DependencyStatus::CheckPending);
+        }
+        DependencyStatus::Ready
     }
 
     /// 标记摘除开始:严格解析立即失败;绑定保留至 [`Registry::finalize_binding`]
@@ -212,8 +265,13 @@ impl Registry {
         if let Some(check) = &binding.check {
             // check() 是用户回调:panic 视为不就绪(TS 语义:记日志并删除,
             // fiber.ts:695-698;评审 #6——不得杀调用方所在的驱动任务)
-            let passed =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check())).unwrap_or(false);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check()));
+            let passed = result.as_ref().copied().unwrap_or(false);
+            *binding.check_status.lock().unwrap() = Some(match result {
+                Ok(true) => DependencyStatus::Ready,
+                Ok(false) => DependencyStatus::CheckRejected,
+                Err(_) => DependencyStatus::CheckPanicked,
+            });
             if !passed {
                 return None;
             }

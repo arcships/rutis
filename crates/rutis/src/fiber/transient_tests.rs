@@ -2,7 +2,7 @@
 //! provide 的清理记录、provided 记账在长寿 root 上回到基线。
 
 use super::*;
-use crate::{BoxFuture, CordisError, Effect, Plugin};
+use crate::{BoxFuture, CordisError, Effect, Event, Listener, Plugin};
 use std::time::Duration;
 
 struct Noop;
@@ -100,4 +100,60 @@ async fn shutdown_completes_dispose_task_queued_behind_it() {
         .await
         .expect("dispose task stranded behind Shutdown")
         .unwrap();
+}
+
+struct ProbeEvent;
+impl Event for ProbeEvent {
+    const NAME: &'static str = "rutis-test-instance-churn";
+    type Value = ();
+}
+
+struct IdleListener;
+impl Listener<ProbeEvent> for IdleListener {
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a Ctx,
+        _event: &'a ProbeEvent,
+    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
+struct ChurnPlugin(Vec<TypeKey>);
+impl Plugin for ChurnPlugin {
+    fn name(&self) -> &str {
+        "churn-plugin"
+    }
+    fn injects(&self) -> &[TypeKey] {
+        &self.0
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            ctx.provide_as(TypeKey::instance::<u64>(ctx.instance()), Arc::new(1u64))?;
+            ctx.events()
+                .on_instance(ctx, ctx.instance(), IdleListener)?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+#[tokio::test]
+async fn thousand_shutdowns_reclaim_all_root_side_records() {
+    let ctx = Ctx::root().unwrap();
+    let root = ctx.weak_fiber().upgrade().unwrap();
+    let service = ctx.provide(1u32).unwrap();
+    for _ in 0..1000 {
+        let view = ctx.plugin(ChurnPlugin(vec![TypeKey::of::<u32>()]));
+        (&view).await.unwrap();
+        view.shutdown().await.unwrap();
+        assert_eq!(view.state().state, FiberState::Disposed);
+        assert!(view.inner.driver.lock().unwrap().is_none());
+        assert_eq!(root.children.lock().unwrap().len(), 0);
+        assert_eq!(root.effects.lock().unwrap().len(), 1);
+        assert_eq!(ctx.shared().registry.table_counts(), (1, 0));
+        assert_eq!(ctx.events().table_counts(), (0, 0, 0));
+        drop(view);
+    }
+    service.dispose().await.unwrap();
+    ctx.shutdown().await.unwrap();
 }

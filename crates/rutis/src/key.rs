@@ -1,6 +1,28 @@
 use std::any::TypeId;
 use std::marker::PhantomData;
+use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+/// A process-local fiber identity. IDs are never reused, including after shutdown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct InstanceId(NonZeroU64);
+
+impl InstanceId {
+    pub(crate) fn allocate() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let value = NEXT
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .expect("rutis InstanceId exhausted");
+        Self(NonZeroU64::new(value).expect("InstanceId starts at one"))
+    }
+}
+
+impl std::fmt::Display for InstanceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// 限定名(D33):双轨——静态路径零分配,动态路径(Arc)承接运行时名字。
 /// PartialEq/Eq/Hash 按**字符串内容**:Static 与 Dynamic 同名等值互通;
@@ -45,11 +67,12 @@ impl std::hash::Hash for Qualifier {
 /// D33:限定名放宽为双轨,支持运行时构造的名字(桥事件等);
 /// 代价是失去 `Copy`——克隆装载/注册路径,频率低。
 /// 携带构造时捕获的类型名,仅用于诊断(`describe`/错误消息);
-/// 相等与哈希仍只由 TypeId + 限定名决定(类型名是 TypeId 的纯函数)。
+/// 相等与哈希由 TypeId、限定名和实例号决定；类型名只供诊断。
 pub struct TypeKey {
     type_id: TypeId,
     type_name: &'static str,
     qualifier: Option<Qualifier>,
+    instance: Option<InstanceId>,
 }
 
 impl Clone for TypeKey {
@@ -58,13 +81,16 @@ impl Clone for TypeKey {
             type_id: self.type_id,
             type_name: self.type_name,
             qualifier: self.qualifier.clone(),
+            instance: self.instance,
         }
     }
 }
 
 impl PartialEq for TypeKey {
     fn eq(&self, other: &Self) -> bool {
-        self.type_id == other.type_id && self.qualifier == other.qualifier
+        self.type_id == other.type_id
+            && self.qualifier == other.qualifier
+            && self.instance == other.instance
     }
 }
 
@@ -74,15 +100,13 @@ impl std::hash::Hash for TypeKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.type_id.hash(state);
         self.qualifier.hash(state);
+        self.instance.hash(state);
     }
 }
 
 impl std::fmt::Debug for TypeKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.qualifier {
-            Some(q) => write!(f, "{}#{q:?}", self.type_name),
-            None => f.write_str(self.type_name),
-        }
+        f.write_str(&self.describe())
     }
 }
 
@@ -101,6 +125,7 @@ impl TypeKey {
             type_id: TypeId::of::<T>(),
             type_name: std::any::type_name::<T>(),
             qualifier: None,
+            instance: None,
         }
     }
 
@@ -110,6 +135,7 @@ impl TypeKey {
             type_id: TypeId::of::<T>(),
             type_name: std::any::type_name::<T>(),
             qualifier: Some(Qualifier::Static(qualifier)),
+            instance: None,
         }
     }
 
@@ -120,15 +146,36 @@ impl TypeKey {
             type_id: TypeId::of::<T>(),
             type_name: std::any::type_name::<T>(),
             qualifier: Some(Qualifier::Dynamic(name.into())),
+            instance: None,
         }
+    }
+
+    /// A service or event key owned by one fiber instance.
+    pub fn instance<T: ?Sized + 'static>(id: InstanceId) -> Self {
+        Self::of::<T>().with_instance(id)
+    }
+
+    /// Attach a fiber identity to a qualified or unqualified key.
+    pub fn with_instance(mut self, id: InstanceId) -> Self {
+        self.instance = Some(id);
+        self
+    }
+
+    /// Instance identity, if this key is scoped to a fiber subtree.
+    pub fn instance_id(&self) -> Option<InstanceId> {
+        self.instance
     }
 
     /// 诊断描述(不参与分发):类型名 + 限定名(0.2.2 起携带构造时捕获的
     /// `type_name::<T>()`,错误消息与装配图可读)。
     pub fn describe(&self) -> String {
-        match &self.qualifier {
+        let base = match &self.qualifier {
             Some(q) => format!("{}#{}", self.type_name, q.as_str()),
             None => self.type_name.to_string(),
+        };
+        match self.instance {
+            Some(id) => format!("{base}@{id}"),
+            None => base,
         }
     }
 }
@@ -189,5 +236,27 @@ mod describe_tests {
         // 相等仍只由 TypeId + 限定名决定;诊断字段不参与。
         assert_eq!(plain, TypeKey::of::<ReadableService>());
         assert_ne!(plain, keyed);
+    }
+
+    #[test]
+    fn instance_is_part_of_key_equality_hash_and_description() {
+        use std::collections::HashSet;
+        let one = InstanceId::allocate();
+        let two = InstanceId::allocate();
+        assert_ne!(one, two);
+        let a = TypeKey::keyed::<ReadableService>("main").with_instance(one);
+        let same = TypeKey::keyed_dynamic::<ReadableService>("main").with_instance(one);
+        let other = TypeKey::keyed::<ReadableService>("main").with_instance(two);
+        assert_eq!(a, same);
+        assert_ne!(a, other);
+        assert_ne!(a, TypeKey::keyed::<ReadableService>("main"));
+        assert_eq!(
+            a.describe(),
+            format!("{}#main@{one}", std::any::type_name::<ReadableService>())
+        );
+        let mut keys = HashSet::new();
+        keys.insert(a);
+        assert!(keys.contains(&same));
+        assert!(!keys.contains(&other));
     }
 }
