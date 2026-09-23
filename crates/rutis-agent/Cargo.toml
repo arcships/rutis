@@ -31,5 +31,8 @@ rutui-core = "0.1.0"
 rutui-prompt = "0.1.0"
 rutui-theme = "0.1.0"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 aimux-providers = "0.3.0"
