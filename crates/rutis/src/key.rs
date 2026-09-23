@@ -87,6 +87,14 @@ impl std::fmt::Debug for TypeKey {
 }
 
 impl TypeKey {
+    pub(crate) fn has_type<T: ?Sized + 'static>(&self) -> bool {
+        self.type_id == TypeId::of::<T>()
+    }
+
+    pub(crate) fn type_name(&self) -> &'static str {
+        self.type_name
+    }
+
     /// 类型主键(默认,无限定名)。
     pub fn of<T: ?Sized + 'static>() -> Self {
         Self {

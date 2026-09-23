@@ -228,6 +228,16 @@ impl Ctx {
         value: Arc<T>,
         check: Option<CheckFn>,
     ) -> Result<Disposer, CordisError> {
+        if !key.has_type::<T>() {
+            return Err(CordisError::Validation {
+                issues: vec![format!(
+                    "service key {} expects value of type {}, got {}",
+                    key.describe(),
+                    key.type_name(),
+                    std::any::type_name::<T>()
+                )],
+            });
+        }
         let fiber = self.0.fiber.upgrade().ok_or(CordisError::InactiveEffect)?;
         {
             // 重入报错检查先于重复注册检查(TS assertActive 语义,fiber.ts:434-436)

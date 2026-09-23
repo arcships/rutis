@@ -265,23 +265,24 @@ impl FiberInner {
         token
     }
 
-    /// 投递无完成信号的意图。驱动已退出时返回 false。
+    /// 投递无完成信号的意图。驱动已退出时返回 false；终态错误
+    /// 预留给未来可能携带完成信号的意图。
     pub(crate) fn post(&self, intent: Intent) -> bool {
         if !self.alive.load(Ordering::SeqCst) {
-            complete_intent(&intent, None);
+            complete_intent(&intent, self.transition.lock().unwrap().error.clone());
             return false;
         }
         match self.intents_tx.send(intent) {
             Ok(()) => true,
             Err(err) => {
-                complete_intent(&err.0, None);
+                complete_intent(&err.0, self.transition.lock().unwrap().error.clone());
                 false
             }
         }
     }
 
     /// 投递携带完成信号的意图。发送后复查 alive:若发送落在驱动排空之后
-    /// (该意图无人处理),任务即刻自完成——与退出排空的重复完成同值,无害
+    /// (该意图无人处理),任务即刻自完成。重复完成不会留下等待者
     ///(封住"查过 alive → 驱动退出排空 → send 才落地"的竞态,简化红线)。
     /// 自完成携带 fiber 终态错误而非凭空 Ok(评审 3:Failed 态下驱动退出,
     /// None 会把真实错误覆盖成伪装成功)。
@@ -304,7 +305,7 @@ impl FiberInner {
                 true
             }
             Err(_) => {
-                task.complete(None);
+                task.complete(self.transition.lock().unwrap().error.clone());
                 false
             }
         }
@@ -464,7 +465,8 @@ impl FiberInner {
         // 预取消(dispose/restart/驱逐)使观察 token 的插件经 ctx.cancelled()
         // 协作返回;不观察则 dispose 无限等待(协作取消限制,D27)。
         let ctx = this.ctx.clone();
-        let outcome = CatchUnwind::new(plugin.apply(&ctx)).await;
+        // async block 把创建 Future 的同步回调也放进 unwind 边界。
+        let outcome = CatchUnwind::new(async { plugin.apply(&ctx).await }).await;
         let result: Result<Effect, CordisError> = outcome.unwrap_or_else(|p| Err(panic_error(p)));
         match result {
             Ok(effect) => {
@@ -590,75 +592,140 @@ impl FiberInner {
 /// apply 与卸载天然互斥,跨代结果不会串染)。
 pub(crate) async fn drive(this: Arc<FiberInner>, mut rx: mpsc::UnboundedReceiver<Intent>) {
     while let Some(intent) = rx.recv().await {
-        match intent {
-            Intent::RefreshDeps => FiberInner::refresh_deps(&this).await,
-            Intent::RefreshDepsJoin(task) => {
-                FiberInner::refresh_deps(&this).await;
-                complete_task(&this, task);
-            }
-            // 稳定性栅栏:FIFO 排到这里时,此前入队的意图已全部处理完。
-            // 错误只认 Failed(红线):dispose 聚合错误经 dispose() 的
-            // 任务通道返回,不从 settle 漏出。
-            Intent::Settle(task) => {
-                let err = {
-                    let tr = this.transition.lock().unwrap();
-                    (tr.state == FiberState::Failed)
-                        .then(|| tr.error.clone())
-                        .flatten()
-                };
-                task.complete(err);
-            }
-            Intent::Restart(task) => {
-                let state = this.state();
-                if state == FiberState::Disposed {
-                    // 仅 root 可重启(§五 root_restart);换新代 token,
-                    // 并清除终态任务:重启后的 dispose 必须真正再卸载一轮
-                    if this.is_root {
-                        this.new_generation_token();
-                        {
-                            let mut tr = this.transition.lock().unwrap();
-                            tr.error = None;
-                            tr.terminal_task = None;
-                            FiberInner::set_state(&this, &mut tr, FiberState::Active);
-                        }
-                        this.flush_status();
-                    }
+        let current_task = intent.task().cloned();
+        let terminal_dispose = matches!(intent, Intent::Dispose) && !this.is_root;
+        let outcome = CatchUnwind::new(async {
+            match intent {
+                Intent::RefreshDeps => FiberInner::refresh_deps(&this).await,
+                Intent::RefreshDepsJoin(task) => {
+                    FiberInner::refresh_deps(&this).await;
                     complete_task(&this, task);
-                    continue;
                 }
-                if !matches!(state, FiberState::Pending) {
-                    FiberInner::unload(&this, NextState::Pending).await;
+                // 稳定性栅栏:FIFO 排到这里时,此前入队的意图已全部处理完。
+                // 错误只认 Failed(红线):dispose 聚合错误经 dispose() 的
+                // 任务通道返回,不从 settle 漏出。
+                Intent::Settle(task) => {
+                    let err = {
+                        let tr = this.transition.lock().unwrap();
+                        (tr.state == FiberState::Failed)
+                            .then(|| tr.error.clone())
+                            .flatten()
+                    };
+                    task.complete(err);
                 }
-                FiberInner::refresh_deps(&this).await;
-                complete_task(&this, task);
-            }
-            Intent::Dispose => {
-                if this.state() != FiberState::Disposed {
-                    FiberInner::unload(&this, NextState::Disposed).await;
-                }
-                let (task, err) = {
-                    let tr = this.transition.lock().unwrap();
-                    (tr.terminal_task.clone(), tr.error.clone())
-                };
-                if let Some(task) = task {
-                    let _ = task.done_tx.send(TaskDone::Done(err));
-                }
-                if !this.is_root {
-                    // 退出:先置 false(此后 post_join 的迟到投递自完成),
-                    // 单遍排空已入队的残留并完成其任务(评审 #2/#3)
-                    this.alive.store(false, Ordering::SeqCst);
-                    while let Ok(intent) = rx.try_recv() {
-                        complete_intent(&intent, None);
+                Intent::Restart(task) => {
+                    let state = this.state();
+                    if state == FiberState::Disposed {
+                        // 仅 root 可重启(§五 root_restart);换新代 token,
+                        // 并清除终态任务:重启后的 dispose 必须真正再卸载一轮
+                        if this.is_root {
+                            this.new_generation_token();
+                            {
+                                let mut tr = this.transition.lock().unwrap();
+                                tr.error = None;
+                                tr.terminal_task = None;
+                                FiberInner::set_state(&this, &mut tr, FiberState::Active);
+                            }
+                            this.flush_status();
+                        }
+                        complete_task(&this, task);
+                        return;
                     }
-                    // 瞬态残留释放(0.2.1):依赖声明注销 + parent mount 记录
-                    // drain(终态后清理幂等,记录 Done 自摘)。TaskDone 已发,
-                    // mount 清理里的 dispose() join 缓存终态,即刻完成。
-                    release_transient(&this).await;
-                    return; // 非 root 终态后驱动退出(句柄仍可 join 缓存终态)
+                    if !matches!(state, FiberState::Pending) {
+                        FiberInner::unload(&this, NextState::Pending).await;
+                    }
+                    FiberInner::refresh_deps(&this).await;
+                    complete_task(&this, task);
+                }
+                Intent::Dispose => {
+                    if this.state() != FiberState::Disposed {
+                        FiberInner::unload(&this, NextState::Disposed).await;
+                    }
+                    let (task, err) = {
+                        let tr = this.transition.lock().unwrap();
+                        (tr.terminal_task.clone(), tr.error.clone())
+                    };
+                    if let Some(task) = task {
+                        let _ = task.done_tx.send(TaskDone::Done(err));
+                    }
                 }
             }
+            this.flush_status();
+        })
+        .await;
+        if let Err(panic) = outcome {
+            recover_driver_panic(&this, &mut rx, current_task, panic).await;
+            return;
         }
-        this.flush_status();
+        if terminal_dispose {
+            // 退出:先置 false(此后 post_join 的迟到投递自完成),
+            // 单遍排空已入队的残留并完成其任务(评审 #2/#3)
+            this.alive.store(false, Ordering::SeqCst);
+            let terminal_error = this.transition.lock().unwrap().error.clone();
+            while let Ok(intent) = rx.try_recv() {
+                // Settle 只观察 Failed；其他 join 应拿到 dispose 的
+                // 清理错误，而非被排空时伪报成功。
+                let error = if matches!(intent, Intent::Settle(_)) {
+                    None
+                } else {
+                    terminal_error.clone()
+                };
+                complete_intent(&intent, error);
+            }
+            // 瞬态残留释放(0.2.1):依赖声明注销 + parent mount 记录
+            // drain(终态后清理幂等,记录 Done 自摘)。TaskDone 已发,
+            // mount 清理里的 dispose() join 缓存终态,即刻完成。
+            release_transient(&this).await;
+            return; // 非 root 终态后驱动退出(句柄仍可 join 缓存终态)
+        }
+    }
+}
+
+/// 意外 panic 不能让驱动直接消失:撤销已注册资源,让当前及排队等待者
+/// 都观察同一个终态错误。正常的 apply/validate panic 走 load 的回滚路径。
+async fn recover_driver_panic(
+    this: &Arc<FiberInner>,
+    rx: &mut mpsc::UnboundedReceiver<Intent>,
+    current_task: Option<Arc<TransitionTask>>,
+    panic: Box<dyn Any + Send>,
+) {
+    this.cancel_current();
+    {
+        let mut tr = this.transition.lock().unwrap();
+        FiberInner::set_state(this, &mut tr, FiberState::Unloading);
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| this.flush_status()));
+    let mut errors = vec![Arc::new(panic_error(panic))];
+    let cleanup_errors = match CatchUnwind::new(FiberInner::drain_effects(this)).await {
+        Ok(cleanup_errors) => cleanup_errors,
+        Err(cleanup_panic) => vec![Arc::new(panic_error(cleanup_panic))],
+    };
+    let sink = this.ctx.error_sink();
+    for error in &cleanup_errors {
+        // A sink panic must not prevent the original waiters from settling.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink(error.clone())));
+    }
+    errors.extend(cleanup_errors);
+    let error = aggregate_arcs(errors).expect("driver panic present");
+    let terminal_task = {
+        let mut tr = this.transition.lock().unwrap();
+        tr.error = Some(error.clone());
+        FiberInner::set_state(this, &mut tr, FiberState::Failed);
+        this.alive.store(false, Ordering::SeqCst);
+        tr.terminal_task.clone()
+    };
+    if let Some(task) = current_task {
+        task.complete(Some(error.clone()));
+    }
+    if let Some(task) = terminal_task {
+        task.complete(Some(error.clone()));
+    }
+    while let Ok(intent) = rx.try_recv() {
+        complete_intent(&intent, Some(error.clone()));
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| this.flush_status()));
+    if !this.is_root {
+        let _ = CatchUnwind::new(release_transient(this)).await;
     }
 }
 
@@ -849,19 +916,24 @@ impl FiberView {
     pub fn dispose(&self) -> BoxFuture<'static, Result<(), Arc<CordisError>>> {
         // 登记在调用点同步完成(评审 #2):dispose() 返回后,并发的
         // restart() 立刻可见终态任务并拒绝,不依赖本 future 被 poll
-        let task = {
+        let (task, newly_registered) = {
             let mut tr = self.inner.transition.lock().unwrap();
             match &tr.terminal_task {
-                Some(task) => task.clone(),
+                Some(task) => (task.clone(), false),
                 None => {
                     self.inner.cancel_current();
                     let task = TransitionTask::new();
                     tr.terminal_task = Some(task.clone());
-                    self.inner.post(Intent::Dispose);
-                    task
+                    (task, true)
                 }
             }
         };
+        if newly_registered {
+            self.inner.post(Intent::Dispose);
+            if !self.inner.alive.load(Ordering::SeqCst) {
+                task.complete(self.inner.transition.lock().unwrap().error.clone());
+            }
+        }
         Box::pin(async move { join_task(&task).await })
     }
 

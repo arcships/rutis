@@ -1172,6 +1172,143 @@ async fn typed_roundtrip() {
 }
 
 #[tokio::test]
+async fn mismatched_service_key_never_satisfies_injection() {
+    let ctx = Ctx::root().unwrap();
+    let key = TypeKey::keyed_dynamic::<Dep1>("session-1");
+    let consumer = ctx.plugin(simple_dep(
+        "needs-dep1",
+        vec![key.clone()],
+        move |ctx: &Ctx| {
+            let key = TypeKey::keyed::<Dep1>("session-1");
+            Box::pin(async move {
+                assert!(ctx.get_as::<Dep1>(key).is_some());
+                Ok(Effect::Done)
+            })
+        },
+    ));
+    soon(async { (&consumer).await }).await.unwrap();
+    assert_eq!(consumer.state().state, FiberState::Pending);
+
+    for err in [
+        ctx.provide_as(key.clone(), Arc::new(Dep2)).unwrap_err(),
+        ctx.provide_as_with_check(key.clone(), Arc::new(Dep2), || true)
+            .unwrap_err(),
+    ] {
+        let CordisError::Validation { issues } = err else {
+            panic!("expected a type validation error");
+        };
+        assert!(issues[0].contains("session-1"));
+        assert!(issues[0].contains("Dep1"));
+        assert!(issues[0].contains("Dep2"));
+    }
+    assert_eq!(consumer.state().state, FiberState::Pending);
+    assert!(ctx.get_as::<Dep1>(key.clone()).is_none());
+
+    ctx.provide_as(key, Arc::new(Dep1)).unwrap();
+    soon(async { (&consumer).await }).await.unwrap();
+    assert_eq!(consumer.state().state, FiberState::Active);
+}
+
+async fn apply_panic_regression() {
+    let root = Ctx::root().unwrap();
+    let cleanups = Arc::new(AtomicUsize::new(0));
+    let sync_panic = root.plugin(simple("sync-panic", {
+        let cleanups = cleanups.clone();
+        move |ctx: &Ctx| {
+            ctx.provide(Dep1).unwrap();
+            let cleanups = cleanups.clone();
+            ctx.effect(move || counting_effect(cleanups, None)).unwrap();
+            panic!("apply failed before creating future")
+        }
+    }));
+    let err = soon(async { (&sync_panic).await }).await.unwrap_err();
+    assert!(format!("{err:?}").contains("apply failed before creating future"));
+    assert_eq!(sync_panic.state().state, FiberState::Failed);
+    assert_eq!(cleanups.load(Ordering::SeqCst), 1);
+    assert!(
+        root.get::<Dep1>().is_none(),
+        "registered service rolled back"
+    );
+    root.provide(Dep1).unwrap();
+    soon(sync_panic.dispose()).await.unwrap();
+
+    let root = Ctx::root().unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let poll_panic = root.plugin(simple("poll-panic", {
+        let started = started.clone();
+        let release = release.clone();
+        move |ctx: &Ctx| {
+            let started = started.clone();
+            let release = release.clone();
+            Box::pin(async move {
+                ctx.provide(Dep1).unwrap();
+                started.notify_one();
+                release.notified().await;
+                panic!("apply failed while polling")
+            })
+        }
+    }));
+    let settle_view = poll_panic.clone();
+    let settle = tokio::spawn(async move { (&settle_view).await });
+    soon(started.notified()).await;
+    release.notify_one();
+    let err = soon(settle).await.unwrap().unwrap_err();
+    assert!(format!("{err:?}").contains("apply failed while polling"));
+    assert_eq!(poll_panic.state().state, FiberState::Failed);
+    assert!(
+        root.get::<Dep1>().is_none(),
+        "poll panic service rolled back"
+    );
+    root.provide(Dep1).unwrap();
+    soon(poll_panic.dispose()).await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn apply_panics_complete_and_roll_back_current_thread() {
+    apply_panic_regression().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apply_panics_complete_and_roll_back_multi_thread() {
+    apply_panic_regression().await;
+}
+
+struct PanickingInjects {
+    calls: AtomicUsize,
+}
+
+impl Plugin for PanickingInjects {
+    fn name(&self) -> &str {
+        "panicking-injects"
+    }
+
+    fn injects(&self) -> &[TypeKey] {
+        if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+            panic!("dependency callback failed")
+        }
+        &[]
+    }
+
+    fn apply<'a>(&'a self, _ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async { Ok(Effect::Done) })
+    }
+}
+
+#[tokio::test]
+async fn driver_panic_completes_waiters_with_error() {
+    let root = Ctx::root().unwrap();
+    let view = root.plugin(PanickingInjects {
+        calls: AtomicUsize::new(0),
+    });
+    let err = soon(async { (&view).await }).await.unwrap_err();
+    assert!(format!("{err:?}").contains("dependency callback failed"));
+    assert_eq!(view.state().state, FiberState::Failed);
+    assert!(soon(view.dispose()).await.is_err());
+    assert!(soon(view.restart()).await.is_err());
+}
+
+#[tokio::test]
 async fn keyed_multi_instance() {
     use rutis::Key;
     const A: Key<LlmSvc> = Key::new("a");
