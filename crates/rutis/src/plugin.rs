@@ -6,20 +6,24 @@ use crate::{BoxFuture, Effect};
 /// 插件 = 装配单元(支柱 1)。config 烘进实例(D19):
 /// 具体插件在 `new(config)` 时持有配置,`validate` 校验自持那份。
 pub trait Plugin: Send + Sync + 'static {
-    /// 显示名(日志/诊断)。
+    /// 显示名(日志/诊断)。注册时同步调用；panic 向注册调用方传播。
     fn name(&self) -> &str;
 
     /// 依赖门控声明(支柱 2):全部就绪(存在 + provider Active + `check()` 通过)才启动。
+    /// 注册时同步调用，panic 向注册调用方传播；驱动重查期间的 panic
+    /// 使 fiber 进入 Failed，等待中的转换任务收到错误。
     fn injects(&self) -> &[TypeKey] {
         &[]
     }
 
     /// 校验自持有 config(D12:validate-before-store,注册/装载期调用)。
+    /// panic 在装载边界转换为 `PluginFailed` 并回滚已注册资源。
     fn validate(&self) -> Result<(), CordisError> {
         Ok(())
     }
 
     /// 装配体:提供 0..n 服务、注册 0..n 监听、交回清理。
+    /// 创建 Future 或 poll 时的 panic 均转换为 `PluginFailed` 并回滚。
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>>;
 }
 
@@ -38,11 +42,13 @@ pub trait Plugin: Send + Sync + 'static {
 /// §八-§十);按配置选依赖的标准形态是拆成多个插件、配置决定装哪个。
 pub trait PluginFactory<C: Send + Sync + 'static>: Send + Sync + 'static {
     /// 显示名(日志/诊断,fiber 创建时取用,不再随代变化)。
+    /// 注册时同步调用；panic 向注册调用方传播。
     fn name(&self) -> &str {
         std::any::type_name::<Self>()
     }
 
     /// 依赖门控声明(静态,spawn 时注册一次;与 [`Plugin::injects`] 对称)。
+    /// 注册时同步调用；panic 向注册调用方传播。
     fn injects(&self) -> &[TypeKey] {
         &[]
     }
