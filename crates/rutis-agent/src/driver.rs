@@ -154,20 +154,6 @@ impl AgentDriver {
         }
     }
 
-    /// 上下文超限兜底(Fix 3):保留最近 `keep` 条消息,早期历史折叠进
-    /// summary。摘要优先沿用既有 summary(跨次 compact 累加信息),否则用
-    /// 一句标记;compact() 内部会自动落盘。有界重试在 run_loop 里控制。
-    fn auto_compact(&self, keep: usize) {
-        let summary = {
-            let session = self.session.lock().unwrap();
-            session.summary().map(str::to_string).unwrap_or_else(|| {
-                "（早期对话因超出模型上下文窗口被自动裁剪,细节不可恢复）".to_string()
-            })
-        };
-        let (before, after) = self.compact(summary, keep);
-        eprintln!("[driver] auto-compact: messages {before} -> {after} (kept last {keep})");
-    }
-
     fn fresh_turn_token(&self) -> CancellationToken {
         let token = CancellationToken::new();
         *self.cancel.lock().unwrap() = token.clone();
@@ -367,13 +353,15 @@ impl AgentDriver {
                     self.system_prompt.clone()
                 }
             };
-            // 每步重建 prompt:Fix 4 先用 sanitize_history 规整 session(去掉
-            // 因并发/历史损坏导致的悬空 tool_call / 孤儿 tool_result),再配合
-            // Fix 3 的上下文超限自动 compact + 有界重试。
+            // 每步重建 prompt:先规整历史，再仅对本次请求的视图做有界
+            // 上下文缩减；原始 session 和持久化文件保持完整。
             let mut ctx_retry = 0u32;
+            let mut retry_history: Option<Vec<ModelMessage>> = None;
             let mut result = 'llm: loop {
                 // Fix 4:规整历史(确保 assistant/tool 配对、无孤儿)后再转 prompt
-                let prompt = {
+                let prompt = if let Some(history) = retry_history.as_deref() {
+                    convert_to_language_model_prompt(history, system.as_deref())
+                } else {
                     let session = self.session.lock().unwrap();
                     let sanitized = sanitize_history(session.messages());
                     convert_to_language_model_prompt(&sanitized, system.as_deref())
@@ -412,12 +400,19 @@ impl AgentDriver {
                     // 越大的 prompt 硬试、越滚越挂的死循环。
                     Err(e) => {
                         let msg = e.to_string();
-                        if ctx_retry < 2 && is_context_overflow(&msg) {
+                        if ctx_retry < 2 && is_context_overflow(&e) {
                             ctx_retry += 1;
                             eprintln!(
-                                "[driver] context overflow, auto-compact & retry ({ctx_retry}/2)"
+                                "[driver] context overflow, shorten request history & retry ({ctx_retry}/2)"
                             );
-                            self.auto_compact(if ctx_retry == 1 { 40 } else { 8 });
+                            let history = retry_history.take().unwrap_or_else(|| {
+                                let session = self.session.lock().unwrap();
+                                sanitize_history(session.messages())
+                            });
+                            retry_history = Some(compact_request_history(
+                                &history,
+                                if ctx_retry == 1 { 40 } else { 8 },
+                            ));
                             continue 'llm;
                         }
                         return Err(AgentError::Llm(msg));
@@ -596,29 +591,58 @@ enum Chunk {
     Part(Result<StreamPart, AiMuxError>),
 }
 
-/// 判断 LLM 错误信息是否属于"上下文超限"类(Fix 3)。
-/// 启发式:误判最多触发一次多余的 compact + 重试(有界),漏判则退化为
-/// 普通失败(回滚),两个方向都安全。
-pub(crate) fn is_context_overflow(err: &str) -> bool {
-    let s = err.to_lowercase();
+/// 优先使用 API 状态和 provider code。只有缺少 code 时才对具体上下文
+/// 长度错误文案做窄匹配；限流、认证、传输和取消绝不触发历史缩减。
+pub(crate) fn is_context_overflow(err: &AiMuxError) -> bool {
+    match err {
+        AiMuxError::ApiCall(api) => {
+            if api
+                .status_code
+                .is_some_and(|status| !matches!(status, 400 | 413 | 422))
+            {
+                return false;
+            }
+            if let Some(code) = &api.provider_code {
+                return matches!(
+                    code.to_ascii_lowercase().as_str(),
+                    "context_length_exceeded"
+                        | "context_window_exceeded"
+                        | "prompt_too_long"
+                        | "input_tokens_exceeded"
+                );
+            }
+            context_length_message(&api.message)
+        }
+        AiMuxError::InvalidArgument(message)
+        | AiMuxError::InvalidPrompt(message)
+        | AiMuxError::Other(message) => context_length_message(message),
+        _ => false,
+    }
+}
+
+fn context_length_message(message: &str) -> bool {
+    let s = message.to_ascii_lowercase();
     [
-        "context",
-        "too long",
-        "too many tokens",
-        "exceed",
-        "input length",
-        "prompt is too",
-        "longer than",
-        "maximum context",
-        "token limit",
-        // 真实 provider 遗漏格式(round57 发现):OpenAI "Request too large for
-        // model gpt-4o";Anthropic "supports at most N tokens"。漏判会让
-        // auto-compact 不触发、长会话退化(虽有 bounded 降级,但主动机制应覆盖)。
-        "too large",
-        "at most",
+        "context length exceeded",
+        "context window exceeded",
+        "maximum context window",
+        "prompt is too long",
+        "request too large for model",
     ]
     .iter()
-    .any(|k| s.contains(k))
+    .any(|phrase| s.contains(phrase))
+        || (s.contains("supports at most") && s.contains("tokens"))
+        || (s.contains("input length") && (s.contains("exceed") || s.contains("too long")))
+}
+
+/// 请求级缩减保留完整的 assistant + 连续 tool 结果块。原始 Session
+/// 不变，因此失败重试和进程重启都仍能恢复完整历史。
+fn compact_request_history(messages: &[ModelMessage], keep: usize) -> Vec<ModelMessage> {
+    let mut start = messages.len().saturating_sub(keep);
+    while start > 0 && start < messages.len() && messages[start].role == Role::Tool {
+        start -= 1;
+    }
+    sanitize_history(&messages[start..])
 }
 
 fn tool_call_ids(m: &ModelMessage) -> Vec<String> {
@@ -902,27 +926,66 @@ mod tests {
 
     #[test]
     fn context_overflow_detection() {
-        assert!(is_context_overflow(
-            "context length exceeded: 350000 > 128000"
-        ));
-        assert!(is_context_overflow("prompt is too long: 50000 tokens"));
-        assert!(is_context_overflow(
-            "This model's maximum context window is 128K"
-        ));
-        assert!(is_context_overflow(
-            "400 Bad Request: Request too large for model gpt-4o"
-        ));
-        assert!(is_context_overflow(
-            "This model supports at most 128000 tokens"
-        ));
-        // 反向:明显非上下文超限不应误判。注意"at most"+"too large"是安全
-        // 的过匹配(注释:误判最多一次多余 compact,有界);真正的反例是
-        // 不含任何关键词的普通失败。
-        assert!(!is_context_overflow(
-            "tool execution rejected: unauthorized access"
-        ));
-        assert!(!is_context_overflow("network timeout, retry later"));
-        assert!(!is_context_overflow("file not found"));
+        use aimux_core::error::ApiCallError;
+        for message in [
+            "context length exceeded: 350000 > 128000",
+            "prompt is too long: 50000 tokens",
+            "This model's maximum context window is 128K",
+            "400 Bad Request: Request too large for model gpt-4o",
+            "This model supports at most 128000 tokens",
+        ] {
+            assert!(is_context_overflow(&AiMuxError::Other(message.into())));
+        }
+        assert!(is_context_overflow(&AiMuxError::ApiCall(ApiCallError {
+            status_code: Some(400),
+            provider_code: Some("context_length_exceeded".into()),
+            message: "request rejected".into(),
+            ..Default::default()
+        })));
+        for message in [
+            "rate limit exceeded",
+            "context canceled",
+            "network timeout, retry later",
+            "file not found",
+            "authentication failed: token limit exceeded",
+        ] {
+            assert!(!is_context_overflow(&AiMuxError::Other(message.into())));
+        }
+        assert!(!is_context_overflow(&AiMuxError::ApiCall(ApiCallError {
+            status_code: Some(429),
+            provider_code: Some("rate_limit_exceeded".into()),
+            message: "context length exceeded".into(),
+            ..Default::default()
+        })));
+    }
+
+    #[test]
+    fn request_compaction_keeps_tool_call_and_result_together() {
+        let messages = vec![
+            ModelMessage::user("old"),
+            ModelMessage::user("older"),
+            ModelMessage {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![ContentPart::tool_call(
+                    "A",
+                    "bash",
+                    serde_json::json!({}),
+                )]),
+            },
+            ModelMessage {
+                role: Role::Tool,
+                content: MessageContent::Parts(vec![ContentPart::tool_result(
+                    "A",
+                    serde_json::Value::String("done".into()),
+                )]),
+            },
+            ModelMessage::user("latest"),
+        ];
+        let view = compact_request_history(&messages, 2);
+        assert_eq!(view.len(), 3);
+        assert_eq!(tool_call_ids(&view[0]), ["A"]);
+        assert_eq!(tool_result_ids(&view[1]), ["A"]);
+        assert_eq!(messages.len(), 5);
     }
 
     /// Fix 2 原语:truncate_to 把 session 截回指定长度(幂等)。
@@ -1003,11 +1066,11 @@ mod tests {
         driver_v.dispose().await.unwrap();
     }
 
-    /// Fix 3:上下文超限 → 自动 compact 后重试成功(超大 session 自愈)。
+    /// 上下文超限仅缩短重试请求；成功后原始历史仍可从文件恢复。
     #[tokio::test]
     async fn context_overflow_triggers_auto_compact_then_succeeds() {
         struct OverflowOnce {
-            inner: ScriptedLlm,
+            inner: Arc<ScriptedLlm>,
             hit: AtomicBool,
         }
         #[async_trait::async_trait]
@@ -1053,8 +1116,9 @@ mod tests {
         }
 
         let root = Ctx::root().unwrap();
+        let inner = Arc::new(ScriptedLlm::new(vec![LlmResponse::content("done")]));
         let llm: Arc<dyn LanguageModel> = Arc::new(OverflowOnce {
-            inner: ScriptedLlm::new(vec![LlmResponse::content("done")]),
+            inner: inner.clone(),
             hit: AtomicBool::new(false),
         });
         let llm_d = root.provide_as(llm_key(), llm).unwrap();
@@ -1067,14 +1131,78 @@ mod tests {
 
         let res = soon(agent.followup("go")).await;
         assert!(res.is_ok(), "compact 后应成功: {res:?}");
-        assert!(
-            agent.session().summary().is_some(),
-            "超限应触发自动 compact"
-        );
-        assert!(
-            agent.session().messages().len() <= 42,
-            "compact 后应大幅缩减,实际={}",
-            agent.session().messages().len()
+        assert!(agent.session().messages().len() >= 52);
+        assert!(agent.session().summary().is_none());
+        assert!(inner.calls.lock().unwrap()[0].prompt.len() <= 41);
+        assert!(Session::restore(&path).messages().len() >= 52);
+
+        llm_d.dispose().await.unwrap();
+        tools_v.dispose().await.unwrap();
+        driver_v.dispose().await.unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_does_not_retry_or_overwrite_history() {
+        use aimux_core::error::ApiCallError;
+
+        struct RateLimited {
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl LanguageModel for RateLimited {
+            fn provider(&self) -> &str {
+                "test"
+            }
+            fn model_id(&self) -> &str {
+                "rate-limited"
+            }
+            async fn do_generate(
+                &self,
+                _: &CallOptions,
+            ) -> Result<aimux_core::result::GenerateResult, AiMuxError> {
+                unreachable!()
+            }
+            async fn do_stream(
+                &self,
+                _: &CallOptions,
+            ) -> Result<aimux_core::result::StreamResult, AiMuxError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(AiMuxError::ApiCall(ApiCallError {
+                    status_code: Some(429),
+                    provider_code: Some("rate_limit_exceeded".into()),
+                    message: "rate limit exceeded".into(),
+                    ..Default::default()
+                }))
+            }
+        }
+
+        let path =
+            std::env::temp_dir().join(format!("rutis-rate-limit-test-{}.json", std::process::id()));
+        let mut original = Session::new();
+        for i in 0..50 {
+            original.push(ModelMessage::user(format!("history-{i}")));
+        }
+        original.persist(&path).unwrap();
+
+        let root = Ctx::root().unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let llm: Arc<dyn LanguageModel> = Arc::new(RateLimited {
+            calls: calls.clone(),
+        });
+        let llm_d = root.provide_as(llm_key(), llm).unwrap();
+        let tools_v = root.plugin(ToolsPlugin::new(Vec::new()));
+        let driver_v = root.plugin(AgentDriverPlugin::new(16).with_session_path(path.clone()));
+        (&tools_v).await.expect("tools loads");
+        (&driver_v).await.expect("driver loads");
+        let agent = root.get_as::<dyn Agent>(agent_key()).unwrap();
+
+        assert!(soon(agent.followup("go")).await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(agent.session().messages().len(), 50);
+        assert_eq!(
+            serde_json::to_value(Session::restore(&path).messages()).unwrap(),
+            serde_json::to_value(original.messages()).unwrap()
         );
 
         llm_d.dispose().await.unwrap();
