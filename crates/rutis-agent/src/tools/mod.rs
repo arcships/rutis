@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use aimux_core::options::Tool;
 use aimux_core::tool::{FunctionTool, ToolCall};
@@ -79,6 +80,8 @@ pub struct ToolRegistry {
 /// JoinHandle detaches the task; abort requests cooperative cancellation at
 /// the next await and cannot interrupt synchronous code that never yields.
 struct AbortOnDrop(tokio::task::JoinHandle<Result<Value, String>>);
+
+const CANCEL_JOIN_GRACE: Duration = Duration::from_secs(2);
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
@@ -146,7 +149,11 @@ impl ToolRegistry {
             out = &mut join.0 => out,
             _ = cancel.cancelled() => {
                 join.0.abort();
-                let _ = (&mut join.0).await;
+                // A third-party runner may block synchronously in one poll.
+                // Abort remains requested, but must not stall this turn forever.
+                if tokio::time::timeout(CANCEL_JOIN_GRACE, &mut join.0).await.is_err() {
+                    eprintln!("[tools] runner did not stop within cancellation grace period");
+                }
                 return ToolOutput::err("error: tool execution cancelled".to_string())
             }
         };
@@ -270,6 +277,52 @@ mod cancellation_tests {
             tokio::task::yield_now().await;
             assert!(!wrote.load(Ordering::SeqCst));
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancellation_wait_is_bounded_for_a_blocking_runner() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = Arc::new(Mutex::new(Some(release_rx)));
+        let def = ToolDef::new("blocking", "block", serde_json::json!({}), {
+            let started = started.clone();
+            let release_rx = release_rx.clone();
+            move |_| {
+                let started = started.clone();
+                let release_rx = release_rx.clone();
+                async move {
+                    let release_rx = release_rx.lock().unwrap().take().unwrap();
+                    started.notify_one();
+                    let _ = release_rx.recv();
+                    Ok(Value::Null)
+                }
+            }
+        });
+        let registry = Arc::new(ToolRegistry::new(
+            tokio::runtime::Handle::current(),
+            vec![def],
+        ));
+        let cancel = CancellationToken::new();
+        let execute = tokio::spawn({
+            let registry = registry.clone();
+            let cancel = cancel.clone();
+            async move {
+                registry
+                    .execute(&tool_call("id", "blocking", Value::Null), &cancel)
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), started.notified())
+            .await
+            .unwrap();
+        cancel.cancel();
+        let output = tokio::time::timeout(Duration::from_secs(3), execute)
+            .await
+            .expect("execute waited indefinitely for a synchronous poll")
+            .unwrap();
+        assert!(!output.ok);
+        assert!(output.output.contains("cancelled"));
+        release_tx.send(()).unwrap();
     }
 
     #[cfg(unix)]

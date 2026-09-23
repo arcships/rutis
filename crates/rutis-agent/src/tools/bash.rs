@@ -28,7 +28,8 @@ pub(crate) const BASH_DESCRIPTION: &str =
     "Execute a bash command (`bash -c`) and return its stdout/stderr. \
 Each call runs in a fresh shell: no state (cwd, variables, functions) persists between calls — \
 pass `workdir` instead of using `cd`. Non-zero exits are reported as `[exit code: N]`. \
-Long output is truncated to its tail.";
+Long output is truncated to its tail. Background processes started by a command are stopped \
+when the command finishes; do not use this tool to launch persistent services.";
 
 /// bash 工具:`ToolDef` 数据,装进 `ToolsPlugin`(设计 §三,非独立插件)。
 pub fn bash_tool() -> ToolDef {
