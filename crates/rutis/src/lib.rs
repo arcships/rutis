@@ -24,7 +24,7 @@ pub use ctx::Ctx;
 pub use effect::{Disposer, Effect};
 pub use error::{CordisError, ErrorSink};
 pub use event::{Event, EventOptions, Listener, Next, Terminal, WaterfallListener};
-pub use fiber::{FiberState, FiberStatusChanged, FiberView, PluginId, Snapshot};
+pub use fiber::{DisposeWaitError, FiberState, FiberStatusChanged, FiberView, PluginId, Snapshot};
 pub use key::{Key, ServiceKey, TypeKey};
 pub use plugin::{Plugin, PluginFactory};
 
