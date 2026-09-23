@@ -265,7 +265,8 @@ impl FiberInner {
         token
     }
 
-    /// 投递无完成信号的意图。驱动已退出时返回 false。
+    /// 投递无完成信号的意图。驱动已退出时返回 false；终态错误
+    /// 预留给未来可能携带完成信号的意图。
     pub(crate) fn post(&self, intent: Intent) -> bool {
         if !self.alive.load(Ordering::SeqCst) {
             complete_intent(&intent, self.transition.lock().unwrap().error.clone());
@@ -281,7 +282,7 @@ impl FiberInner {
     }
 
     /// 投递携带完成信号的意图。发送后复查 alive:若发送落在驱动排空之后
-    /// (该意图无人处理),任务即刻自完成——与退出排空的重复完成同值,无害
+    /// (该意图无人处理),任务即刻自完成。重复完成不会留下等待者
     ///(封住"查过 alive → 驱动退出排空 → send 才落地"的竞态,简化红线)。
     /// 自完成携带 fiber 终态错误而非凭空 Ok(评审 3:Failed 态下驱动退出,
     /// None 会把真实错误覆盖成伪装成功)。
@@ -660,8 +661,16 @@ pub(crate) async fn drive(this: Arc<FiberInner>, mut rx: mpsc::UnboundedReceiver
             // 退出:先置 false(此后 post_join 的迟到投递自完成),
             // 单遍排空已入队的残留并完成其任务(评审 #2/#3)
             this.alive.store(false, Ordering::SeqCst);
+            let terminal_error = this.transition.lock().unwrap().error.clone();
             while let Ok(intent) = rx.try_recv() {
-                complete_intent(&intent, None);
+                // Settle 只观察 Failed；其他 join 应拿到 dispose 的
+                // 清理错误，而非被排空时伪报成功。
+                let error = if matches!(intent, Intent::Settle(_)) {
+                    None
+                } else {
+                    terminal_error.clone()
+                };
+                complete_intent(&intent, error);
             }
             // 瞬态残留释放(0.2.1):依赖声明注销 + parent mount 记录
             // drain(终态后清理幂等,记录 Done 自摘)。TaskDone 已发,
@@ -685,11 +694,18 @@ async fn recover_driver_panic(
         let mut tr = this.transition.lock().unwrap();
         FiberInner::set_state(this, &mut tr, FiberState::Unloading);
     }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| this.flush_status()));
     let mut errors = vec![Arc::new(panic_error(panic))];
-    match CatchUnwind::new(FiberInner::drain_effects(this)).await {
-        Ok(cleanup_errors) => errors.extend(cleanup_errors),
-        Err(cleanup_panic) => errors.push(Arc::new(panic_error(cleanup_panic))),
+    let cleanup_errors = match CatchUnwind::new(FiberInner::drain_effects(this)).await {
+        Ok(cleanup_errors) => cleanup_errors,
+        Err(cleanup_panic) => vec![Arc::new(panic_error(cleanup_panic))],
+    };
+    let sink = this.ctx.error_sink();
+    for error in &cleanup_errors {
+        // A sink panic must not prevent the original waiters from settling.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink(error.clone())));
     }
+    errors.extend(cleanup_errors);
     let error = aggregate_arcs(errors).expect("driver panic present");
     let terminal_task = {
         let mut tr = this.transition.lock().unwrap();
