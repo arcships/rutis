@@ -1274,35 +1274,22 @@ async fn apply_panics_complete_and_roll_back_multi_thread() {
     apply_panic_regression().await;
 }
 
-struct PanickingInjects {
-    calls: AtomicUsize,
-}
-
-impl Plugin for PanickingInjects {
-    fn name(&self) -> &str {
-        "panicking-injects"
-    }
-
-    fn injects(&self) -> &[TypeKey] {
-        if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
-            panic!("dependency callback failed")
-        }
-        &[]
-    }
-
-    fn apply<'a>(&'a self, _ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async { Ok(Effect::Done) })
-    }
-}
-
 #[tokio::test]
 async fn driver_panic_completes_waiters_with_error() {
-    let root = Ctx::root().unwrap();
-    let view = root.plugin(PanickingInjects {
-        calls: AtomicUsize::new(0),
-    });
-    let err = soon(async { (&view).await }).await.unwrap_err();
-    assert!(format!("{err:?}").contains("dependency callback failed"));
+    let root = Ctx::root_with_sink(
+        tokio::runtime::Handle::current(),
+        Arc::new(|_| panic!("error sink failed")),
+    );
+    let view = root.plugin(simple("panicking-sink", |_ctx: &Ctx| {
+        Box::pin(async {
+            Ok(Effect::Disposer(Box::new(|| {
+                Err(CordisError::InactiveEffect)
+            })))
+        })
+    }));
+    soon(async { (&view).await }).await.unwrap();
+    let err = soon(view.restart()).await.unwrap_err();
+    assert!(format!("{err:?}").contains("error sink failed"));
     assert_eq!(view.state().state, FiberState::Failed);
     assert!(soon(view.dispose()).await.is_err());
     assert!(soon(view.restart()).await.is_err());

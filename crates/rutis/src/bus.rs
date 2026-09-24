@@ -362,8 +362,15 @@ impl EventBus {
             }
             if key.instance_id().is_some() {
                 let owner = hook.owner.clone();
+                let shared = access_ctx.shared().clone();
                 Ok(Effect::AsyncDisposer(Box::new(move || {
-                    remove_call_hook(&bus, &key, &hook);
+                    {
+                        // Serialize removal with an instance dispatch's
+                        // snapshot and flight registration. Otherwise the
+                        // drain may finish before a snapshotted callback starts.
+                        let _admission = shared.admission.lock().unwrap();
+                        remove_call_hook(&bus, &key, &hook);
+                    }
                     Box::pin(async move {
                         if let Some(owner) = owner.upgrade() {
                             owner.wait_events().await;
@@ -540,7 +547,8 @@ impl EventBus {
             }
             // 按注册序逐个 await(不并发 spawn,否则退回乱序)
             for hook in hooks {
-                let out = CatchUnwind::new(hook.call.call(&ctx2, &*e as &DynEvent)).await;
+                let out =
+                    CatchUnwind::new(async { hook.call.call(&ctx2, &*e as &DynEvent).await }).await;
                 match out {
                     Ok(Ok(_)) => {}
                     Ok(Err(err)) => sink(Arc::new(err)),

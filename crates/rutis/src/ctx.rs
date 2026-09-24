@@ -729,7 +729,9 @@ impl Ctx {
                 if fiber.closing.load(Ordering::SeqCst) {
                     // The subtree coordinator already owns the terminal intent.
                 } else if self.0.shared.closing.load(Ordering::SeqCst) {
-                    fiber.post(Intent::Shutdown(TransitionTask::new()));
+                    // Keep the orphan's terminal result available to its
+                    // FiberView, even when root shutdown won the mount race.
+                    drop(view.shutdown());
                 } else {
                     fiber.post(Intent::Dispose);
                 }

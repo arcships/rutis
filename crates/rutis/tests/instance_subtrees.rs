@@ -1,3 +1,4 @@
+use std::future::IntoFuture;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -137,6 +138,45 @@ impl Listener<Fault> for FailListener {
     }
 }
 
+struct PanicCall;
+impl Listener<Ping> for PanicCall {
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a Ctx,
+        _event: &'a Ping,
+    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+        panic!("listener call failed before returning a future")
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn instance_emit_reports_synchronous_listener_panic() {
+    let (tx, rx) = oneshot::channel();
+    let sink = Arc::new(Mutex::new(Some(tx)));
+    let root = Ctx::root_with_sink(tokio::runtime::Handle::current(), {
+        let sink = sink.clone();
+        Arc::new(move |error| {
+            if let Some(tx) = sink.lock().unwrap().take() {
+                let _ = tx.send(error);
+            }
+        })
+    });
+    let (view, ctx) = child(&root).await;
+    ctx.events()
+        .on_instance(&ctx, ctx.instance(), PanicCall)
+        .unwrap();
+    ctx.events()
+        .emit_instance(&ctx, ctx.instance(), Arc::new(Ping(1)))
+        .unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(2), rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(format!("{error:?}").contains("listener call failed"));
+    view.shutdown().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn instance_serial_short_circuits_and_parallel_aggregates() {
     let root = Ctx::root().unwrap();
@@ -271,6 +311,43 @@ async fn process_service_reload_reaches_both_instances() {
     (&read_b).await.unwrap();
     assert_eq!(*seen_a.lock().unwrap(), vec![7, 9]);
     assert_eq!(*seen_b.lock().unwrap(), vec![7, 9]);
+    root.shutdown().await.unwrap();
+}
+
+struct CountInjects {
+    key: TypeKey,
+    calls: Arc<AtomicUsize>,
+}
+
+impl Plugin for CountInjects {
+    fn name(&self) -> &str {
+        "count-injects"
+    }
+
+    fn injects(&self) -> &[TypeKey] {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::slice::from_ref(&self.key)
+    }
+
+    fn apply<'a>(&'a self, _ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async { Ok(Effect::Done) })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dependency_gate_reuses_registration_snapshot() {
+    let root = Ctx::root().unwrap();
+    root.provide(1u64).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let view = root.plugin(CountInjects {
+        key: TypeKey::of::<u64>(),
+        calls: calls.clone(),
+    });
+    (&view).await.unwrap();
+    root.refresh();
+    (&view).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    view.shutdown().await.unwrap();
     root.shutdown().await.unwrap();
 }
 
@@ -427,6 +504,46 @@ async fn dropped_parallel_waiter_does_not_finish_dispatch_early() {
     root.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn manual_instance_listener_disposal_waits_for_accepted_callback() {
+    let root = Ctx::root().unwrap();
+    let (view, ctx) = child(&root).await;
+    let release = Arc::new(Semaphore::new(0));
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let listener = ctx
+        .events()
+        .on_instance(
+            &ctx,
+            ctx.instance(),
+            Record {
+                log: log.clone(),
+                entered: Mutex::new(Some(entered_tx)),
+                release: Some(release.clone()),
+            },
+        )
+        .unwrap();
+    ctx.events()
+        .emit_instance(&ctx, ctx.instance(), Arc::new(Ping(1)))
+        .unwrap();
+    entered_rx.await.unwrap();
+
+    let mut removing = tokio::spawn(listener.dispose());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut removing)
+            .await
+            .is_err()
+    );
+    release.add_permits(1);
+    removing.await.unwrap().unwrap();
+    ctx.events()
+        .emit_instance(&ctx, ctx.instance(), Arc::new(Ping(2)))
+        .unwrap();
+    assert_eq!(*log.lock().unwrap(), vec![1]);
+    view.shutdown().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
 struct FailCleanup;
 impl Plugin for FailCleanup {
     fn name(&self) -> &str {
@@ -474,6 +591,51 @@ async fn subtree_shutdown_aggregates_child_error_and_shares_result() {
     assert!(Arc::ptr_eq(&one, &two));
     assert_eq!(bad.state().state, FiberState::Disposed);
     assert!(parent.restart().await.is_err());
+    root.shutdown().await.unwrap();
+}
+
+struct BlockCleanup {
+    entered: Mutex<Option<oneshot::Sender<()>>>,
+    release: Arc<Semaphore>,
+}
+
+impl Plugin for BlockCleanup {
+    fn name(&self) -> &str {
+        "block-cleanup"
+    }
+
+    fn apply<'a>(&'a self, _ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        let entered = self.entered.lock().unwrap().take().unwrap();
+        let release = self.release.clone();
+        Box::pin(async move {
+            Ok(Effect::AsyncDisposer(Box::new(move || {
+                Box::pin(async move {
+                    let _ = entered.send(());
+                    let permit = release.acquire().await.unwrap();
+                    permit.forget();
+                    Ok(())
+                })
+            })))
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn settle_queued_after_clean_shutdown_stays_successful() {
+    let root = Ctx::root().unwrap();
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let release = Arc::new(Semaphore::new(0));
+    let view = root.plugin(BlockCleanup {
+        entered: Mutex::new(Some(entered_tx)),
+        release: release.clone(),
+    });
+    (&view).await.unwrap();
+    let shutdown = view.shutdown();
+    entered_rx.await.unwrap();
+    let settle = (&view).into_future();
+    release.add_permits(1);
+    assert!(settle.await.is_ok());
+    shutdown.await.unwrap();
     root.shutdown().await.unwrap();
 }
 

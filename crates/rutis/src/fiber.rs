@@ -427,17 +427,10 @@ impl FiberInner {
     ) {
         let mut satisfied: HashSet<(PluginId, u64, TypeKey, Option<ScopeId>)> = HashSet::new();
         let mut missing: Vec<TypeKey> = Vec::new();
-        // 依赖声明来源:静态模式取实例,工厂模式取工厂(两形态同形,
-        // D32f:声明终身静态,与 cordis 的构造固化 inject 一致)。
-        let inject_keys: Vec<TypeKey> = if let Some(plugin) = &self.plugin {
-            plugin.injects().to_vec()
-        } else if let Some(factory) = &self.factory {
-            factory.injects().to_vec()
-        } else {
-            return (satisfied, missing);
-        };
+        // Reuse the declarations captured at registration. The index, gate,
+        // and diagnostics must all observe the same keys.
         let registry = &self.ctx.shared().registry;
-        for key in inject_keys {
+        for key in self.declared_injects.iter().cloned() {
             if self.ctx.check_instance(&key).is_err() {
                 missing.push(key);
                 continue;
@@ -775,7 +768,16 @@ pub(crate) async fn drive(this: Arc<FiberInner>, mut rx: mpsc::UnboundedReceiver
                 (tr.terminal_task.clone(), tr.error.clone())
             };
             while let Ok(intent) = rx.try_recv() {
-                complete_intent(&intent, Some(Arc::new(CordisError::Closed)));
+                let completion = match &intent {
+                    // Settle reports Failed only; a clean terminal state is
+                    // stable even if its request was queued after Shutdown.
+                    Intent::Settle(_) => None,
+                    // A second internal shutdown must observe the actual
+                    // terminal result, including cleanup errors.
+                    Intent::Shutdown(_) => err.clone(),
+                    _ => Some(Arc::new(CordisError::Closed)),
+                };
+                complete_intent(&intent, completion);
             }
             if !this.is_root {
                 // The mount disposer may join this internal result. Publish it
