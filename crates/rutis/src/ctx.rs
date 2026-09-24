@@ -8,8 +8,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::bus::EventBus;
 use crate::diagnostics::{
-    DependencyDiagnostics, DependencyStatus, PluginDiagnostics, ResolvedDependency,
-    RuntimeDiagnostics, ServiceAccess,
+    DependencyDiagnostics, DependencyStatus, DiagnosticChangeKind, DiagnosticHub,
+    DiagnosticSubscription, PluginDiagnostics, ResolvedDependency, RuntimeDiagnostics,
+    ServiceAccess,
 };
 use crate::effect::{Disposer, Effect, EffectRecord};
 use crate::error::{default_sink, CordisError, ErrorSink, ServiceReadError, ServiceReadFailure};
@@ -27,6 +28,7 @@ pub(crate) struct Shared {
     pub handle: Handle,
     pub bus: EventBus,
     pub registry: Registry,
+    pub diagnostics: Arc<DiagnosticHub>,
     pub error_sink: ErrorSink,
     pub next_plugin_id: AtomicU64,
     pub closing: AtomicBool,
@@ -224,11 +226,13 @@ impl Ctx {
 
     /// 注入构造 + 自定义 ErrorSink。
     pub fn root_with_sink(handle: Handle, sink: ErrorSink) -> Ctx {
+        let diagnostics = Arc::new(DiagnosticHub::new());
         let shared = Arc::new(Shared {
             admission: Mutex::new(()),
             handle,
             bus: EventBus::new(),
-            registry: Registry::new(),
+            registry: Registry::new(diagnostics.clone()),
+            diagnostics,
             error_sink: sink,
             next_plugin_id: AtomicU64::new(1),
             closing: AtomicBool::new(false),
@@ -331,6 +335,23 @@ impl Ctx {
             plugins,
             bindings: self.0.shared.registry.bindings_snapshot(),
         }
+    }
+
+    /// Subscribe to root lifecycle changes and take a best-effort snapshot.
+    /// The cursor marks subscription time, not snapshot time; changes may
+    /// overlap the snapshot. A lagged receiver must resubscribe.
+    pub fn subscribe_diagnostics(&self) -> Result<DiagnosticSubscription, CordisError> {
+        let (cursor, changes) = self
+            .0
+            .shared
+            .diagnostics
+            .subscribe()
+            .ok_or(CordisError::Closed)?;
+        Ok(DiagnosticSubscription {
+            initial: self.diagnostics(),
+            cursor,
+            changes,
+        })
     }
 
     /// 最终关闭 root。重复或并发调用共享同一完成结果；现有 `dispose`
@@ -652,6 +673,16 @@ impl Ctx {
         reason: ServiceReadFailure,
         location: &'static std::panic::Location<'static>,
     ) -> ServiceReadError {
+        self.0
+            .shared
+            .diagnostics
+            .publish(DiagnosticChangeKind::StrictReadDenied {
+                plugin: self.0.plugin_id,
+                instance: self.instance(),
+                scope: self.scope_for(&key).as_ref().map(|s| s.to_string()),
+                key: key.clone(),
+                reason,
+            });
         ServiceReadError {
             key,
             plugin_id: self.0.plugin_id,
@@ -786,6 +817,7 @@ impl Ctx {
                     value: StoredValue::new(value),
                     provider: Arc::downgrade(fiber),
                     provider_id: fiber.id,
+                    provider_instance: fiber.instance,
                     provider_gen,
                     check,
                     check_status: Mutex::new(None),
@@ -872,6 +904,19 @@ impl Ctx {
         let record = EffectRecord::new(make(), self.0.fiber.clone());
         parent.effects.lock().unwrap().push(record.clone());
         *child.mount.lock().unwrap() = Some(record.clone());
+        let snapshot = child.transition.lock().unwrap();
+        child.mounted.store(true, Ordering::SeqCst);
+        self.0
+            .shared
+            .diagnostics
+            .publish(DiagnosticChangeKind::PluginRegistered {
+                plugin: child.id,
+                instance: child.instance,
+                parent: Some(parent.id),
+                name: child.name.clone(),
+                state: snapshot.state,
+                generation: snapshot.generation,
+            });
         Ok(record)
     }
 
@@ -1072,13 +1117,7 @@ async fn evict_and_finalize(
 ) -> Result<(), CordisError> {
     let old = shared
         .registry
-        .lookup(&key, scope.as_ref())
-        .filter(|b| b.provider_id == pid && b.provider_gen == provider_gen);
-    if let Some(binding) = &old {
-        binding
-            .removing
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
+        .begin_removal(&key, scope.as_ref(), pid, provider_gen);
     let consumers: Vec<Arc<FiberInner>> = shared
         .registry
         .consumers_of(&key, (pid, provider_gen, key.clone(), scope.clone()));
@@ -1151,6 +1190,7 @@ mod tests {
     #[tokio::test]
     async fn child_created_before_root_closes_but_mounted_afterward_never_applies() {
         let ctx = Ctx::root().unwrap();
+        let mut changes = ctx.subscribe_diagnostics().unwrap().changes;
         let root_view = ctx.root_view().unwrap();
         let applies = Arc::new(AtomicUsize::new(0));
         // Split the public plugin path at its two admission points to force
@@ -1171,5 +1211,19 @@ mod tests {
         assert!(child.inner.driver.lock().unwrap().is_none());
         assert!(ctx.shared().registry.bindings_snapshot().is_empty());
         assert!(root_view.inner.children.lock().unwrap().is_empty());
+        loop {
+            match changes.try_recv() {
+                Ok(change) => match change.kind {
+                    DiagnosticChangeKind::PluginRegistered { plugin, .. }
+                    | DiagnosticChangeKind::PluginTerminated { plugin, .. }
+                    | DiagnosticChangeKind::StateChanged { plugin, .. } => {
+                        assert_ne!(plugin, child.id, "unmounted child entered diagnostic feed");
+                    }
+                    _ => {}
+                },
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                Err(error) => panic!("unexpected diagnostic receive error: {error}"),
+            }
+        }
     }
 }

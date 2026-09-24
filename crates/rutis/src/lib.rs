@@ -23,8 +23,9 @@ mod registry;
 pub use bus::EventBus;
 pub use ctx::Ctx;
 pub use diagnostics::{
-    BindingDiagnostics, DependencyDiagnostics, DependencyStatus, PluginDiagnostics,
-    ResolvedDependency, RuntimeDiagnostics, ServiceAccess,
+    BindingDiagnostics, BindingIdentity, DependencyDiagnostics, DependencyStatus, DiagnosticChange,
+    DiagnosticChangeKind, DiagnosticSubscription, PluginDiagnostics, ResolvedDependency,
+    RuntimeDiagnostics, ServiceAccess,
 };
 pub use effect::{Disposer, Effect};
 pub use error::{CordisError, ErrorSink, ServiceReadError, ServiceReadFailure};

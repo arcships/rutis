@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::ctx::{Ctx, Shared};
-use crate::diagnostics::ServiceAccess;
+use crate::diagnostics::{DiagnosticChangeKind, ServiceAccess};
 use crate::effect::{Effect, EffectRecord};
 use crate::error::{aggregate_arcs, panic_error, CordisError};
 use crate::event::{CatchUnwind, Event};
@@ -155,6 +155,7 @@ pub(crate) struct FiberInner {
     pub instance: InstanceId,
     pub name: String,
     pub is_root: bool,
+    pub mounted: AtomicBool,
     pub plugin: Option<Arc<dyn Plugin>>,
     /// 工厂模式(D32):与 `plugin` 互斥(工厂模式 plugin 为 None)。
     pub factory: Option<Arc<dyn ErasedFactory>>,
@@ -162,6 +163,7 @@ pub(crate) struct FiberInner {
     pub config: Mutex<Option<Arc<dyn Any + Send + Sync>>>,
     pub ctx: Ctx,
     pub parent_fiber: Option<Weak<FiberInner>>,
+    pub parent_id: Option<PluginId>,
     pub children: Mutex<Vec<Weak<FiberInner>>>,
     pub closing: Arc<AtomicBool>,
     pub event_flights: Mutex<usize>,
@@ -401,6 +403,18 @@ impl FiberInner {
             from: old,
             to: new,
         });
+        if self.is_root || self.mounted.load(Ordering::SeqCst) {
+            self.ctx
+                .shared()
+                .diagnostics
+                .publish(DiagnosticChangeKind::StateChanged {
+                    plugin: self.id,
+                    instance: self.instance,
+                    generation: tr.generation,
+                    from: old,
+                    to: new,
+                });
+        }
         let _ = self.snapshot_tx.send(Snapshot {
             generation: tr.generation,
             state: new,
@@ -790,6 +804,18 @@ pub(crate) async fn drive(this: Arc<FiberInner>, mut rx: mpsc::UnboundedReceiver
             if let Some(terminal) = terminal {
                 terminal.complete(err.clone());
             }
+            if this.is_root {
+                this.ctx.shared().diagnostics.wait_children().await;
+                this.ctx
+                    .shared()
+                    .diagnostics
+                    .publish(DiagnosticChangeKind::PluginTerminated {
+                        plugin: this.id,
+                        instance: this.instance,
+                        parent: None,
+                    });
+                this.ctx.shared().diagnostics.close();
+            }
             drop(this);
             task.complete(err);
             return;
@@ -863,6 +889,18 @@ async fn recover_driver_panic(
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| this.flush_status()));
     if !this.is_root {
         let _ = CatchUnwind::new(release_transient(this)).await;
+    } else {
+        // A panicked root driver may have lost cleanup ownership. Do not let
+        // diagnostics keep its failure waiters blocked on orphaned children.
+        this.ctx
+            .shared()
+            .diagnostics
+            .publish(DiagnosticChangeKind::PluginTerminated {
+                plugin: this.id,
+                instance: this.instance,
+                parent: None,
+            });
+        this.ctx.shared().diagnostics.close();
     }
 }
 
@@ -885,7 +923,13 @@ async fn release_transient(this: &Arc<FiberInner>) {
     shared
         .registry
         .unregister_injects(this, &this.declared_injects);
-    let record = this.mount.lock().unwrap().take();
+    let record = {
+        // A mount and a terminal release must choose one order. Without this
+        // lock, a child could detach before its parent publishes the mount.
+        let _admission = shared.admission.lock().unwrap();
+        this.mount.lock().unwrap().take()
+    };
+    let was_mounted = record.is_some();
     if let Some(record) = record {
         let handle = this.ctx.handle().clone();
         if let Err(e) = record.drain(&handle).await {
@@ -893,13 +937,24 @@ async fn release_transient(this: &Arc<FiberInner>) {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink(e)));
         }
     }
-    if let Some(parent) = this.parent_fiber.as_ref().and_then(Weak::upgrade) {
+    let parent = this.parent_fiber.as_ref().and_then(Weak::upgrade);
+    if let Some(parent) = parent {
         let self_weak = Arc::downgrade(this);
         let mut children = parent.children.lock().unwrap();
         children.retain(|child| !Weak::ptr_eq(child, &self_weak) && child.strong_count() > 0);
         if children.capacity() > 64 && children.len() * 4 < children.capacity() {
             children.shrink_to_fit();
         }
+    }
+    if was_mounted {
+        this.ctx
+            .shared()
+            .diagnostics
+            .publish(DiagnosticChangeKind::PluginTerminated {
+                plugin: this.id,
+                instance: this.instance,
+                parent: this.parent_id,
+            });
     }
 }
 
@@ -1004,6 +1059,7 @@ fn spawn_fiber_inner(
     let token = CancellationToken::new();
     let closing = Arc::new(AtomicBool::new(closed));
     let parent_fiber = parent_ctx.map(|p| p.weak_fiber());
+    let parent_id = parent_fiber.as_ref().and_then(Weak::upgrade).map(|p| p.id);
 
     let this = Arc::new_cyclic(|weak: &Weak<FiberInner>| {
         let ctx = match parent_ctx {
@@ -1023,11 +1079,13 @@ fn spawn_fiber_inner(
             instance,
             name: if closed { "closed".to_string() } else { name },
             is_root,
+            mounted: AtomicBool::new(is_root),
             plugin,
             factory,
             config: Mutex::new(config),
             ctx,
             parent_fiber,
+            parent_id,
             children: Mutex::new(Vec::new()),
             closing,
             event_flights: Mutex::new(0),

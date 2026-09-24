@@ -1,5 +1,7 @@
 //! Read-only snapshots of fiber ownership and service resolution.
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::{broadcast, watch};
 
 use crate::{CordisError, FiberState, InstanceId, PluginId, ServiceReadFailure, TypeKey};
 
@@ -93,4 +95,142 @@ pub struct BindingDiagnostics {
     pub provider: PluginId,
     pub generation: u64,
     pub removing: bool,
+}
+
+/// Identity of one service generation. No service value is retained.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindingIdentity {
+    pub provider: PluginId,
+    pub instance: InstanceId,
+    pub generation: u64,
+    pub key: TypeKey,
+    pub scope: Option<String>,
+}
+
+/// A structural lifecycle change, or one rejected strict read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiagnosticChangeKind {
+    PluginRegistered {
+        plugin: PluginId,
+        instance: InstanceId,
+        parent: Option<PluginId>,
+        name: String,
+        state: FiberState,
+        generation: u64,
+    },
+    PluginTerminated {
+        plugin: PluginId,
+        instance: InstanceId,
+        parent: Option<PluginId>,
+    },
+    StateChanged {
+        plugin: PluginId,
+        instance: InstanceId,
+        generation: u64,
+        from: FiberState,
+        to: FiberState,
+    },
+    BindingRegistered(BindingIdentity),
+    BindingRemoving(BindingIdentity),
+    BindingRemoved(BindingIdentity),
+    StrictReadDenied {
+        plugin: PluginId,
+        instance: InstanceId,
+        key: TypeKey,
+        scope: Option<String>,
+        reason: ServiceReadFailure,
+    },
+}
+
+/// Root-wide enqueue order. Events from distinct fibers do not claim causal order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticChange {
+    pub seq: u64,
+    pub kind: DiagnosticChangeKind,
+}
+
+/// Subscribe first, then scan a best-effort snapshot. The snapshot may overlap
+/// changes after `cursor`; consumers should replay by identity and sequence.
+/// This feed does not cover every mutable snapshot field, such as cached checks
+/// and access history. `Lagged` from `recv()` requires a fresh subscription.
+pub struct DiagnosticSubscription {
+    pub initial: RuntimeDiagnostics,
+    pub cursor: u64,
+    pub changes: broadcast::Receiver<DiagnosticChange>,
+}
+
+struct HubState {
+    seq: u64,
+    live_children: usize,
+    sender: Option<broadcast::Sender<DiagnosticChange>>,
+}
+
+/// A bounded, read-only broadcast. Sending never calls subscriber code.
+pub(crate) struct DiagnosticHub {
+    state: Mutex<HubState>,
+    live_tx: watch::Sender<usize>,
+}
+
+impl DiagnosticHub {
+    pub(crate) fn new() -> Self {
+        let (sender, _) = broadcast::channel(256);
+        let (live_tx, _) = watch::channel(0);
+        Self {
+            state: Mutex::new(HubState {
+                seq: 0,
+                live_children: 0,
+                sender: Some(sender),
+            }),
+            live_tx,
+        }
+    }
+
+    pub(crate) fn subscribe(&self) -> Option<(u64, broadcast::Receiver<DiagnosticChange>)> {
+        let state = self.state.lock().unwrap();
+        state
+            .sender
+            .as_ref()
+            .map(|sender| (state.seq, sender.subscribe()))
+    }
+
+    pub(crate) fn publish(&self, kind: DiagnosticChangeKind) {
+        let mut state = self.state.lock().unwrap();
+        let Some(sender) = state.sender.clone() else {
+            return;
+        };
+        match &kind {
+            DiagnosticChangeKind::PluginRegistered { .. } => {
+                state.live_children += 1;
+                self.live_tx.send_replace(state.live_children);
+            }
+            DiagnosticChangeKind::PluginTerminated {
+                parent: Some(_), ..
+            } => {
+                state.live_children -= 1;
+                self.live_tx.send_replace(state.live_children);
+            }
+            _ => {}
+        }
+        state.seq = state
+            .seq
+            .checked_add(1)
+            .expect("diagnostic sequence exhausted");
+        let _ = sender.send(DiagnosticChange {
+            seq: state.seq,
+            kind,
+        });
+    }
+
+    pub(crate) fn close(&self) {
+        self.state.lock().unwrap().sender.take();
+    }
+
+    pub(crate) async fn wait_children(&self) {
+        let mut live = self.live_tx.subscribe();
+        while *live.borrow_and_update() != 0 {
+            if live.changed().await.is_err() {
+                break;
+            }
+        }
+    }
 }

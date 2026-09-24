@@ -2,10 +2,12 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 
-use crate::diagnostics::{BindingDiagnostics, DependencyStatus};
+use crate::diagnostics::{
+    BindingDiagnostics, BindingIdentity, DependencyStatus, DiagnosticChangeKind, DiagnosticHub,
+};
 use crate::error::CordisError;
 use crate::fiber::{FiberInner, FiberState, Intent, PluginId};
-use crate::key::{ScopeId, TypeKey};
+use crate::key::{InstanceId, ScopeId, TypeKey};
 
 pub(crate) type CheckFn = Arc<dyn Fn() -> bool + Send + Sync>;
 
@@ -31,6 +33,7 @@ pub(crate) struct Binding {
     pub value: StoredValue,
     pub provider: Weak<FiberInner>,
     pub provider_id: PluginId,
+    pub provider_instance: InstanceId,
     pub provider_gen: u64,
     pub check: Option<CheckFn>,
     pub check_status: Mutex<Option<DependencyStatus>>,
@@ -41,6 +44,7 @@ pub(crate) struct Binding {
 /// 服务注册表(支柱 3)+ 反向依赖索引(支柱 5/D21 三元组)。
 pub(crate) struct Registry {
     bindings: Mutex<HashMap<(TypeKey, Option<ScopeId>), Arc<Binding>>>,
+    diagnostics: Arc<DiagnosticHub>,
     /// 注入索引:TypeKey → 声明依赖它的 fiber。
     inject_index: Mutex<HashMap<TypeKey, Vec<Weak<FiberInner>>>>,
 }
@@ -54,9 +58,10 @@ fn shrink_if_sparse<K: Eq + std::hash::Hash, V>(map: &mut HashMap<K, V>) {
     }
 }
 impl Registry {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(diagnostics: Arc<DiagnosticHub>) -> Self {
         Self {
             bindings: Mutex::new(HashMap::new()),
+            diagnostics,
             inject_index: Mutex::new(HashMap::new()),
         }
     }
@@ -90,7 +95,38 @@ impl Registry {
         }
         let stored = Arc::new(binding);
         bindings.insert(entry, stored.clone());
+        self.diagnostics
+            .publish(DiagnosticChangeKind::BindingRegistered(binding_identity(
+                &key,
+                scope.as_ref(),
+                &stored,
+            )));
         Ok(stored)
+    }
+
+    /// Commit the visibility transition and enqueue its notification together.
+    pub(crate) fn begin_removal(
+        &self,
+        key: &TypeKey,
+        scope: Option<&ScopeId>,
+        provider: PluginId,
+        generation: u64,
+    ) -> Option<Arc<Binding>> {
+        let bindings = self.bindings.lock().unwrap();
+        let binding = bindings.get(&(key.clone(), scope.cloned()))?.clone();
+        if binding.provider_id != provider || binding.provider_gen != generation {
+            return None;
+        }
+        if !binding
+            .removing
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.diagnostics
+                .publish(DiagnosticChangeKind::BindingRemoving(binding_identity(
+                    key, scope, &binding,
+                )));
+        }
+        Some(binding)
     }
 
     pub(crate) fn lookup(&self, key: &TypeKey, scope: Option<&ScopeId>) -> Option<Arc<Binding>> {
@@ -162,9 +198,15 @@ impl Registry {
             .get(&(key.clone(), scope.clone()))
             .is_some_and(|b| Arc::ptr_eq(b, expected));
         if still_old {
-            bindings.remove(&(key, scope));
+            bindings.remove(&(key.clone(), scope.clone()));
             shrink_if_sparse(&mut bindings);
         }
+        self.diagnostics
+            .publish(DiagnosticChangeKind::BindingRemoved(binding_identity(
+                &key,
+                scope.as_ref(),
+                expected,
+            )));
     }
 
     /// 该依赖四元组的当前消费者(D21 简化:唯一事实源是各 fiber 的
@@ -282,6 +324,16 @@ impl Registry {
             }
         }
         Some((binding.provider_id, binding.provider_gen))
+    }
+}
+
+fn binding_identity(key: &TypeKey, scope: Option<&ScopeId>, binding: &Binding) -> BindingIdentity {
+    BindingIdentity {
+        provider: binding.provider_id,
+        instance: binding.provider_instance,
+        generation: binding.provider_gen,
+        key: key.clone(),
+        scope: scope.map(|s| s.to_string()),
     }
 }
 
