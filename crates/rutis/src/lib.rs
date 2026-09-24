@@ -20,7 +20,7 @@ mod key;
 mod plugin;
 mod registry;
 
-pub use bus::EventBus;
+pub use bus::{DispatchAttempt, DispatchMode, EventBus};
 pub use ctx::Ctx;
 pub use diagnostics::{
     BindingDiagnostics, DependencyDiagnostics, DependencyStatus, PluginDiagnostics,

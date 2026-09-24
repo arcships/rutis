@@ -106,6 +106,10 @@ impl Ctx {
         self.0.fiber.clone()
     }
 
+    pub(crate) fn plugin_id(&self) -> PluginId {
+        self.0.plugin_id
+    }
+
     pub(crate) fn shared(&self) -> &Arc<Shared> {
         &self.0.shared
     }
