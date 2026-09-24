@@ -287,6 +287,136 @@ async fn instance_keys_enforce_subtree_and_explain_pending_dependency() {
     new_root.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn registration_errors_prioritize_closed_then_inactive_then_instance_scope() {
+    let root = Ctx::root().unwrap();
+    let (disposed_view, disposed) = child(&root).await;
+    let (closed_view, closed) = child(&root).await;
+    let foreign = TypeKey::instance::<u64>(closed.instance());
+    let id = closed.instance();
+
+    assert!(matches!(
+        root.provide_as(foreign.clone(), Arc::new(1u64)),
+        Err(CordisError::InstanceOutOfScope { .. })
+    ));
+    assert!(matches!(
+        root.events().on_instance(&root, id, Bail),
+        Err(CordisError::InstanceOutOfScope { .. })
+    ));
+    assert!(matches!(
+        root.events().emit_instance(&root, id, Arc::new(Ping(1))),
+        Err(CordisError::InstanceOutOfScope { .. })
+    ));
+    assert!(matches!(
+        root.events().serial_instance(&root, id, &Ping(1)).await,
+        Err(CordisError::InstanceOutOfScope { .. })
+    ));
+    assert!(matches!(
+        root.events()
+            .parallel_instance(&root, id, Arc::new(Ping(1)))
+            .await,
+        Err(CordisError::InstanceOutOfScope { .. })
+    ));
+
+    disposed_view.dispose().await.unwrap();
+    assert!(matches!(
+        disposed.effect(|| Effect::Done),
+        Err(CordisError::InactiveEffect)
+    ));
+    assert!(matches!(
+        disposed.provide_as(foreign.clone(), Arc::new(1u64)),
+        Err(CordisError::InactiveEffect)
+    ));
+    assert!(matches!(
+        disposed.events().on_instance(&disposed, id, Bail),
+        Err(CordisError::InactiveEffect)
+    ));
+    assert!(matches!(
+        disposed
+            .events()
+            .emit_instance(&disposed, id, Arc::new(Ping(1))),
+        Err(CordisError::InactiveEffect)
+    ));
+    assert!(matches!(
+        disposed
+            .events()
+            .serial_instance(&disposed, id, &Ping(1))
+            .await,
+        Err(CordisError::InactiveEffect)
+    ));
+    assert!(matches!(
+        disposed
+            .events()
+            .parallel_instance(&disposed, id, Arc::new(Ping(1)))
+            .await,
+        Err(CordisError::InactiveEffect)
+    ));
+
+    closed_view.shutdown().await.unwrap();
+    assert!(matches!(
+        closed.effect(|| Effect::Done),
+        Err(CordisError::Closed)
+    ));
+    assert!(matches!(
+        closed.provide_as(foreign.clone(), Arc::new(1u64)),
+        Err(CordisError::Closed)
+    ));
+    assert!(matches!(
+        closed.events().on_instance(&closed, id, Bail),
+        Err(CordisError::Closed)
+    ));
+    assert!(matches!(
+        closed
+            .events()
+            .emit_instance(&closed, id, Arc::new(Ping(1))),
+        Err(CordisError::Closed)
+    ));
+    assert!(matches!(
+        closed.events().serial_instance(&closed, id, &Ping(1)).await,
+        Err(CordisError::Closed)
+    ));
+    assert!(matches!(
+        closed
+            .events()
+            .parallel_instance(&closed, id, Arc::new(Ping(1)))
+            .await,
+        Err(CordisError::Closed)
+    ));
+
+    drop(closed_view);
+    assert!(matches!(
+        closed.effect(|| Effect::Done),
+        Err(CordisError::Closed)
+    ));
+    root.shutdown().await.unwrap();
+    assert!(matches!(
+        root.effect(|| Effect::Done),
+        Err(CordisError::Closed)
+    ));
+    assert!(matches!(
+        root.provide_as(foreign.clone(), Arc::new(1u64)),
+        Err(CordisError::Closed)
+    ));
+    assert!(matches!(
+        root.events().on_instance(&root, id, Bail),
+        Err(CordisError::Closed)
+    ));
+    assert!(matches!(
+        root.events().emit_instance(&root, id, Arc::new(Ping(1))),
+        Err(CordisError::Closed)
+    ));
+    assert!(matches!(
+        root.events().serial_instance(&root, id, &Ping(1)).await,
+        Err(CordisError::Closed)
+    ));
+    assert!(matches!(
+        root.events()
+            .parallel_instance(&root, id, Arc::new(Ping(1)))
+            .await,
+        Err(CordisError::Closed)
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn process_service_reload_reaches_both_instances() {
     let root = Ctx::root().unwrap();
@@ -311,6 +441,179 @@ async fn process_service_reload_reaches_both_instances() {
     (&read_b).await.unwrap();
     assert_eq!(*seen_a.lock().unwrap(), vec![7, 9]);
     assert_eq!(*seen_b.lock().unwrap(), vec![7, 9]);
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn instance_service_reload_does_not_touch_sibling_consumer() {
+    let root = Ctx::root().unwrap();
+    let (_a_view, a) = child(&root).await;
+    let (_b_view, b) = child(&root).await;
+    let key_a = TypeKey::instance::<u64>(a.instance());
+    let key_b = TypeKey::instance::<u64>(b.instance());
+    let old_a = a.provide_as(key_a.clone(), Arc::new(1u64)).unwrap();
+    b.provide_as(key_b.clone(), Arc::new(2u64)).unwrap();
+    let seen_a = Arc::new(Mutex::new(Vec::new()));
+    let seen_b = Arc::new(Mutex::new(Vec::new()));
+    let read_a = a.plugin(Read {
+        key: key_a.clone(),
+        seen: seen_a.clone(),
+    });
+    let read_b = b.plugin(Read {
+        key: key_b,
+        seen: seen_b.clone(),
+    });
+    (&read_a).await.unwrap();
+    (&read_b).await.unwrap();
+    let b_generation = read_b.state().generation;
+
+    old_a.dispose().await.unwrap();
+    assert_eq!(read_a.state().state, FiberState::Pending);
+    a.provide_as(key_a, Arc::new(3u64)).unwrap();
+    (&read_a).await.unwrap();
+    assert_eq!(*seen_a.lock().unwrap(), vec![1, 3]);
+    assert_eq!(*seen_b.lock().unwrap(), vec![2]);
+    assert_eq!(read_b.state().generation, b_generation);
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn fiber_instance_stays_stable_across_restart_update_and_dependency_reload() {
+    let root = Ctx::root().unwrap();
+    let (static_view, static_ctx) = child(&root).await;
+    let static_id = static_ctx.instance();
+    static_view.restart().await.unwrap();
+    assert_eq!(
+        root.diagnostics()
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == static_view.id)
+            .unwrap()
+            .instance,
+        static_id
+    );
+
+    let slot = Arc::new(Mutex::new(None));
+    let factory_slot = slot.clone();
+    let factory = root.plugin_from(
+        move |_config: &u32| Ok(Box::new(Capture(factory_slot.clone())) as Box<dyn Plugin>),
+        1u32,
+    );
+    (&factory).await.unwrap();
+    let factory_id = slot.lock().unwrap().as_ref().unwrap().instance();
+    factory.update(2u32).await.unwrap();
+    assert_eq!(
+        root.diagnostics()
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == factory.id)
+            .unwrap()
+            .instance,
+        factory_id
+    );
+
+    let old = root.provide(4u64).unwrap();
+    let reader = root.plugin(Read {
+        key: TypeKey::of::<u64>(),
+        seen: Arc::new(Mutex::new(Vec::new())),
+    });
+    (&reader).await.unwrap();
+    let reader_id = root
+        .diagnostics()
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == reader.id)
+        .unwrap()
+        .instance;
+    old.dispose().await.unwrap();
+    root.provide(5u64).unwrap();
+    (&reader).await.unwrap();
+    assert_eq!(
+        root.diagnostics()
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == reader.id)
+            .unwrap()
+            .instance,
+        reader_id
+    );
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn dropping_borrowed_serial_releases_shutdown_flight() {
+    let root = Ctx::root().unwrap();
+    let (view, ctx) = child(&root).await;
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let gate = Arc::new(Semaphore::new(0));
+    ctx.events()
+        .on_instance(
+            &ctx,
+            ctx.instance(),
+            Record {
+                log: Arc::new(Mutex::new(Vec::new())),
+                entered: Mutex::new(Some(entered_tx)),
+                release: Some(gate),
+            },
+        )
+        .unwrap();
+    let event = Ping(1);
+    let mut dispatch = Box::pin(ctx.events().serial_instance(&ctx, ctx.instance(), &event));
+    tokio::select! {
+        result = &mut dispatch => panic!("serial completed before its gate: {result:?}"),
+        result = entered_rx => result.unwrap(),
+    }
+    drop(dispatch);
+    tokio::time::timeout(Duration::from_secs(2), view.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    root.shutdown().await.unwrap();
+}
+
+struct StartOwnShutdown {
+    view: rutis::FiberView,
+    calls: Arc<AtomicUsize>,
+}
+
+impl Listener<Ping> for StartOwnShutdown {
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a Ctx,
+        _event: &'a Ping,
+    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+        Box::pin(async move {
+            drop(self.view.shutdown());
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        })
+    }
+}
+
+#[tokio::test]
+async fn callback_can_start_own_shutdown_and_return() {
+    let root = Ctx::root().unwrap();
+    let (view, ctx) = child(&root).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    ctx.events()
+        .on_instance(
+            &ctx,
+            ctx.instance(),
+            StartOwnShutdown {
+                view: view.clone(),
+                calls: calls.clone(),
+            },
+        )
+        .unwrap();
+    ctx.events()
+        .serial_instance(&ctx, ctx.instance(), &Ping(1))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), view.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     root.shutdown().await.unwrap();
 }
 

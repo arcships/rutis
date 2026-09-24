@@ -227,6 +227,7 @@ impl EventBus {
         id: InstanceId,
         listener: impl Listener<E>,
     ) -> Result<Disposer, CordisError> {
+        ctx.registration_preflight()?;
         self.ensure_instance_ctx(ctx, id)?;
         self.add_hook(
             TypeKey::instance::<E>(id),
@@ -456,8 +457,8 @@ impl EventBus {
         key: &TypeKey,
     ) -> Result<(Vec<Arc<Hook<Arc<dyn ErasedCall>>>>, EventFlight), CordisError> {
         let _admission = ctx.shared().admission.lock().unwrap();
+        ctx.registration_preflight()?;
         self.ensure_instance_ctx(ctx, id)?;
-        ctx.registration_open()?;
         let hooks = self.take_hooks(key);
         let flight = EventFlight::new(ctx, id, &hooks);
         Ok((hooks, flight))
@@ -514,8 +515,8 @@ impl EventBus {
             .instance_id()
             .map(|_| ctx.shared().admission.lock().unwrap());
         if let Some(id) = key.instance_id() {
+            ctx.registration_preflight()?;
             self.ensure_instance_ctx(ctx, id)?;
-            ctx.registration_open()?;
         }
         let hooks = self.take_hooks(&key);
         if hooks.is_empty() {
@@ -586,6 +587,9 @@ impl EventBus {
     ) -> Result<(), CordisError> {
         let key = TypeKey::instance::<E>(id);
         let (hooks, flight) = self.take_instance_hooks(ctx, id, &key)?;
+        if hooks.is_empty() {
+            return Ok(());
+        }
         let ctx2 = ctx.clone();
         let runner = ctx.handle().spawn(async move {
             let _flight = flight;

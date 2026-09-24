@@ -40,6 +40,7 @@ pub(crate) struct CtxInner {
     pub(crate) isolate: Option<(TypeKey, ScopeId)>,
     pub(crate) instance: InstanceId,
     pub(crate) plugin_id: PluginId,
+    pub(crate) closing: Arc<AtomicBool>,
 }
 
 /// 上下文 = `Arc<CtxInner>`(所有权模型:Clone 廉价;isolate/plugin 返回共享内核的新 Ctx)。
@@ -70,6 +71,7 @@ impl Ctx {
         isolate: Option<(TypeKey, ScopeId)>,
         instance: InstanceId,
         plugin_id: PluginId,
+        closing: Arc<AtomicBool>,
     ) -> Self {
         Self(Arc::new(CtxInner {
             shared,
@@ -78,6 +80,7 @@ impl Ctx {
             isolate,
             instance,
             plugin_id,
+            closing,
         }))
     }
 
@@ -86,6 +89,7 @@ impl Ctx {
         fiber: Weak<FiberInner>,
         instance: InstanceId,
         plugin_id: PluginId,
+        closing: Arc<AtomicBool>,
     ) -> Self {
         Self(Arc::new(CtxInner {
             shared,
@@ -94,6 +98,7 @@ impl Ctx {
             isolate: None,
             instance,
             plugin_id,
+            closing,
         }))
     }
 
@@ -147,12 +152,12 @@ impl Ctx {
     }
 
     pub(crate) fn subtree_closing(&self) -> bool {
-        let mut current = self.0.fiber.upgrade();
-        while let Some(fiber) = current {
-            if fiber.closing.load(Ordering::SeqCst) {
+        let mut current = Some(self.clone());
+        while let Some(ctx) = current {
+            if ctx.0.closing.load(Ordering::SeqCst) {
                 return true;
             }
-            current = fiber.parent_fiber.as_ref().and_then(Weak::upgrade);
+            current = ctx.0.parent.clone();
         }
         false
     }
@@ -163,6 +168,18 @@ impl Ctx {
         } else {
             Ok(())
         }
+    }
+
+    /// Common precedence for public service and instance-event operations:
+    /// permanent closure, inactive fiber, then key/instance validation.
+    /// Registration itself repeats the state check under the admission lock.
+    pub(crate) fn registration_preflight(&self) -> Result<(), CordisError> {
+        self.registration_open()?;
+        let fiber = self.0.fiber.upgrade().ok_or(CordisError::InactiveEffect)?;
+        if matches!(fiber.state(), FiberState::Unloading | FiberState::Disposed) {
+            return Err(CordisError::InactiveEffect);
+        }
+        Ok(())
     }
 
     pub fn handle(&self) -> &Handle {
@@ -395,6 +412,7 @@ impl Ctx {
             Some((key.into(), Arc::from(label))),
             self.instance(),
             self.0.plugin_id,
+            self.0.closing.clone(),
         )
     }
 
@@ -735,6 +753,7 @@ impl Ctx {
         value: Arc<T>,
         check: Option<CheckFn>,
     ) -> Result<Disposer, CordisError> {
+        self.registration_preflight()?;
         self.check_instance(&key)?;
         if !key.has_type::<T>() {
             return Err(CordisError::Validation {
@@ -853,7 +872,13 @@ impl Ctx {
         &self,
         f: impl FnOnce() -> Effect,
     ) -> Result<Arc<EffectRecord>, CordisError> {
-        let fiber = self.0.fiber.upgrade().ok_or(CordisError::InactiveEffect)?;
+        let fiber = self.0.fiber.upgrade();
+        if self.0.shared.closing.load(Ordering::SeqCst)
+            || (fiber.is_none() && self.subtree_closing())
+        {
+            return Err(CordisError::Closed);
+        }
+        let fiber = fiber.ok_or(CordisError::InactiveEffect)?;
         let lease = {
             let _admission = self.0.shared.admission.lock().unwrap();
             let tr = fiber.transition.lock().unwrap();
