@@ -26,7 +26,7 @@ pub use diagnostics::{
     BindingDiagnostics, DependencyDiagnostics, DependencyStatus, PluginDiagnostics,
     ResolvedDependency, RuntimeDiagnostics, ServiceAccess,
 };
-pub use effect::{Disposer, Effect};
+pub use effect::{Disposer, Effect, EffectMeta, EffectPhase};
 pub use error::{CordisError, ErrorSink, ServiceReadError, ServiceReadFailure};
 pub use event::{Event, EventOptions, Listener, Next, Terminal, WaterfallListener};
 pub use fiber::{DisposeWaitError, FiberState, FiberStatusChanged, FiberView, PluginId, Snapshot};

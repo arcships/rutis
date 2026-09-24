@@ -272,7 +272,7 @@ impl EventBus {
         });
         let bus = self.clone();
         let shared = owner.shared().clone();
-        owner.register_internal_effect(move |_, _, _| {
+        owner.register_internal_effect_named("dispatch observer".into(), move |_, _, _| {
             bus.inner.lock().unwrap().observers.push(hook.clone());
             Ok(Effect::AsyncDisposer(Box::new(move || {
                 {
@@ -511,7 +511,8 @@ impl EventBus {
         });
         let bus = self.clone();
         let access_ctx = ctx.clone();
-        ctx.register_internal_effect(move |_, _, _| {
+        let label = format!("event listener: {}", key.describe());
+        ctx.register_internal_effect_named(label, move |_, _, _| {
             access_ctx.check_instance(&key)?;
             {
                 let mut inner = bus.inner.lock().unwrap();
@@ -559,7 +560,8 @@ impl EventBus {
             owner: ctx.weak_fiber(),
         });
         let bus = self.clone();
-        ctx.register_internal_effect(move |_, _, _| {
+        let label = format!("waterfall listener: {}", key.describe());
+        ctx.register_internal_effect_named(label, move |_, _, _| {
             {
                 let mut inner = bus.inner.lock().unwrap();
                 let list = inner.wf_hooks.entry(key.clone()).or_default();

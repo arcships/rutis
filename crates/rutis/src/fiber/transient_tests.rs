@@ -150,6 +150,8 @@ async fn thousand_shutdowns_reclaim_all_root_side_records() {
         assert!(view.inner.driver.lock().unwrap().is_none());
         assert_eq!(root.children.lock().unwrap().len(), 0);
         assert_eq!(root.effects.lock().unwrap().len(), 1);
+        assert_eq!(root.effect_index.lock().unwrap().len(), 1);
+        assert!(view.inner.effect_index.lock().unwrap().is_empty());
         assert_eq!(ctx.shared().registry.table_counts(), (1, 0));
         assert_eq!(ctx.events().table_counts(), (0, 0, 0));
         drop(view);

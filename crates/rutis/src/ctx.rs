@@ -780,7 +780,8 @@ impl Ctx {
         }
         let scope = self.scope_for(&key);
         let shared = self.0.shared.clone();
-        self.register_internal_effect(move |fiber, provider_gen, state| {
+        let label = format!("service provide: {}", key.describe());
+        self.register_internal_effect_named(label, move |fiber, provider_gen, state| {
             // Admission and the fiber transition lock cover both the binding and
             // its cleanup record, so shutdown cannot miss a committed service.
             shared.registry.insert_binding(
@@ -823,7 +824,16 @@ impl Ctx {
     /// 注册清理效应(D23):`f` 立即执行,返回的清理在卸载时 LIFO 执行。
     /// fiber 已 Disposed/Unloading 时返回 `InactiveEffect`(§四:重入报错)。
     pub fn effect(&self, f: impl FnOnce() -> Effect) -> Result<Disposer, CordisError> {
-        let record = self.register_effect(f)?;
+        self.effect_named("anonymous", f)
+    }
+
+    /// Register a cleanup with a label visible through [`FiberView::effects`].
+    pub fn effect_named(
+        &self,
+        label: impl Into<String>,
+        f: impl FnOnce() -> Effect,
+    ) -> Result<Disposer, CordisError> {
+        let record = self.register_effect_named(label.into(), f)?;
         let handle = self.handle().clone();
         Ok(Disposer::new(Box::new(move || {
             let record = record.clone();
@@ -835,8 +845,9 @@ impl Ctx {
     /// Framework-owned registration: admission, state check, insertion and
     /// cleanup ownership commit at one synchronous point. `f` must not call
     /// user code or try to acquire the admission lock again.
-    pub(crate) fn register_internal_effect(
+    pub(crate) fn register_internal_effect_named(
         &self,
+        label: String,
         f: impl FnOnce(&Arc<FiberInner>, u64, FiberState) -> Result<Effect, CordisError>,
     ) -> Result<Disposer, CordisError> {
         let _admission = self.0.shared.admission.lock().unwrap();
@@ -847,8 +858,8 @@ impl Ctx {
             return Err(CordisError::InactiveEffect);
         }
         let effect = f(&fiber, tr.generation, tr.state)?;
-        let record = EffectRecord::new(effect, self.0.fiber.clone());
-        fiber.effects.lock().unwrap().push(record.clone());
+        let record = EffectRecord::new(effect, label, self.0.fiber.clone());
+        fiber.push_effect(record.clone());
         drop(tr);
         let handle = self.handle().clone();
         Ok(Disposer::new(Box::new(move || {
@@ -873,16 +884,21 @@ impl Ctx {
         if matches!(tr.state, FiberState::Unloading | FiberState::Disposed) {
             return Err(CordisError::InactiveEffect);
         }
-        let record = EffectRecord::new(make(), self.0.fiber.clone());
-        parent.effects.lock().unwrap().push(record.clone());
+        let record = EffectRecord::new(
+            make(),
+            format!("plugin mount: {} #{}", child.name, child.id.0),
+            self.0.fiber.clone(),
+        );
+        parent.push_effect(record.clone());
         *child.mount.lock().unwrap() = Some(record.clone());
         Ok(record)
     }
 
     /// `effect` 的内部形态:返回记录本体,供 mount 登记等持有引用。
     /// Disposer 语义不变:drop 不触发清理,fiber 卸载仍兜底(D28)。
-    pub(crate) fn register_effect(
+    pub(crate) fn register_effect_named(
         &self,
+        label: String,
         f: impl FnOnce() -> Effect,
     ) -> Result<Arc<EffectRecord>, CordisError> {
         let fiber = self.0.fiber.upgrade();
@@ -909,7 +925,7 @@ impl Ctx {
         // factory 锁外执行;但"状态检查 + effects 入队"必须在同一临界区
         //(transition → effects 嵌套,锁序无反向):否则检查通过后驱动恰好
         // 卸载取走 effects,新记录漏掉本轮清理而泄漏(评审 P1)
-        let record = EffectRecord::new(f(), self.0.fiber.clone());
+        let record = EffectRecord::new(f(), label, self.0.fiber.clone());
         let handle = self.handle().clone();
         {
             let tr = fiber.transition.lock().unwrap();
@@ -927,7 +943,7 @@ impl Ctx {
                 });
                 return Err(CordisError::InactiveEffect);
             }
-            fiber.effects.lock().unwrap().push(record.clone());
+            fiber.push_effect(record.clone());
         }
         drop(lease);
         Ok(record)
