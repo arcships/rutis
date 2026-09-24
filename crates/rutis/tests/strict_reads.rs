@@ -102,20 +102,6 @@ async fn strict_reads_distinguish_declaration_readiness_and_inactive_context() {
     assert_eq!(error.plugin_id, plain_view.id);
     assert_eq!(error.instance, plain.instance());
 
-    let accesses = &root
-        .diagnostics()
-        .plugins
-        .into_iter()
-        .find(|plugin| plugin.id == plain_view.id)
-        .unwrap()
-        .accesses;
-    assert!(accesses.iter().any(|access| {
-        access.strict
-            && !access.declared
-            && access.failure == Some(ServiceReadFailure::Undeclared)
-            && access.provider.is_none()
-    }));
-
     provider.dispose().await.unwrap();
     assert_eq!(declared_view.state().state, FiberState::Pending);
     assert_eq!(declared.get::<u64>(), None);
@@ -126,22 +112,6 @@ async fn strict_reads_distinguish_declaration_readiness_and_inactive_context() {
         unavailable.reason,
         ServiceReadFailure::Unavailable(DependencyStatus::Missing)
     );
-    let access = root
-        .diagnostics()
-        .plugins
-        .into_iter()
-        .find(|plugin| plugin.id == declared_view.id)
-        .unwrap()
-        .accesses
-        .into_iter()
-        .find(|access| access.failure.is_some())
-        .unwrap();
-    assert!(access.declared);
-    assert_eq!(
-        access.failure,
-        Some(ServiceReadFailure::Unavailable(DependencyStatus::Missing))
-    );
-
     plain_view.shutdown().await.unwrap();
     assert_eq!(
         plain.require::<u64>().unwrap_err().reason,
@@ -167,17 +137,6 @@ async fn self_and_ancestor_declarations_respect_isolate_scope() {
         ServiceReadFailure::Undeclared
     );
     assert!(scoped.get::<u64>().is_none());
-    let access = root
-        .diagnostics()
-        .plugins
-        .into_iter()
-        .find(|plugin| plugin.instance == descendant.instance())
-        .unwrap()
-        .accesses
-        .into_iter()
-        .find(|access| access.strict)
-        .unwrap();
-    assert!(access.declared);
     root.shutdown().await.unwrap();
 }
 
@@ -210,18 +169,6 @@ async fn instance_boundaries_hide_provider_and_old_ids() {
         b.require_as::<u64>(key_a.clone()).unwrap_err().reason,
         ServiceReadFailure::OutOfScope
     );
-    let access = root
-        .diagnostics()
-        .plugins
-        .into_iter()
-        .find(|plugin| plugin.instance == b.instance())
-        .unwrap()
-        .accesses
-        .into_iter()
-        .find(|access| access.failure == Some(ServiceReadFailure::OutOfScope))
-        .unwrap();
-    assert!(access.provider.is_none());
-    assert!(access.generation.is_none());
     foreign_root.shutdown().await.unwrap();
     root.shutdown().await.unwrap();
 }
@@ -236,19 +183,13 @@ async fn denied_reads_do_not_run_checks_or_change_bindings_and_callbacks_are_che
         true
     })
     .unwrap();
-    let (view, ctx) = child(&root, vec![]).await;
-    let before = root.diagnostics().bindings;
+    let (_view, ctx) = child(&root, vec![]).await;
     assert_eq!(
         ctx.require::<u64>().unwrap_err().reason,
         ServiceReadFailure::Undeclared
     );
     assert_eq!(*ctx.get::<u64>().unwrap(), 5);
     assert_eq!(checks.load(Ordering::SeqCst), 0);
-    assert_eq!(root.diagnostics().bindings.len(), before.len());
-    assert_eq!(
-        root.diagnostics().bindings[0].generation,
-        before[0].generation
-    );
 
     let reasons = Arc::new(Mutex::new(Vec::new()));
     ctx.events()
@@ -260,14 +201,5 @@ async fn denied_reads_do_not_run_checks_or_change_bindings_and_callbacks_are_che
         vec![ServiceReadFailure::Undeclared]
     );
     assert_eq!(checks.load(Ordering::SeqCst), 0);
-    assert!(root
-        .diagnostics()
-        .plugins
-        .into_iter()
-        .find(|plugin| plugin.id == view.id)
-        .unwrap()
-        .accesses
-        .iter()
-        .any(|access| access.strict && access.failure == Some(ServiceReadFailure::Undeclared)));
     root.shutdown().await.unwrap();
 }

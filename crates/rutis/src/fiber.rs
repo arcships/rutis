@@ -8,7 +8,6 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::ctx::{Ctx, Shared};
-use crate::diagnostics::ServiceAccess;
 use crate::effect::{Effect, EffectRecord};
 use crate::error::{aggregate_arcs, panic_error, CordisError};
 use crate::event::{CatchUnwind, Event};
@@ -199,7 +198,6 @@ pub(crate) struct FiberInner {
     /// 亦是驱逐判定的唯一事实源(D21:消费者 = last_deps 含该四元组者;
     /// 含作用域——同一 fiber 在不同作用域提供的同键绑定不可混淆)。
     pub last_deps: Mutex<Option<HashSet<(PluginId, u64, TypeKey, Option<crate::key::ScopeId>)>>>,
-    pub accesses: Mutex<Vec<ServiceAccess>>,
 }
 
 /// 工厂擦除面(D32):泛型 `PluginFactory<C>` 的类型擦除适配层内部协议。
@@ -428,7 +426,7 @@ impl FiberInner {
         let mut satisfied: HashSet<(PluginId, u64, TypeKey, Option<ScopeId>)> = HashSet::new();
         let mut missing: Vec<TypeKey> = Vec::new();
         // Reuse the declarations captured at registration. The index, gate,
-        // and diagnostics must all observe the same keys.
+        // and dependency resolution must all observe the same keys.
         let registry = &self.ctx.shared().registry;
         for key in self.declared_injects.iter().cloned() {
             if self.ctx.check_instance(&key).is_err() {
@@ -447,6 +445,11 @@ impl FiberInner {
     }
 
     async fn refresh_deps(this: &Arc<Self>) {
+        // A dependency notification may arrive after inject registration but
+        // before the parent commits this fiber's mount. Mount refreshes it.
+        if !this.is_root && this.mount.lock().unwrap().is_none() {
+            return;
+        }
         if this.closing.load(Ordering::SeqCst) || this.ctx.shared().closing.load(Ordering::SeqCst) {
             return;
         }
@@ -492,7 +495,6 @@ impl FiberInner {
             return;
         }
         this.new_generation_token();
-        this.accesses.lock().unwrap().clear();
         {
             let mut tr = this.transition.lock().unwrap();
             tr.generation += 1;
@@ -1052,7 +1054,6 @@ fn spawn_fiber_inner(
             alive: AtomicBool::new(!closed),
             provided: Mutex::new(Vec::new()),
             last_deps: Mutex::new(None),
-            accesses: Mutex::new(Vec::new()),
             shutdown_task: Mutex::new(None),
             shutdown_inner: Mutex::new(None),
             driver: Mutex::new(None),

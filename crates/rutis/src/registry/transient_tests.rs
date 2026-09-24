@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::ctx::Ctx;
-use crate::{BoxFuture, CordisError, DependencyStatus, Effect, Plugin};
+use crate::{BoxFuture, CordisError, Effect, FiberState, Plugin};
 use std::time::Duration;
 
 struct Declares {
@@ -64,16 +64,7 @@ async fn foreign_instance_dependency_never_enters_notification_index() {
         keys: vec![foreign.clone()],
     });
     (&pending).await.unwrap();
-    assert_eq!(
-        root.diagnostics()
-            .plugins
-            .iter()
-            .find(|plugin| plugin.id == pending.id)
-            .unwrap()
-            .injects[0]
-            .status,
-        DependencyStatus::OutOfScope
-    );
+    assert_eq!(pending.state().state, FiberState::Pending);
     assert!(!root
         .shared()
         .registry

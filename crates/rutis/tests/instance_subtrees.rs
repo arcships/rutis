@@ -3,10 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rutis::{
-    BoxFuture, CordisError, Ctx, DependencyStatus, Effect, Event, FiberState, Listener, Plugin,
-    TypeKey,
-};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, FiberState, Listener, Plugin, TypeKey};
 use tokio::sync::{oneshot, Semaphore};
 
 struct Capture(Arc<Mutex<Option<Ctx>>>);
@@ -44,6 +41,7 @@ async fn child(parent: &Ctx) -> (rutis::FiberView, Ctx) {
 struct Read {
     key: TypeKey,
     seen: Arc<Mutex<Vec<u64>>>,
+    capture: Option<Arc<Mutex<Option<Ctx>>>>,
 }
 
 struct ProbeRead(TypeKey);
@@ -68,6 +66,9 @@ impl Plugin for Read {
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
+            if let Some(slot) = &self.capture {
+                *slot.lock().unwrap() = Some(ctx.clone());
+            }
             let value = ctx.get_as::<u64>(self.key.clone()).unwrap();
             self.seen.lock().unwrap().push(*value);
             Ok(Effect::Done)
@@ -221,7 +222,7 @@ async fn instance_serial_short_circuits_and_parallel_aggregates() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn instance_keys_enforce_subtree_and_explain_pending_dependency() {
+async fn instance_keys_enforce_subtree_and_pending_dependency() {
     let root = Ctx::root().unwrap();
     let (_a, a) = child(&root).await;
     let (_b, b) = child(&root).await;
@@ -250,35 +251,13 @@ async fn instance_keys_enforce_subtree_and_explain_pending_dependency() {
     let pending = b.plugin(Read {
         key: key_a.clone(),
         seen: Arc::new(Mutex::new(Vec::new())),
+        capture: None,
     });
     (&pending).await.unwrap();
     assert_eq!(pending.state().state, FiberState::Pending);
-    let diag = root.diagnostics();
-    let node = diag.plugins.iter().find(|p| p.id == pending.id).unwrap();
-    assert_eq!(node.injects[0].status, DependencyStatus::OutOfScope);
-    assert_ne!(node.instance, b.instance());
-    assert_eq!(
-        node.parent,
-        root.diagnostics()
-            .plugins
-            .iter()
-            .find(|p| p.instance == b.instance())
-            .map(|p| p.id)
-    );
-    assert!(node.resolved_dependencies.is_empty());
     assert_eq!(checks.load(Ordering::SeqCst), 0);
     let probe = b.plugin(ProbeRead(key_a.clone()));
     (&probe).await.unwrap();
-    let diag = root.diagnostics();
-    let access = &diag
-        .plugins
-        .iter()
-        .find(|p| p.id == probe.id)
-        .unwrap()
-        .accesses[0];
-    assert!(access.out_of_scope);
-    assert!(access.provider.is_none());
-    assert!(access.generation.is_none());
     root.shutdown().await.unwrap();
     assert_eq!(a.instance(), key_a.instance_id().unwrap());
     assert!(a.get_as::<u64>(key_a).is_none());
@@ -428,10 +407,12 @@ async fn process_service_reload_reaches_both_instances() {
     let read_a = a.plugin(Read {
         key: TypeKey::of::<u64>(),
         seen: seen_a.clone(),
+        capture: None,
     });
     let read_b = b.plugin(Read {
         key: TypeKey::of::<u64>(),
         seen: seen_b.clone(),
+        capture: None,
     });
     (&read_a).await.unwrap();
     (&read_b).await.unwrap();
@@ -458,10 +439,12 @@ async fn instance_service_reload_does_not_touch_sibling_consumer() {
     let read_a = a.plugin(Read {
         key: key_a.clone(),
         seen: seen_a.clone(),
+        capture: None,
     });
     let read_b = b.plugin(Read {
         key: key_b,
         seen: seen_b.clone(),
+        capture: None,
     });
     (&read_a).await.unwrap();
     (&read_b).await.unwrap();
@@ -480,16 +463,14 @@ async fn instance_service_reload_does_not_touch_sibling_consumer() {
 #[tokio::test]
 async fn fiber_instance_stays_stable_across_restart_update_and_dependency_reload() {
     let root = Ctx::root().unwrap();
-    let (static_view, static_ctx) = child(&root).await;
+    let static_slot = Arc::new(Mutex::new(None));
+    let static_view = root.plugin(Capture(static_slot.clone()));
+    (&static_view).await.unwrap();
+    let static_ctx = static_slot.lock().unwrap().as_ref().unwrap().clone();
     let static_id = static_ctx.instance();
     static_view.restart().await.unwrap();
     assert_eq!(
-        root.diagnostics()
-            .plugins
-            .iter()
-            .find(|plugin| plugin.id == static_view.id)
-            .unwrap()
-            .instance,
+        static_slot.lock().unwrap().as_ref().unwrap().instance(),
         static_id
     );
 
@@ -503,38 +484,24 @@ async fn fiber_instance_stays_stable_across_restart_update_and_dependency_reload
     let factory_id = slot.lock().unwrap().as_ref().unwrap().instance();
     factory.update(2u32).await.unwrap();
     assert_eq!(
-        root.diagnostics()
-            .plugins
-            .iter()
-            .find(|plugin| plugin.id == factory.id)
-            .unwrap()
-            .instance,
+        slot.lock().unwrap().as_ref().unwrap().instance(),
         factory_id
     );
 
     let old = root.provide(4u64).unwrap();
+    let reader_slot = Arc::new(Mutex::new(None));
     let reader = root.plugin(Read {
         key: TypeKey::of::<u64>(),
         seen: Arc::new(Mutex::new(Vec::new())),
+        capture: Some(reader_slot.clone()),
     });
     (&reader).await.unwrap();
-    let reader_id = root
-        .diagnostics()
-        .plugins
-        .iter()
-        .find(|plugin| plugin.id == reader.id)
-        .unwrap()
-        .instance;
+    let reader_id = reader_slot.lock().unwrap().as_ref().unwrap().instance();
     old.dispose().await.unwrap();
     root.provide(5u64).unwrap();
     (&reader).await.unwrap();
     assert_eq!(
-        root.diagnostics()
-            .plugins
-            .iter()
-            .find(|plugin| plugin.id == reader.id)
-            .unwrap()
-            .instance,
+        reader_slot.lock().unwrap().as_ref().unwrap().instance(),
         reader_id
     );
     root.shutdown().await.unwrap();
@@ -967,7 +934,6 @@ async fn concurrent_parent_and_child_shutdown_join_without_cycle() {
     })
     .await
     .unwrap();
-    assert_eq!(root.diagnostics().plugins.len(), 1);
     root.shutdown().await.unwrap();
 }
 
@@ -1000,7 +966,6 @@ async fn thousand_subtrees_leave_no_live_fibers() {
         drop(child);
         assert_eq!(dropped.load(Ordering::SeqCst), n);
     }
-    assert_eq!(root.diagnostics().plugins.len(), 1);
     root.shutdown().await.unwrap();
 }
 
@@ -1090,7 +1055,6 @@ async fn dispose_child_shutdown_and_parent_shutdown_converge() {
         leaf_closed.unwrap().unwrap();
         parent_closed.unwrap().unwrap();
         assert_eq!(leaf.state().state, FiberState::Disposed);
-        assert_eq!(root.diagnostics().plugins.len(), 1);
         root.shutdown().await.unwrap();
     }
 }

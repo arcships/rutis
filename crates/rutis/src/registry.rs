@@ -2,8 +2,7 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 
-use crate::diagnostics::{BindingDiagnostics, DependencyStatus};
-use crate::error::CordisError;
+use crate::error::{CordisError, DependencyStatus};
 use crate::fiber::{FiberInner, FiberState, Intent, PluginId};
 use crate::key::{ScopeId, TypeKey};
 
@@ -96,32 +95,6 @@ impl Registry {
     pub(crate) fn lookup(&self, key: &TypeKey, scope: Option<&ScopeId>) -> Option<Arc<Binding>> {
         let bindings = self.bindings.lock().unwrap();
         bindings.get(&(key.clone(), scope.cloned())).cloned()
-    }
-
-    pub(crate) fn bindings_snapshot(&self) -> Vec<BindingDiagnostics> {
-        self.bindings
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|((key, scope), binding)| BindingDiagnostics {
-                key: key.clone(),
-                scope: scope.as_ref().map(|s| s.to_string()),
-                provider: binding.provider_id,
-                generation: binding.provider_gen,
-                removing: binding.removing.load(std::sync::atomic::Ordering::SeqCst),
-            })
-            .collect()
-    }
-
-    pub(crate) fn dependency_status(
-        &self,
-        key: &TypeKey,
-        scope: Option<&ScopeId>,
-    ) -> DependencyStatus {
-        let Some(binding) = self.lookup(key, scope) else {
-            return DependencyStatus::Missing;
-        };
-        Self::binding_status(&binding)
     }
 
     /// Cached status of one binding snapshot; never invokes its check callback.

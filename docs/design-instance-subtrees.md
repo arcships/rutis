@@ -16,7 +16,7 @@ rutis 负责 fiber 身份、服务可见性、事件通道、子树关闭和内�
 | 事件通道 | hooks、wf_hooks、dispatch_tail 已按 TypeKey 索引 | 扩展现有键，不退回 TypeId 二元组 |
 | 子插件回收 | mount effect 自摘、依赖索引注销、空事件通道及完成尾链清理已有实现 | 复用；强化永久关闭完成屏障 |
 | 子树遍历 | 只有 parent_fiber，没有 children 表 | 增加 Weak 子节点关系，并随终态脱离 |
-| 诊断 | 没有 vendor 的 PluginDiagnostics / ServiceAccess | issue 1 包含最小诊断接口，与既有 #13 协调 |
+| 诊断快照 | 原设计曾要求独立 DTO 与读取历史 | 已取消；仅保留实际读取错误和 fiber 状态 |
 | root shutdown | 已有 Shared.closing 与缓存结果；与 vendor 的子错误汇总不同 | 保留旧接口及既有语义，不直接照搬 vendor |
 
 ## 2. 身份和服务键
@@ -61,23 +61,17 @@ Ctx 的共享身份元数据保存这个数值，isolate 派生的 Ctx 沿用本
 | 操作 | 不在实例子树内 | 位于子树内 |
 | --- | --- | --- |
 | provide_as / provide_as_with_check | 返回 InstanceOutOfScope，无注册副作用 | 按原类型校验、重复注册、生命周期规则处理 |
-| get_as | None，记录越界原因 | 按原 provider 活跃状态和清理期自访问规则处理 |
+| get_as | None | 按原 provider 活跃状态和清理期自访问规则处理 |
 | resolve_dep | 缺失，不运行该绑定的 check 回调 | 按原门控规则处理 |
-| 依赖诊断 | OutOfScope，不暴露外部 provider 信息 | 返回实际已记录的依赖状态 |
+| require_as | OutOfScope 错误，不暴露外部 provider 信息 | 按声明和服务状态返回值或结构化错误 |
 
 新增结构化错误 `InstanceOutOfScope { instance: InstanceId }`。已结束/关闭的调用上下文按生命周期错误拒绝新注册。实例检查不放宽原有生命周期检查。已有 isolate 继续对完整 TypeKey 解析 scope；最终绑定身份仍为 `(provider, generation, key, scope)`。
 
 实例键是运行期可见性规则。它不强制某个 T 必须使用实例键，不区分业务 SessionId/BranchId，也不能撤回此前合法取得的 Arc 服务。业务侧不得据此宣称漏写 ID 会编译失败。
 
-### 2.4 最小诊断
+### 2.4 可观测的错误
 
-在上游增加 `Ctx::diagnostics()`，复用 vendor DTO 的概念与原始 Arc 错误，不机械复制其旧 Copy 假设。包含 plugin 身份、父节点、状态/代次、声明与解析依赖、绑定，以及 apply 阶段的读取记录。PluginDiagnostics 暴露本 fiber 的 InstanceId。
-
-ServiceAccess 增加明确的 `out_of_scope` 字段。越界检查必须在 lookup 早退前记录；越界记录的 provider/generation 均为空。DependencyStatus 增加 OutOfScope。门控判定和诊断使用同一个可见性判定。
-
-读取记录只在本代 apply 期间采集并去重，下一代清空；Pending 的越界声明通过依赖诊断呈现，不伪造一次 get 调用。diagnostics 不调用 name/injects/check 或驱动任务。check 的状态由正常门控过程记录。读取结果是尽力一致的快照，不宣称全树事务一致性。
-
-复用注册时捕获的 declared_injects，使索引、门控与诊断来自同一份声明。全树遍历使用可清理的 Weak children；在终态脱离前仍可看到节点。watch_diagnostics 和完整观测能力仍可由 #13 后续扩展。
+`FiberView::state()` 暴露本 fiber 的状态与错误；`require_as()` 失败时直接返回键、调用位置和原因。`get_as()` 保持返回 `Option`。依赖声明在注册时捕获一次，供索引和门控共用。框架不维护读取历史或全树诊断快照。
 
 ## 3. 实例事件
 
@@ -218,7 +212,7 @@ issue 1 建立身份、最小诊断、可清理的 children 和共同准入设�
 - 错误按拥有边汇总一次，共享错误 Arc；独立关闭的历史失败不随子树创建次数被父级持续保留。
 - 长寿 root 上 1000 轮公开 API 创建和关闭，包括有常驻兄弟的场景；释放外部句柄后检查 Weak/Drop、内部表项、任务数和容量趋势。
 
-复用 tests/contract.rs、parity.rs、event_keys.rs、transient_release.rs，必要时增加实例与子树流程测试。内部计数仅作为测试观测辅助。vendor 的 lifecycle_diagnostics.rs 尚不在上游；迁入适用的框架流程断言，消费仓库回灌时再执行其完整原测试，不能把未运行的 vendor 测试写成上游验证结果。
+复用 tests/contract.rs、parity.rs、event_keys.rs、transient_release.rs，必要时增加实例与子树流程测试。内部计数仅作为测试观测辅助。消费仓库的 vendor 测试须按实际迁移范围单独执行，不能把未运行的测试写成上游验证结果。
 
 实施后的必要命令：
 

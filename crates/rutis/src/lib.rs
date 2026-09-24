@@ -11,7 +11,6 @@
 
 mod bus;
 mod ctx;
-mod diagnostics;
 mod effect;
 mod error;
 mod event;
@@ -22,12 +21,8 @@ mod registry;
 
 pub use bus::EventBus;
 pub use ctx::Ctx;
-pub use diagnostics::{
-    BindingDiagnostics, DependencyDiagnostics, DependencyStatus, PluginDiagnostics,
-    ResolvedDependency, RuntimeDiagnostics, ServiceAccess,
-};
 pub use effect::{Disposer, Effect};
-pub use error::{CordisError, ErrorSink, ServiceReadError, ServiceReadFailure};
+pub use error::{CordisError, DependencyStatus, ErrorSink, ServiceReadError, ServiceReadFailure};
 pub use event::{Event, EventOptions, Listener, Next, Terminal, WaterfallListener};
 pub use fiber::{DisposeWaitError, FiberState, FiberStatusChanged, FiberView, PluginId, Snapshot};
 pub use key::{InstanceId, Key, ServiceKey, TypeKey};

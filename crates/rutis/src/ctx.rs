@@ -7,12 +7,10 @@ use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 use crate::bus::EventBus;
-use crate::diagnostics::{
-    DependencyDiagnostics, DependencyStatus, PluginDiagnostics, ResolvedDependency,
-    RuntimeDiagnostics, ServiceAccess,
-};
 use crate::effect::{Disposer, Effect, EffectRecord};
-use crate::error::{default_sink, CordisError, ErrorSink, ServiceReadError, ServiceReadFailure};
+use crate::error::{
+    default_sink, CordisError, DependencyStatus, ErrorSink, ServiceReadError, ServiceReadFailure,
+};
 use crate::fiber::{
     join_task, spawn_fiber, DisposeWaitError, FiberInner, FiberState, FiberView, Intent, PluginId,
     TransitionTask,
@@ -46,14 +44,6 @@ pub(crate) struct CtxInner {
 /// 上下文 = `Arc<CtxInner>`(所有权模型:Clone 廉价;isolate/plugin 返回共享内核的新 Ctx)。
 #[derive(Clone)]
 pub struct Ctx(Arc<CtxInner>);
-
-struct AccessOutcome {
-    found: Option<(PluginId, u64, bool)>,
-    declared: bool,
-    out_of_scope: bool,
-    strict: bool,
-    failure: Option<ServiceReadFailure>,
-}
 
 struct EffectFactoryLease(Arc<FiberInner>);
 
@@ -248,91 +238,6 @@ impl Ctx {
         current.0.fiber.upgrade().map(FiberView::from_inner)
     }
 
-    /// Read-only, best-effort snapshot of live fibers and services.
-    ///
-    /// This scans fibers and bindings under separate locks. Concurrent lifecycle
-    /// changes may therefore mix states or generations from different moments,
-    /// even within one plugin's state, dependency, and binding entries. The
-    /// result is useful for diagnosis, not an atomic transaction or a change
-    /// stream. Dependency checks are never called here: their status is the
-    /// last result recorded by normal gate resolution, or `CheckPending` if
-    /// that binding has not been checked yet. Reading does not call plugin
-    /// `name`, `injects`, or other user code and does not advance a fiber.
-    pub fn diagnostics(&self) -> RuntimeDiagnostics {
-        let mut plugins = Vec::new();
-        if let Some(root) = self.root_view() {
-            let mut pending = vec![root.inner];
-            while let Some(fiber) = pending.pop() {
-                pending.extend(
-                    fiber
-                        .children
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .filter_map(Weak::upgrade),
-                );
-                let snapshot = fiber.state_snapshot();
-                let injects = fiber
-                    .declared_injects
-                    .iter()
-                    .map(|key| {
-                        let scope = fiber.ctx.scope_for(key);
-                        let status = if !fiber.ctx.in_instance_key(key) {
-                            DependencyStatus::OutOfScope
-                        } else {
-                            self.0
-                                .shared
-                                .registry
-                                .dependency_status(key, scope.as_ref())
-                        };
-                        DependencyDiagnostics {
-                            key: key.clone(),
-                            scope: scope.as_ref().map(|s| s.to_string()),
-                            status,
-                        }
-                    })
-                    .collect();
-                let resolved_dependencies = fiber
-                    .last_deps
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .map(|deps| {
-                        deps.iter()
-                            .map(|(provider, generation, key, scope)| ResolvedDependency {
-                                key: key.clone(),
-                                scope: scope.as_ref().map(|s| s.to_string()),
-                                provider: *provider,
-                                generation: *generation,
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                plugins.push(PluginDiagnostics {
-                    id: fiber.id,
-                    instance: fiber.instance,
-                    parent: fiber
-                        .parent_fiber
-                        .as_ref()
-                        .and_then(Weak::upgrade)
-                        .map(|p| p.id),
-                    name: fiber.name.clone(),
-                    state: snapshot.state,
-                    generation: snapshot.generation,
-                    error: snapshot.error,
-                    injects,
-                    resolved_dependencies,
-                    accesses: fiber.accesses.lock().unwrap().clone(),
-                });
-            }
-        }
-        RuntimeDiagnostics {
-            shutting_down: self.0.shared.closing.load(Ordering::SeqCst),
-            plugins,
-            bindings: self.0.shared.registry.bindings_snapshot(),
-        }
-    }
-
     /// 最终关闭 root。重复或并发调用共享同一完成结果；现有 `dispose`
     /// 仍可 `restart`。关闭会拒绝新注册并等待准入关闭前完成挂载的子树
     /// 及其清理。创建已开始但挂载被关闭拒绝的子 fiber 不会进入 `apply`，
@@ -440,31 +345,12 @@ impl Ctx {
         key: impl Into<TypeKey>,
     ) -> Option<Arc<T>> {
         let key = key.into();
-        let scope = self.scope_for(&key);
-        let out_of_scope = !self.in_instance_key(&key);
-        let (result, found) = if out_of_scope {
-            (None, None)
-        } else {
-            let binding = self.0.shared.registry.lookup(&key, scope.as_ref());
-            self.read_binding_as::<T>(binding.as_ref())
-        };
-        if let Some(fiber) = self.0.fiber.upgrade() {
-            if fiber.state() == FiberState::Loading {
-                self.record_access(
-                    &fiber,
-                    &key,
-                    scope.as_ref(),
-                    AccessOutcome {
-                        found,
-                        declared: fiber.declared_injects.contains(&key),
-                        out_of_scope,
-                        strict: false,
-                        failure: None,
-                    },
-                );
-            }
+        if !self.in_instance_key(&key) {
+            return None;
         }
-        result
+        let scope = self.scope_for(&key);
+        let binding = self.0.shared.registry.lookup(&key, scope.as_ref());
+        self.read_binding_as::<T>(binding.as_ref()).0
     }
 
     /// Read a declared service, or return a call-site error. Unlike `get`,
@@ -525,20 +411,6 @@ impl Ctx {
             None
         };
         if let Some(reason) = failure {
-            if let Some(fiber) = caller.as_ref() {
-                self.record_access(
-                    fiber,
-                    &key,
-                    scope.as_ref(),
-                    AccessOutcome {
-                        found: None,
-                        declared,
-                        out_of_scope: reason == ServiceReadFailure::OutOfScope,
-                        strict: true,
-                        failure: Some(reason),
-                    },
-                );
-            }
             return Err(self.read_error(key, reason, location));
         }
 
@@ -553,20 +425,6 @@ impl Ctx {
                 });
             if status != DependencyStatus::Ready {
                 let reason = ServiceReadFailure::Unavailable(status);
-                if let Some(fiber) = caller.as_ref() {
-                    self.record_access(
-                        fiber,
-                        &key,
-                        scope.as_ref(),
-                        AccessOutcome {
-                            found: None,
-                            declared,
-                            out_of_scope: false,
-                            strict: true,
-                            failure: Some(reason),
-                        },
-                    );
-                }
                 return Err(self.read_error(key, reason, location));
             }
         }
@@ -574,7 +432,7 @@ impl Ctx {
         // During removal, a new provider may take the same slot before this
         // fiber's own provide record is cleared. Do not grant that replacement
         // the self-access exemption.
-        if own_service && found.is_some_and(|(provider, _, _)| provider != self.0.plugin_id) {
+        if own_service && found.is_some_and(|provider| provider != self.0.plugin_id) {
             let reason = if caller.as_ref().is_none_or(|fiber| {
                 matches!(fiber.state(), FiberState::Unloading | FiberState::Disposed)
             }) {
@@ -591,20 +449,6 @@ impl Ctx {
                     .then_some(ServiceReadFailure::Unavailable(status))
             };
             if let Some(reason) = reason {
-                if let Some(fiber) = caller.as_ref() {
-                    self.record_access(
-                        fiber,
-                        &key,
-                        scope.as_ref(),
-                        AccessOutcome {
-                            found: None,
-                            declared: declared_by_injects,
-                            out_of_scope: false,
-                            strict: true,
-                            failure: Some(reason),
-                        },
-                    );
-                }
                 return Err(self.read_error(key, reason, location));
             }
         }
@@ -629,20 +473,6 @@ impl Ctx {
                 status
             })
         });
-        if let Some(fiber) = caller.as_ref() {
-            self.record_access(
-                fiber,
-                &key,
-                scope.as_ref(),
-                AccessOutcome {
-                    found,
-                    declared,
-                    out_of_scope: false,
-                    strict: true,
-                    failure: reason,
-                },
-            );
-        }
         value.ok_or_else(|| self.read_error(key, reason.unwrap(), location))
     }
 
@@ -664,7 +494,7 @@ impl Ctx {
     fn read_binding_as<T: ?Sized + Send + Sync + 'static>(
         &self,
         binding: Option<&Arc<Binding>>,
-    ) -> (Option<Arc<T>>, Option<(PluginId, u64, bool)>) {
+    ) -> (Option<Arc<T>>, Option<PluginId>) {
         let Some(binding) = binding else {
             return (None, None);
         };
@@ -672,7 +502,7 @@ impl Ctx {
             return (None, None);
         };
         let self_access = self.in_subtree_of(&provider);
-        let found = Some((binding.provider_id, binding.provider_gen, !self_access));
+        let found = Some(binding.provider_id);
         if !self_access {
             match self.0.fiber.upgrade() {
                 None => return (None, found),
@@ -691,34 +521,6 @@ impl Ctx {
             }
         }
         (binding.value.downcast::<T>(), found)
-    }
-
-    fn record_access(
-        &self,
-        fiber: &Arc<FiberInner>,
-        key: &TypeKey,
-        scope: Option<&ScopeId>,
-        outcome: AccessOutcome,
-    ) {
-        let (provider, generation, external) = outcome
-            .found
-            .map(|(p, g, x)| (Some(p), Some(g), x))
-            .unwrap_or((None, None, false));
-        let access = ServiceAccess {
-            key: key.clone(),
-            scope: scope.map(|s| s.to_string()),
-            provider,
-            generation,
-            declared: outcome.declared,
-            external,
-            out_of_scope: outcome.out_of_scope,
-            strict: outcome.strict,
-            failure: outcome.failure,
-        };
-        let mut accesses = fiber.accesses.lock().unwrap();
-        if !accesses.contains(&access) {
-            accesses.push(access);
-        }
     }
 
     fn in_subtree_of(&self, other: &Arc<FiberInner>) -> bool {
@@ -1148,6 +950,54 @@ mod tests {
         }
     }
 
+    struct InjectProbe {
+        key: TypeKey,
+        applies: Arc<AtomicUsize>,
+    }
+
+    impl Plugin for InjectProbe {
+        fn name(&self) -> &str {
+            "inject-probe"
+        }
+
+        fn injects(&self) -> &[TypeKey] {
+            std::slice::from_ref(&self.key)
+        }
+
+        fn apply<'a>(&'a self, _ctx: &'a Ctx) -> crate::BoxFuture<'a, Result<Effect, CordisError>> {
+            self.applies.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(Effect::Done) })
+        }
+    }
+
+    #[tokio::test]
+    async fn dependency_refresh_waits_for_child_mount() {
+        let ctx = Ctx::root().unwrap();
+        let key = TypeKey::of::<u64>();
+        let _service = ctx.provide_as(key.clone(), Arc::new(1_u64)).unwrap();
+        let applies = Arc::new(AtomicUsize::new(0));
+        let fiber = spawn_fiber(
+            ctx.shared(),
+            Some(&ctx),
+            Some(Arc::new(InjectProbe {
+                key,
+                applies: applies.clone(),
+            })),
+            false,
+        );
+        let task = TransitionTask::new();
+        fiber.post_join(task.clone(), Intent::RefreshDepsJoin);
+        join_task(&task).await.unwrap();
+        assert_eq!(applies.load(Ordering::SeqCst), 0);
+        assert_eq!(fiber.state(), FiberState::Pending);
+
+        let child = ctx.mount_fiber(fiber);
+        (&child).await.unwrap();
+        assert_eq!(applies.load(Ordering::SeqCst), 1);
+        child.shutdown().await.unwrap();
+        ctx.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn child_created_before_root_closes_but_mounted_afterward_never_applies() {
         let ctx = Ctx::root().unwrap();
@@ -1169,7 +1019,7 @@ mod tests {
         assert_eq!(child.state().state, FiberState::Disposed);
         assert!(child.inner.effects.lock().unwrap().is_empty());
         assert!(child.inner.driver.lock().unwrap().is_none());
-        assert!(ctx.shared().registry.bindings_snapshot().is_empty());
+        assert_eq!(ctx.shared().registry.table_counts().0, 0);
         assert!(root_view.inner.children.lock().unwrap().is_empty());
     }
 }
