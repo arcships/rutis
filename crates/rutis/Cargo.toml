@@ -2,8 +2,7 @@
 name = "rutis"
 description = "Cordis core paradigms in idiomatic Rust: plugin assembly, fiber lifecycle, typed service registry, dependency-driven reload"
 edition.workspace = true
-# 0.2.5: shrink sparse root-side tables (waste-threshold)
-version = "0.2.5"
+version = "0.3.0"
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true

@@ -6,7 +6,7 @@ members = ["crates/rutis", "crates/rutis-agent", "crates/rutis-cli", "crates/rut
 edition = "2021"
 version = "0.2.0"
 license = "MIT"
-repository = "https://github.com/eric8810/rutis"
+repository = "https://github.com/arcships/rutis"
 rust-version = "1.85"
 
 [workspace.dependencies]
