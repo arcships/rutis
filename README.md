@@ -191,6 +191,8 @@ cargo test                                    # 全量测试
 
 ## 📚 文档
 
+**从这里开始开发** — [应用设计指南](docs/development-guide.md)（如何拆插件、画依赖图、设计重载与多实例）· [开发手册](docs/development-handbook.md)（API 用法、资源清理、事件、排障与验证）· [完整可运行示例](crates/rutis/examples/development_workflow.rs)
+
 **内核与范式** — [内核设计(D1-D31 决策表)](docs/design-rust-port.md) · [96 spec 对拍判定](docs/cordis-spec-parity-2026-08-18.md) · [热更新+动态事件(设计/三轮评审/复盘/审计)](docs/design-config-hot-update-and-dynamic-events-2026-09-21.md) · [shutdown 与卸载等待截止时间](docs/core-shutdown-and-disposal-deadline.md)
 
 **桥与宿主** — [双核架构与锈化路线](docs/design-dual-core-2026-08-20.md) · [dsh 桥 v1 设计](docs/design-dsh-bridge-2026-08-21.md) · [aimux-llm 插件裁决](docs/decision-aimux-llm-plugin-2026-08-23.md)

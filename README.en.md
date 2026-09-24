@@ -192,6 +192,8 @@ cargo test                                    # full test suite
 
 ## 📚 Documentation
 
+**Developing with Rutis** — [Application design guide (Chinese)](docs/development-guide.md) · [Development handbook (Chinese)](docs/development-handbook.md) · [Runnable lifecycle example](crates/rutis/examples/development_workflow.rs)
+
 **Kernel & paradigm** — [kernel design (D1–D31 decision table)](docs/design-rust-port.md) · [96-spec parity ruling](docs/cordis-spec-parity-2026-08-18.md) · [hot update + dynamic events (design / three review rounds / post-mortem / audit)](docs/design-config-hot-update-and-dynamic-events-2026-09-21.md)
 
 **Bridge & host** — [dual-core architecture & rustification roadmap](docs/design-dual-core-2026-08-20.md) · [dsh bridge v1 design](docs/design-dsh-bridge-2026-08-21.md) · [aimux-llm plugin ruling](docs/decision-aimux-llm-plugin-2026-08-23.md)
