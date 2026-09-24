@@ -43,6 +43,20 @@ pub(crate) fn default_sink() -> ErrorSink {
 }
 
 fn format_for_sink(error: &CordisError) -> String {
+    fn write_source(source: &(dyn std::error::Error + 'static), out: &mut String, indent: usize) {
+        if let Some(error) = source.downcast_ref::<CordisError>() {
+            write_error(error, out, indent);
+            return;
+        }
+        out.push_str(&source.to_string());
+        if let Some(next) = source.source() {
+            out.push('\n');
+            out.push_str(&" ".repeat(indent + 2));
+            out.push_str("caused by: ");
+            write_source(next, out, indent + 2);
+        }
+    }
+
     fn write_error(error: &CordisError, out: &mut String, indent: usize) {
         match error {
             CordisError::Aggregate { errors } => {
@@ -55,14 +69,26 @@ fn format_for_sink(error: &CordisError) -> String {
                 }
             }
             CordisError::PluginFailed(source) => {
-                out.push_str("plugin failed");
-                let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(source.as_ref());
-                while let Some(current) = cause {
-                    out.push('\n');
-                    out.push_str(&" ".repeat(indent + 2));
-                    out.push_str("caused by: ");
-                    out.push_str(&current.to_string());
-                    cause = current.source();
+                let display = error.to_string();
+                let direct = source.to_string();
+                match display.strip_suffix(&direct) {
+                    Some(prefix) => {
+                        // Keep the public Display as the source of the prefix,
+                        // while formatting a nested CordisError structurally.
+                        out.push_str(prefix);
+                        write_source(source.as_ref(), out, indent);
+                    }
+                    None => {
+                        out.push_str(&display);
+                        // A future Display that omits the direct source still
+                        // gets its deeper chain without printing it twice.
+                        if let Some(next) = source.source() {
+                            out.push('\n');
+                            out.push_str(&" ".repeat(indent + 2));
+                            out.push_str("caused by: ");
+                            write_source(next, out, indent + 2);
+                        }
+                    }
                 }
             }
             _ => out.push_str(&error.to_string()),
@@ -137,7 +163,7 @@ mod tests {
         assert_eq!(error.to_string(), "plugin failed: outer cause");
         assert_eq!(
             format_for_sink(&error),
-            "plugin failed\n  caused by: outer cause\n  caused by: inner cause"
+            "plugin failed: outer cause\n  caused by: inner cause"
         );
         assert_eq!(
             std::error::Error::source(&error).unwrap().to_string(),
@@ -155,7 +181,19 @@ mod tests {
         };
         assert_eq!(
             format_for_sink(&error),
-            "multiple errors:\n1. plugin failed\n     caused by: cleanup detail\n2. service \"missing\" not found in scope"
+            "multiple errors:\n1. plugin failed: cleanup detail\n2. service \"missing\" not found in scope"
+        );
+    }
+
+    #[test]
+    fn sink_recurses_into_aggregate_used_as_plugin_failure_source() {
+        let nested = CordisError::Aggregate {
+            errors: vec![Arc::new(CordisError::ServiceNotFound("nested".into()))],
+        };
+        let error = CordisError::PluginFailed(Box::new(nested));
+        assert_eq!(
+            format_for_sink(&error),
+            "plugin failed: multiple errors:\n1. service \"nested\" not found in scope"
         );
     }
 }
