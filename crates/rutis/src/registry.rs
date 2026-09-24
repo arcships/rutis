@@ -28,7 +28,7 @@ impl StoredValue {
 /// 共享同一身份,`removing` 置位即刻全员可见——不再有克隆快照滞后窗口
 ///(简化 S1/正确性:旧克隆体的旗标是拍照值,移除中的服务短暂可见)。
 pub(crate) struct Binding {
-    pub value: StoredValue,
+    pub value: ValueSlot,
     pub provider: Weak<FiberInner>,
     pub provider_id: PluginId,
     pub provider_gen: u64,
@@ -36,6 +36,31 @@ pub(crate) struct Binding {
     pub check_status: Mutex<Option<DependencyStatus>>,
     /// 摘除已开始(严格解析立即失败;绑定保留至消费者排干,供 provider 子树自访问,§四)。
     pub removing: std::sync::atomic::AtomicBool,
+}
+
+/// Ordinary bindings remain immutable; only `provide_mut_as` pays a value lock.
+pub(crate) enum ValueSlot {
+    Fixed(StoredValue),
+    Mutable(Mutex<StoredValue>),
+}
+
+impl ValueSlot {
+    pub(crate) fn snapshot(&self) -> StoredValue {
+        match self {
+            Self::Fixed(value) => value.clone(),
+            Self::Mutable(value) => value.lock().unwrap().clone(),
+        }
+    }
+
+    fn replace_mutable(&self, value: StoredValue) -> bool {
+        match self {
+            Self::Fixed(_) => false,
+            Self::Mutable(slot) => {
+                *slot.lock().unwrap() = value;
+                true
+            }
+        }
+    }
 }
 
 /// 服务注册表(支柱 3)+ 反向依赖索引(支柱 5/D21 三元组)。
@@ -96,6 +121,45 @@ impl Registry {
     pub(crate) fn lookup(&self, key: &TypeKey, scope: Option<&ScopeId>) -> Option<Arc<Binding>> {
         let bindings = self.bindings.lock().unwrap();
         bindings.get(&(key.clone(), scope.cloned())).cloned()
+    }
+
+    /// Commit a mutable value only while this exact binding still occupies
+    /// its key/scope slot. The caller holds the provider transition lock.
+    pub(crate) fn replace_mutable_if_current(
+        &self,
+        key: &TypeKey,
+        scope: Option<&ScopeId>,
+        expected: &Arc<Binding>,
+        value: StoredValue,
+    ) -> bool {
+        let bindings = self.bindings.lock().unwrap();
+        let Some(current) = bindings.get(&(key.clone(), scope.cloned())) else {
+            return false;
+        };
+        if !Arc::ptr_eq(current, expected)
+            || current.removing.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return false;
+        }
+        current.value.replace_mutable(value)
+    }
+
+    /// Linearize service removal with mutable value commits.
+    pub(crate) fn mark_removing_if(
+        &self,
+        key: &TypeKey,
+        scope: Option<&ScopeId>,
+        expected: &Arc<Binding>,
+    ) {
+        let bindings = self.bindings.lock().unwrap();
+        if bindings
+            .get(&(key.clone(), scope.cloned()))
+            .is_some_and(|current| Arc::ptr_eq(current, expected))
+        {
+            expected
+                .removing
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     pub(crate) fn bindings_snapshot(&self) -> Vec<BindingDiagnostics> {
