@@ -162,6 +162,8 @@ let scope_b = root.isolate(primary_backend(), "b");
 
 ## 管理资源
 
+插件作者负责业务资源的完整生命周期，通过 `apply` 实现初始化，通过 `Effect` 登记清理。Rutis 按生命周期规则调用这些实现。职责说明见 [职责划分](development-guide.md#职责划分)。
+
 ### 登记清理
 
 通过 `ctx.provide` 注册的服务、通过当前 `ctx` 注册的监听器，以及 `ctx.plugin` 创建的子插件，都由框架登记清理。外部订阅、连接和任务通过 `ctx.effect` 登记释放过程。
@@ -208,7 +210,7 @@ ctx.effect(move || {
 })?;
 ```
 
-每次 `apply` 捕获一次当前代的 token，并将它传给这一代的任务。任务收到取消信号后结束工作，清理函数通过 `JoinHandle` 等待实际退出。
+每次 `apply` 捕获一次当前代的 token，并将它传给这一代的任务。任务收到取消信号后，按约定完成或取消当前操作，然后退出。清理函数通过 `JoinHandle` 等待实际退出。
 
 业务循环通常用 `tokio::select!` 同时等待输入和取消。队列中的请求可以选择完成、取消或保存，具体策略由服务接口约定。完整实现见 [IndexerPlugin 示例](../crates/rutis/examples/development_workflow.rs)。
 
