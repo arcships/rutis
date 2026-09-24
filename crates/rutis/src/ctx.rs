@@ -163,6 +163,20 @@ impl Ctx {
         self.0.shared.error_sink.clone()
     }
 
+    /// Take completed, early-disposed effect errors owned by this fiber.
+    /// `Disposer::dispose()` returns an error immediately without sending it
+    /// to the error sink. Each error is returned here once; taken errors no
+    /// longer appear in a later unload result or restart sink notification.
+    /// Errors from effects still draining remain available to a subsequent
+    /// call or to the unload that owns their completion.
+    pub fn take_cleanup_errors(&self) -> Vec<Arc<CordisError>> {
+        self.0
+            .fiber
+            .upgrade()
+            .map(|fiber| std::mem::take(&mut *fiber.drained_errors.lock().unwrap()))
+            .unwrap_or_default()
+    }
+
     /// 自动路径:`Handle::try_current()` 失败返回明确错误,绝不隐式建 runtime(D8)。
     pub fn root() -> Result<Ctx, CordisError> {
         let handle = Handle::try_current().map_err(|_| {
@@ -281,7 +295,10 @@ impl Ctx {
     }
 
     /// 最终关闭 root。重复或并发调用共享同一完成结果；现有 `dispose`
-    /// 仍可 `restart`。关闭会拒绝新注册并等待当前装载、子树与清理完成。
+    /// 仍可 `restart`。关闭会拒绝新注册并等待准入关闭前完成挂载的子树
+    /// 及其清理。创建已开始但挂载被关闭拒绝的子 fiber 不会进入 `apply`，
+    /// 会独立关闭；其返回的 `FiberView::shutdown()` 可等待该 driver 退出。
+    /// root 的完成结果不包含这种未挂载子 fiber。
     /// 不协作的代码可能使等待无限延长，可用 `shutdown_with_timeout` 限制等待。
     pub fn shutdown(&self) -> crate::BoxFuture<'static, Result<(), Arc<CordisError>>> {
         let _admission = self.0.shared.admission.lock().unwrap();
@@ -645,7 +662,7 @@ impl Ctx {
         self.mount_fiber(fiber)
     }
 
-    /// 工厂模式装载(D32:配置热更新):依赖门控声明从 config 派生,
+    /// 工厂模式装载(D32:配置热更新):依赖门控声明在注册时取自工厂并固定,
     /// 每代装载用当前 config 构造实例;返回的 FiberView 可 `update(config)`。
     pub fn plugin_with<C: Send + Sync + 'static>(
         &self,
@@ -837,4 +854,48 @@ async fn evict_and_finalize(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ApplyProbe(Arc<AtomicUsize>);
+
+    impl Plugin for ApplyProbe {
+        fn name(&self) -> &str {
+            "apply-probe"
+        }
+
+        fn apply<'a>(&'a self, _ctx: &'a Ctx) -> crate::BoxFuture<'a, Result<Effect, CordisError>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(Effect::Done) })
+        }
+    }
+
+    #[tokio::test]
+    async fn child_created_before_root_closes_but_mounted_afterward_never_applies() {
+        let ctx = Ctx::root().unwrap();
+        let root_view = ctx.root_view().unwrap();
+        let applies = Arc::new(AtomicUsize::new(0));
+        // Split the public plugin path at its two admission points to force
+        // the otherwise narrow spawn/mount race without timing sleeps.
+        let fiber = spawn_fiber(
+            ctx.shared(),
+            Some(&ctx),
+            Some(Arc::new(ApplyProbe(applies.clone()))),
+            false,
+        );
+        let root_shutdown = ctx.shutdown();
+        let child = ctx.mount_fiber(fiber);
+        root_shutdown.await.unwrap();
+        child.shutdown().await.unwrap();
+        assert_eq!(applies.load(Ordering::SeqCst), 0);
+        assert_eq!(child.state().state, FiberState::Disposed);
+        assert!(child.inner.effects.lock().unwrap().is_empty());
+        assert!(child.inner.driver.lock().unwrap().is_none());
+        assert!(ctx.shared().registry.bindings_snapshot().is_empty());
+        assert!(root_view.inner.children.lock().unwrap().is_empty());
+    }
 }
