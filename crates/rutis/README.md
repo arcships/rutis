@@ -19,6 +19,8 @@ rutis = "0.3.0"
 
 内核零 serde、零 unsafe,依赖仅 tokio / tokio-util / thiserror。设计与对拍文档见[仓库 docs](https://github.com/arcships/rutis/tree/main/docs)。
 
+首次使用建议先读[应用设计指南](https://github.com/arcships/rutis/blob/main/docs/development-guide.md)，再按[开发手册](https://github.com/arcships/rutis/blob/main/docs/development-handbook.md)实现。配套示例可在仓库中运行：`cargo run -p rutis --example development_workflow`。
+
 ## License
 
 MIT(继承自 [Cordis](https://github.com/shigma/cordis) © Shigma)。
