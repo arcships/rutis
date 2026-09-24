@@ -1,3 +1,4 @@
+use crate::InstanceId;
 use std::sync::Arc;
 
 /// 框架错误。不 `Clone`(D11);跨任务共享走 `Arc<CordisError>`。
@@ -18,6 +19,8 @@ pub enum CordisError {
     },
     #[error("fiber disposed")]
     InactiveEffect,
+    #[error("root has been shut down")]
+    Closed,
     #[error("config validation failed: {issues:?}")]
     Validation { issues: Vec<String> },
     #[error("dependency unsatisfied: {0:?}")]
@@ -25,6 +28,8 @@ pub enum CordisError {
     /// 同一 (key, scope) 重复注册(实现新增变体,见 §八 实现记录)。
     #[error("service {0:?} already registered in scope")]
     ServiceExists(String),
+    #[error("instance {instance} is outside the caller's fiber subtree")]
+    InstanceOutOfScope { instance: InstanceId },
 }
 
 /// 错误汇聚点。默认实现输出到 stderr(设计 §二)。

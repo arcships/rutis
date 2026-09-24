@@ -56,7 +56,7 @@ impl Drop for Probe {
 }
 
 async fn await_active(ctx: &Ctx, deadline: Duration) {
-    let view = ctx.root_view();
+    let view = ctx.root_view().unwrap();
     let start = tokio::time::Instant::now();
     loop {
         let mut last = view.watch();

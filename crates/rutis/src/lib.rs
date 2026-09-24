@@ -11,6 +11,7 @@
 
 mod bus;
 mod ctx;
+mod diagnostics;
 mod effect;
 mod error;
 mod event;
@@ -21,11 +22,15 @@ mod registry;
 
 pub use bus::EventBus;
 pub use ctx::Ctx;
+pub use diagnostics::{
+    BindingDiagnostics, DependencyDiagnostics, DependencyStatus, PluginDiagnostics,
+    ResolvedDependency, RuntimeDiagnostics, ServiceAccess,
+};
 pub use effect::{Disposer, Effect};
 pub use error::{CordisError, ErrorSink};
 pub use event::{Event, EventOptions, Listener, Next, Terminal, WaterfallListener};
-pub use fiber::{FiberState, FiberStatusChanged, FiberView, PluginId, Snapshot};
-pub use key::{Key, ServiceKey, TypeKey};
+pub use fiber::{DisposeWaitError, FiberState, FiberStatusChanged, FiberView, PluginId, Snapshot};
+pub use key::{InstanceId, Key, ServiceKey, TypeKey};
 pub use plugin::{Plugin, PluginFactory};
 
 /// dyn 兼容的 future 别名(与 `futures::future::BoxFuture` 同一定义,D1)。
