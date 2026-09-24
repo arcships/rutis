@@ -1,18 +1,15 @@
+# Core crate tags use rutis-vX.Y.Z; CLI binary releases use vX.Y.Z.
 name: publish rutis crate
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: Crate version to publish
-        required: true
-        type: string
+  push:
+    tags: ["rutis-v*"]
 
 permissions:
   contents: read
 
 concurrency:
-  group: publish-rutis-crate
+  group: publish-rutis-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -25,12 +22,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Verify crate version
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
+      - name: Verify tag matches crate version
         run: |
           package_version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rutis") | .version')
-          test "$package_version" = "$RELEASE_VERSION"
+          test "$GITHUB_REF_NAME" = "rutis-v$package_version"
 
       - name: Publish rutis to crates.io
         run: cargo publish --locked -p rutis
