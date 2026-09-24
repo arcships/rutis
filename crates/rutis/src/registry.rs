@@ -52,12 +52,12 @@ impl ValueSlot {
         }
     }
 
-    fn replace_mutable(&self, value: StoredValue) -> bool {
+    fn replace_mutable(&self, value: StoredValue) -> Option<StoredValue> {
         match self {
-            Self::Fixed(_) => false,
+            Self::Fixed(_) => None,
             Self::Mutable(slot) => {
-                *slot.lock().unwrap() = value;
-                true
+                let old = std::mem::replace(&mut *slot.lock().unwrap(), value);
+                Some(old)
             }
         }
     }
@@ -131,15 +131,13 @@ impl Registry {
         scope: Option<&ScopeId>,
         expected: &Arc<Binding>,
         value: StoredValue,
-    ) -> bool {
+    ) -> Option<StoredValue> {
         let bindings = self.bindings.lock().unwrap();
-        let Some(current) = bindings.get(&(key.clone(), scope.cloned())) else {
-            return false;
-        };
+        let current = bindings.get(&(key.clone(), scope.cloned()))?;
         if !Arc::ptr_eq(current, expected)
             || current.removing.load(std::sync::atomic::Ordering::SeqCst)
         {
-            return false;
+            return None;
         }
         current.value.replace_mutable(value)
     }

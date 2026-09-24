@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex, Weak};
 
 use crate::ctx::{Ctx, Shared};
 use crate::effect::{Disposer, Effect};
-use crate::error::{CordisError, ServiceReadFailure, ServiceWriteError, ServiceWriteFailure};
+use crate::error::{
+    panic_error, CordisError, ServiceReadFailure, ServiceWriteError, ServiceWriteFailure,
+};
 use crate::fiber::{FiberInner, FiberState};
 use crate::key::{ScopeId, TypeKey};
 use crate::registry::{Binding, StoredValue};
@@ -407,13 +409,19 @@ impl<T: ?Sized + Send + Sync + 'static> ServiceWriter<T> {
         {
             return Err(error(ServiceWriteFailure::Stale));
         }
-        if !self.shared.registry.replace_mutable_if_current(
-            &self.key,
-            self.scope.as_ref(),
-            &self.binding,
-            value,
-        ) {
-            return Err(error(ServiceWriteFailure::Stale));
+        let old = self
+            .shared
+            .registry
+            .replace_mutable_if_current(&self.key, self.scope.as_ref(), &self.binding, value)
+            .ok_or_else(|| error(ServiceWriteFailure::Stale))?;
+        drop(transition);
+        drop(_admission);
+        // The last Arc of the previous value may run user Drop code. Release
+        // the registry, transition and admission locks before it can do so.
+        if let Err(panic) = catch_unwind(AssertUnwindSafe(|| drop(old))) {
+            let sink = caller.error_sink();
+            let error = Arc::new(panic_error(panic));
+            let _ = catch_unwind(AssertUnwindSafe(|| sink(error)));
         }
         Ok(())
     }

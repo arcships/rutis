@@ -1,5 +1,5 @@
 use std::future::IntoFuture;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -284,6 +284,83 @@ async fn mutable_writer_respects_owner_generation_and_write_hooks() {
     );
     current.set(&root, Arc::new(51)).unwrap();
     assert_eq!(*reader.require_as::<u64>(key).unwrap(), 51);
+}
+
+struct DropProbe {
+    ctx: Ctx,
+    key: TypeKey,
+    check: bool,
+    saw_new_value: Arc<AtomicBool>,
+}
+
+impl Drop for DropProbe {
+    fn drop(&mut self) {
+        if self.check {
+            let replacement = self.ctx.get_as::<DropProbe>(self.key.clone()).unwrap();
+            self.saw_new_value
+                .store(!replacement.check, Ordering::SeqCst);
+        }
+    }
+}
+
+#[tokio::test]
+async fn replaced_value_drop_can_read_registry_after_commit() {
+    let root = Ctx::root().unwrap();
+    let key = TypeKey::keyed::<DropProbe>("drop-reentry");
+    let saw_new_value = Arc::new(AtomicBool::new(false));
+    let old = Arc::new(DropProbe {
+        ctx: root.clone(),
+        key: key.clone(),
+        check: true,
+        saw_new_value: saw_new_value.clone(),
+    });
+    let (binding, writer) = root.provide_mut_as(key.clone(), old).unwrap();
+    writer
+        .set(
+            &root,
+            Arc::new(DropProbe {
+                ctx: root.clone(),
+                key,
+                check: false,
+                saw_new_value: saw_new_value.clone(),
+            }),
+        )
+        .unwrap();
+    assert!(saw_new_value.load(Ordering::SeqCst));
+    drop(writer);
+    binding.dispose().await.unwrap();
+}
+
+struct PanicOnDrop(bool);
+
+impl Drop for PanicOnDrop {
+    fn drop(&mut self) {
+        if self.0 {
+            panic!("old service value dropped");
+        }
+    }
+}
+
+#[tokio::test]
+async fn replaced_value_drop_panic_reports_to_sink_after_commit() {
+    let failures = Arc::new(AtomicUsize::new(0));
+    let failures_sink = failures.clone();
+    let root = Ctx::root_with_sink(
+        tokio::runtime::Handle::current(),
+        Arc::new(move |error| {
+            assert!(error.to_string().contains("old service value dropped"));
+            failures_sink.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
+    let key = TypeKey::keyed::<PanicOnDrop>("drop-panic");
+    let (binding, writer) = root
+        .provide_mut_as(key.clone(), Arc::new(PanicOnDrop(true)))
+        .unwrap();
+    writer.set(&root, Arc::new(PanicOnDrop(false))).unwrap();
+    assert_eq!(failures.load(Ordering::SeqCst), 1);
+    assert!(!root.get_as::<PanicOnDrop>(key).unwrap().0);
+    drop(writer);
+    binding.dispose().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -812,49 +812,51 @@ impl Ctx {
         let label = format!("service provide: {}", key.describe());
         let inserted = Arc::new(Mutex::new(None));
         let inserted_slot = inserted.clone();
-        let disposer = self.register_internal_effect_named(label, move |fiber, provider_gen, state| {
-            // Admission and the fiber transition lock cover both the binding and
-            // its cleanup record, so shutdown cannot miss a committed service.
-            let binding = shared.registry.insert_binding(
-                key.clone(),
-                scope.clone(),
-                Binding {
-                    value: if mutable {
-                        ValueSlot::Mutable(Mutex::new(StoredValue::new(value)))
-                    } else {
-                        ValueSlot::Fixed(StoredValue::new(value))
+        let disposer =
+            self.register_internal_effect_named(label, move |fiber, provider_gen, state| {
+                // Admission and the fiber transition lock cover both the binding and
+                // its cleanup record, so shutdown cannot miss a committed service.
+                let binding = shared.registry.insert_binding(
+                    key.clone(),
+                    scope.clone(),
+                    Binding {
+                        value: if mutable {
+                            ValueSlot::Mutable(Mutex::new(StoredValue::new(value)))
+                        } else {
+                            ValueSlot::Fixed(StoredValue::new(value))
+                        },
+                        provider: Arc::downgrade(fiber),
+                        provider_id: fiber.id,
+                        provider_gen,
+                        check,
+                        check_status: Mutex::new(None),
+                        removing: AtomicBool::new(false),
                     },
-                    provider: Arc::downgrade(fiber),
-                    provider_id: fiber.id,
-                    provider_gen,
-                    check,
-                    check_status: Mutex::new(None),
-                    removing: AtomicBool::new(false),
-                },
-            )?;
-            *inserted_slot.lock().unwrap() = Some(binding);
-            fiber
-                .provided
-                .lock()
-                .unwrap()
-                .push((key.clone(), scope.clone()));
-            let cleanup_shared = shared.clone();
-            let provider = Arc::downgrade(fiber);
-            let pid = fiber.id;
-            let evict_scope = scope.clone();
-            let evict_key = key.clone();
-            if state == FiberState::Active {
-                shared.registry.notify_key_changed(&key);
-            }
-            Ok(Effect::AsyncDisposer(Box::new(move || {
-                let shared = cleanup_shared.clone();
-                let provider = provider.clone();
-                let scope = evict_scope.clone();
-                Box::pin(async move {
-                    evict_and_finalize(&shared, provider, pid, provider_gen, evict_key, scope).await
-                })
-            })))
-        })?;
+                )?;
+                *inserted_slot.lock().unwrap() = Some(binding);
+                fiber
+                    .provided
+                    .lock()
+                    .unwrap()
+                    .push((key.clone(), scope.clone()));
+                let cleanup_shared = shared.clone();
+                let provider = Arc::downgrade(fiber);
+                let pid = fiber.id;
+                let evict_scope = scope.clone();
+                let evict_key = key.clone();
+                if state == FiberState::Active {
+                    shared.registry.notify_key_changed(&key);
+                }
+                Ok(Effect::AsyncDisposer(Box::new(move || {
+                    let shared = cleanup_shared.clone();
+                    let provider = provider.clone();
+                    let scope = evict_scope.clone();
+                    Box::pin(async move {
+                        evict_and_finalize(&shared, provider, pid, provider_gen, evict_key, scope)
+                            .await
+                    })
+                })))
+            })?;
         let binding = inserted
             .lock()
             .unwrap()
