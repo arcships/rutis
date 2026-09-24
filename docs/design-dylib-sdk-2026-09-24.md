@@ -115,23 +115,36 @@ SDK 的 `build.rs` 计算 `SDK_ID`:
 sha256(
   sdk 版本号, rustc -vV 全文, 目标三元组,
   Cargo.lock 中 SDK 子依赖树(包名+版本+来源+checksum),
-  启用的 features, profile 中影响 ABI 的项(panic、opt-level 不计;debug-assertions 计入),
-  RUSTFLAGS / target-cpu / target-feature
+  启用的 features, profile 中影响 ABI 的项(panic、debug-assertions、overflow-checks;opt-level、debuginfo 不计),
+  规范化后的 RUSTFLAGS(见下)
 )
 ```
 
-- `pub const SDK_ID: &str` 被插件在编译期**内联**进自己的 .so;
+- `pub const SDK_ID: &str` 被插件和宿主在编译期**内联**进各自的产物;
 - `#[inline(never)] pub fn loaded_sdk_id() -> &'static str` 在运行期返回**实际加载的** SDK 中的值。
 
-加载时二者不等即拒绝。原型实验 (a) 正是被这一层拦下。它便宜、无需额外文件,能拦下绝大多数配置错误。
+两者不等即拒绝(宿主一侧见 §5.4,插件一侧见 §7.1)。原型实验 (a) 正是被这一层拦下。它便宜、无需额外文件,能拦下绝大多数配置错误。
+
+**输入必须与机器无关。** `SDK_ID` 会被编译进 SDK,任何机器相关的输入都会同时改变 L1 和 L2 的结果,破坏可复现构建。
+例如两台机器分别用 `--remap-path-prefix=/build/a=/target` 和 `--remap-path-prefix=/build/b=/target`,原始 RUSTFLAGS
+不同,`SDK_ID` 就不同;路径重映射只改写输出中的源路径,改不了已经算出的哈希。因此 RUSTFLAGS 按**白名单**规范化:
+
+- 读取 `CARGO_ENCODED_RUSTFLAGS`,只保留影响代码生成或类型布局的项:`-C target-cpu`、`-C target-feature`、
+  `-C panic`、`-C debug-assertions`、`-C overflow-checks`、`--cfg`、`-Z` 系列;排序后参与哈希。
+- 明确忽略:`--remap-path-prefix`、`-L`、`-l`、`-C link-arg(s)`、`-C linker`、`-C debuginfo`、`-C opt-level`、
+  `-C incremental`、`-C codegen-units` 等只影响路径、链接或优化而不影响布局的项。
+- 遇到不在两张表中的项,`build.rs` 直接报错,要求先归类,避免新参数悄悄进入或漏出身份。
+- `build.rs` 为以上输入声明 `rerun-if-env-changed`。
 
 ### 5.3 L2:产物身份(二进制哈希)
 
 评估文档要求“版本号必须对应一组不可变、经过验证的构建产物”。L2 落实这一点:
 
 - 每个发布的 SDK 版本对应一个 `librutis_sdk.so` 的 sha256(`sdk_artifact`),记录在 SDK 发布清单中;
+- **宿主**构建时把它所链接的 SDK 产物哈希编译进自己(§5.4);
 - 插件打包工具在插件构建完成后,读取同一次构建产出的 `librutis_sdk.so` 计算 sha256,写入插件清单;
-- 宿主启动时计算自己加载的 SDK 文件的 sha256(安装布局已知路径,或 `dladdr` 反查);加载插件时比对。
+- 宿主启动时计算自己加载的 SDK 文件的 sha256(安装布局已知路径,或 `dladdr` 反查),与编译进宿主的值比对;
+  加载插件时再与插件清单比对。
 
 L2 要求**可复现构建**:插件在自己的 cargo 调用中会从源码重建 SDK,必须得到逐字节相同的产物。原型实测:
 
@@ -140,11 +153,38 @@ L2 要求**可复现构建**:插件在自己的 cargo 调用中会从源码重�
 | 不加路径重映射 | 不同 |
 | `--remap-path-prefix=<target>=/target --remap-path-prefix=$HOME=/home` | **相同** |
 
-跨机器可复现(不同源码路径、不同 CARGO_HOME)尚未验证,见 §十一 V1。构建时的路径重映射参数统一写进
-`.cargo/config.toml` 与 CI,计入 L1。
+这次原型的 `SDK_ID` 用的是固定的环境变量,没有包含 §5.2 的真实生成逻辑。跨机器可复现(不同源码路径、
+CARGO_HOME、target 目录、用户名)尚未验证,见 §十一 V1;V1 必须用最终的 `build.rs` 生成 `SDK_ID`,并让各机器的
+重映射参数不同,以确认规范化有效。路径重映射参数统一写进 `.cargo/config.toml` 与 CI,但**不计入** L1。
 
 **L2 不可复现时的退路**:一方插件与 SDK 在同一次 CI 构建中产出(同一 cargo 调用,产物天然一致),插件按 SDK 版本批量发布。
 这正是评估文档中“SDK 升级时自动重编全部一方插件”的做法;代价是“单独发布”退化为“按 SDK 批次发布”。
+
+### 5.4 宿主绑定与启动检查顺序
+
+只比较“运行时 SDK”和“插件构建时 SDK”是不够的:宿主自己也按某个 SDK 的布局编译。部署时若误换了同名、符号可解析
+但布局不同的 SDK,配套的新插件会通过校验,宿主却仍按旧布局访问共享类型,产生未定义行为。原型复现了这一场景:
+
+| 场景 | 结果 |
+| --- | --- |
+| 宿主按 SDK A 编译;部署了 SDK B 与按 B 编译的插件;宿主不做自检 | 启动、加载、换代码、shutdown **全部通过** |
+| 同上,宿主启动时比对自身内联的 `SDK_ID` 与 `loaded_sdk_id()` | 启动即拒绝 |
+
+因此宿主、运行时 SDK、插件三者的身份必须闭合。宿主构建时绑定 SDK 身份:
+
+- **L1**:宿主内联 `SDK_ID` 常量(与插件相同机制);
+- **L2**:两阶段构建——先构建 `rutis-sdk` 并计算产物哈希,再以 `RUTIS_SDK_ARTIFACT_SHA256` 环境变量构建宿主,
+  由 `env!` 编译进宿主。第二阶段复用第一阶段的 SDK 产物(同一 target 目录、同一参数),打包工具在构建结束后
+  复核 SDK 文件哈希仍等于宿主内嵌的值。
+
+**启动检查顺序**(dylib 变体,在创建 root、加载任何插件之前):
+
+1. `SDK_ID`(宿主内联)== `loaded_sdk_id()`(运行时)——不等则拒绝启动。这一步只调用一个返回 `&'static str` 的函数,
+   不触碰其他 SDK 类型。
+2. sha256(实际加载的 SDK 文件)== 宿主内嵌的 `RUTIS_SDK_ARTIFACT_SHA256`——不等则拒绝启动。
+3. 之后每个插件:清单中的 `sdk.id`、`sdk.artifact_sha256` 等于宿主的值,且插件内联的 `SDK_ID` 等于 `loaded_sdk_id()`(§7.1)。
+
+前两步通过后,“宿主构建时 = 运行时”;第 3 步保证“插件构建时 = 运行时”,三者闭合。
 
 ## 六、插件产物与清单
 
@@ -186,13 +226,13 @@ lock_sha256 = "…"             # 插件 Cargo.lock 全文
 `PluginFactory::build` 在 `update` 的 dry-run 与实际装载时各调用一次,约定为纯构造(`crates/rutis/src/plugin.rs:32`),
 不能在其中加载库。加载是宿主的显式操作:`unsafe fn Loader::load(dir) -> Result<Arc<Module>, LoadError>`。
 
-1. **读清单并校验**(不触碰 .so 的代码):目标三元组、`sdk.id`、`sdk.artifact_sha256`、接口版本、同 id 已保留版本数(§九)。
+1. **读清单并校验**(不触碰 .so 的代码):目标三元组;`sdk.id`、`sdk.artifact_sha256` 等于宿主在 §5.4 启动检查中确认过的值;接口版本;同 id 已保留版本数(§九)。
 2. **复制到内容寻址缓存**:`<cache>/<library_sha256>/lib<name>.so`,复制后重新计算哈希并比对。所有平台都这样做:
    Windows 避免文件锁,Linux 避免原地覆盖已映射的 .so 导致 SIGBUS;同一哈希只复制一次。
 3. **加载库**:`dlopen(path, RTLD_NOW | RTLD_LOCAL)`。`RTLD_NOW` 让未解析符号在此刻失败而不是在调用时崩溃;
    `RTLD_LOCAL` 使同一插件的多个版本可以共存(原型实测 v1/v2 同名 crate 同时加载,互不串线)。
 4. **核对内嵌元数据**:调用 `rutis_plugin_meta()`,比对 `sdk_id`(L1,对比 `loaded_sdk_id()`)、插件 id 与版本和清单一致。
-5. **构造工厂**:调用 `rutis_plugin_entry()` 得到 `Box<dyn PluginFactory<ConfigValue>>`,包进 `Module`。
+5. **构造工厂**:调用 `rutis_plugin_entry()` 得到 `Box<dyn PluginFactory<ConfigValue>>`,并在此时读取一次 `name()`、`injects()`,连同插件 id 一起记入 `Module`(供 §8.2 的不变量检查使用,之后不再回调)。
 
 任一步失败返回 `LoadError`,带插件 id、版本、失败步骤和原因;第 3 步之后失败的库不卸载(§九),计入诊断。
 
@@ -218,28 +258,30 @@ rutis_sdk::export_plugin! {
 `PluginFactory<C>` 的 `C` 必须是宿主与插件都认识的类型。统一用 `ConfigValue = serde_json::Value`:
 
 - 宿主从配置文件读取后原样交给插件,插件在 `validate_config` 中反序列化并校验;
-- 插件配置结构变化不影响 SDK,不需要换 SDK 版本。
-
-需要强类型配置的插件族,可以把配置类型放进接口 crate(即进入 SDK),代价是配置变动即 SDK 变动。
-
-## 八、接入 rutis 生命周期
-
-### 8.1 换代码 = `update`
+- 插件配置结构变化不影响 SDK,不需要换 ### 8.1 换代码 = `update`
 
 rutis 的 `FiberView::update(config)` 要求 config 类型不变、工厂不变(`crates/rutis/src/fiber.rs:1279`)。
 让 config 携带模块,即可复用 update 的全部语义(dry-run、预取消、重启、消费者驱逐与重载):
 
 ```rust
-pub struct DylibConfig { pub module: Arc<Module>, pub value: ConfigValue }
+pub struct DylibConfig { module: Arc<Module>, value: ConfigValue }   // 字段私有,经 DylibConfig::new 构造
 
-struct DylibFactory { id: String, name: String, injects: Vec<TypeKey> }  // spawn 时从首个模块取定
+/// spawn 时从首个模块取定,终身不变(对应 rutis 的静态依赖声明,D32f)。
+struct DylibFactory { id: String, name: String, injects: Vec<TypeKey> }
+
+impl DylibFactory {
+    /// 模块必须与 spawn 时的插件 id、name、injects 完全一致。纯比较,无副作用。
+    fn check_module(&self, m: &Module) -> Result<(), CordisError> { /* 不一致 → CordisError::Validation */ }
+}
 
 impl PluginFactory<DylibConfig> for DylibFactory {
     fn validate_config(&self, c: &DylibConfig) -> Result<(), CordisError> {
+        self.check_module(&c.module)?;
         c.module.factory.validate_config(&c.value)
     }
     fn build(&self, c: &DylibConfig) -> Result<Box<dyn Plugin>, CordisError> {
-        c.module.factory.build(&c.value)   // 纯构造:库早已加载
+        self.check_module(&c.module)?;       // 纯构造:库早已加载,检查也是纯比较
+        c.module.factory.build(&c.value)
     }
     // name / injects 返回 spawn 时取定的值
 }
@@ -248,18 +290,28 @@ impl PluginFactory<DylibConfig> for DylibFactory {
 宿主侧 API:
 
 ```rust
-let view = loader.spawn(&ctx, &module_v3, config)?;     // = ctx.plugin_with(DylibFactory, DylibConfig{..})
-loader.swap(&view, &module_v4, config).await?;          // 校验后调用 view.update(DylibConfig{..})
+let view = loader.spawn(&ctx, &module_v3, config)?;     // = ctx.plugin_with(DylibFactory, DylibConfig::new(..))
+loader.swap(&view, &module_v4, config).await?;          // 便捷封装:提前给出可读错误,再调用 view.update(..)
 ```
 
 原型已验证整条链路:consumer 依赖插件提供的 `Greeting`,`update` 把 v1 换成 v2 后,consumer 被自动驱逐并以新服务重载
 (输出 `["hello v1 …", "hello v2 …"]`),插件内 `tokio::spawn` 正常。
 
-### 8.2 `swap` 的前置校验
+### 8.2 不变量放在工厂里,而不是 `swap` 里
 
-rutis 的依赖声明是静态的(D32f):`injects` 在 spawn 时注册一次,`update` 不会改变它。所以 `swap` 必须在调用 `update` 之前检查:
+rutis 的依赖声明是静态的(D32f):`injects` 在 spawn 时注册一次,`update` 不会改变依赖注册表。如果换上去的模块声明了
+不同的依赖,它会在旧的依赖门控下运行。
 
-- 新模块的插件 id 与 fiber 相同;
+`FiberView::update` 是公开 API,调用方可以绕过 `loader.swap` 直接 `view.update(DylibConfig::new(other, ..))`。
+因此插件 id、`name()`、`injects()` 的一致性检查必须放在 `DylibFactory` 内部,而不是只放在 `swap` 里:
+
+- `update` 的 dry-run 依次调用 `validate_config` 和 `build`(`crates/rutis/src/fiber.rs:1299-1300`),两处都会拒绝;
+- rutis 首次装载不调用 `validate_config`,但每次装载都调用 `build`,所以 `build` 中的检查覆盖所有路径;
+- 检查所需的 id、name、injects 在加载时已记入 `Module`(§7.1 第 5 步),比较是纯操作,符合 `build` 的纯构造约定。
+
+不一致时返回 `CordisError::Validation`,提示“依赖声明或插件身份变化需要 dispose 后重新 spawn”。`swap` 只是提前给出
+同样的错误。
+
 - `name()` 与 `injects()` 与 spawn 时取定的值**完全相同**;不同则拒绝并提示“依赖声明变化需要 dispose 后重新 spawn”。
 
 ### 8.3 旧代残留
@@ -295,7 +347,8 @@ dylib 场景只会更明显(旧代码甚至来自另一个版本)。**#41(按装
 ### 10.2 CI 与发布
 
 1. 仓库固定 `rust-toolchain.toml`,路径重映射参数写入 `.cargo/config.toml`。
-2. SDK 发布:构建 `rutis-sdk` 与宿主 dylib 变体,产出 SDK 发布清单(`id`、`artifact_sha256`、包含的 crate 与版本)。
+2. SDK 发布:先构建 `rutis-sdk` 并计算产物哈希,再以 `RUTIS_SDK_ARTIFACT_SHA256` 构建宿主 dylib 变体(§5.4 两阶段构建),
+   复核 SDK 文件哈希未变;产出 SDK 发布清单(`id`、`artifact_sha256`、包含的 crate 与版本)。
 3. 插件发布:检出 SDK 对应的 tag,与 SDK 共用锁文件构建插件;打包工具校验本次构建产出的 `librutis_sdk.so`
    哈希等于 SDK 发布清单中的 `artifact_sha256`,不等即失败(这就是 L2 的“验证”)。
 4. SDK 升级时,CI 以新 SDK 重编全部一方插件并批量发布。SDK 升级节奏放慢(例如按季度);只加不改的变化也会产生新 SDK 版本。
@@ -319,10 +372,13 @@ dylib 场景只会更明显(旧代码甚至来自另一个版本)。**#41(按装
 | SDK 依赖 features 变化 | `dlopen` 成功,运行未出错(不代表兼容) |
 | SDK 可复现构建(同机不同 target 目录) | 加路径重映射后逐字节一致 |
 | 宿主可选动态链接(Bevy 写法) | 可行 |
+| 旧宿主(SDK A)+ 新 SDK(B)+ 按 B 编译的插件,宿主不自检 | 全部通过(即 §5.4 的漏洞) |
+| 同上,宿主启动时比对内联 `SDK_ID` 与 `loaded_sdk_id()` | 启动即拒绝 |
 
 **未验证(实施前必须完成)**
 
-- V1 跨机器可复现构建(不同源码路径、CARGO_HOME、用户名);不成立则采用 §5.3 的退路。
+- V1 跨机器可复现构建(不同源码路径、CARGO_HOME、target 目录、用户名,且各机器的重映射参数不同),
+  必须使用 §5.2 的真实 `SDK_ID` 生成逻辑;不成立则采用 §5.3 的退路。
 - V2 macOS:`install_name` / `@rpath`、`RTLD_LOCAL` 下同名 crate 多版本共存、两级命名空间的影响。
 - V3 Windows:Rust `dylib` 的导出符号数量上限(DLL 导出表 65535 项,大型 dylib 可能超限)、加载锁、`std` DLL 的分发。
   若不可行,Windows 只提供静态变体。
@@ -333,8 +389,8 @@ dylib 场景只会更明显(旧代码甚至来自另一个版本)。**#41(按装
 ## 十二、实施步骤
 
 1. **前置**:#41(旧代迟到注册)合入。
-2. `rutis-sdk` crate:重导出、分配器、`SDK_ID`(`build.rs`)、`export_plugin!`、`ConfigValue`。
-3. `rutis-dylib` crate:清单、内容寻址缓存、三步加载、`DylibFactory`、`spawn`/`swap`、模块登记表与诊断、保留上限。
+2. `rutis-sdk` crate:重导出、分配器、`SDK_ID`(`build.rs`,含 RUSTFLAGS 白名单规范化)、`export_plugin!`、`ConfigValue`。
+3. `rutis-dylib` crate:宿主启动检查(§5.4)、清单、内容寻址缓存、三阶段加载、`DylibFactory`(含模块不变量检查)、`spawn`/`swap`、模块登记表与诊断、保留上限。
 4. 宿主 `dylib-plugins` 构建变体与发布布局。
 5. 打包工具(`cargo xtask pack-plugin`):生成清单、计算哈希、执行 L2 校验、`cargo tree -d` 检查。
 6. CI:SDK 发布流水线、插件批量重编、V1–V4 的自动化验证。
@@ -344,7 +400,10 @@ dylib 场景只会更明显(旧代码甚至来自另一个版本)。**#41(按装
 
 - [ ] 宿主 + 一个 dylib 插件:跨库 TypeId、downcast、trait object、异步调用、析构均有自动化测试。
 - [ ] L1/L2 任一不匹配时加载被拒绝,原因可读;测试覆盖 §5.1 的两个反例。
-- [ ] `swap` 加载新版本后,旧实例按 rutis 生命周期卸载,消费者切换到新版本服务;依赖声明变化时 `swap` 被拒绝。
+- [ ] 宿主启动检查(§5.4):“旧宿主 + 新 SDK + 新插件”在启动时被拒绝;SDK 文件哈希与宿主内嵌值不符时被拒绝。
+- [ ] `SDK_ID` 规范化:仅重映射参数不同的两次构建得到相同的 `SDK_ID` 与 SDK 产物哈希;未归类的 RUSTFLAGS 项使构建失败。
+- [ ] `swap` 加载新版本后,旧实例按 rutis 生命周期卸载,消费者切换到新版本服务。
+- [ ] 插件 id、name 或 injects 不同的模块:经 `swap` 和直接 `view.update(..)` 两条路径都被拒绝,fiber 保持原模块运行。
 - [ ] 保留上限生效,诊断中可见各版本使用情况与内存占用。
 - [ ] 默认构建仍为单二进制,不依赖任何 Rust 动态库。
 - [ ] V1–V4 有结论并记录在本文档。
