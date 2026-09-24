@@ -1,6 +1,6 @@
 # Cordis 检查与拦截能力在 rutis 中的设计
 
-状态：设计草案；未实现。基准为 rutis `7d7402d`、Cordis [`56b3d4f`](https://github.com/cordiverse/cordis/tree/56b3d4f725681cf4556c1a8695a709cc3b6eed74)。关联 rutis [#40](https://github.com/arcships/rutis/issues/40)、[#27](https://github.com/arcships/rutis/issues/27)、[#29](https://github.com/arcships/rutis/issues/29)。
+状态：设计稿；实现分别在 [PR #53](https://github.com/arcships/rutis/pull/53)、[PR #54](https://github.com/arcships/rutis/pull/54)、[PR #55](https://github.com/arcships/rutis/pull/55) 审阅中，合并前主线尚无这些 API。基准为 rutis `7d7402d`、Cordis [`56b3d4f`](https://github.com/cordiverse/cordis/tree/56b3d4f725681cf4556c1a8695a709cc3b6eed74)。关联 rutis [#40](https://github.com/arcships/rutis/issues/40)、[#27](https://github.com/arcships/rutis/issues/27)、[#29](https://github.com/arcships/rutis/issues/29)。
 
 ## 目的与边界
 
@@ -86,6 +86,8 @@ impl FiberView {
 
 `EffectRecord` 登记时同时保存纯元数据树和现有 LIFO 清理列表；元数据不捕获清理闭包。当前 `FiberInner.effects` 在卸载时整表取出，因此还需可清理的弱引用索引，让 `effects()` 在清理期间看见 `Draining`，在记录进入 `Done` 后删除索引。读取只复制标签、阶段和树结构，不执行用户代码，不持有子 fiber 或服务值。#27 要求可由 fiber **或** `Ctx::diagnostics()` 获取；第一步选择 `FiberView::effects()` 满足这个入口要求。架构图确实需要时才把它纳入全树 `Ctx::diagnostics()`。
 
+`EffectPhase` 表示整个清理记录的状态，嵌套子项沿用同一状态；第一版不追踪 `Many` 中哪一个叶子正在执行。
+
 验收：自动/显式标签、`Many` 的真实嵌套与 LIFO 清理顺序、提前 dispose、清理中可见、完成即消失、错误聚合不变，以及 1000 轮子树关闭后父 fiber 的元数据与 effect 记录回到基线。
 
 ## 3. 严格服务读取与提供者写入拦截（#29）
@@ -102,7 +104,7 @@ impl FiberView {
 
 现有 `provide_as` 注册的服务保持不可替换。新增 `provide_mut_as` 返回清理句柄和代次绑定的 `ServiceWriter<T>`；只有该句柄可以写回其创建时的绑定。旧代句柄、摘除中的绑定、非 owner、类型或实例越界一律失败。这样旧代异步任务即使持有相同的 `Ctx`，也不能改写新代的同键服务。
 
-`ServiceWriter::set(Arc<T>)` 在锁外运行该键、scope 的同步写入钩子；只选择注册 fiber 位于提供者祖先链上的钩子，防止兄弟子树干预写入。钩子可继续、替换同类型候选值或拒绝。提交时重新检查绑定的 Arc 身份、provider 与 generation，然后原子替换值。可替换绑定单独持有一个可变值槽；普通不可替换服务不必为此增加读取锁。成功写入保持 provider、generation、依赖四元组和驱逐关系；旧 `Arc<T>` 不会被原地改写，之后的读取取得新值。写入不自动重载消费者；健康谓词的外部条件变化仍由 `refresh()` 触发门控重查。钩子 panic 返回写入错误，不提交候选值。
+`ServiceWriter::set(&provider_ctx, Arc<T>)` 显式检查调用方是创建绑定的提供 fiber；仅凭可传递的 writer 句柄无法证明调用方身份。随后在锁外运行该键、scope 的同步写入钩子；只选择注册 fiber 位于提供者祖先链上的钩子，防止兄弟子树干预写入。钩子可继续、替换同类型候选值或拒绝。提交时重新检查绑定的 Arc 身份、provider 与 generation，然后原子替换值。可替换绑定单独持有一个可变值槽；普通不可替换服务不必为此增加读取锁。成功写入保持 provider、generation、依赖四元组和驱逐关系；旧 `Arc<T>` 不会被原地改写，之后的读取取得新值。写入不自动重载消费者；健康谓词的外部条件变化仍由 `refresh()` 触发门控重查。钩子 panic 返回写入错误，不提交候选值。
 
 这个顺序比 Cordis 的 `internal/get/set` 更严格：Cordis 的 get 钩子位于最终依赖读取之前；rutis 的拦截器不能越过类型、实例和依赖声明边界。同步入口也不能复用目前异步的 `EventBus::waterfall`，只能复用它的链式顺序思想。
 
@@ -114,4 +116,4 @@ impl FiberView {
 2. 按 #27 实现 effect 树；先在单 fiber 上读取，不扩大全树 DTO。
 3. 按 #29 先实现严格读取拦截，再实现可替换服务及写入拦截；后者需要独立验证代次、旧 Arc 和更新竞态。
 
-每一步都保留现有 `Ctx::diagnostics()` 的架构分析用途，并运行 `cargo +1.98.1 test -p rutis`、`clippy -p rutis --all-targets -- -D warnings`、`fmt -p rutis -- --check`。消费仓库的构建、架构图和 Session/Branch 诊断流程在 API 变更后另行验收。没有实现代码前，本文件不表示 rutis 已提供这些 Cordis 钩子。
+每一步都保留现有 `Ctx::diagnostics()` 的架构分析用途，并运行 `cargo +1.98.1 test -p rutis`、`clippy -p rutis --all-targets -- -D warnings`、`fmt -p rutis -- --check`。三个实现 PR 已按 #53 → #54 → #55 叠放并通过组合验证；消费仓库的构建、架构图和 Session/Branch 诊断流程在 API 合并后另行验收。
