@@ -258,7 +258,13 @@ rutis_sdk::export_plugin! {
 `PluginFactory<C>` 的 `C` 必须是宿主与插件都认识的类型。统一用 `ConfigValue = serde_json::Value`:
 
 - 宿主从配置文件读取后原样交给插件,插件在 `validate_config` 中反序列化并校验;
-- 插件配置结构变化不影响 SDK,不需要换 ### 8.1 换代码 = `update`
+- 插件配置结构变化不影响 SDK,不需要换 SDK 版本。
+
+需要强类型配置的插件族,可以把配置类型放进接口 crate(即进入 SDK),代价是配置变动即 SDK 变动。
+
+## 八、接入 rutis 生命周期
+
+### 8.1 换代码 = `update`
 
 rutis 的 `FiberView::update(config)` 要求 config 类型不变、工厂不变(`crates/rutis/src/fiber.rs:1279`)。
 让 config 携带模块,即可复用 update 的全部语义(dry-run、预取消、重启、消费者驱逐与重载):
@@ -311,8 +317,6 @@ rutis 的依赖声明是静态的(D32f):`injects` 在 spawn 时注册一次,`upd
 
 不一致时返回 `CordisError::Validation`,提示“依赖声明或插件身份变化需要 dispose 后重新 spawn”。`swap` 只是提前给出
 同样的错误。
-
-- `name()` 与 `injects()` 与 spawn 时取定的值**完全相同**;不同则拒绝并提示“依赖声明变化需要 dispose 后重新 spawn”。
 
 ### 8.3 旧代残留
 
