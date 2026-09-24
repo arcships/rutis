@@ -4,7 +4,7 @@
 
 **Rust 插件框架**
 
-类型安全的服务容器 · fiber 生命周期 · 四分发事件总线 · 依赖驱动热重载
+类型键服务容器 · fiber 生命周期 · 四分发事件总线 · 依赖驱动重新装载
 
 [![crates.io](https://img.shields.io/crates/v/rutis.svg)](https://crates.io/crates/rutis)
 [![docs.rs](https://docs.rs/rutis/badge.svg)](https://docs.rs/rutis)
@@ -22,7 +22,7 @@ Cordis 核心范式的 Rust 惯用实现 · [English](README.en.md)
 
 | 自己拼装的痛 | rutis 给你的 |
 |---|---|
-| 服务注册与查找散落各处的字符串键 | **编译期类型键**:`ctx.get::<Database>()`,错了编不过 |
+| 服务注册与查找散落各处的字符串键 | **类型键**：用 `TypeKey` 标识服务类型，避免拼写类型名；服务是否已提供、依赖声明与实际读取是否一致仍在运行期检查 |
 | 插件启停顺序、谁先谁后的隐式约定 | **装配一次完成**:apply 同时提供服务 / 监听 / 清理,恰好一次执行 |
 | 卸载时资源泄漏、清理漏跑 | **fiber 容器**:严格 LIFO 清理,中途失败也回滚 |
 | 依赖变化后手动重建一串东西 | **依赖驱动重载**:换 provider,消费者自动驱逐重载 |
@@ -31,13 +31,13 @@ Cordis 核心范式的 Rust 惯用实现 · [English](README.en.md)
 ## 🚀 快速上手
 
 ```bash
-cargo add rutis@0.2
+cargo add rutis@0.3
 ```
 
 一个 provider、一个声明依赖的 consumer、一次换 provider——完整代码见 [crates/rutis/examples/quickstart.rs](crates/rutis/examples/quickstart.rs)(`cargo run -p rutis --example quickstart`):
 
 ```rust
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, TypeKey};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, FiberView, Plugin, TypeKey};
 
 /// 服务:类型即键,注册槽全局唯一。
 struct Greeting(String);
@@ -71,6 +71,14 @@ impl Plugin for Listener {
     }
 }
 
+async fn wait_active(view: &FiberView) {
+    let mut state = view.watch();
+    loop {
+        if state.borrow().state == FiberState::Active { return; }
+        state.changed().await.expect("fiber driver alive");
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Ctx::root()?;
@@ -86,6 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     v1.dispose().await?;
     let _v2 = ctx.plugin(Greeter { version: 2 });
     wait_active(&listener).await;                 // [listener] loaded: hello from greeter v2
+    ctx.shutdown().await?;
     Ok(())
 }
 ```
@@ -155,6 +164,10 @@ view.update(cfg_v2).await?;   // dry-run 不过则现状不动;通过则卸载�
 ctx.events().on_keyed::<HostEvent>(&ctx, "session/event", listener)?;
 ctx.events().emit_keyed(&ctx, name, Arc::new(event));
 ```
+
+**使用边界** —— `get/get_as` 是返回 `Option` 的显式服务定位器，不强制核对 `injects()`；provider 未 Active 或读取方正在卸载时通常不可见，provider 子树在清理期间仍可读取自己提供的服务。实例键另有子树可见性检查。监听器由注册时传给 `on` 的 `Ctx` 持有，回调参数 `Ctx` 来自发送方；回调要给注册插件登记资源时，应捕获注册方的 `Ctx`。可编译示例见 [listener_ctx_ownership.rs](crates/rutis/examples/listener_ctx_ownership.rs)。
+
+`apply` 的同步及异步 panic 会变成插件错误；`check()` panic 视为依赖未就绪；`waterfall` 回调 panic 向调用方传播。`settle` 仅是该 fiber 的 FIFO 栅栏，Pending 也可能是稳定结果。root 的 `dispose()` 后仍可重启，`shutdown()` 是最终关闭；丢弃等待 future 不会停止已启动的清理。`update(config)` 重新装配插件，不替换进程中的代码。提前 `Disposer::dispose()` 的失败立即返回给调用方，不自动通知 ErrorSink；`Ctx::take_cleanup_errors()` 可取走并释放这些历史错误。未取走的错误在终态卸载时进入结果，在重载时交给 ErrorSink。
 
 **与 cordis 的关系** —— rutis 是 [Cordis](https://github.com/shigma/cordis) 范式的 Rust 惯用实现,不是翻译:96 个原版 spec 逐条审阅,58 个语言无关不变量全部自动化对拍;其余差异全部显式声明(决策表 + 不移植清单 + 对照审计)。已知的刻意强化:跨 effect 清理严格串行 LIFO(cordis 并发)、emit 同键保序显式重建。
 

@@ -4,7 +4,7 @@
 
 **A plugin framework for Rust**
 
-Type-safe service container · fiber lifecycles · four-way event bus · dependency-driven hot reloading
+Typed-key service container · fiber lifecycles · four-way event bus · dependency-driven lifecycle reloads
 
 [![crates.io](https://img.shields.io/crates/v/rutis.svg)](https://crates.io/crates/rutis)
 [![docs.rs](https://docs.rs/rutis/badge.svg)](https://docs.rs/rutis)
@@ -22,7 +22,7 @@ When your application needs a plugin architecture — editors, bots, agent hosts
 
 | Hand-rolled pain | What rutis gives you |
 |---|---|
-| String-keyed services scattered everywhere | **Compile-time typed keys**: `ctx.get::<Database>()` — wrong types don't compile |
+| String-keyed services scattered everywhere | **Typed keys**: `TypeKey` identifies the service type without spelling its name; service availability and agreement between `injects()` and actual reads are checked at runtime |
 | Implicit plugin start/stop ordering conventions | **One apply, everything wired**: provides services / listeners / cleanup, exactly once |
 | Resource leaks and missed cleanups on unload | **Fiber containers**: strict LIFO cleanup, rolling back even mid-apply failures |
 | Manually rebuilding a chain of things when a dependency changes | **Dependency-driven reload**: swap a provider, consumers evict and reload themselves |
@@ -31,13 +31,13 @@ When your application needs a plugin architecture — editors, bots, agent hosts
 ## 🚀 Getting started
 
 ```bash
-cargo add rutis@0.2
+cargo add rutis@0.3
 ```
 
 A provider, a consumer that declares a dependency, and a provider swap — full code at [crates/rutis/examples/quickstart.rs](crates/rutis/examples/quickstart.rs) (`cargo run -p rutis --example quickstart`):
 
 ```rust
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, TypeKey};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, FiberView, Plugin, TypeKey};
 
 /// A service: the type is the key; one registration slot per type.
 struct Greeting(String);
@@ -72,6 +72,14 @@ impl Plugin for Listener {
     }
 }
 
+async fn wait_active(view: &FiberView) {
+    let mut state = view.watch();
+    loop {
+        if state.borrow().state == FiberState::Active { return; }
+        state.changed().await.expect("fiber driver alive");
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Ctx::root()?;
@@ -87,6 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     v1.dispose().await?;
     let _v2 = ctx.plugin(Greeter { version: 2 });
     wait_active(&listener).await;                 // [listener] loaded: hello from greeter v2
+    ctx.shutdown().await?;
     Ok(())
 }
 ```
@@ -156,6 +165,10 @@ view.update(cfg_v2).await?;   // dry-run failure leaves everything untouched; su
 ctx.events().on_keyed::<HostEvent>(&ctx, "session/event", listener)?;
 ctx.events().emit_keyed(&ctx, name, Arc::new(event));
 ```
+
+**API boundaries** — `get/get_as` are optional service locators; they do not enforce `injects()` declarations. A service is normally hidden while its provider is inactive or the reader is unloading, except that the provider's subtree can read its own service during cleanup. Instance keys also have subtree visibility checks. The `Ctx` passed to `on` owns a listener; the callback's `Ctx` belongs to the emitter. Capture the registration `Ctx` when the callback must register resources for its own plugin. See the compiling [listener ownership example](crates/rutis/examples/listener_ctx_ownership.rs).
+
+Synchronous and asynchronous `apply` panics become plugin errors; a `check()` panic leaves a dependency unready; a `waterfall` callback panic propagates to its caller. `settle` is a FIFO barrier for one fiber, and Pending can be a stable result. Root `dispose()` remains restartable, while `shutdown()` closes it permanently; dropping a waiting future does not stop cleanup already in progress. `update(config)` reassembles a plugin without replacing process code. An early `Disposer::dispose()` failure returns to its caller without notifying the error sink; `Ctx::take_cleanup_errors()` consumes and releases these retained errors. Unconsumed errors join a terminal unload result or reach the error sink on reload.
 
 **Relation to cordis** — rutis is an idiomatic Rust implementation of the [Cordis](https://github.com/shigma/cordis) paradigm, not a translation: all 96 original specs reviewed line by line, the 58 language-agnostic invariants locked by automated parity tests; every other difference is explicitly declared (decision table + non-port list + audit record). Known deliberate strengthenings: cross-effect cleanup is strictly serial LIFO (cordis runs concurrently), per-key emit ordering is rebuilt explicitly.
 

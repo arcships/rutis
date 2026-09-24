@@ -108,8 +108,11 @@ impl EffectRecord {
                         if effects.capacity() > 64 && effects.len() * 4 < effects.capacity() {
                             effects.shrink_to_fit();
                         }
-                        drop(effects);
                         if let Some(e) = &err {
+                            // Keep the effects lock until the error is queued.
+                            // drain_effects takes the whole effects list under
+                            // this lock, then consumes drained_errors: it must
+                            // see either this record or its queued error.
                             owner.drained_errors.lock().unwrap().push(e.clone());
                         }
                     }

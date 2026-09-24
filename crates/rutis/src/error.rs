@@ -9,7 +9,7 @@ use std::sync::Arc;
 pub enum CordisError {
     #[error("service {0:?} not found in scope")]
     ServiceNotFound(String),
-    #[error("plugin failed")]
+    #[error("plugin failed: {0}")]
     PluginFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("multiple errors: {errors:?}")]
     Aggregate {
@@ -39,7 +39,65 @@ pub enum CordisError {
 pub type ErrorSink = Arc<dyn Fn(Arc<CordisError>) + Send + Sync>;
 
 pub(crate) fn default_sink() -> ErrorSink {
-    Arc::new(|e: Arc<CordisError>| eprintln!("[rutis] {e}"))
+    Arc::new(|e: Arc<CordisError>| eprintln!("[rutis] {}", format_for_sink(&e)))
+}
+
+fn format_for_sink(error: &CordisError) -> String {
+    fn write_source(source: &(dyn std::error::Error + 'static), out: &mut String, indent: usize) {
+        if let Some(error) = source.downcast_ref::<CordisError>() {
+            write_error(error, out, indent);
+            return;
+        }
+        out.push_str(&source.to_string());
+        if let Some(next) = source.source() {
+            out.push('\n');
+            out.push_str(&" ".repeat(indent + 2));
+            out.push_str("caused by: ");
+            write_source(next, out, indent + 2);
+        }
+    }
+
+    fn write_error(error: &CordisError, out: &mut String, indent: usize) {
+        match error {
+            CordisError::Aggregate { errors } => {
+                out.push_str("multiple errors:");
+                for (index, member) in errors.iter().enumerate() {
+                    out.push('\n');
+                    out.push_str(&" ".repeat(indent));
+                    out.push_str(&format!("{}. ", index + 1));
+                    write_error(member, out, indent + 3);
+                }
+            }
+            CordisError::PluginFailed(source) => {
+                let display = error.to_string();
+                let direct = source.to_string();
+                match display.strip_suffix(&direct) {
+                    Some(prefix) => {
+                        // Keep the public Display as the source of the prefix,
+                        // while formatting a nested CordisError structurally.
+                        out.push_str(prefix);
+                        write_source(source.as_ref(), out, indent);
+                    }
+                    None => {
+                        out.push_str(&display);
+                        // A future Display that omits the direct source still
+                        // gets its deeper chain without printing it twice.
+                        if let Some(next) = source.source() {
+                            out.push('\n');
+                            out.push_str(&" ".repeat(indent + 2));
+                            out.push_str("caused by: ");
+                            write_source(next, out, indent + 2);
+                        }
+                    }
+                }
+            }
+            _ => out.push_str(&error.to_string()),
+        }
+    }
+
+    let mut out = String::new();
+    write_error(error, &mut out, 0);
+    out
 }
 
 /// 单错原样、多错聚合不压平;返回 `None` 表示无错。
@@ -81,5 +139,61 @@ pub(crate) fn join_panic_error(join_err: tokio::task::JoinError) -> CordisError 
         panic_error(join_err.into_panic())
     } else {
         CordisError::PluginFailed("task cancelled before completion".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("outer cause")]
+    struct OuterCause {
+        #[source]
+        source: InnerCause,
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("inner cause")]
+    struct InnerCause;
+
+    #[test]
+    fn plugin_failure_display_and_sink_preserve_each_cause_once() {
+        let error = CordisError::PluginFailed(Box::new(OuterCause { source: InnerCause }));
+        assert_eq!(error.to_string(), "plugin failed: outer cause");
+        assert_eq!(
+            format_for_sink(&error),
+            "plugin failed: outer cause\n  caused by: inner cause"
+        );
+        assert_eq!(
+            std::error::Error::source(&error).unwrap().to_string(),
+            "outer cause"
+        );
+    }
+
+    #[test]
+    fn sink_formats_aggregate_members_without_debug_noise() {
+        let error = CordisError::Aggregate {
+            errors: vec![
+                Arc::new(CordisError::PluginFailed("cleanup detail".into())),
+                Arc::new(CordisError::ServiceNotFound("missing".into())),
+            ],
+        };
+        assert_eq!(
+            format_for_sink(&error),
+            "multiple errors:\n1. plugin failed: cleanup detail\n2. service \"missing\" not found in scope"
+        );
+    }
+
+    #[test]
+    fn sink_recurses_into_aggregate_used_as_plugin_failure_source() {
+        let nested = CordisError::Aggregate {
+            errors: vec![Arc::new(CordisError::ServiceNotFound("nested".into()))],
+        };
+        let error = CordisError::PluginFailed(Box::new(nested));
+        assert_eq!(
+            format_for_sink(&error),
+            "plugin failed: multiple errors:\n1. service \"nested\" not found in scope"
+        );
     }
 }

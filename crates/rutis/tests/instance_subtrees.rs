@@ -744,6 +744,54 @@ async fn shutdown_keeps_cleanup_from_loading_apply() {
     root.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispose_child_shutdown_and_parent_shutdown_converge() {
+    for _ in 0..32 {
+        let root = Ctx::root().unwrap();
+        let (parent, ctx) = child(&root).await;
+        let leaf = ctx.plugin(Capture(Arc::new(Mutex::new(None))));
+        (&leaf).await.unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(4));
+        let dispose = tokio::spawn({
+            let leaf = leaf.clone();
+            let barrier = barrier.clone();
+            async move {
+                barrier.wait().await;
+                leaf.dispose().await
+            }
+        });
+        let close_leaf = tokio::spawn({
+            let leaf = leaf.clone();
+            let barrier = barrier.clone();
+            async move {
+                barrier.wait().await;
+                leaf.shutdown().await
+            }
+        });
+        let close_parent = tokio::spawn({
+            let parent = parent.clone();
+            let barrier = barrier.clone();
+            async move {
+                barrier.wait().await;
+                parent.shutdown().await
+            }
+        });
+        barrier.wait().await;
+        let (disposed, leaf_closed, parent_closed) =
+            tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::join!(dispose, close_leaf, close_parent)
+            })
+            .await
+            .expect("concurrent shutdown deadlocked");
+        disposed.unwrap().unwrap();
+        leaf_closed.unwrap().unwrap();
+        parent_closed.unwrap().unwrap();
+        assert_eq!(leaf.state().state, FiberState::Disposed);
+        assert_eq!(root.diagnostics().plugins.len(), 1);
+        root.shutdown().await.unwrap();
+    }
+}
+
 struct Supply(Arc<Mutex<Vec<&'static str>>>);
 impl Plugin for Supply {
     fn name(&self) -> &str {

@@ -1100,6 +1100,13 @@ impl FiberView {
         &self.inner.name
     }
 
+    /// Take this fiber's completed, early-disposed effect errors. Taken
+    /// errors are excluded from a later unload result; see
+    /// [`Ctx::take_cleanup_errors`].
+    pub fn take_cleanup_errors(&self) -> Vec<Arc<CordisError>> {
+        std::mem::take(&mut *self.inner.drained_errors.lock().unwrap())
+    }
+
     /// Permanently close this fiber and its descendants. Admission closes at
     /// the call site; dropping the returned future does not stop cleanup.
     /// A callback or finalizer must not await shutdown of its own subtree.
