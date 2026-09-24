@@ -48,8 +48,8 @@ impl Plugin for Listener {
         &self.deps // 依赖未就绪则停在 Pending,就绪后自动装载
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        let greeting = ctx.get::<Greeting>().unwrap().0.clone();
         Box::pin(async move {
+            let greeting = ctx.require::<Greeting>()?.0.clone();
             println!("[listener] loaded: {greeting}");
             Ok(Effect::Done)
         })

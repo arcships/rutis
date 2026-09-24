@@ -1,7 +1,7 @@
 //! Read-only snapshots of fiber ownership and service resolution.
 use std::sync::Arc;
 
-use crate::{CordisError, FiberState, InstanceId, PluginId, TypeKey};
+use crate::{CordisError, FiberState, InstanceId, PluginId, ServiceReadFailure, TypeKey};
 
 #[derive(Debug, Clone)]
 pub struct RuntimeDiagnostics {
@@ -60,6 +60,10 @@ pub struct ServiceAccess {
     pub declared: bool,
     pub external: bool,
     pub out_of_scope: bool,
+    /// Whether this access used `require` / `require_as`.
+    pub strict: bool,
+    /// Rejection reason for a strict read; absent on success and optional reads.
+    pub failure: Option<ServiceReadFailure>,
 }
 
 #[derive(Debug, Clone)]

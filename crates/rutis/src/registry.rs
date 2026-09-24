@@ -121,6 +121,11 @@ impl Registry {
         let Some(binding) = self.lookup(key, scope) else {
             return DependencyStatus::Missing;
         };
+        Self::binding_status(&binding)
+    }
+
+    /// Cached status of one binding snapshot; never invokes its check callback.
+    pub(crate) fn binding_status(binding: &Binding) -> DependencyStatus {
         if binding.removing.load(std::sync::atomic::Ordering::SeqCst) {
             return DependencyStatus::Removing;
         }

@@ -12,9 +12,9 @@ use crate::diagnostics::{
     RuntimeDiagnostics, ServiceAccess,
 };
 use crate::effect::{Disposer, Effect, EffectRecord};
-use crate::error::{default_sink, CordisError, ErrorSink};
+use crate::error::{default_sink, CordisError, ErrorSink, ServiceReadError, ServiceReadFailure};
 use crate::fiber::{
-    join_task, spawn_fiber, DisposeWaitError, FiberInner, FiberState, FiberView, Intent,
+    join_task, spawn_fiber, DisposeWaitError, FiberInner, FiberState, FiberView, Intent, PluginId,
     TransitionTask,
 };
 use crate::key::{InstanceId, ScopeId, TypeKey};
@@ -39,11 +39,20 @@ pub(crate) struct CtxInner {
     pub(crate) fiber: Weak<FiberInner>,
     pub(crate) isolate: Option<(TypeKey, ScopeId)>,
     pub(crate) instance: InstanceId,
+    pub(crate) plugin_id: PluginId,
 }
 
 /// 上下文 = `Arc<CtxInner>`(所有权模型:Clone 廉价;isolate/plugin 返回共享内核的新 Ctx)。
 #[derive(Clone)]
 pub struct Ctx(Arc<CtxInner>);
+
+struct AccessOutcome {
+    found: Option<(PluginId, u64, bool)>,
+    declared: bool,
+    out_of_scope: bool,
+    strict: bool,
+    failure: Option<ServiceReadFailure>,
+}
 
 struct EffectFactoryLease(Arc<FiberInner>);
 
@@ -60,6 +69,7 @@ impl Ctx {
         fiber: Weak<FiberInner>,
         isolate: Option<(TypeKey, ScopeId)>,
         instance: InstanceId,
+        plugin_id: PluginId,
     ) -> Self {
         Self(Arc::new(CtxInner {
             shared,
@@ -67,6 +77,7 @@ impl Ctx {
             fiber,
             isolate,
             instance,
+            plugin_id,
         }))
     }
 
@@ -74,6 +85,7 @@ impl Ctx {
         shared: Arc<Shared>,
         fiber: Weak<FiberInner>,
         instance: InstanceId,
+        plugin_id: PluginId,
     ) -> Self {
         Self(Arc::new(CtxInner {
             shared,
@@ -81,6 +93,7 @@ impl Ctx {
             fiber,
             isolate: None,
             instance,
+            plugin_id,
         }))
     }
 
@@ -381,6 +394,7 @@ impl Ctx {
             self.0.fiber.clone(),
             Some((key.into(), Arc::from(label))),
             self.instance(),
+            self.0.plugin_id,
         )
     }
 
@@ -401,57 +415,276 @@ impl Ctx {
         let key = key.into();
         let scope = self.scope_for(&key);
         let out_of_scope = !self.in_instance_key(&key);
-        let mut found = None;
-        let result = (|| {
-            if out_of_scope {
-                return None;
-            }
-            let binding = self.0.shared.registry.lookup(&key, scope.as_ref())?;
-            let provider = binding.provider.upgrade()?;
-            let self_access = self.in_subtree_of(&provider);
-            found = Some((binding.provider_id, binding.provider_gen, !self_access));
-            if !self_access {
-                match self.0.fiber.upgrade() {
-                    None => return None,
-                    Some(accessor)
-                        if matches!(
-                            accessor.state(),
-                            FiberState::Unloading | FiberState::Disposed
-                        ) =>
-                    {
-                        return None
-                    }
-                    _ => {}
-                }
-                let visible = provider.state() == FiberState::Active
-                    && !binding.removing.load(std::sync::atomic::Ordering::SeqCst);
-                if !visible {
-                    return None;
-                }
-            }
-            binding.value.downcast::<T>()
-        })();
+        let (result, found) = if out_of_scope {
+            (None, None)
+        } else {
+            let binding = self.0.shared.registry.lookup(&key, scope.as_ref());
+            self.read_binding_as::<T>(binding.as_ref())
+        };
         if let Some(fiber) = self.0.fiber.upgrade() {
             if fiber.state() == FiberState::Loading {
-                let (provider, generation, external) = found
-                    .map(|(p, g, x)| (Some(p), Some(g), x))
-                    .unwrap_or((None, None, false));
-                let access = ServiceAccess {
-                    key: key.clone(),
-                    scope: scope.as_ref().map(|s| s.to_string()),
-                    provider,
-                    generation,
-                    declared: fiber.declared_injects.contains(&key),
-                    external,
-                    out_of_scope,
-                };
-                let mut accesses = fiber.accesses.lock().unwrap();
-                if !accesses.contains(&access) {
-                    accesses.push(access);
-                }
+                self.record_access(
+                    &fiber,
+                    &key,
+                    scope.as_ref(),
+                    AccessOutcome {
+                        found,
+                        declared: fiber.declared_injects.contains(&key),
+                        out_of_scope,
+                        strict: false,
+                        failure: None,
+                    },
+                );
             }
         }
         result
+    }
+
+    /// Read a declared service, or return a call-site error. Unlike `get`,
+    /// this enforces the caller's dependency declaration at every invocation.
+    #[track_caller]
+    pub fn require<T: Send + Sync + 'static>(&self) -> Result<Arc<T>, ServiceReadError> {
+        self.require_as(TypeKey::of::<T>())
+    }
+
+    /// Strict keyed read. A declaration on an ancestor fiber is usable only
+    /// when that ancestor sees the same isolate scope as this context.
+    #[track_caller]
+    pub fn require_as<T: ?Sized + Send + Sync + 'static>(
+        &self,
+        key: impl Into<TypeKey>,
+    ) -> Result<Arc<T>, ServiceReadError> {
+        let location = std::panic::Location::caller();
+        let key = key.into();
+        let scope = self.scope_for(&key);
+        let caller = self.0.fiber.upgrade();
+        let own_service = caller.as_ref().is_some_and(|fiber| {
+            fiber
+                .provided
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(provided_key, provided_scope)| {
+                    provided_key == &key && provided_scope.as_ref() == scope.as_ref()
+                })
+        });
+        let mut current = caller.clone();
+        let mut declared_by_injects = false;
+        while let Some(fiber) = current {
+            if fiber.declared_injects.contains(&key)
+                && fiber.ctx.scope_for(&key).as_ref() == scope.as_ref()
+            {
+                declared_by_injects = true;
+                break;
+            }
+            current = fiber
+                .parent_fiber
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade);
+        }
+        let declared = own_service || declared_by_injects;
+        let failure = if !self.in_instance_key(&key) {
+            Some(ServiceReadFailure::OutOfScope)
+        } else if !key.has_type::<T>() {
+            Some(ServiceReadFailure::TypeMismatch)
+        } else if caller.as_ref().is_none_or(|fiber| {
+            matches!(fiber.state(), FiberState::Unloading | FiberState::Disposed)
+        }) && !own_service
+        {
+            Some(ServiceReadFailure::Inactive)
+        } else if !declared {
+            Some(ServiceReadFailure::Undeclared)
+        } else {
+            None
+        };
+        if let Some(reason) = failure {
+            if let Some(fiber) = caller.as_ref() {
+                self.record_access(
+                    fiber,
+                    &key,
+                    scope.as_ref(),
+                    AccessOutcome {
+                        found: None,
+                        declared,
+                        out_of_scope: reason == ServiceReadFailure::OutOfScope,
+                        strict: true,
+                        failure: Some(reason),
+                    },
+                );
+            }
+            return Err(self.read_error(key, reason, location));
+        }
+
+        let binding = self.0.shared.registry.lookup(&key, scope.as_ref());
+        // The cached status is read-only: this path never invokes user check().
+        // Self-provided services retain the existing loading/cleanup exemption.
+        if !own_service {
+            let status = binding
+                .as_ref()
+                .map_or(DependencyStatus::Missing, |binding| {
+                    Registry::binding_status(binding)
+                });
+            if status != DependencyStatus::Ready {
+                let reason = ServiceReadFailure::Unavailable(status);
+                if let Some(fiber) = caller.as_ref() {
+                    self.record_access(
+                        fiber,
+                        &key,
+                        scope.as_ref(),
+                        AccessOutcome {
+                            found: None,
+                            declared,
+                            out_of_scope: false,
+                            strict: true,
+                            failure: Some(reason),
+                        },
+                    );
+                }
+                return Err(self.read_error(key, reason, location));
+            }
+        }
+        let (value, found) = self.read_binding_as::<T>(binding.as_ref());
+        // During removal, a new provider may take the same slot before this
+        // fiber's own provide record is cleared. Do not grant that replacement
+        // the self-access exemption.
+        if own_service && found.is_some_and(|(provider, _, _)| provider != self.0.plugin_id) {
+            let reason = if caller.as_ref().is_none_or(|fiber| {
+                matches!(fiber.state(), FiberState::Unloading | FiberState::Disposed)
+            }) {
+                Some(ServiceReadFailure::Inactive)
+            } else if !declared_by_injects {
+                Some(ServiceReadFailure::Undeclared)
+            } else {
+                let status = binding
+                    .as_ref()
+                    .map_or(DependencyStatus::Missing, |binding| {
+                        Registry::binding_status(binding)
+                    });
+                (status != DependencyStatus::Ready)
+                    .then_some(ServiceReadFailure::Unavailable(status))
+            };
+            if let Some(reason) = reason {
+                if let Some(fiber) = caller.as_ref() {
+                    self.record_access(
+                        fiber,
+                        &key,
+                        scope.as_ref(),
+                        AccessOutcome {
+                            found: None,
+                            declared: declared_by_injects,
+                            out_of_scope: false,
+                            strict: true,
+                            failure: Some(reason),
+                        },
+                    );
+                }
+                return Err(self.read_error(key, reason, location));
+            }
+        }
+        let reason = value.is_none().then(|| {
+            let status = binding
+                .as_ref()
+                .map_or(DependencyStatus::Missing, |binding| {
+                    Registry::binding_status(binding)
+                });
+            // The binding may have changed state since the failed read.
+            // Report the failed read, not a contradictory Ready.
+            ServiceReadFailure::Unavailable(if status == DependencyStatus::Ready {
+                DependencyStatus::Missing
+            } else {
+                status
+            })
+        });
+        if let Some(fiber) = caller.as_ref() {
+            self.record_access(
+                fiber,
+                &key,
+                scope.as_ref(),
+                AccessOutcome {
+                    found,
+                    declared,
+                    out_of_scope: false,
+                    strict: true,
+                    failure: reason,
+                },
+            );
+        }
+        value.ok_or_else(|| self.read_error(key, reason.unwrap(), location))
+    }
+
+    fn read_error(
+        &self,
+        key: TypeKey,
+        reason: ServiceReadFailure,
+        location: &'static std::panic::Location<'static>,
+    ) -> ServiceReadError {
+        ServiceReadError {
+            key,
+            plugin_id: self.0.plugin_id,
+            instance: self.instance(),
+            location,
+            reason,
+        }
+    }
+
+    fn read_binding_as<T: ?Sized + Send + Sync + 'static>(
+        &self,
+        binding: Option<&Arc<Binding>>,
+    ) -> (Option<Arc<T>>, Option<(PluginId, u64, bool)>) {
+        let Some(binding) = binding else {
+            return (None, None);
+        };
+        let Some(provider) = binding.provider.upgrade() else {
+            return (None, None);
+        };
+        let self_access = self.in_subtree_of(&provider);
+        let found = Some((binding.provider_id, binding.provider_gen, !self_access));
+        if !self_access {
+            match self.0.fiber.upgrade() {
+                None => return (None, found),
+                Some(accessor)
+                    if matches!(
+                        accessor.state(),
+                        FiberState::Unloading | FiberState::Disposed
+                    ) =>
+                {
+                    return (None, found);
+                }
+                _ => {}
+            }
+            if provider.state() != FiberState::Active || binding.removing.load(Ordering::SeqCst) {
+                return (None, found);
+            }
+        }
+        (binding.value.downcast::<T>(), found)
+    }
+
+    fn record_access(
+        &self,
+        fiber: &Arc<FiberInner>,
+        key: &TypeKey,
+        scope: Option<&ScopeId>,
+        outcome: AccessOutcome,
+    ) {
+        let (provider, generation, external) = outcome
+            .found
+            .map(|(p, g, x)| (Some(p), Some(g), x))
+            .unwrap_or((None, None, false));
+        let access = ServiceAccess {
+            key: key.clone(),
+            scope: scope.map(|s| s.to_string()),
+            provider,
+            generation,
+            declared: outcome.declared,
+            external,
+            out_of_scope: outcome.out_of_scope,
+            strict: outcome.strict,
+            failure: outcome.failure,
+        };
+        let mut accesses = fiber.accesses.lock().unwrap();
+        if !accesses.contains(&access) {
+            accesses.push(access);
+        }
     }
 
     fn in_subtree_of(&self, other: &Arc<FiberInner>) -> bool {

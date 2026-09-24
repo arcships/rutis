@@ -1,5 +1,39 @@
-use crate::InstanceId;
+use crate::{DependencyStatus, InstanceId, PluginId, TypeKey};
+use std::panic::Location;
 use std::sync::Arc;
+
+/// Why a strict service read was rejected. Optional `get` reads do not use this check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceReadFailure {
+    Undeclared,
+    Unavailable(DependencyStatus),
+    OutOfScope,
+    Inactive,
+    TypeMismatch,
+}
+
+impl std::fmt::Display for ServiceReadFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Undeclared => f.write_str("dependency not declared"),
+            Self::Unavailable(status) => write!(f, "declared dependency unavailable ({status:?})"),
+            Self::OutOfScope => f.write_str("instance outside caller's fiber ancestry"),
+            Self::Inactive => f.write_str("caller context inactive"),
+            Self::TypeMismatch => f.write_str("service key has a different value type"),
+        }
+    }
+}
+
+/// A strict read error with the key, caller identity, and source location.
+#[derive(Debug, thiserror::Error)]
+#[error("strict service read {key:?} by fiber {plugin_id:?} instance {instance} at {location}: {reason}")]
+pub struct ServiceReadError {
+    pub key: TypeKey,
+    pub plugin_id: PluginId,
+    pub instance: InstanceId,
+    pub location: &'static Location<'static>,
+    pub reason: ServiceReadFailure,
+}
 
 /// 框架错误。不 `Clone`(D11);跨任务共享走 `Arc<CordisError>`。
 ///
@@ -7,6 +41,8 @@ use std::sync::Arc;
 /// apply 自身返回的 `CordisError` 直接传播,不再递归包一层。
 #[derive(Debug, thiserror::Error)]
 pub enum CordisError {
+    #[error(transparent)]
+    ServiceRead(#[from] ServiceReadError),
     #[error("service {0:?} not found in scope")]
     ServiceNotFound(String),
     #[error("plugin failed: {0}")]

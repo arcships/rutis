@@ -63,8 +63,8 @@ impl Plugin for Listener {
     fn name(&self) -> &str { "listener" }
     fn injects(&self) -> &[TypeKey] { &self.deps }  // 未就绪则停在 Pending
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        let greeting = ctx.get::<Greeting>().unwrap().0.clone();
         Box::pin(async move {
+            let greeting = ctx.require::<Greeting>()?.0.clone();
             println!("[listener] loaded: {greeting}");
             Ok(Effect::Done)
         })
@@ -165,7 +165,7 @@ ctx.events().on_keyed::<HostEvent>(&ctx, "session/event", listener)?;
 ctx.events().emit_keyed(&ctx, name, Arc::new(event));
 ```
 
-**使用边界** —— `get/get_as` 是返回 `Option` 的显式服务定位器，不强制核对 `injects()`；provider 未 Active 或读取方正在卸载时通常不可见，provider 子树在清理期间仍可读取自己提供的服务。实例键另有子树可见性检查。监听器由注册时传给 `on` 的 `Ctx` 持有，回调参数 `Ctx` 来自发送方；回调要给注册插件登记资源时，应捕获注册方的 `Ctx`。可编译示例见 [listener_ctx_ownership.rs](crates/rutis/examples/listener_ctx_ownership.rs)。
+**使用边界** —— `require/require_as` 是严格读取，对应 Cordis 普通插件访问服务时的声明检查；它沿 fiber 祖先链核对 `injects()`，并区分未声明、未就绪、实例越界和上下文失活，错误保留调用位置。`get/get_as` 对应 Cordis 显式 `ctx.get()` 定位器：返回 `Option`，不强制依赖声明。provider 未 Active 或读取方正在卸载时通常不可见，provider 子树在清理期间仍可读取自己提供的服务。实例键另有子树可见性检查。监听器由注册时传给 `on` 的 `Ctx` 持有，回调参数 `Ctx` 来自发送方；回调要给注册插件登记资源时，应捕获注册方的 `Ctx`。可编译示例见 [listener_ctx_ownership.rs](crates/rutis/examples/listener_ctx_ownership.rs)。
 
 `apply` 的同步及异步 panic 会变成插件错误；`check()` panic 视为依赖未就绪；`waterfall` 回调 panic 向调用方传播。`settle` 仅是该 fiber 的 FIFO 栅栏，Pending 也可能是稳定结果。root 的 `dispose()` 后仍可重启，`shutdown()` 是最终关闭；丢弃等待 future 不会停止已启动的清理。`update(config)` 重新装配插件，不替换进程中的代码。提前 `Disposer::dispose()` 的失败立即返回给调用方，不自动通知 ErrorSink；`Ctx::take_cleanup_errors()` 可取走并释放这些历史错误。未取走的错误在终态卸载时进入结果，在重载时交给 ErrorSink。
 
