@@ -25,6 +25,8 @@ rutis = "0.3.0"
 
 变化流报告插件登记与终止、状态转换、服务绑定登记与移除、严格读取失败。每条记录只有身份和原因，不含服务值、配置或业务事件。序号表示提交点的入队顺序；不同 fiber 之间不承诺因果顺序。依赖检查缓存和读取历史等快照字段并非完整事件增量，需要时应重新取快照。
 
+root fiber 在订阅前已存在，因此不会发出 `PluginRegistered`；它仍会报告状态变化，并在最终关闭时发出 `PluginTerminated`。
+
 接收端是有界的 Tokio broadcast receiver。`recv()` 返回 `Lagged` 时已丢失记录，须重新调用 `subscribe_diagnostics()` 取得快照和新游标。root 最终 `shutdown()` 完成后，接收端读完剩余记录会返回 `Closed`。
 
 ## License

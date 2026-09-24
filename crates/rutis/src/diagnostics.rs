@@ -5,6 +5,8 @@ use tokio::sync::{broadcast, watch};
 
 use crate::{CordisError, FiberState, InstanceId, PluginId, ServiceReadFailure, TypeKey};
 
+const DIAGNOSTIC_BUFFER_CAPACITY: usize = 256;
+
 /// A read-only, best-effort view of live fibers and service bindings.
 ///
 /// Fields are collected under separate locks, so concurrent lifecycle changes
@@ -173,7 +175,7 @@ pub(crate) struct DiagnosticHub {
 
 impl DiagnosticHub {
     pub(crate) fn new() -> Self {
-        let (sender, _) = broadcast::channel(256);
+        let (sender, _) = broadcast::channel(DIAGNOSTIC_BUFFER_CAPACITY);
         let (live_tx, _) = watch::channel(0);
         Self {
             state: Mutex::new(HubState {

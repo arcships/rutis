@@ -185,7 +185,15 @@ async fn root_shutdown_drains_child_termination_before_closing_the_feed() {
     let (grandchild, _) = child(&parent_ctx).await;
     let root_id = root.root_view().unwrap().id;
     root.shutdown().await.unwrap();
-    let changes = collect_until_closed(&mut subscription.changes).await;
+    // The public root shutdown task completes after the feed is closed.
+    let mut changes = Vec::new();
+    loop {
+        match subscription.changes.try_recv() {
+            Ok(change) => changes.push(change),
+            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+            Err(error) => panic!("feed was not closed at root shutdown completion: {error}"),
+        }
+    }
     let terminated: Vec<_> = changes
         .iter()
         .filter_map(|change| match change.kind {

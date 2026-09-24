@@ -1187,6 +1187,62 @@ mod tests {
         }
     }
 
+    struct InjectProbe {
+        key: TypeKey,
+        applies: Arc<AtomicUsize>,
+    }
+
+    impl Plugin for InjectProbe {
+        fn name(&self) -> &str {
+            "inject-probe"
+        }
+
+        fn injects(&self) -> &[TypeKey] {
+            std::slice::from_ref(&self.key)
+        }
+
+        fn apply<'a>(&'a self, _ctx: &'a Ctx) -> crate::BoxFuture<'a, Result<Effect, CordisError>> {
+            self.applies.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(Effect::Done) })
+        }
+    }
+
+    #[tokio::test]
+    async fn dependency_refresh_before_mount_cannot_publish_child_events() {
+        let ctx = Ctx::root().unwrap();
+        let key = TypeKey::of::<u64>();
+        let _service = ctx.provide_as(key.clone(), Arc::new(1_u64)).unwrap();
+        let mut changes = ctx.subscribe_diagnostics().unwrap().changes;
+        let applies = Arc::new(AtomicUsize::new(0));
+        let fiber = spawn_fiber(
+            ctx.shared(),
+            Some(&ctx),
+            Some(Arc::new(InjectProbe {
+                key: key.clone(),
+                applies: applies.clone(),
+            })),
+            false,
+        );
+        let task = TransitionTask::new();
+        fiber.post_join(task.clone(), Intent::RefreshDepsJoin);
+        join_task(&task).await.unwrap();
+        assert_eq!(applies.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            changes.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+
+        let child = ctx.mount_fiber(fiber);
+        (&child).await.unwrap();
+        assert_eq!(applies.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            changes.recv().await.unwrap().kind,
+            DiagnosticChangeKind::PluginRegistered { plugin, .. } if plugin == child.id
+        ));
+        child.shutdown().await.unwrap();
+        ctx.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn child_created_before_root_closes_but_mounted_afterward_never_applies() {
         let ctx = Ctx::root().unwrap();

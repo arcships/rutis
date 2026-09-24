@@ -461,6 +461,12 @@ impl FiberInner {
     }
 
     async fn refresh_deps(this: &Arc<Self>) {
+        // Dependency notifications can arrive after spawn registered injects
+        // but before the parent committed this fiber's mount. The mount path
+        // posts its own refresh, so an early notification can be discarded.
+        if !this.mounted.load(Ordering::SeqCst) {
+            return;
+        }
         if this.closing.load(Ordering::SeqCst) || this.ctx.shared().closing.load(Ordering::SeqCst) {
             return;
         }
