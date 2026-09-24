@@ -27,7 +27,7 @@ pub use diagnostics::{
     ResolvedDependency, RuntimeDiagnostics, ServiceAccess,
 };
 pub use effect::{Disposer, Effect};
-pub use error::{CordisError, ErrorSink};
+pub use error::{CordisError, ErrorSink, ServiceReadError, ServiceReadFailure};
 pub use event::{Event, EventOptions, Listener, Next, Terminal, WaterfallListener};
 pub use fiber::{DisposeWaitError, FiberState, FiberStatusChanged, FiberView, PluginId, Snapshot};
 pub use key::{InstanceId, Key, ServiceKey, TypeKey};

@@ -1006,8 +1006,10 @@ fn spawn_fiber_inner(
 
     let this = Arc::new_cyclic(|weak: &Weak<FiberInner>| {
         let ctx = match parent_ctx {
-            Some(parent) => Ctx::new_child(shared.clone(), parent, weak.clone(), None, instance),
-            None => Ctx::new_root(shared.clone(), weak.clone(), instance),
+            Some(parent) => {
+                Ctx::new_child(shared.clone(), parent, weak.clone(), None, instance, id)
+            }
+            None => Ctx::new_root(shared.clone(), weak.clone(), instance, id),
         };
         FiberInner {
             id,
