@@ -19,6 +19,8 @@ rutis = "0.3.0"
 
 内核零 serde、零 unsafe,依赖仅 tokio / tokio-util / thiserror。设计与对拍文档见[仓库 docs](https://github.com/arcships/rutis/tree/main/docs)。
 
+首次使用建议先读[应用设计指南](https://github.com/arcships/rutis/blob/main/docs/development-guide.md)，再按[开发手册](https://github.com/arcships/rutis/blob/main/docs/development-handbook.md)实现。配套示例可在仓库中运行：`cargo run -p rutis --example development_workflow`。
+
 ## 运行时诊断
 
 `Ctx::diagnostics()` 返回只读的全树快照。`Ctx::subscribe_diagnostics()` 先订阅 root 的变化流，再扫描一次快照，返回 `initial`、订阅时的 `cursor` 和 `changes` 接收端。快照不是原子事务，可能与序号大于 `cursor` 的事件重叠；消费方应按插件、绑定身份和序号幂等合并。
