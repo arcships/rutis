@@ -43,6 +43,21 @@ pub enum DependencyStatus {
     Ready,
 }
 
+impl std::fmt::Display for DependencyStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OutOfScope => f.write_str("instance out of scope"),
+            Self::Missing => f.write_str("service missing"),
+            Self::Removing => f.write_str("service being removed"),
+            Self::ProviderInactive(state) => write!(f, "provider inactive ({state:?})"),
+            Self::CheckPending => f.write_str("check pending"),
+            Self::CheckRejected => f.write_str("check rejected"),
+            Self::CheckPanicked => f.write_str("check panicked"),
+            Self::Ready => f.write_str("ready"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedDependency {
     pub key: TypeKey,

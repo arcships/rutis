@@ -582,6 +582,13 @@ impl Ctx {
             }
         }
         let reason = value.is_none().then(|| {
+            if !own_service
+                && caller.as_ref().is_none_or(|fiber| {
+                    matches!(fiber.state(), FiberState::Unloading | FiberState::Disposed)
+                })
+            {
+                return ServiceReadFailure::Inactive;
+            }
             let status = binding
                 .as_ref()
                 .map_or(DependencyStatus::Missing, |binding| {

@@ -16,7 +16,7 @@ impl std::fmt::Display for ServiceReadFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Undeclared => f.write_str("dependency not declared"),
-            Self::Unavailable(status) => write!(f, "declared dependency unavailable ({status:?})"),
+            Self::Unavailable(status) => write!(f, "declared dependency unavailable ({status})"),
             Self::OutOfScope => f.write_str("instance outside caller's fiber ancestry"),
             Self::Inactive => f.write_str("caller context inactive"),
             Self::TypeMismatch => f.write_str("service key has a different value type"),
