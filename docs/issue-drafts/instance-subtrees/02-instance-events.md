@@ -12,7 +12,7 @@
 2. emit_instance 同步返回 Result，Ok 表示已接纳，异步回调错误走 ErrorSink；serial/parallel 在首次 poll 时接纳，结果沿原分发语义返回。
 3. 保留现有 TypeKey 索引及 named 通道。实例变体构造无 qualifier 的实例键；不增加实例 waterfall、once 或 named+instance 组合入口。
 4. 校验、快照和 emit 尾链链接有统一提交顺序。相同类型和实例的 emit 保序，不同实例独立。serial 只保证单次调用内的监听顺序。
-5. 为已接纳派发记录目标实例、发射 fiber、监听器注册 fiber/代次。提供给子树关闭使用的停止准入与排干能力；关闭子节点不关闭祖先实例供兄弟使用的整个通道。
+5. 为已接纳派发记录目标实例、发射 fiber、监听器注册 fiber。按 fiber 保守排干跨代派发，不按代次拆分在途计数。提供给子树关闭使用的停止准入与排干能力；关闭子节点不关闭祖先实例供兄弟使用的整个通道。
 6. 明确 drop/panic/error 下的归属：emit 后台任务有所有者；借用 serial 的 future 析构后释放凭据；parallel 子任务全部结束或取消并 join 后才释放凭据。
 7. 实例监听器注销/重载须排干其旧代在途引用。文档说明回调可以发起关闭，但不能等待包含自身的关闭或自身注销。
 

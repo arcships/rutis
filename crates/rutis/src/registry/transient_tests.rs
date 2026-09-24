@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::ctx::Ctx;
-use crate::{BoxFuture, CordisError, Effect, Plugin};
+use crate::{BoxFuture, CordisError, DependencyStatus, Effect, Plugin};
 use std::time::Duration;
 
 struct Declares {
@@ -52,4 +52,34 @@ async fn churn_injects_release_index() {
         index.is_empty(),
         "inject declarations must unregister on terminal exit"
     );
+}
+
+#[tokio::test]
+async fn foreign_instance_dependency_never_enters_notification_index() {
+    let root = Ctx::root().unwrap();
+    let owner = root.plugin(Declares { keys: vec![] });
+    (&owner).await.unwrap();
+    let foreign = TypeKey::instance::<u32>(owner.inner.instance);
+    let pending = root.plugin(Declares {
+        keys: vec![foreign.clone()],
+    });
+    (&pending).await.unwrap();
+    assert_eq!(
+        root.diagnostics()
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == pending.id)
+            .unwrap()
+            .injects[0]
+            .status,
+        DependencyStatus::OutOfScope
+    );
+    assert!(!root
+        .shared()
+        .registry
+        .inject_index
+        .lock()
+        .unwrap()
+        .contains_key(&foreign));
+    root.shutdown().await.unwrap();
 }

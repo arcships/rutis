@@ -163,7 +163,7 @@ pub(crate) struct FiberInner {
     pub ctx: Ctx,
     pub parent_fiber: Option<Weak<FiberInner>>,
     pub children: Mutex<Vec<Weak<FiberInner>>>,
-    pub closing: AtomicBool,
+    pub closing: Arc<AtomicBool>,
     pub event_flights: Mutex<usize>,
     pub event_flights_tx: watch::Sender<usize>,
     _event_flights_rx: watch::Receiver<usize>,
@@ -1002,14 +1002,21 @@ fn spawn_fiber_inner(
     let (event_flights_tx, event_flights_rx) = watch::channel(0);
     let (tx, rx) = mpsc::unbounded_channel();
     let token = CancellationToken::new();
+    let closing = Arc::new(AtomicBool::new(closed));
     let parent_fiber = parent_ctx.map(|p| p.weak_fiber());
 
     let this = Arc::new_cyclic(|weak: &Weak<FiberInner>| {
         let ctx = match parent_ctx {
-            Some(parent) => {
-                Ctx::new_child(shared.clone(), parent, weak.clone(), None, instance, id)
-            }
-            None => Ctx::new_root(shared.clone(), weak.clone(), instance, id),
+            Some(parent) => Ctx::new_child(
+                shared.clone(),
+                parent,
+                weak.clone(),
+                None,
+                instance,
+                id,
+                closing.clone(),
+            ),
+            None => Ctx::new_root(shared.clone(), weak.clone(), instance, id, closing.clone()),
         };
         FiberInner {
             id,
@@ -1022,7 +1029,7 @@ fn spawn_fiber_inner(
             ctx,
             parent_fiber,
             children: Mutex::new(Vec::new()),
-            closing: AtomicBool::new(closed),
+            closing,
             event_flights: Mutex::new(0),
             event_flights_tx,
             _event_flights_rx: event_flights_rx,
@@ -1060,7 +1067,11 @@ fn spawn_fiber_inner(
 
     if !closed {
         for key in &this.declared_injects {
-            shared.registry.register_inject(key.clone(), &this);
+            // A foreign instance can never enter this fiber's ancestry, so
+            // changes to that key cannot make its Pending gate succeed.
+            if this.ctx.in_instance_key(key) {
+                shared.registry.register_inject(key.clone(), &this);
+            }
         }
         let driver = shared.handle.spawn(drive(this.clone(), rx));
         *this.driver.lock().unwrap() = Some(driver);
