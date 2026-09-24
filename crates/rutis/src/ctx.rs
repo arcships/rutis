@@ -248,7 +248,16 @@ impl Ctx {
         current.0.fiber.upgrade().map(FiberView::from_inner)
     }
 
-    /// Read-only snapshot of live fibers and services; no plugin callback runs.
+    /// Read-only, best-effort snapshot of live fibers and services.
+    ///
+    /// This scans fibers and bindings under separate locks. Concurrent lifecycle
+    /// changes may therefore mix states or generations from different moments,
+    /// even within one plugin's state, dependency, and binding entries. The
+    /// result is useful for diagnosis, not an atomic transaction or a change
+    /// stream. Dependency checks are never called here: their status is the
+    /// last result recorded by normal gate resolution, or `CheckPending` if
+    /// that binding has not been checked yet. Reading does not call plugin
+    /// `name`, `injects`, or other user code and does not advance a fiber.
     pub fn diagnostics(&self) -> RuntimeDiagnostics {
         let mut plugins = Vec::new();
         if let Some(root) = self.root_view() {

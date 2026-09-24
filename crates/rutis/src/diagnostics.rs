@@ -3,6 +3,11 @@ use std::sync::Arc;
 
 use crate::{CordisError, FiberState, InstanceId, PluginId, ServiceReadFailure, TypeKey};
 
+/// A read-only, best-effort view of live fibers and service bindings.
+///
+/// Fields are collected under separate locks, so concurrent lifecycle changes
+/// can make entries reflect different moments. A retained snapshot does not
+/// update itself; call [`crate::Ctx::diagnostics`] again for a fresh view.
 #[derive(Debug, Clone)]
 pub struct RuntimeDiagnostics {
     pub shutting_down: bool,
