@@ -1,6 +1,6 @@
 # Cordis 检查与拦截能力在 rutis 中的设计
 
-状态：设计草案；未实现。基准为 rutis `7d7402d`、Cordis [`56b3d4f`](https://github.com/cordiverse/cordis/tree/56b3d4f725681cf4556c1a8695a709cc3b6eed74)。关联 rutis [#27](https://github.com/arcships/rutis/issues/27)、[#29](https://github.com/arcships/rutis/issues/29)。
+状态：设计草案；未实现。基准为 rutis `7d7402d`、Cordis [`56b3d4f`](https://github.com/cordiverse/cordis/tree/56b3d4f725681cf4556c1a8695a709cc3b6eed74)。关联 rutis [#40](https://github.com/arcships/rutis/issues/40)、[#27](https://github.com/arcships/rutis/issues/27)、[#29](https://github.com/arcships/rutis/issues/29)。
 
 ## 目的与边界
 
@@ -18,7 +18,15 @@ Cordis 的检查能力分散在运行对象和同步钩子中，没有单一的 
 
 Cordis 的 `parallel` 在 `_resolve` 中也传入 `emit` 模式；rutis 的新模式字段按真实调用区分 `Emit` 和 `Parallel`，不照搬这个字符串细节。Cordis 的 `internal/dispatch` 监听器抛错可能中断投递，但那不是一个明确的审核决定接口。
 
-## 1. 事件投递前观察
+三个钩子都按注册 fiber 的祖先关系限制作用范围；完整键、isolate scope 和实例号校验仍分别执行：
+
+| 钩子 | 用谁的祖先链筛选注册 fiber | 结果 |
+| --- | --- | --- |
+| 投递前观察 | 事件发射方 | 子树观察器看不到兄弟子树的投递 |
+| 严格读取拦截 | 服务读取方 | 子树拦截器不能接管兄弟子树的读取 |
+| 提供者写入拦截 | 服务提供者 | 子树拦截器不能接管兄弟子树的写入 |
+
+## 1. 事件投递前观察（#40）
 
 ### 公共接口草案
 
@@ -76,7 +84,7 @@ impl FiberView {
 
 现有 `Ctx::effect()` 和 `Plugin::apply()` 的返回类型不改；默认标签分别为 `anonymous` 和插件名。plugin mount、service provide、listener register 使用框架生成的类型/键/实例标签，不含服务值、配置或事件载荷。`Effect::Many` 的原有嵌套结构生成 `children`；每个子项先用稳定的序号和种类标识。并列的 `ctx.effect()` 登记仍为兄弟项，不通过调用栈臆造父子关系。需要用户自定义子项标签时再引入明确的组合 API，避免给公开 `Effect` 枚举贸然增加变体。
 
-`EffectRecord` 登记时同时保存纯元数据树和现有 LIFO 清理列表；元数据不捕获清理闭包。当前 `FiberInner.effects` 在卸载时整表取出，因此还需可清理的弱引用索引，让 `effects()` 在清理期间看见 `Draining`，在记录进入 `Done` 后删除索引。读取只复制标签、阶段和树结构，不执行用户代码，不持有子 fiber 或服务值。先提供 `FiberView::effects()`；架构图确实需要时才把它纳入全树 `Ctx::diagnostics()`。
+`EffectRecord` 登记时同时保存纯元数据树和现有 LIFO 清理列表；元数据不捕获清理闭包。当前 `FiberInner.effects` 在卸载时整表取出，因此还需可清理的弱引用索引，让 `effects()` 在清理期间看见 `Draining`，在记录进入 `Done` 后删除索引。读取只复制标签、阶段和树结构，不执行用户代码，不持有子 fiber 或服务值。#27 要求可由 fiber **或** `Ctx::diagnostics()` 获取；第一步选择 `FiberView::effects()` 满足这个入口要求。架构图确实需要时才把它纳入全树 `Ctx::diagnostics()`。
 
 验收：自动/显式标签、`Many` 的真实嵌套与 LIFO 清理顺序、提前 dispose、清理中可见、完成即消失、错误聚合不变，以及 1000 轮子树关闭后父 fiber 的元数据与 effect 记录回到基线。
 
@@ -102,7 +110,7 @@ impl FiberView {
 
 ## 实施顺序与交付边界
 
-1. 先实现投递前观察：这是现有 Cordis 行为中明确提出要核对的投递动作入口。单独 PR，独立于快照与服务拦截。
+1. 按 #40 先实现投递前观察：这是现有 Cordis 行为中明确提出要核对的投递动作入口。单独 PR，独立于快照与服务拦截。
 2. 按 #27 实现 effect 树；先在单 fiber 上读取，不扩大全树 DTO。
 3. 按 #29 先实现严格读取拦截，再实现可替换服务及写入拦截；后者需要独立验证代次、旧 Arc 和更新竞态。
 
