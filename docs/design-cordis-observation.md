@@ -1,6 +1,6 @@
 # Cordis 检查与拦截能力在 rutis 中的设计
 
-状态：设计稿；实现分别在 [PR #53](https://github.com/arcships/rutis/pull/53)、[PR #54](https://github.com/arcships/rutis/pull/54)、[PR #55](https://github.com/arcships/rutis/pull/55) 审阅中，合并前主线尚无这些 API。基准为 rutis `7d7402d`、Cordis [`56b3d4f`](https://github.com/cordiverse/cordis/tree/56b3d4f725681cf4556c1a8695a709cc3b6eed74)。关联 rutis [#40](https://github.com/arcships/rutis/issues/40)、[#27](https://github.com/arcships/rutis/issues/27)、[#29](https://github.com/arcships/rutis/issues/29)。
+状态：已实现；[PR #53](https://github.com/arcships/rutis/pull/53)、[PR #54](https://github.com/arcships/rutis/pull/54)、[PR #55](https://github.com/arcships/rutis/pull/55) 已合并进 main（#55 链含写入失败候选值锁外析构修复与验收补充测试），[#40](https://github.com/arcships/rutis/issues/40)、[#27](https://github.com/arcships/rutis/issues/27)、[#29](https://github.com/arcships/rutis/issues/29) 已关闭。基准为 rutis `7d7402d`、Cordis [`56b3d4f`](https://github.com/cordiverse/cordis/tree/56b3d4f725681cf4556c1a8695a709cc3b6eed74)。
 
 ## 目的与边界
 
@@ -96,7 +96,7 @@ impl FiberView {
 
 `get/get_as` 保留显式可选定位器语义，不进拦截链。`require/require_as` 先按现有顺序完成实例可见性、类型、活跃状态、依赖声明和绑定可用性检查，再在锁外运行当前 `(完整 TypeKey, 有效 isolate scope)` 的同步、类型化钩子。只选择注册 fiber 位于读取方祖先链上的钩子，防止 Session 中的钩子接管兄弟 Session 的进程级服务读取。钩子依注册顺序接收已解析的 `Arc<T>`，可继续、替换本次读取结果为另一个 `Arc<T>`，或拒绝；拒绝使 `ServiceReadError` 得到明确的拦截原因，panic 转为明确错误。钩子不能使未声明、越界或未就绪的服务变得可读。替换只影响本次返回值，不改绑定及 `(provider, generation, key, scope)` 身份；`ServiceAccess` 仍记录原绑定身份，并可另记本次结果是否被拦截。
 
-拦截器是可信的框架扩展点。`Arc<T>` 的类型不能证明值来自哪个实例：拦截器若预先持有兄弟实例的值，仍能把它作为同类型替代结果返回。因此实例键和 scope 校验只保证**被读取的绑定**以及**允许注册钩子的 fiber**没有越界，不能证明钩子制造的内容来源。若要求对不可信拦截器强制防串用，必须禁用 `Replace`，或改成只能返回带私有来源证明的绑定句柄；当前草案不声称实现这一点，#29 的相应验收表述也应随实现 PR 修正。
+拦截器是可信的框架扩展点。`Arc<T>` 的类型不能证明值来自哪个实例：拦截器若预先持有兄弟实例的值，仍能把它作为同类型替代结果返回。因此实例键和 scope 校验只保证**被读取的绑定**以及**允许注册钩子的 fiber**没有越界，不能证明钩子制造的内容来源。若要求对不可信拦截器强制防串用，必须禁用 `Replace`，或改成只能返回带私有来源证明的绑定句柄；实现不提供来源证明，#29 验收按此边界通过（拦截器须为可信代码）。
 
 候选入口为 `Ctx::intercept_require_as::<T>(key, hook) -> Result<Disposer, CordisError>`，决策类型为 `Continue | Replace(Arc<T>) | Deny`。同键同操作的同步重入返回明确错误；不同键重入允许。钩子是 owner fiber 的 effect，注册与撤销遵守实例子树边界。读取先快照钩子，再离锁调用；shutdown 等已接纳的钩子完成。
 
@@ -116,4 +116,4 @@ impl FiberView {
 2. 按 #27 实现 effect 树；先在单 fiber 上读取，不扩大全树 DTO。
 3. 按 #29 先实现严格读取拦截，再实现可替换服务及写入拦截；后者需要独立验证代次、旧 Arc 和更新竞态。
 
-每一步都保留现有 `Ctx::diagnostics()` 的架构分析用途，并运行 `cargo +1.98.1 test -p rutis`、`clippy -p rutis --all-targets -- -D warnings`、`fmt -p rutis -- --check`。三个实现 PR 已按 #53 → #54 → #55 叠放并通过组合验证；消费仓库的构建、架构图和 Session/Branch 诊断流程在 API 合并后另行验收。
+每一步都保留现有 `Ctx::diagnostics()` 的架构分析用途，并运行 `cargo +1.98.1 test -p rutis`、`clippy -p rutis --all-targets -- -D warnings`、`fmt -p rutis -- --check`。三个 PR 均经独立验收与远程审阅后合并（记录见 [plan/analysis/cordis-observation-parity.md](plan/analysis/cordis-observation-parity.md)）；PR #55 链含写入失败候选值锁外析构修复（`df65961`）及验收补充测试（观察器重入、跨键重入、摘除中写入）。消费仓库的构建、架构图和 Session/Branch 诊断流程另行验收。
