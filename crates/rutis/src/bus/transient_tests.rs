@@ -81,3 +81,15 @@ async fn keyed_channels_and_dispatch_tails_prune() {
     bus.emit_keyed::<Ping>(&ctx, "ch/0", Arc::new(Ping));
     listener.dispose().await.unwrap();
 }
+
+#[tokio::test]
+async fn dispatch_observers_prune_after_repeated_registration() {
+    let ctx = Ctx::root().unwrap();
+    let bus = ctx.events().clone();
+    for _ in 0..1000 {
+        let observer = bus.observe_dispatch(&ctx, |_| {}).unwrap();
+        assert_eq!(bus.observer_count(), 1);
+        observer.dispose().await.unwrap();
+        assert_eq!(bus.observer_count(), 0);
+    }
+}

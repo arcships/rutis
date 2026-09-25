@@ -19,17 +19,58 @@ pub enum Effect {
     Many(Vec<Effect>),
 }
 
+/// Whether an owned cleanup record is waiting or currently being drained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectPhase {
+    Live,
+    Draining,
+}
+
+/// Read-only cleanup ownership tree. Child phases follow their owning record;
+/// the tree does not track which individual leaf is currently executing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectMeta {
+    pub label: String,
+    pub phase: EffectPhase,
+    pub children: Vec<EffectMeta>,
+}
+
+impl EffectMeta {
+    fn set_phase(&mut self, phase: EffectPhase) {
+        self.phase = phase;
+        for child in &mut self.children {
+            child.set_phase(phase);
+        }
+    }
+}
+
 impl Effect {
-    fn into_cleanups(self, out: &mut Vec<Cleanup>) {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Disposer(_) => "disposer",
+            Self::AsyncDisposer(_) => "async disposer",
+            Self::Many(_) => "many",
+        }
+    }
+
+    fn into_cleanups(self, label: String, out: &mut Vec<Cleanup>) -> EffectMeta {
+        let mut children = Vec::new();
         match self {
             Effect::Done => {}
             Effect::Disposer(f) => out.push(Cleanup::Sync(f)),
             Effect::AsyncDisposer(f) => out.push(Cleanup::Async(f)),
             Effect::Many(v) => {
-                for e in v {
-                    e.into_cleanups(out);
+                for (index, effect) in v.into_iter().enumerate() {
+                    let child_label = format!("{index}: {}", effect.kind());
+                    children.push(effect.into_cleanups(child_label, out));
                 }
             }
+        }
+        EffectMeta {
+            label,
+            phase: EffectPhase::Live,
+            children,
         }
     }
 }
@@ -45,6 +86,7 @@ enum Cleanup {
 /// parent 下反复注册/清理的瞬态记录不残留(0.2.1 瞬态子插件释放)。
 pub(crate) struct EffectRecord {
     st: Mutex<EffectState>,
+    metadata: EffectMeta,
     notify: Notify,
     owner: Option<Weak<FiberInner>>,
 }
@@ -56,14 +98,26 @@ enum EffectState {
 }
 
 impl EffectRecord {
-    pub(crate) fn new(effect: Effect, owner: Weak<FiberInner>) -> Arc<Self> {
+    pub(crate) fn new(effect: Effect, label: String, owner: Weak<FiberInner>) -> Arc<Self> {
         let mut cleanups = Vec::new();
-        effect.into_cleanups(&mut cleanups);
+        let metadata = effect.into_cleanups(label, &mut cleanups);
         Arc::new(Self {
             st: Mutex::new(EffectState::Live(cleanups)),
+            metadata,
             notify: Notify::new(),
             owner: Some(owner),
         })
+    }
+
+    pub(crate) fn snapshot(&self) -> Option<EffectMeta> {
+        let phase = match &*self.st.lock().unwrap() {
+            EffectState::Live(_) => EffectPhase::Live,
+            EffectState::Draining => EffectPhase::Draining,
+            EffectState::Done(_) => return None,
+        };
+        let mut metadata = self.metadata.clone();
+        metadata.set_phase(phase);
+        Some(metadata)
     }
 
     /// 排干清理。首个调用者把清理移入独立任务执行,所有调用者(含被
@@ -115,6 +169,13 @@ impl EffectRecord {
                             // see either this record or its queued error.
                             owner.drained_errors.lock().unwrap().push(e.clone());
                         }
+                    }
+                    drop(effects);
+                    let weak = Arc::downgrade(&this);
+                    let mut index = owner.effect_index.lock().unwrap();
+                    index.retain(|entry| !Weak::ptr_eq(entry, &weak) && entry.strong_count() > 0);
+                    if index.capacity() > 64 && index.len() * 4 < index.capacity() {
+                        index.shrink_to_fit();
                     }
                 }
                 this.notify.notify_waiters();

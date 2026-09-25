@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -8,7 +9,7 @@ use crate::event::{
     CatchUnwind, DynEvent, ErasedValue, Event, EventOptions, Listener, ListenerAdapter, Terminal,
     TerminalAdapter, WaterfallAdapter, WaterfallListener,
 };
-use crate::fiber::FiberInner;
+use crate::fiber::{FiberInner, PluginId};
 use crate::key::{InstanceId, TypeKey};
 use crate::{BoxFuture, Disposer, Effect};
 
@@ -86,11 +87,46 @@ struct Hook<C> {
     owner: Weak<FiberInner>,
 }
 
+/// Which public dispatch operation produced an observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchMode {
+    Emit,
+    Serial,
+    Parallel,
+    Waterfall,
+}
+
+/// A dispatch before its business listener snapshot is selected. An observed
+/// instance attempt can still lose a race with subtree shutdown and be rejected.
+pub struct DispatchAttempt<'a> {
+    pub key: &'a TypeKey,
+    pub mode: DispatchMode,
+    pub emitter: PluginId,
+    pub emitter_instance: InstanceId,
+    pub event: &'a (dyn std::any::Any + Send + Sync),
+}
+
+type ObserverCall = dyn for<'a> Fn(&DispatchAttempt<'a>) + Send + Sync;
+
+struct DispatchObserver {
+    call: Arc<ObserverCall>,
+    owner: Weak<FiberInner>,
+}
+
 /// An accepted instance dispatch owns every fiber whose shutdown must wait
 /// for the callback snapshot. Dropping the owner releases all counts.
 struct EventFlight(Vec<Arc<FiberInner>>);
 
 impl EventFlight {
+    fn from_owners(mut owners: Vec<Arc<FiberInner>>) -> Self {
+        owners.sort_by_key(|fiber| fiber.id);
+        owners.dedup_by_key(|fiber| fiber.id);
+        for fiber in &owners {
+            fiber.begin_event();
+        }
+        Self(owners)
+    }
+
     fn new(ctx: &Ctx, id: InstanceId, hooks: &[Arc<Hook<Arc<dyn ErasedCall>>>]) -> Self {
         let mut owners = Vec::new();
         if let Some(owner) = ctx.instance_owner(id) {
@@ -104,12 +140,7 @@ impl EventFlight {
                 owners.push(owner);
             }
         }
-        owners.sort_by_key(|fiber| fiber.id);
-        owners.dedup_by_key(|fiber| fiber.id);
-        for fiber in &owners {
-            fiber.begin_event();
-        }
-        Self(owners)
+        Self::from_owners(owners)
     }
 }
 
@@ -183,6 +214,7 @@ struct BusInner {
     /// 注册面键 = TypeKey(D33:限定名通道;非 keyed 注册 qualifier 为 None)。
     hooks: HashMap<TypeKey, Vec<Arc<Hook<Arc<dyn ErasedCall>>>>>,
     wf_hooks: HashMap<TypeKey, Vec<Arc<Hook<Arc<dyn ErasedWaterfallCall>>>>>,
+    observers: Vec<Arc<DispatchObserver>>,
     /// 同事件键的派发尾链(D31):每次 emit 的派发任务 await 上一个,
     /// 保证同键多次 emit 按发射序执行(修 spawn 调度乱序)。
     /// 值 = (代次, 任务):任务完成后自摘;代次防旧任务误删新尾链
@@ -213,6 +245,131 @@ impl EventBus {
             inner.wf_hooks.len(),
             inner.dispatch_tail.len(),
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observer_count(&self) -> usize {
+        self.inner.lock().unwrap().observers.len()
+    }
+
+    /// Observe a dispatch before business listeners are selected. The callback
+    /// borrows the event for this synchronous invocation and cannot veto it.
+    /// Observers are trusted code: they may inspect event payloads.
+    pub fn observe_dispatch(
+        &self,
+        owner: &Ctx,
+        observer: impl for<'a> Fn(&DispatchAttempt<'a>) + Send + Sync + 'static,
+    ) -> Result<Disposer, CordisError> {
+        owner.registration_preflight()?;
+        if !Arc::ptr_eq(&self.inner, &owner.events().inner) {
+            return Err(CordisError::Validation {
+                issues: vec!["dispatch observer belongs to another event bus".into()],
+            });
+        }
+        let hook = Arc::new(DispatchObserver {
+            call: Arc::new(observer),
+            owner: owner.weak_fiber(),
+        });
+        let bus = self.clone();
+        let shared = owner.shared().clone();
+        owner.register_internal_effect_named("dispatch observer".into(), move |_, _, _| {
+            bus.inner.lock().unwrap().observers.push(hook.clone());
+            Ok(Effect::AsyncDisposer(Box::new(move || {
+                {
+                    // Serialize removal with observer selection and flight
+                    // registration. Neither lock is held during callbacks.
+                    let _admission = shared.admission.lock().unwrap();
+                    let mut inner = bus.inner.lock().unwrap();
+                    inner.observers.retain(|entry| !Arc::ptr_eq(entry, &hook));
+                    if inner.observers.capacity() > 64
+                        && inner.observers.len() * 4 < inner.observers.capacity()
+                    {
+                        inner.observers.shrink_to_fit();
+                    }
+                }
+                Box::pin(async move {
+                    if let Some(owner) = hook.owner.upgrade() {
+                        owner.wait_events().await;
+                    }
+                    Ok(())
+                })
+            })))
+        })
+    }
+
+    fn observe_attempt<E: Event>(
+        &self,
+        key: &TypeKey,
+        mode: DispatchMode,
+        ctx: &Ctx,
+        event: &E,
+    ) -> Result<(), CordisError> {
+        // The first table read is the observation linearization point when no
+        // observers exist. Avoid the admission lock and ancestry scan in that
+        // common case; concurrent registration affects later attempts.
+        if self.inner.lock().unwrap().observers.is_empty() {
+            return Ok(());
+        }
+        let (observers, _flight) = {
+            let _admission = ctx.shared().admission.lock().unwrap();
+            if let Some(id) = key.instance_id() {
+                ctx.registration_preflight()?;
+                self.ensure_instance_ctx(ctx, id)?;
+            } else if ctx.registration_preflight().is_err() {
+                // Preserve the existing behavior of non-instance dispatches
+                // from inactive contexts; they simply have no observation.
+                return Ok(());
+            }
+            let mut ancestry = Vec::new();
+            let mut current = ctx.weak_fiber().upgrade();
+            while let Some(fiber) = current {
+                current = fiber.parent_fiber.as_ref().and_then(Weak::upgrade);
+                ancestry.push(fiber);
+            }
+            let mut owners = Vec::new();
+            if let Some(emitter) = ancestry.first() {
+                owners.push(emitter.clone());
+            }
+            if let Some(id) = key.instance_id() {
+                if let Some(owner) = ctx.instance_owner(id) {
+                    owners.push(owner);
+                }
+            }
+            let observers = self
+                .inner
+                .lock()
+                .unwrap()
+                .observers
+                .iter()
+                .filter_map(|observer| {
+                    let owner = observer.owner.upgrade()?;
+                    if !owner.alive.load(Ordering::SeqCst)
+                        || owner.closing.load(Ordering::SeqCst)
+                        || !ancestry.iter().any(|fiber| Arc::ptr_eq(fiber, &owner))
+                    {
+                        return None;
+                    }
+                    owners.push(owner);
+                    Some(observer.clone())
+                })
+                .collect::<Vec<_>>();
+            (observers, EventFlight::from_owners(owners))
+        };
+        let attempt = DispatchAttempt {
+            key,
+            mode,
+            emitter: ctx.plugin_id(),
+            emitter_instance: ctx.instance(),
+            event,
+        };
+        let sink = ctx.error_sink();
+        for observer in observers {
+            if let Err(panic) = catch_unwind(AssertUnwindSafe(|| (observer.call)(&attempt))) {
+                let error = Arc::new(panic_error(panic));
+                let _ = catch_unwind(AssertUnwindSafe(|| sink(error)));
+            }
+        }
+        Ok(())
     }
 
     /// 注册监听器(默认追加在后)。
@@ -354,7 +511,8 @@ impl EventBus {
         });
         let bus = self.clone();
         let access_ctx = ctx.clone();
-        ctx.register_internal_effect(move |_, _, _| {
+        let label = format!("event listener: {}", key.describe());
+        ctx.register_internal_effect_named(label, move |_, _, _| {
             access_ctx.check_instance(&key)?;
             {
                 let mut inner = bus.inner.lock().unwrap();
@@ -402,7 +560,8 @@ impl EventBus {
             owner: ctx.weak_fiber(),
         });
         let bus = self.clone();
-        ctx.register_internal_effect(move |_, _, _| {
+        let label = format!("waterfall listener: {}", key.describe());
+        ctx.register_internal_effect_named(label, move |_, _, _| {
             {
                 let mut inner = bus.inner.lock().unwrap();
                 let list = inner.wf_hooks.entry(key.clone()).or_default();
@@ -511,6 +670,7 @@ impl EventBus {
         ctx: &Ctx,
         e: Arc<E>,
     ) -> Result<(), CordisError> {
+        self.observe_attempt(&key, DispatchMode::Emit, ctx, e.as_ref())?;
         let _admission = key
             .instance_id()
             .map(|_| ctx.shared().admission.lock().unwrap());
@@ -586,6 +746,7 @@ impl EventBus {
         e: Arc<E>,
     ) -> Result<(), CordisError> {
         let key = TypeKey::instance::<E>(id);
+        self.observe_attempt(&key, DispatchMode::Parallel, ctx, e.as_ref())?;
         let (hooks, flight) = self.take_instance_hooks(ctx, id, &key)?;
         if hooks.is_empty() {
             return Ok(());
@@ -620,6 +781,7 @@ impl EventBus {
         ctx: &Ctx,
         e: Arc<E>,
     ) -> Result<(), CordisError> {
+        self.observe_attempt(&key, DispatchMode::Parallel, ctx, e.as_ref())?;
         let hooks = self.take_hooks(&key);
         if hooks.is_empty() {
             return Ok(());
@@ -679,6 +841,7 @@ impl EventBus {
         e: &E,
     ) -> Result<Option<E::Value>, CordisError> {
         let key = TypeKey::instance::<E>(id);
+        self.observe_attempt(&key, DispatchMode::Serial, ctx, e)?;
         let (hooks, _flight) = self.take_instance_hooks(ctx, id, &key)?;
         for hook in hooks {
             let outcome = CatchUnwind::new(hook.call.call(ctx, e as &DynEvent)).await;
@@ -705,6 +868,7 @@ impl EventBus {
         ctx: &Ctx,
         e: &E,
     ) -> Result<Option<E::Value>, CordisError> {
+        self.observe_attempt(&key, DispatchMode::Serial, ctx, e)?;
         for hook in self.take_hooks(&key) {
             let outcome = CatchUnwind::new(hook.call.call(ctx, e as &DynEvent)).await;
             match outcome {
@@ -755,6 +919,7 @@ impl EventBus {
     ) -> BoxFuture<'a, Result<E::Value, CordisError>> {
         let bus = self.clone();
         Box::pin(async move {
+            bus.observe_attempt(&key, DispatchMode::Waterfall, ctx, e)?;
             let chain = bus.take_wf_hooks(&key);
             let mut terminal: Box<dyn ErasedTerminal + 'a> =
                 Box::new(TerminalAdapter(terminal, std::marker::PhantomData));
