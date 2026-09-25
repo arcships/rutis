@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ctx::{Ctx, Shared};
 use crate::diagnostics::ServiceAccess;
-use crate::effect::{Effect, EffectRecord};
+use crate::effect::{Effect, EffectMeta, EffectRecord};
 use crate::error::{aggregate_arcs, panic_error, CordisError};
 use crate::event::{CatchUnwind, Event};
 use crate::key::{InstanceId, ScopeId, TypeKey};
@@ -179,6 +179,9 @@ pub(crate) struct FiberInner {
     /// 常驻 receiver:保活 watch 通道(无 receiver 时通道视为关闭,send 静默失败)。
     pub snapshot_rx: watch::Receiver<Snapshot>,
     pub effects: Mutex<Vec<Arc<EffectRecord>>>,
+    /// Weak index keeps draining records visible after `drain_effects` takes
+    /// the active list, without retaining cleanups or finished child fibers.
+    pub effect_index: Mutex<Vec<Weak<EffectRecord>>>,
     /// 已 drain 记录寄存的清理错误(0.2.1):记录 Done 自摘后,错误在此
     /// 等待 fiber 级卸载/重启统一观察——单一错误保持 Arc 同一性,
     /// 与记录留在列表中被再次 join 的旧语义等价。
@@ -254,6 +257,14 @@ where
 }
 
 impl FiberInner {
+    pub(crate) fn push_effect(&self, record: Arc<EffectRecord>) {
+        self.effects.lock().unwrap().push(record.clone());
+        self.effect_index
+            .lock()
+            .unwrap()
+            .push(Arc::downgrade(&record));
+    }
+
     /// 当前代插件实例(D32):静态模式克隆既有实例;工厂模式用当前
     /// config 构造(每代一个新实例 = 配置热更新生效点)。
     /// `build` 是用户回调且 panic 概率高于 validate(评审:三处用户回调
@@ -538,8 +549,12 @@ impl FiberInner {
         let result: Result<Effect, CordisError> = outcome.unwrap_or_else(|p| Err(panic_error(p)));
         match result {
             Ok(effect) => {
-                let record = EffectRecord::new(effect, Arc::downgrade(this));
-                this.effects.lock().unwrap().push(record);
+                let record = EffectRecord::new(
+                    effect,
+                    format!("plugin apply: {}", this.name),
+                    Arc::downgrade(this),
+                );
+                this.push_effect(record);
                 if this.closing.load(Ordering::SeqCst) {
                     Self::unload(this, NextState::Disposed).await;
                     return;
@@ -1045,6 +1060,7 @@ fn spawn_fiber_inner(
             snapshot_tx: snapshot_tx.clone(),
             snapshot_rx,
             effects: Mutex::new(Vec::new()),
+            effect_index: Mutex::new(Vec::new()),
             drained_errors: Mutex::new(Vec::new()),
             mount: Mutex::new(None),
             declared_injects,
@@ -1106,6 +1122,18 @@ impl FiberView {
     /// 当前快照。
     pub fn state(&self) -> Snapshot {
         self.inner.state_snapshot()
+    }
+
+    /// Current cleanup ownership tree for this fiber. Records being drained
+    /// remain visible until their cleanup completes. This is a point-in-time
+    /// read of metadata only; it never calls user code.
+    pub fn effects(&self) -> Vec<EffectMeta> {
+        let records = self.inner.effect_index.lock().unwrap().clone();
+        records
+            .into_iter()
+            .filter_map(|entry| entry.upgrade())
+            .filter_map(|record| record.snapshot())
+            .collect()
     }
 
     /// 插件显示名。

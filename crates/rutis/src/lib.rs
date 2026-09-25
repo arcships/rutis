@@ -16,6 +16,7 @@ mod effect;
 mod error;
 mod event;
 mod fiber;
+mod intercept;
 mod key;
 mod plugin;
 mod registry;
@@ -26,10 +27,14 @@ pub use diagnostics::{
     BindingDiagnostics, DependencyDiagnostics, DependencyStatus, PluginDiagnostics,
     ResolvedDependency, RuntimeDiagnostics, ServiceAccess,
 };
-pub use effect::{Disposer, Effect};
-pub use error::{CordisError, ErrorSink, ServiceReadError, ServiceReadFailure};
+pub use effect::{Disposer, Effect, EffectMeta, EffectPhase};
+pub use error::{
+    CordisError, ErrorSink, ServiceReadError, ServiceReadFailure, ServiceWriteError,
+    ServiceWriteFailure,
+};
 pub use event::{Event, EventOptions, Listener, Next, Terminal, WaterfallListener};
 pub use fiber::{DisposeWaitError, FiberState, FiberStatusChanged, FiberView, PluginId, Snapshot};
+pub use intercept::{ServiceIntercept, ServiceWriter};
 pub use key::{InstanceId, Key, ServiceKey, TypeKey};
 pub use plugin::{Plugin, PluginFactory};
 

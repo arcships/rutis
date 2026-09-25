@@ -10,6 +10,9 @@ pub enum ServiceReadFailure {
     OutOfScope,
     Inactive,
     TypeMismatch,
+    InterceptDenied,
+    InterceptPanicked,
+    InterceptReentrant,
 }
 
 impl std::fmt::Display for ServiceReadFailure {
@@ -20,6 +23,9 @@ impl std::fmt::Display for ServiceReadFailure {
             Self::OutOfScope => f.write_str("instance outside caller's fiber ancestry"),
             Self::Inactive => f.write_str("caller context inactive"),
             Self::TypeMismatch => f.write_str("service key has a different value type"),
+            Self::InterceptDenied => f.write_str("strict read denied by interceptor"),
+            Self::InterceptPanicked => f.write_str("strict read interceptor panicked"),
+            Self::InterceptReentrant => f.write_str("same-key strict read interceptor reentered"),
         }
     }
 }
@@ -33,6 +39,45 @@ pub struct ServiceReadError {
     pub instance: InstanceId,
     pub location: &'static Location<'static>,
     pub reason: ServiceReadFailure,
+}
+
+/// Why a provider-owned mutable service update was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceWriteFailure {
+    WrongOwner,
+    Stale,
+    InterceptDenied,
+    InterceptPanicked,
+    InterceptReentrant,
+}
+
+impl std::fmt::Display for ServiceWriteFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WrongOwner => f.write_str("writer called outside its provider fiber"),
+            Self::Stale => {
+                f.write_str("service binding or provider generation is no longer active")
+            }
+            Self::InterceptDenied => f.write_str("service update denied by interceptor"),
+            Self::InterceptPanicked => f.write_str("service update interceptor panicked"),
+            Self::InterceptReentrant => {
+                f.write_str("same-key service update interceptor reentered")
+            }
+        }
+    }
+}
+
+/// A mutable service update error with the original binding identity.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "service write {key:?} by fiber {provider:?} generation {generation} at {location}: {reason}"
+)]
+pub struct ServiceWriteError {
+    pub key: TypeKey,
+    pub provider: PluginId,
+    pub generation: u64,
+    pub location: &'static Location<'static>,
+    pub reason: ServiceWriteFailure,
 }
 
 /// 框架错误。不 `Clone`(D11);跨任务共享走 `Arc<CordisError>`。
