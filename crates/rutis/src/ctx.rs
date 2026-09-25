@@ -43,6 +43,10 @@ pub(crate) struct CtxInner {
     pub(crate) instance: InstanceId,
     pub(crate) plugin_id: PluginId,
     pub(crate) closing: Arc<AtomicBool>,
+    /// The load generation that handed this context to plugin code. Root and
+    /// framework-owned contexts have no generation; isolated contexts inherit it.
+    pub(crate) generation: Option<u64>,
+    pub(crate) generation_token: Option<CancellationToken>,
 }
 
 /// 上下文 = `Arc<CtxInner>`(所有权模型:Clone 廉价;isolate/plugin 返回共享内核的新 Ctx)。
@@ -83,6 +87,8 @@ impl Ctx {
             instance,
             plugin_id,
             closing,
+            generation: None,
+            generation_token: None,
         }))
     }
 
@@ -101,11 +107,49 @@ impl Ctx {
             instance,
             plugin_id,
             closing,
+            generation: None,
+            generation_token: None,
         }))
     }
 
     pub(crate) fn weak_fiber(&self) -> Weak<FiberInner> {
         self.0.fiber.clone()
+    }
+
+    pub(crate) fn for_generation(&self, generation: u64) -> Self {
+        self.for_generation_with_token(generation, self.cancellation_token())
+    }
+
+    fn for_generation_with_token(&self, generation: u64, token: CancellationToken) -> Self {
+        Self(Arc::new(CtxInner {
+            shared: self.0.shared.clone(),
+            parent: self.0.parent.clone(),
+            fiber: self.0.fiber.clone(),
+            isolate: self.0.isolate.clone(),
+            instance: self.0.instance,
+            plugin_id: self.0.plugin_id,
+            closing: self.0.closing.clone(),
+            generation: Some(generation),
+            generation_token: Some(token),
+        }))
+    }
+
+    fn check_generation(&self, current: u64, state: FiberState) -> Result<(), CordisError> {
+        if let Some(expected) = self.0.generation {
+            if expected != current {
+                return Err(CordisError::StaleGeneration { expected, current });
+            }
+            if matches!(state, FiberState::Unloading | FiberState::Disposed) {
+                return Err(CordisError::InactiveEffect);
+            }
+            if !matches!(state, FiberState::Loading | FiberState::Active) {
+                return Err(CordisError::InactiveGeneration {
+                    generation: expected,
+                    state,
+                });
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn plugin_id(&self) -> PluginId {
@@ -182,7 +226,9 @@ impl Ctx {
     pub(crate) fn registration_preflight(&self) -> Result<(), CordisError> {
         self.registration_open()?;
         let fiber = self.0.fiber.upgrade().ok_or(CordisError::InactiveEffect)?;
-        if matches!(fiber.state(), FiberState::Unloading | FiberState::Disposed) {
+        let tr = fiber.transition.lock().unwrap();
+        self.check_generation(tr.generation, tr.state)?;
+        if matches!(tr.state, FiberState::Unloading | FiberState::Disposed) {
             return Err(CordisError::InactiveEffect);
         }
         Ok(())
@@ -421,7 +467,7 @@ impl Ctx {
     /// isolate 作用域(支柱 3):按 ServiceKey 隔离,同 label 合并(TS 语义,D21);
     /// 返回的 Ctx 保留原 fiber 所有权(D28)。
     pub fn isolate(&self, key: impl Into<TypeKey>, label: &str) -> Ctx {
-        Ctx::new_child(
+        let isolated = Ctx::new_child(
             self.0.shared.clone(),
             self,
             self.0.fiber.clone(),
@@ -429,7 +475,13 @@ impl Ctx {
             self.instance(),
             self.0.plugin_id,
             self.0.closing.clone(),
-        )
+        );
+        match self.0.generation {
+            Some(generation) => {
+                isolated.for_generation_with_token(generation, self.cancellation_token())
+            }
+            None => isolated,
+        }
     }
 
     /// 类型键读取(显式定位器,D13):沿父链解析作用域;
@@ -898,6 +950,7 @@ impl Ctx {
         self.registration_open()?;
         let fiber = self.0.fiber.upgrade().ok_or(CordisError::InactiveEffect)?;
         let tr = fiber.transition.lock().unwrap();
+        self.check_generation(tr.generation, tr.state)?;
         if matches!(tr.state, FiberState::Unloading | FiberState::Disposed) {
             return Err(CordisError::InactiveEffect);
         }
@@ -925,6 +978,7 @@ impl Ctx {
         }
         let parent = self.0.fiber.upgrade().ok_or(CordisError::InactiveEffect)?;
         let tr = parent.transition.lock().unwrap();
+        self.check_generation(tr.generation, tr.state)?;
         if matches!(tr.state, FiberState::Unloading | FiberState::Disposed) {
             return Err(CordisError::InactiveEffect);
         }
@@ -960,6 +1014,7 @@ impl Ctx {
             {
                 return Err(CordisError::Closed);
             }
+            self.check_generation(tr.generation, tr.state)?;
             if matches!(tr.state, FiberState::Unloading | FiberState::Disposed) {
                 return Err(CordisError::InactiveEffect);
             }
@@ -973,7 +1028,8 @@ impl Ctx {
         let handle = self.handle().clone();
         {
             let tr = fiber.transition.lock().unwrap();
-            if matches!(tr.state, FiberState::Unloading | FiberState::Disposed) {
+            let stale = self.check_generation(tr.generation, tr.state).err();
+            if stale.is_some() || matches!(tr.state, FiberState::Unloading | FiberState::Disposed) {
                 drop(tr);
                 // 生命周期已越过登记点:f() 可能已有副作用(如插入了监听器),
                 // 立即排干该记录的清理并返失败
@@ -985,7 +1041,7 @@ impl Ctx {
                     }
                     drop(lease);
                 });
-                return Err(CordisError::InactiveEffect);
+                return Err(stale.unwrap_or(CordisError::InactiveEffect));
             }
             fiber.push_effect(record.clone());
         }
@@ -1097,6 +1153,9 @@ impl Ctx {
 
     /// 当前 fiber 代的取消 token(D27:每代独立 token,卸载第②步取消)。
     pub fn cancellation_token(&self) -> CancellationToken {
+        if let Some(token) = &self.0.generation_token {
+            return token.clone();
+        }
         match self.0.fiber.upgrade() {
             Some(fiber) => fiber.current_token(),
             // fiber 已析构 ≡ 代已结束:返回预取消 token,cancelled() 不永等(评审 P2)

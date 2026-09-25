@@ -1,4 +1,4 @@
-use crate::{DependencyStatus, InstanceId, PluginId, TypeKey};
+use crate::{DependencyStatus, FiberState, InstanceId, PluginId, TypeKey};
 use std::panic::Location;
 use std::sync::Arc;
 
@@ -100,6 +100,10 @@ pub enum CordisError {
     },
     #[error("fiber disposed")]
     InactiveEffect,
+    #[error("stale plugin context: load generation {expected}, current generation {current}")]
+    StaleGeneration { expected: u64, current: u64 },
+    #[error("plugin context generation {generation} is inactive in state {state:?}")]
+    InactiveGeneration { generation: u64, state: FiberState },
     #[error("root has been shut down")]
     Closed,
     #[error("config validation failed: {issues:?}")]

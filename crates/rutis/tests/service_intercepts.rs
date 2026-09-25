@@ -656,6 +656,7 @@ struct MutableDropProvider {
     key: TypeKey,
     writer: Arc<Mutex<Option<ServiceWriter<DropEffect>>>>,
     ctx_slot: Arc<Mutex<Option<Ctx>>>,
+    drop_ctx: Ctx,
 }
 
 impl Plugin for MutableDropProvider {
@@ -670,7 +671,7 @@ impl Plugin for MutableDropProvider {
             let (disposer, writer) = ctx.provide_mut_as(
                 self.key.clone(),
                 Arc::new(DropEffect {
-                    ctx: ctx.clone(),
+                    ctx: self.drop_ctx.clone(),
                     label: "drop-gen-initial",
                 }),
             )?;
@@ -689,10 +690,9 @@ impl Plugin for MutableDropProvider {
 /// check inside the locked section (path 2 of the three write-failure
 /// paths). The candidate `DropEffect` must be dropped without deadlock.
 ///
-/// Note: `registration_preflight` passes after restart because the fiber
-/// is back to Active and the ctx is still valid (restart reuses the same
-/// `FiberInner` and `CtxInner`). The generation mismatch is confirmed by
-/// the error field `generation: 1` (old) vs `transition.generation` (2).
+/// The stale writer still reaches the binding's generation check. Drop's
+/// reentrant effect uses root because an old apply context cannot register
+/// anything after the provider restarts.
 ///
 /// On the old (pre-IIFE) code, path 2 does not deadlock either: Rust drops
 /// locals in reverse declaration order, so the `value` local is dropped
@@ -708,6 +708,7 @@ async fn writer_set_stale_candidate_drop_no_deadlock_generation_stale() {
         key: key.clone(),
         writer: writer_slot.clone(),
         ctx_slot: ctx_slot.clone(),
+        drop_ctx: root.clone(),
     };
     let view = root.plugin(provider);
     (&view).into_future().await.unwrap();
@@ -725,7 +726,7 @@ async fn writer_set_stale_candidate_drop_no_deadlock_generation_stale() {
         .set(
             &provider_ctx,
             Arc::new(DropEffect {
-                ctx: provider_ctx.clone(),
+                ctx: root.clone(),
                 label: "check-gen",
             }),
         )
@@ -735,7 +736,7 @@ async fn writer_set_stale_candidate_drop_no_deadlock_generation_stale() {
 
     let (tx, rx) = std::sync::mpsc::channel();
     let candidate = DropEffect {
-        ctx: provider_ctx.clone(),
+        ctx: root.clone(),
         label: "drop-generation-candidate",
     };
     std::thread::spawn(move || {

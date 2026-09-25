@@ -2774,6 +2774,8 @@ dependencies = [
  "aimux-providers",
  "rutis",
  "rutis-agent",
+ "rutis-dylib",
+ "rutis-sdk",
  "serde_json",
  "tokio",
 ]
@@ -2806,6 +2808,57 @@ dependencies = [
  "serde_json",
  "tokio",
 ]
+
+[[package]]
+name = "rutis-dylib"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rutis",
+ "rutis-sdk",
+ "semver",
+ "serde",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "rutis-dylib-launcher"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
+name = "rutis-greeter-fixture-v1"
+version = "1.0.0"
+dependencies = [
+ "rutis-sdk",
+]
+
+[[package]]
+name = "rutis-greeter-fixture-v2"
+version = "2.0.0"
+dependencies = [
+ "rutis-sdk",
+]
+
+[[package]]
+name = "rutis-sdk"
+version = "0.1.0"
+dependencies = [
+ "rutis",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rutis-xtask"
+version = "0.1.0"
 
 [[package]]
 name = "rutui-core"
@@ -3605,9 +3658,13 @@ checksum = "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "futures-util",
+ "hashbrown 0.15.5",
+ "libc",
  "pin-project-lite",
+ "slab",
  "tokio",
 ]
 

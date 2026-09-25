@@ -15,9 +15,13 @@ use std::sync::Arc;
 
 use aimux_core::language_model::LanguageModel;
 use rutis::Ctx;
+#[cfg(all(feature = "dylib-plugins", panic = "abort"))]
+compile_error!("dylib-plugins requires panic = unwind");
 use rutis_agent::{
     llm_key, minimal_persona, minimal_tools, AgentDriverPlugin, ToolsPlugin, TuiPlugin,
 };
+#[cfg(feature = "dylib-plugins")]
+use rutis_sdk as _;
 
 const USAGE: &str = "\
 rutis-cli — minimal coding agent (bash + replace_text) on the rutis framework
@@ -29,8 +33,11 @@ OPTIONS:
     -p, --provider <ID>   aimux provider id [env: AIMUX_PROVIDER] [default: deepseek]
     -m, --model <ID>      model id [env: AIMUX_MODEL] [default: deepseek-chat]
         --scripted        offline demo backend (no API key needed)
+        --plugin <DIR>    load a trusted dylib plugin [dylib-plugins build only]
+        --plugin-config <JSON>   configuration passed to the dylib plugin
     -h, --help            print this help
     -V, --version         print the version
+        --sdk-info        print dylib SDK build identity [dylib-plugins build only]
 ";
 
 #[tokio::main]
@@ -38,12 +45,38 @@ async fn main() {
     let mut provider = std::env::var("AIMUX_PROVIDER").unwrap_or_else(|_| "deepseek".into());
     let mut model = std::env::var("AIMUX_MODEL").unwrap_or_else(|_| "deepseek-chat".into());
     let mut scripted = false;
+    let mut plugin: Option<String> = None;
+    let mut plugin_config = serde_json::Value::Null;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-p" | "--provider" => provider = value(&mut args, &arg),
             "-m" | "--model" => model = value(&mut args, &arg),
             "--scripted" => scripted = true,
+            #[cfg(feature = "dylib-plugins")]
+            "--sdk-info" => {
+                println!("[sdk]\nversion = {:?}\nid = {:?}\nartifact_sha256 = {:?}\ntarget = {:?}\nrustc = {:?}",
+                    rutis_sdk::SDK_VERSION,
+                    rutis_sdk::SDK_ID,
+                    option_env!("RUTIS_SDK_ARTIFACT_SHA256").unwrap_or(""),
+                    rutis_sdk::SDK_TARGET,
+                    rutis_sdk::SDK_RUSTC_VERSION,
+                );
+                println!("packages = [");
+                for package in rutis_sdk::SDK_PACKAGES {
+                    println!("  {package:?},");
+                }
+                println!("]");
+                return;
+            }
+            "--plugin" => plugin = Some(value(&mut args, &arg)),
+            "--plugin-config" => {
+                let raw = value(&mut args, &arg);
+                plugin_config = serde_json::from_str(&raw).unwrap_or_else(|error| {
+                    eprintln!("invalid --plugin-config JSON: {error}");
+                    std::process::exit(2);
+                });
+            }
             "-h" | "--help" => {
                 print!("{USAGE}");
                 return;
@@ -81,7 +114,7 @@ async fn main() {
         model.clone()
     };
 
-    if let Err(e) = run(llm, &provider, &model_id).await {
+    if let Err(e) = run(llm, &provider, &model_id, plugin, plugin_config).await {
         eprintln!("rutis-cli failed: {e}");
         std::process::exit(1);
     }
@@ -101,12 +134,36 @@ async fn run(
     llm: Arc<dyn LanguageModel>,
     provider: &str,
     model: &str,
+    plugin: Option<String>,
+    plugin_config: serde_json::Value,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".into());
+    #[cfg(feature = "dylib-plugins")]
+    let loader = rutis_dylib::Loader::new(
+        option_env!("RUTIS_SDK_ARTIFACT_SHA256").unwrap_or(""),
+        std::path::Path::new(&cwd).join(".rutis/plugin-cache"),
+        std::collections::HashMap::new(),
+        4,
+    )?;
+    #[cfg(not(feature = "dylib-plugins"))]
+    if plugin.is_some() {
+        return Err("--plugin requires a dylib-plugins build".into());
+    }
     let root = Ctx::root()?;
     root.provide_as(llm_key(), llm)?;
+    #[cfg(feature = "dylib-plugins")]
+    let plugin_view = if let Some(dir) = plugin {
+        let module = unsafe { loader.load(dir)? };
+        let view = loader.spawn(&root, &module, plugin_config)?;
+        (&view).await?;
+        Some(view)
+    } else {
+        None
+    };
+    #[cfg(not(feature = "dylib-plugins"))]
+    let _ = plugin_config;
 
     // session 持久化(默认 <cwd>/.rutis/session.json,重启恢复历史)
     let tools_view = root.plugin(ToolsPlugin::new(minimal_tools()));
@@ -132,6 +189,10 @@ async fn run(
     tui_view.dispose().await?;
     driver_view.dispose().await?;
     tools_view.dispose().await?;
+    #[cfg(feature = "dylib-plugins")]
+    if let Some(view) = plugin_view {
+        view.dispose().await?;
+    }
 
     Ok(())
 }
