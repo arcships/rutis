@@ -170,6 +170,9 @@ CARGO_HOME、target 目录、用户名)尚未验证,见 §十一 V1;V1 必须用
 | 宿主按 SDK A 编译;部署了 SDK B 与按 B 编译的插件;宿主不做自检 | 启动、加载、换代码、shutdown **全部通过** |
 | 同上,宿主启动时比对自身内联的 `SDK_ID` 与 `loaded_sdk_id()` | 启动即拒绝 |
 
+原型第二行按 Rust ABI 直接调用 `loaded_sdk_id()`,只验证了自检的**有效性**;最终设计把宿主的首次身份查询换成
+C ABI 引导接口(§7.2),原因见下方启动顺序第 1 步。
+
 因此宿主、运行时 SDK、插件三者的身份必须闭合。宿主构建时绑定 SDK 身份:
 
 - **L1**:宿主内联 `SDK_ID` 常量(与插件相同机制);
@@ -179,12 +182,17 @@ CARGO_HOME、target 目录、用户名)尚未验证,见 §十一 V1;V1 必须用
 
 **启动检查顺序**(dylib 变体,在创建 root、加载任何插件之前):
 
-1. `SDK_ID`(宿主内联)== `loaded_sdk_id()`(运行时)——不等则拒绝启动。这一步只调用一个返回 `&'static str` 的函数,
-   不触碰其他 SDK 类型。
+1. 经 **C ABI 引导接口** `rutis_sdk_boot_id(buf, cap) -> usize`(§7.2)读取运行时 SDK 的身份字节,与宿主内联的
+   `SDK_ID` 比对——不等则拒绝启动。这是整个序列中唯一一次在确认兼容**之前**的跨界调用:此时第 2 步的产物哈希
+   尚未核对,不能假设运行时 SDK 与宿主构建时 SDK 布局一致,而 Rust ABI 不保证稳定。因此引导接口用 `extern "C"`,
+   签名只含整数与字节缓冲,不返回 `&str`、不触碰任何 SDK 类型——即使 SDK 布局不同,最坏情况也只是读到错误的
+   字节而被这一步拒绝,不会产生未定义行为。
 2. sha256(实际加载的 SDK 文件)== 宿主内嵌的 `RUTIS_SDK_ARTIFACT_SHA256`——不等则拒绝启动。
-3. 之后每个插件:清单中的 `sdk.id`、`sdk.artifact_sha256` 等于宿主的值,且插件内联的 `SDK_ID` 等于 `loaded_sdk_id()`(§7.1)。
+3. 之后每个插件:清单中的 `sdk.id`、`sdk.artifact_sha256` 等于宿主的值,插件 .so 内嵌的 `SDK_ID` 等于宿主的值
+   ——加载前核对引导元数据(§7.1 第 2 步),加载后再交叉核对(§7.1 第 5 步)。
 
-前两步通过后,“宿主构建时 = 运行时”;第 3 步保证“插件构建时 = 运行时”,三者闭合。
+第 1、2 步通过后,“宿主构建时 = 运行时”成立,此后对 SDK 的 Rust ABI 调用(包括 `loaded_sdk_id()` 本身)才是安全的;
+第 3 步保证“插件构建时 = 运行时”,三者闭合。
 
 ## 六、插件产物与清单
 
@@ -217,7 +225,8 @@ rustc = "rustc 1.98.1 (48a229cea 2026-09-01)"
 lock_sha256 = "…"             # 插件 Cargo.lock 全文
 ```
 
-清单与 .so 内嵌元数据由 `export_plugin!` 和打包工具共同保证一致;加载时交叉核对(§7.1 第 4 步)。
+清单与 .so 内嵌元数据由 `export_plugin!` 和打包工具共同保证一致;加载时双重核对:加载前静态解析引导元数据
+(§7.1 第 2 步),加载后再调 `rutis_plugin_meta()` 交叉核对(§7.1 第 5 步)。
 
 ## 七、加载流程
 
@@ -227,16 +236,23 @@ lock_sha256 = "…"             # 插件 Cargo.lock 全文
 不能在其中加载库。加载是宿主的显式操作:`unsafe fn Loader::load(dir) -> Result<Arc<Module>, LoadError>`。
 
 1. **读清单并校验**(不触碰 .so 的代码):目标三元组;`sdk.id`、`sdk.artifact_sha256` 等于宿主在 §5.4 启动检查中确认过的值;接口版本;同 id 已保留版本数(§九)。
-2. **复制到内容寻址缓存**:`<cache>/<library_sha256>/lib<name>.so`,复制后重新计算哈希并比对。所有平台都这样做:
+2. **静态解析 .so 引导元数据**(只读文件 I/O,不加载、不执行任何代码):定位 `export_plugin!` 嵌入的引导 blob
+   (§7.2),核对其中 SDK 身份等于宿主的值、插件 id 等于清单值;定位不到或核对失败即拒绝。清单是打包工具写的
+   **声明**,这一步核对的是**二进制自身携带的值**——`dlopen` 在返回前就会执行 ELF 初始化代码
+   (`.init`/`.init_array`),没有这一步,一个 `library_sha256` 与文件一致、但 `sdk.id` 错标为当前 SDK 的包,
+   会在运行期核对(第 5 步)之前执行初始化代码,违背 §一 目标 3 的“加载前拒绝”。
+3. **复制到内容寻址缓存**:`<cache>/<library_sha256>/lib<name>.so`,复制后重新计算哈希并比对。所有平台都这样做:
    Windows 避免文件锁,Linux 避免原地覆盖已映射的 .so 导致 SIGBUS;同一哈希只复制一次。
-3. **加载库**:`dlopen(path, RTLD_NOW | RTLD_LOCAL)`。`RTLD_NOW` 让未解析符号在此刻失败而不是在调用时崩溃;
-   `RTLD_LOCAL` 使同一插件的多个版本可以共存(原型实测 v1/v2 同名 crate 同时加载,互不串线)。
-4. **核对内嵌元数据**:调用 `rutis_plugin_meta()`,比对 `sdk_id`(L1,对比 `loaded_sdk_id()`)、插件 id 与版本和清单一致。
-5. **构造工厂**:调用 `rutis_plugin_entry()` 得到 `Box<dyn PluginFactory<ConfigValue>>`,并在此时读取一次 `name()`、`injects()`,连同插件 id 一起记入 `Module`(供 §8.2 的不变量检查使用,之后不再回调)。
+4. **加载库**:`dlopen(path, RTLD_NOW | RTLD_LOCAL)`。`RTLD_NOW` 让未解析符号在此刻失败而不是在调用时崩溃;
+   `RTLD_LOCAL` 使同一插件的多个版本可以共存(原型实测 v1/v2 同名 crate 同时加载,互不串线)。此时第 2 步已
+   确认二进制自述身份兼容,初始化代码的执行不再违背“加载前拒绝”。
+5. **核对运行期元数据**:调用 `rutis_plugin_meta()`,比对 `sdk_id`(L1,对比 `loaded_sdk_id()`)、插件 id 与版本和
+   清单及引导 blob 一致——加载后的交叉核对,防止引导 blob 被篡改或与运行期值不一致。
+6. **构造工厂**:调用 `rutis_plugin_entry()` 得到 `Box<dyn PluginFactory<ConfigValue>>`,并在此时读取一次 `name()`、`injects()`,连同插件 id 一起记入 `Module`(供 §8.2 的不变量检查使用,之后不再回调)。
 
-任一步失败返回 `LoadError`,带插件 id、版本、失败步骤和原因;第 3 步之后失败的库不卸载(§九),计入诊断。
+任一步失败返回 `LoadError`,带插件 id、版本、失败步骤和原因;第 4 步之后失败的库不卸载(§九),计入诊断。
 
-### 7.2 插件侧导出
+### 7.2 插件侧导出与引导接口
 
 ```rust
 rutis_sdk::export_plugin! {
@@ -249,9 +265,20 @@ rutis_sdk::export_plugin! {
 
 - `#[no_mangle] pub fn rutis_plugin_meta() -> rutis_sdk::PluginMeta`(Rust ABI;包含 `SDK_ID` 常量、id、`CARGO_PKG_VERSION`);
 - `#[no_mangle] pub fn rutis_plugin_entry() -> Box<dyn PluginFactory<ConfigValue>>`,内部用 `catch_unwind` 包住构造;
-- 编译期断言:`panic = "unwind"`。
+- 编译期断言:`panic = "unwind"`;
+- 一段**引导 blob**(纯数据,无初始化代码),供宿主在 `dlopen` 之前静态解析(§7.1 第 2 步):
+  `#[used] #[link_section = ".note.rutis.meta"] static RUTIS_BOOT_META: [u8; N]`,内容为 magic、格式版本、
+  `SDK_ID`、插件 id,各带长度前缀,余下填零。宿主在文件字节中搜索 magic 定位,不解析 ELF/PE/Mach-O 结构,
+  三平台同一套代码;定位不到按不兼容拒绝。
 
-两者都是 Rust ABI(不是 `extern "C"`):宿主与插件保证同一 rustc、同一 SDK,传 trait object 是安全的——这正是 L1/L2 要保证的前提。
+SDK 侧另导出一个 **C ABI 引导函数**,供宿主在验证运行时 SDK 之前调用(§5.4 第 1 步):
+
+- `#[no_mangle] pub extern "C" fn rutis_sdk_boot_id(buf: *mut u8, cap: usize) -> usize`:把 `SDK_ID` 的 UTF-8
+  字节拷入 `buf`,返回长度;`cap` 不足时返回所需长度且不写入。函数体只有拷贝与长度比较,不触碰任何 SDK 类型。
+
+其余导出(`rutis_plugin_meta()`、`rutis_plugin_entry()`、`loaded_sdk_id()`)都是 Rust ABI(不是 `extern "C"`):
+宿主与插件保证同一 rustc、同一 SDK,传 trait object 是安全的——这正是 L1/L2 要保证的前提,也因此它们的首次
+调用必须发生在引导校验通过之后。
 
 ### 7.3 配置类型
 
@@ -313,7 +340,7 @@ rutis 的依赖声明是静态的(D32f):`injects` 在 spawn 时注册一次,`upd
 
 - `update` 的 dry-run 依次调用 `validate_config` 和 `build`(`crates/rutis/src/fiber.rs:1299-1300`),两处都会拒绝;
 - rutis 首次装载不调用 `validate_config`,但每次装载都调用 `build`,所以 `build` 中的检查覆盖所有路径;
-- 检查所需的 id、name、injects 在加载时已记入 `Module`(§7.1 第 5 步),比较是纯操作,符合 `build` 的纯构造约定。
+- 检查所需的 id、name、injects 在加载时已记入 `Module`(§7.1 第 6 步),比较是纯操作,符合 `build` 的纯构造约定。
 
 不一致时返回 `CordisError::Validation`,提示“依赖声明或插件身份变化需要 dispose 后重新 spawn”。`swap` 只是提前给出
 同样的错误。
@@ -389,12 +416,14 @@ dylib 场景只会更明显(旧代码甚至来自另一个版本)。**#41(按装
 - V4 release 配置(LTO、`codegen-units`、`opt-level`)下的同样验证;SDK 不得启用跨 crate 的 LTO。
 - V5 跨库 trait object 的长期运行:旧版本插件留下的任务在新版本运行期间继续执行、析构发生在旧库代码中。
 - V6 线程局部变量与 `tracing` 等带全局分发器的 crate(若进入 SDK)在跨库下的行为。
+- V7 引导接口与引导 blob(本轮修订新增,原型未验证):C ABI 引导函数在布局不一致的 SDK 上确实只返回错误字节
+  而不崩溃;magic 字节搜索在 macOS/Windows 产物(含 debuginfo、去符号、strip 变体)上的定位可靠性。
 
 ## 十二、实施步骤
 
 1. **前置**:#41(旧代迟到注册)合入。
-2. `rutis-sdk` crate:重导出、分配器、`SDK_ID`(`build.rs`,含 RUSTFLAGS 白名单规范化)、`export_plugin!`、`ConfigValue`。
-3. `rutis-dylib` crate:宿主启动检查(§5.4)、清单、内容寻址缓存、三阶段加载、`DylibFactory`(含模块不变量检查)、`spawn`/`swap`、模块登记表与诊断、保留上限。
+2. `rutis-sdk` crate:重导出、分配器、`SDK_ID`(`build.rs`,含 RUSTFLAGS 白名单规范化)、C ABI 引导函数、`export_plugin!`(含引导 blob)、`ConfigValue`。
+3. `rutis-dylib` crate:宿主启动检查(§5.4,首次身份查询走引导接口)、清单、引导元数据静态解析(§7.1 第 2 步)、内容寻址缓存、三阶段加载、`DylibFactory`(含模块不变量检查)、`spawn`/`swap`、模块登记表与诊断、保留上限。
 4. 宿主 `dylib-plugins` 构建变体与发布布局。
 5. 打包工具(`cargo xtask pack-plugin`):生成清单、计算哈希、执行 L2 校验、`cargo tree -d` 检查。
 6. CI:SDK 发布流水线、插件批量重编、V1–V4 的自动化验证。
@@ -405,6 +434,10 @@ dylib 场景只会更明显(旧代码甚至来自另一个版本)。**#41(按装
 - [ ] 宿主 + 一个 dylib 插件:跨库 TypeId、downcast、trait object、异步调用、析构均有自动化测试。
 - [ ] L1/L2 任一不匹配时加载被拒绝,原因可读;测试覆盖 §5.1 的两个反例。
 - [ ] 宿主启动检查(§5.4):“旧宿主 + 新 SDK + 新插件”在启动时被拒绝;SDK 文件哈希与宿主内嵌值不符时被拒绝。
+- [ ] 引导边界:宿主的首次身份查询走 C ABI 引导接口,在运行时 SDK 的产物哈希核对通过之前不存在任何 Rust ABI
+  跨界调用;同名可解析但布局不同的 SDK 部署在启动第 1 步被拒绝(不依赖 UB 侥幸)。
+- [ ] 引导元数据:清单 `library_sha256` 与文件一致、但 `sdk.id` 与 .so 内嵌值(引导 blob)不符的包,在 `dlopen`
+  之前被拒绝,不执行任何初始化代码;引导 blob 与 `rutis_plugin_meta()` 不一致在第 5 步被拒绝。
 - [ ] `SDK_ID` 规范化:仅重映射参数不同的两次构建得到相同的 `SDK_ID` 与 SDK 产物哈希;未归类的 RUSTFLAGS 项使构建失败。
 - [ ] `swap` 加载新版本后,旧实例按 rutis 生命周期卸载,消费者切换到新版本服务。
 - [ ] 插件 id、name 或 injects 不同的模块:经 `swap` 和直接 `view.update(..)` 两条路径都被拒绝,fiber 保持原模块运行。
