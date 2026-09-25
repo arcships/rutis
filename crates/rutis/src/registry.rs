@@ -125,21 +125,33 @@ impl Registry {
 
     /// Commit a mutable value only while this exact binding still occupies
     /// its key/scope slot. The caller holds the provider transition lock.
+    ///
+    /// Returns the old value on success, or the *candidate* value on failure
+    /// so the caller can drop it outside any framework lock.
     pub(crate) fn replace_mutable_if_current(
         &self,
         key: &TypeKey,
         scope: Option<&ScopeId>,
         expected: &Arc<Binding>,
         value: StoredValue,
-    ) -> Option<StoredValue> {
+    ) -> Result<StoredValue, StoredValue> {
         let bindings = self.bindings.lock().unwrap();
-        let current = bindings.get(&(key.clone(), scope.cloned()))?;
+        let current = bindings.get(&(key.clone(), scope.cloned()));
+        let Some(current) = current else {
+            return Err(value);
+        };
         if !Arc::ptr_eq(current, expected)
             || current.removing.load(std::sync::atomic::Ordering::SeqCst)
         {
-            return None;
+            return Err(value);
         }
-        current.value.replace_mutable(value)
+        match &current.value {
+            ValueSlot::Mutable(_) => {
+                // Safety: Mutable slot always returns Some.
+                Ok(current.value.replace_mutable(value).unwrap())
+            }
+            ValueSlot::Fixed(_) => Err(value),
+        }
     }
 
     /// Linearize service removal with mutable value commits.

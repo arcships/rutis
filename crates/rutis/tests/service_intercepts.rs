@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use rutis::{
     BoxFuture, CordisError, Ctx, Effect, FiberState, Plugin, ServiceIntercept, ServiceReadFailure,
-    ServiceWriteFailure, TypeKey,
+    ServiceWriteFailure, ServiceWriter, TypeKey,
 };
 use tokio::sync::oneshot;
 
@@ -524,4 +524,207 @@ async fn writer_set_fails_stale_during_binding_removal() {
     assert_eq!(err.reason, ServiceWriteFailure::Stale);
 
     dispose_task.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests for candidate-value Drop reentry deadlock (PR #55 P1)
+// ---------------------------------------------------------------------------
+
+/// A value whose Drop calls `Ctx::effect()`. If dropped inside a framework
+/// lock, the reentrant effect triggers a self-deadlock.
+struct DropEffect {
+    ctx: Ctx,
+    label: &'static str,
+}
+
+impl Drop for DropEffect {
+    fn drop(&mut self) {
+        self.ctx.effect_named(self.label, || Effect::Done).unwrap();
+    }
+}
+
+/// Test 1: When the old binding has been removed and the writer is stale,
+/// writing a candidate whose Drop reenters the framework must not deadlock.
+#[tokio::test]
+async fn writer_set_stale_candidate_drop_no_deadlock_replaced_binding() {
+    let root = Ctx::root().unwrap();
+    let key = TypeKey::keyed::<DropEffect>("drop-replaced");
+    let (binding_disposer, writer) = root
+        .provide_mut_as(
+            key.clone(),
+            Arc::new(DropEffect {
+                ctx: root.clone(),
+                label: "drop-replaced-initial",
+            }),
+        )
+        .unwrap();
+
+    // Drive disposal in background to make the writer stale.
+    let dispose_task = tokio::spawn(binding_disposer.dispose());
+
+    // Spin-wait until the binding is gone or marked removing.
+    for _ in 0..1000 {
+        let diags = root.diagnostics();
+        if diags.bindings.iter().any(|b| b.key == key && b.removing) {
+            break;
+        }
+        if !diags.bindings.iter().any(|b| b.key == key) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    // Write a candidate whose Drop calls root.effect(). Without the fix this
+    // deadlocks because the candidate is dropped inside framework locks.
+    // Use a dedicated OS thread + channel so the Mutex deadlock is observable
+    // via recv_timeout (tokio::time::timeout cannot cancel a synchronously
+    // blocked thread).
+    let root2 = root.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let candidate = DropEffect {
+        ctx: root.clone(),
+        label: "drop-replaced-candidate",
+    };
+    std::thread::spawn(move || {
+        let res = writer.set(&root2, Arc::new(candidate));
+        let _ = tx.send(res);
+    });
+
+    let result = rx.recv_timeout(Duration::from_secs(5));
+    assert!(
+        result.is_ok(),
+        "set should not deadlock (recv_timeout means Mutex deadlock)"
+    );
+    let err = result.unwrap().unwrap_err();
+    assert_eq!(err.reason, ServiceWriteFailure::Stale);
+
+    dispose_task.await.unwrap().unwrap();
+}
+
+/// Test 2: When the binding is marked removing (but not yet evicted from the
+/// registry), writing a DropEffect candidate must not deadlock.
+#[tokio::test]
+async fn writer_set_stale_candidate_drop_no_deadlock_removing_flag() {
+    let root = Ctx::root().unwrap();
+    let key = TypeKey::keyed::<DropEffect>("drop-removing");
+    let (binding_disposer, writer) = root
+        .provide_mut_as(
+            key.clone(),
+            Arc::new(DropEffect {
+                ctx: root.clone(),
+                label: "drop-removing-initial",
+            }),
+        )
+        .unwrap();
+
+    let dispose_task = tokio::spawn(binding_disposer.dispose());
+
+    // Spin until we observe removing=true (not just binding absent).
+    for _ in 0..1000 {
+        let diags = root.diagnostics();
+        if diags.bindings.iter().any(|b| b.key == key && b.removing) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    let root2 = root.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let candidate = DropEffect {
+        ctx: root.clone(),
+        label: "drop-removing-candidate",
+    };
+    std::thread::spawn(move || {
+        let res = writer.set(&root2, Arc::new(candidate));
+        let _ = tx.send(res);
+    });
+
+    let result = rx.recv_timeout(Duration::from_secs(5));
+    assert!(
+        result.is_ok(),
+        "set should not deadlock (recv_timeout means Mutex deadlock)"
+    );
+    let err = result.unwrap().unwrap_err();
+    assert_eq!(err.reason, ServiceWriteFailure::Stale);
+
+    dispose_task.await.unwrap().unwrap();
+}
+
+/// Plugin that provides a mutable `DropEffect` service and stores the writer
+/// for the test harness.
+struct MutableDropProvider {
+    key: TypeKey,
+    writer: Arc<Mutex<Option<ServiceWriter<DropEffect>>>>,
+    ctx_slot: Arc<Mutex<Option<Ctx>>>,
+}
+
+impl Plugin for MutableDropProvider {
+    fn name(&self) -> &str {
+        "mutable-drop-provider"
+    }
+    fn injects(&self) -> &[TypeKey] {
+        &[]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let (disposer, writer) = ctx.provide_mut_as(
+                self.key.clone(),
+                Arc::new(DropEffect {
+                    ctx: ctx.clone(),
+                    label: "drop-gen-initial",
+                }),
+            )?;
+            *self.writer.lock().unwrap() = Some(writer);
+            *self.ctx_slot.lock().unwrap() = Some(ctx.clone());
+            Ok(Effect::Disposer(Box::new(move || {
+                drop(disposer);
+                Ok(())
+            })))
+        })
+    }
+}
+
+/// Test 3: After the provider fiber restarts, the generation changes and
+/// the generation check inside the locked section fails. The candidate
+/// `DropEffect` must be dropped outside locks.
+#[tokio::test]
+async fn writer_set_stale_candidate_drop_no_deadlock_generation_stale() {
+    let root = Ctx::root().unwrap();
+    let key = TypeKey::keyed::<DropEffect>("drop-generation");
+    let writer_slot = Arc::new(Mutex::new(None));
+    let ctx_slot = Arc::new(Mutex::new(None));
+    let provider = MutableDropProvider {
+        key: key.clone(),
+        writer: writer_slot.clone(),
+        ctx_slot: ctx_slot.clone(),
+    };
+    let view = root.plugin(provider);
+    (&view).into_future().await.unwrap();
+    let writer = writer_slot.lock().unwrap().take().unwrap();
+    let provider_ctx = ctx_slot.lock().unwrap().take().unwrap();
+
+    // Restart the provider so the generation changes.
+    // registration_preflight passes (fiber is Active), but inside the
+    // locked section transition.generation != self.binding.provider_gen.
+    view.restart().await.unwrap();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let candidate = DropEffect {
+        ctx: provider_ctx.clone(),
+        label: "drop-generation-candidate",
+    };
+    std::thread::spawn(move || {
+        let res = writer.set(&provider_ctx, Arc::new(candidate));
+        let _ = tx.send(res);
+    });
+
+    let result = rx.recv_timeout(Duration::from_secs(5));
+    assert!(
+        result.is_ok(),
+        "set should not deadlock (recv_timeout means Mutex deadlock)"
+    );
+    let err = result.unwrap().unwrap_err();
+    assert_eq!(err.reason, ServiceWriteFailure::Stale);
+
+    drop(view);
 }

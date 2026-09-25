@@ -399,31 +399,40 @@ impl<T: ?Sized + Send + Sync + 'static> ServiceWriter<T> {
                     HookFailure::Reentrant => ServiceWriteFailure::InterceptReentrant,
                 })
             })?;
-        let _admission = self.shared.admission.lock().unwrap();
-        caller
-            .registration_open()
-            .map_err(|_| error(ServiceWriteFailure::Stale))?;
-        let transition = provider.transition.lock().unwrap();
-        if transition.generation != self.binding.provider_gen
-            || !matches!(transition.state, FiberState::Loading | FiberState::Active)
-        {
-            return Err(error(ServiceWriteFailure::Stale));
-        }
-        let old = self
-            .shared
-            .registry
-            .replace_mutable_if_current(&self.key, self.scope.as_ref(), &self.binding, value)
-            .ok_or_else(|| error(ServiceWriteFailure::Stale))?;
-        drop(transition);
-        drop(_admission);
-        // The last Arc of the previous value may run user Drop code. Release
-        // the registry, transition and admission locks before it can do so.
-        if let Err(panic) = catch_unwind(AssertUnwindSafe(|| drop(old))) {
+        // Locked section: admission → transition → registry bindings.
+        // On success we return the old value; on failure we return the
+        // *candidate* value so it is dropped outside every framework lock.
+        // This prevents Drop reentry deadlocks (PR #55 P1).
+        let (owned, result) = (|| -> (StoredValue, Result<(), ServiceWriteError>) {
+            let _admission = self.shared.admission.lock().unwrap();
+            if caller.registration_open().is_err() {
+                return (value, Err(error(ServiceWriteFailure::Stale)));
+            }
+            let transition = provider.transition.lock().unwrap();
+            if transition.generation != self.binding.provider_gen
+                || !matches!(transition.state, FiberState::Loading | FiberState::Active)
+            {
+                return (value, Err(error(ServiceWriteFailure::Stale)));
+            }
+            match self.shared.registry.replace_mutable_if_current(
+                &self.key,
+                self.scope.as_ref(),
+                &self.binding,
+                value,
+            ) {
+                Ok(old) => (old, Ok(())),
+                Err(candidate) => (candidate, Err(error(ServiceWriteFailure::Stale))),
+            }
+        })();
+        // Drop the owned value (old on success, candidate on failure) outside
+        // every lock. The last Arc may run user Drop code — panic is caught
+        // and reported via the error sink.
+        if let Err(panic) = catch_unwind(AssertUnwindSafe(|| drop(owned))) {
             let sink = caller.error_sink();
             let error = Arc::new(panic_error(panic));
             let _ = catch_unwind(AssertUnwindSafe(|| sink(error)));
         }
-        Ok(())
+        result
     }
 }
 
