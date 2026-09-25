@@ -432,3 +432,96 @@ async fn subtree_shutdown_waits_for_selected_read_hook() {
     assert_eq!(*read.await.unwrap().unwrap(), 1);
     shutdown.await.unwrap();
 }
+
+#[tokio::test]
+async fn different_key_reentry_allowed_for_read_and_write() {
+    let root = Ctx::root().unwrap();
+    let key_a = TypeKey::keyed::<u64>("reentry-a");
+    let key_b = TypeKey::keyed::<u64>("reentry-b");
+    root.provide_as(key_a.clone(), Arc::new(1u64)).unwrap();
+    root.provide_as(key_b.clone(), Arc::new(2u64)).unwrap();
+
+    // B has its own read hook that replaces the value
+    let b_read_hits = Arc::new(AtomicUsize::new(0));
+    let b_read_hits_hook = b_read_hits.clone();
+    let _b_hook = root
+        .intercept_require_as::<u64>(key_b.clone(), move |v| {
+            b_read_hits_hook.fetch_add(1, Ordering::SeqCst);
+            ServiceIntercept::Replace(Arc::new(*v + 10))
+        })
+        .unwrap();
+
+    // A's read hook does require B — must succeed, not InterceptReentrant
+    let root_hook = root.clone();
+    let key_b_hook = key_b.clone();
+    let b_value_seen = Arc::new(Mutex::new(None));
+    let b_value_seen_copy = b_value_seen.clone();
+    root.intercept_require_as::<u64>(key_a.clone(), move |_| {
+        let b_val = root_hook.require_as::<u64>(key_b_hook.clone()).unwrap();
+        b_value_seen_copy.lock().unwrap().replace(*b_val);
+        ServiceIntercept::Continue
+    })
+    .unwrap();
+
+    let result = root.require_as::<u64>(key_a.clone()).unwrap();
+    assert_eq!(*result, 1);
+    assert_eq!(b_read_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(*b_value_seen.lock().unwrap(), Some(12)); // 2 + 10 from B's hook
+
+    // Write: hook on C's set writes D, D has its own set hook
+    let key_c = TypeKey::keyed::<u64>("reentry-c");
+    let key_d = TypeKey::keyed::<u64>("reentry-d");
+    let (_b_c, writer_c) = root.provide_mut_as(key_c.clone(), Arc::new(10u64)).unwrap();
+    let (_b_d, writer_d) = root.provide_mut_as(key_d.clone(), Arc::new(20u64)).unwrap();
+
+    let d_write_hits = Arc::new(AtomicUsize::new(0));
+    let d_write_hits_hook = d_write_hits.clone();
+    root.intercept_set_as::<u64>(key_d.clone(), move |v| {
+        d_write_hits_hook.fetch_add(1, Ordering::SeqCst);
+        ServiceIntercept::Replace(Arc::new(*v + 100))
+    })
+    .unwrap();
+
+    let writer_d = Arc::new(writer_d);
+    let writer_d_hook = writer_d.clone();
+    let root_copy = root.clone();
+    root.intercept_set_as::<u64>(key_c.clone(), move |_| {
+        writer_d_hook.set(&root_copy, Arc::new(30)).unwrap();
+        ServiceIntercept::Continue
+    })
+    .unwrap();
+
+    writer_c.set(&root, Arc::new(11)).unwrap();
+    assert_eq!(d_write_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(*root.get_as::<u64>(key_d).unwrap(), 130); // 30 + 100 from D's hook
+}
+
+#[tokio::test]
+async fn writer_set_fails_stale_during_binding_removal() {
+    let root = Ctx::root().unwrap();
+    let key = TypeKey::keyed::<u64>("evict");
+    let (binding_disposer, writer) = root.provide_mut_as(key.clone(), Arc::new(1u64)).unwrap();
+
+    // Drive disposal in background; evict_and_finalize runs mark_removing_if
+    // synchronously before any await, so the removing flag is set quickly.
+    let dispose_task = tokio::spawn(binding_disposer.dispose());
+
+    // Spin-wait until the binding is marked removing or fully evicted.
+    // If eviction completes before we observe removing=true, the write
+    // will still fail with Stale because the binding is no longer current.
+    for _ in 0..1000 {
+        let diags = root.diagnostics();
+        if diags.bindings.iter().any(|b| b.key == key && b.removing) {
+            break;
+        }
+        if !diags.bindings.iter().any(|b| b.key == key) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    let err = writer.set(&root, Arc::new(2)).unwrap_err();
+    assert_eq!(err.reason, ServiceWriteFailure::Stale);
+
+    dispose_task.await.unwrap().unwrap();
+}
