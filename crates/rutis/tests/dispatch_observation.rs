@@ -278,3 +278,51 @@ async fn early_disposal_waits_for_in_flight_observer_and_prevents_new_calls() {
     bus.emit(&root, Arc::new(Ping(2)));
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn observer_reentry_observes_nested_dispatch_and_business_listener_runs() {
+    let root = Ctx::root().unwrap();
+    let bus = root.events().clone();
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let inner_hits = Arc::new(AtomicUsize::new(0));
+
+    // Register a business listener; it will be taken by the nested emit inside
+    // the observer. The outer serial will find no hooks left.
+    bus.on(&root, Count(inner_hits.clone())).unwrap();
+
+    {
+        let attempts = attempts.clone();
+        let bus_obs = bus.clone();
+        let root_obs = root.clone();
+        bus.observe_dispatch(&root, move |attempt| {
+            let value = attempt.event.downcast_ref::<Ping>().unwrap().0;
+            attempts.lock().unwrap().push(value);
+            if value == 1 {
+                bus_obs.emit(&root_obs, Arc::new(Ping(2)));
+                // Nested emit takes hooks and spawns a tail task synchronously
+                // before returning. The outer serial will see empty hooks.
+            }
+        })
+        .unwrap();
+    }
+
+    // Use serial for the outer dispatch; the observer runs during observation,
+    // then serial finds no hooks and returns immediately.
+    let result = tokio::time::timeout(Duration::from_secs(5), bus.serial(&root, &Ping(1)))
+        .await
+        .expect("outer serial did not deadlock");
+    assert!(result.unwrap().is_none(), "outer serial had no hooks left");
+
+    // Both outer (1) and nested (2) dispatch attempts were observed.
+    assert_eq!(*attempts.lock().unwrap(), vec![1, 2]);
+
+    // The inner emit's tail task runs the business listener asynchronously.
+    // Yield cooperatively until it completes.
+    for _ in 0..100 {
+        if inner_hits.load(Ordering::SeqCst) == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(inner_hits.load(Ordering::SeqCst), 1);
+}
