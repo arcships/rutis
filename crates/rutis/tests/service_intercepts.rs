@@ -684,9 +684,20 @@ impl Plugin for MutableDropProvider {
     }
 }
 
-/// Test 3: After the provider fiber restarts, the generation changes and
-/// the generation check inside the locked section fails. The candidate
-/// `DropEffect` must be dropped outside locks.
+/// Test 3: After the provider fiber restarts, `transition.generation`
+/// differs from the binding's `provider_gen`. This hits the generation
+/// check inside the locked section (path 2 of the three write-failure
+/// paths). The candidate `DropEffect` must be dropped without deadlock.
+///
+/// Note: `registration_preflight` passes after restart because the fiber
+/// is back to Active and the ctx is still valid (restart reuses the same
+/// `FiberInner` and `CtxInner`). The generation mismatch is confirmed by
+/// the error field `generation: 1` (old) vs `transition.generation` (2).
+///
+/// On the old (pre-IIFE) code, path 2 does not deadlock either: Rust drops
+/// locals in reverse declaration order, so the `value` local is dropped
+/// *after* the `transition` and `_admission` guards release their locks.
+/// Path 2 is accidentally safe; the IIFE fix makes that boundary explicit.
 #[tokio::test]
 async fn writer_set_stale_candidate_drop_no_deadlock_generation_stale() {
     let root = Ctx::root().unwrap();
@@ -703,10 +714,24 @@ async fn writer_set_stale_candidate_drop_no_deadlock_generation_stale() {
     let writer = writer_slot.lock().unwrap().take().unwrap();
     let provider_ctx = ctx_slot.lock().unwrap().take().unwrap();
 
-    // Restart the provider so the generation changes.
-    // registration_preflight passes (fiber is Active), but inside the
-    // locked section transition.generation != self.binding.provider_gen.
+    // Restart the provider. restart() awaits the full unload→load cycle,
+    // so after this the fiber is Active with an incremented generation.
     view.restart().await.unwrap();
+
+    // Verify the error reports the old binding's provider_gen (= 1),
+    // confirming the generation check inside the locked section was hit
+    // rather than a preflight failure.
+    let err = writer
+        .set(
+            &provider_ctx,
+            Arc::new(DropEffect {
+                ctx: provider_ctx.clone(),
+                label: "check-gen",
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(err.reason, ServiceWriteFailure::Stale);
+    assert_eq!(err.generation, 1, "should report old binding gen");
 
     let (tx, rx) = std::sync::mpsc::channel();
     let candidate = DropEffect {
