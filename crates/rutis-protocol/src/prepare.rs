@@ -249,6 +249,9 @@ impl PreparedPackage {
     pub fn catalog(&self) -> Option<&RunnerCatalog> {
         self.catalog.as_ref()
     }
+    pub fn config_schema(&self) -> &Value {
+        &self.config_schema
+    }
     /// Call before launch. Frozen input stays unchanged; a changed disk package
     /// is rejected. The supervisor must pin/copy verified artifacts for launch
     /// to close the check-to-exec interval; this is not an OS sandbox.

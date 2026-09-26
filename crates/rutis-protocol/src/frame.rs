@@ -81,6 +81,7 @@ struct State {
     latest_request: Sequence,
     pending: BTreeMap<Sequence, oneshot::Sender<Result<Value>>>,
     closed: Option<ProtocolError>,
+    close_hooks: Vec<Weak<dyn Fn() + Send + Sync>>,
 }
 struct Inner {
     state: Mutex<State>,
@@ -90,6 +91,11 @@ struct Inner {
 impl Drop for Inner {
     fn drop(&mut self) {
         self.closing.cancel();
+        for hook in &self.state.get_mut().unwrap().close_hooks {
+            if let Some(hook) = hook.upgrade() {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook()));
+            }
+        }
     }
 }
 #[derive(Clone)]
@@ -114,6 +120,7 @@ impl Peer {
                 latest_request: Sequence(0),
                 pending: BTreeMap::new(),
                 closed: None,
+                close_hooks: Vec::new(),
             }),
             outgoing,
             closing: tokio_util::sync::CancellationToken::new(),
@@ -252,19 +259,47 @@ impl Peer {
     pub fn is_closed(&self) -> bool {
         self.0.state.lock().unwrap().closed.is_some()
     }
+    pub async fn closed(&self) {
+        self.0.closing.cancelled().await;
+    }
+    /// The caller owns the hook lease. Close invokes live hooks synchronously
+    /// outside the frame lock, before pending requests are settled.
+    pub fn on_close(&self, hook: &Arc<dyn Fn() + Send + Sync>) {
+        let closed = {
+            let mut state = self.0.state.lock().unwrap();
+            state.close_hooks.retain(|hook| hook.strong_count() != 0);
+            if state.closed.is_none() {
+                state.close_hooks.push(Arc::downgrade(hook));
+                false
+            } else {
+                true
+            }
+        };
+        if closed {
+            hook();
+        }
+    }
     pub fn downgrade(&self) -> WeakPeer {
         WeakPeer(Arc::downgrade(&self.0))
     }
     pub fn close(&self, error: ProtocolError) {
-        let pending = {
+        let (pending, hooks) = {
             let mut state = self.0.state.lock().unwrap();
             if state.closed.is_some() {
                 return;
             }
             state.closed = Some(error.clone());
-            std::mem::take(&mut state.pending)
+            (
+                std::mem::take(&mut state.pending),
+                std::mem::take(&mut state.close_hooks),
+            )
         };
         self.0.closing.cancel();
+        for hook in hooks {
+            if let Some(hook) = hook.upgrade() {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook()));
+            }
+        }
         for send in pending.into_values() {
             let mut error = error.clone();
             error.execution = Execution::Unknown;

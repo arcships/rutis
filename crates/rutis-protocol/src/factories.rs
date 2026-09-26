@@ -4,7 +4,7 @@ use crate::{
     contract::{check_schema_for_prepare, identifier, validate_json},
     error::{ErrorCode, ProtocolError, Result},
     json,
-    managed::ManagedActivation,
+    managed::{ActivationGate, ManagedActivation},
     prepare::{digest, PluginEntry, PreparedInstance, RuntimeKind},
     runner_image::{FactoryCatalog, RunnerCatalog},
 };
@@ -16,7 +16,7 @@ use std::{
     panic::{catch_unwind, AssertUnwindSafe},
 };
 
-type Mount = dyn Fn(&Ctx, Value) -> Result<ManagedActivation> + Send + Sync;
+type Mount = dyn Fn(&Ctx, Value, ActivationGate) -> Result<ManagedActivation> + Send + Sync;
 
 pub struct StaticFactory {
     name: String,
@@ -51,13 +51,21 @@ impl StaticFactory {
             name,
             catalog,
             config_schema,
-            mount: Box::new(move |ctx, value| {
+            mount: Box::new(move |ctx, value, gate| {
+                if !gate.is_open() {
+                    return Err(ProtocolError::new(
+                        ErrorCode::Unavailable,
+                        "start",
+                        "activation was stopped before construction",
+                    ));
+                }
                 let config: C = serde_json::from_value(value)
                     .map_err(|e| invalid(format!("native config decode: {e}")))?;
                 catch_unwind(AssertUnwindSafe(|| {
                     let factory = constructor();
                     factory.validate_config(&config).map_err(native_error)?;
-                    ManagedActivation::mount_factory(ctx, factory, config).map_err(native_error)
+                    ManagedActivation::mount_factory_gated(ctx, factory, config, gate)
+                        .map_err(native_error)
                 }))
                 .unwrap_or_else(|_| {
                     Err(ProtocolError::new(
@@ -128,12 +136,21 @@ impl StaticFactories {
     /// Native mounting alone does not publish protocol services. The runner
     /// must still stage exports and wait for the host's activation ACK.
     pub fn mount(&self, parent: &Ctx, factory: &str, config: Value) -> Result<ManagedActivation> {
+        self.mount_gated(parent, factory, config, ActivationGate::default())
+    }
+    pub fn mount_gated(
+        &self,
+        parent: &Ctx,
+        factory: &str,
+        config: Value,
+        gate: ActivationGate,
+    ) -> Result<ManagedActivation> {
         let entry = self
             .entries
             .get(factory)
             .ok_or_else(|| mismatch("factory is not in the linked registry"))?;
         validate_json(&entry.config_schema, &config)?;
-        (entry.mount)(parent, config)
+        (entry.mount)(parent, config, gate)
     }
 }
 

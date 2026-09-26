@@ -209,6 +209,35 @@ async fn prepared_member_selects_linked_factory_and_keeps_its_frozen_config() {
     let mut f = two_languages();
     let plan = f.prepare().unwrap();
     f.deployment["instances"]["rust"]["config"]["label"] = json!("changed-after-prepare");
+    let snapshot = rutis_protocol::snapshot::Snapshot::materialize(&plan).unwrap();
+    let hello = rutis_protocol::lifecycle::Hello::prepared(
+        &plan,
+        "native",
+        &snapshot.groups()["native"],
+        "rust-runtime".into(),
+        rutis_protocol::identity::Sequence(1),
+    )
+    .unwrap();
+    assert_eq!(hello.members["rust"].config["label"], "rust");
+    assert_eq!(hello.members["rust"].config_schema.as_bytes(), SCHEMA);
+    fs::set_permissions(
+        f.path("rust-provider").join("config.json"),
+        fs::Permissions::from_mode(0o555),
+    )
+    .unwrap();
+    let changed = f.prepare().unwrap();
+    assert!(
+        rutis_protocol::lifecycle::Hello::prepared(
+            &changed,
+            "native",
+            &snapshot.groups()["native"],
+            "rust-runtime".into(),
+            rutis_protocol::identity::Sequence(1)
+        )
+        .is_err(),
+        "a different code snapshot cannot reuse the frozen hello plan"
+    );
+    snapshot.cleanup().unwrap();
     let catalog = RunnerCatalog::parse(runner_catalog_bytes()).unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let constructed = Arc::new(AtomicU64::new(0));

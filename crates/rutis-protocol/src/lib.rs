@@ -11,6 +11,7 @@ pub mod graph;
 pub mod identity;
 pub mod imports;
 pub mod json;
+pub mod lifecycle;
 pub mod managed;
 pub mod memory;
 pub mod prepare;

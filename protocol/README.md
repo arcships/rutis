@@ -4,6 +4,8 @@
 当前 M1 与 M2 的传输验证在推进，尚未形成可部署的 Rust↔Cordis 协议插件系统。已有两端生成绑定、对象图、私有 socket 上的真实跨语言调用与回收 ACK，以及只读 prepare 和 Rust 延迟 factory 注册；生产 runner、监督恢复和 broker 事件仍在开发。
 实施证据及完整验收范围见[验收记录](../docs/protocol-plugin-implementation.md)。旧 `rutis-cordis` 桥继续独立存在。
 
+Rust 私有连接的 hello/start/activate/stop、native RuntimeReady 与发布门控见[生命周期控制](lifecycle.md)。默认驱动当前明确拒绝未安装的对象/事件传输能力；对象 fixture 与完整生产装配的接入仍待完成。
+
 包/部署 JSON 格式、原字节文件库存、精确路由、静态 ELF catalog、私有启动快照与只读 CLI 见[prepare 约定](package-format.md)。prepare 冻结计划，快照固定 artifact 与 Node canonical dependency tree；实际 runner 仍需接入 RuntimeReady 与成员发布屏障。
 
 ## JSON 与描述符

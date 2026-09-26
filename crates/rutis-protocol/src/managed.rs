@@ -20,6 +20,9 @@ struct GateState {
 pub struct ActivationGate(Arc<Mutex<GateState>>, CancellationToken);
 
 impl ActivationGate {
+    pub(crate) fn same_activation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
     pub fn is_open(&self) -> bool {
         let mut state = self.0.lock().unwrap();
         if state.tokens.iter().any(CancellationToken::is_cancelled) {
@@ -193,8 +196,15 @@ pub struct ManagedActivation {
 
 impl ManagedActivation {
     pub fn mount(parent: &Ctx, plugin: impl Plugin) -> Result<Self, CordisError> {
+        Self::mount_gated(parent, plugin, ActivationGate::default())
+    }
+    pub fn mount_gated(
+        parent: &Ctx,
+        plugin: impl Plugin,
+        gate: ActivationGate,
+    ) -> Result<Self, CordisError> {
         let mut injects = plugin.injects().to_vec();
-        Self::mount_native(parent, move |isolated, gate, key| {
+        Self::mount_native(parent, gate, move |isolated, gate, key| {
             injects.push(key);
             isolated.plugin(ManagedPlugin {
                 plugin: Arc::new(plugin),
@@ -209,11 +219,19 @@ impl ManagedActivation {
         factory: impl PluginFactory<C>,
         config: C,
     ) -> Result<Self, CordisError> {
+        Self::mount_factory_gated(parent, factory, config, ActivationGate::default())
+    }
+    pub fn mount_factory_gated<C: Send + Sync + 'static>(
+        parent: &Ctx,
+        factory: impl PluginFactory<C>,
+        config: C,
+        gate: ActivationGate,
+    ) -> Result<Self, CordisError> {
         // Capture author metadata before registering the permit. A panic here
         // cannot leave an orphaned permit or a partially mounted fiber.
         let name = factory.name().to_owned();
         let mut injects = factory.injects().to_vec();
-        Self::mount_native(parent, move |isolated, gate, key| {
+        Self::mount_native(parent, gate, move |isolated, gate, key| {
             injects.push(key);
             isolated.plugin_with(
                 ManagedFactory {
@@ -229,9 +247,9 @@ impl ManagedActivation {
 
     fn mount_native(
         parent: &Ctx,
+        gate: ActivationGate,
         mount: impl FnOnce(&Ctx, ActivationGate, TypeKey) -> FiberView,
     ) -> Result<Self, CordisError> {
-        let gate = ActivationGate::default();
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))

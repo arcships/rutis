@@ -83,8 +83,12 @@ pub struct SnapshotGroup {
     executable: PathBuf,
     runner: Option<PathBuf>,
     members: BTreeMap<String, SnapshotMember>,
+    code_sha256: String,
 }
 impl SnapshotGroup {
+    pub fn code_sha256(&self) -> &str {
+        &self.code_sha256
+    }
     pub fn environment(&self) -> &Path {
         &self.environment
     }
@@ -220,6 +224,7 @@ impl Snapshot {
                     executable,
                     runner,
                     members,
+                    code_sha256: group.code_sha256().into(),
                 },
             );
         }
