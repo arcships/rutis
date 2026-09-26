@@ -1,10 +1,7 @@
 import { createHash } from 'node:crypto'
-
-export type ErrorCode = 'InvalidParams' | 'InterfaceMismatch' | 'UnsupportedCapability' | 'CapabilityDenied' | 'StaleObject' | 'ScopeClosed' | 'Cancelled' | 'DeadlineExceeded' | 'Unavailable' | 'Business'
-export class ProtocolError extends Error {
-  readonly execution = 'not_started'
-  constructor(readonly code: ErrorCode, readonly stage: string, message: string) { super(message) }
-}
+import { ProtocolError } from './error.ts'
+import { decodeJson, scalarUnicode, signatureCanonical } from './json.ts'
+export { ProtocolError, type ErrorCode } from './error.ts'
 export type Schema = Record<string, any>
 export type TypeExpr =
   | { kind: 'value'; schema: Schema }
@@ -42,18 +39,68 @@ export function canonical(value: unknown): string {
   if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical((value as any)[k])).join(',') + '}'
   return JSON.stringify(value)
 }
-export function callbackKey(type: TypeExpr): string { return '$callback:' + createHash('sha256').update(canonical(type)).digest('hex') }
+export function callbackKey(type: TypeExpr): string { return '$callback:' + createHash('sha256').update(signatureCanonical(type)).digest('hex') }
+
+// Match Rust's serde boundary: the complete descriptor shape is decoded before
+// capability admission. Malformed nested types cannot hide behind an earlier
+// unsupported mode or stream, and strings are never coerced into map keys.
+function typeStructure(type: any): void {
+  record(type)
+  switch (type.kind) {
+    case 'value': keys(type, ['kind', 'schema']); return
+    case 'object':
+      keys(type, ['kind', 'interface', 'ownership'])
+      if (typeof type.interface !== 'string' || !['scope', 'borrow'].includes(type.ownership)) invalid('invalid object type')
+      return
+    case 'callback':
+      keys(type, ['kind', 'params', 'result', 'ownership'])
+      if (!['scope', 'borrow'].includes(type.ownership)) invalid('invalid callback ownership')
+      typeStructure(type.params); typeStructure(type.result); return
+    case 'record':
+      keys(type, ['kind', 'fields']); record(type.fields)
+      for (const expr of Object.values(type.fields)) typeStructure(expr)
+      return
+    case 'list': case 'optional': case 'stream':
+      keys(type, ['kind', 'item']); typeStructure(type.item); return
+    default: invalid('unknown type expression')
+  }
+}
+function bundleStructure(bundle: any): void {
+  keys(bundle, ['id', 'version', 'interfaces'], ['events', 'required_capabilities'])
+  if (typeof bundle.id !== 'string' || typeof bundle.version !== 'string') invalid('bundle identity must be strings')
+  record(bundle.interfaces)
+  if (bundle.required_capabilities !== undefined && (!Array.isArray(bundle.required_capabilities) || bundle.required_capabilities.some((c: unknown) => typeof c !== 'string'))) invalid('capabilities must be strings')
+  for (const iface of Object.values(bundle.interfaces)) {
+    keys(iface, ['methods'], ['properties']); record(iface.methods)
+    for (const method of Object.values(iface.methods)) {
+      keys(method, ['params', 'result']); typeStructure(method.params); typeStructure(method.result)
+    }
+    if (iface.properties !== undefined) {
+      record(iface.properties)
+      for (const property of Object.values(iface.properties)) typeStructure(property)
+    }
+  }
+  if (bundle.events !== undefined) {
+    record(bundle.events)
+    for (const event of Object.values(bundle.events)) {
+      keys(event, ['params', 'result', 'modes'])
+      if (!Array.isArray(event.modes) || event.modes.some((m: unknown) => !['parallel', 'serial', 'emit', 'bail', 'waterfall'].includes(m as string))) invalid('unknown event mode')
+      typeStructure(event.params); typeStructure(event.result)
+    }
+  }
+}
 
 export function admit(bytes: Uint8Array): { bundle: Bundle; sha256: string } {
-  let bundle: any
-  try { bundle = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) }
-  catch { invalid('invalid UTF-8 JSON descriptor') }
+  const bundle: any = decodeJson(bytes)
+  bundleStructure(bundle)
   keys(bundle, ['id', 'version', 'interfaces'], ['events', 'required_capabilities'])
   if (typeof bundle.id !== 'string' || !identifier(bundle.id) || typeof bundle.version !== 'string' || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(bundle.version)) invalid('invalid bundle identity')
   record(bundle.interfaces)
   if (!Object.keys(bundle.interfaces).length) invalid('interfaces are required')
   if (bundle.required_capabilities !== undefined && !Array.isArray(bundle.required_capabilities)) invalid('capabilities must be an array')
+  if (new Set(bundle.required_capabilities ?? []).size !== (bundle.required_capabilities ?? []).length) invalid('duplicate required capability')
   for (const capability of bundle.required_capabilities ?? []) {
+    if (typeof capability !== 'string') invalid('capability must be a string')
     if (!['object.scope', 'callback.borrow', 'event.parallel', 'event.serial'].includes(capability)) unsupported('capability is not implemented')
   }
   for (const [name, iface] of Object.entries(bundle.interfaces)) {
@@ -78,6 +125,7 @@ export function admit(bytes: Uint8Array): { bundle: Bundle; sha256: string } {
     if (!identifier(name)) invalid('invalid event name')
     keys(event, ['params', 'result', 'modes'])
     if (!Array.isArray(event.modes) || !event.modes.length) invalid('event modes required')
+    if (new Set(event.modes).size !== event.modes.length) invalid('duplicate event mode')
     for (const mode of event.modes) {
       if (!['parallel', 'serial', 'emit', 'bail', 'waterfall'].includes(mode)) invalid('unknown event mode')
       if (!['parallel', 'serial'].includes(mode)) unsupported('event mode requires an extension')
@@ -100,7 +148,7 @@ function checkType(type: any, bundle: Record<string, any>, result: boolean): voi
     case 'value': keys(type, ['kind', 'schema']); checkSchema(type.schema); break
     case 'object':
       keys(type, ['kind', 'interface', 'ownership'])
-      if (!Object.hasOwn(bundle.interfaces, type.interface)) invalid('unknown object interface')
+      if (typeof type.interface !== 'string' || !Object.hasOwn(bundle.interfaces, type.interface)) invalid('unknown object interface')
       if (!['scope', 'borrow'].includes(type.ownership)) invalid('unknown ownership')
       if (result && type.ownership !== 'scope') invalid('returned objects must belong to a scope')
       break
@@ -129,6 +177,8 @@ function resolve(root: Schema, path: string): Schema {
 export function checkSchema(schema: Schema, root = schema, stack = new Set<string>()): void {
   record(schema)
   for (const keyword of Object.keys(schema)) if (!keywords.includes(keyword)) unsupported('schema keyword is unsupported')
+  if (schema.$schema !== undefined && schema.$schema !== 'https://json-schema.org/draft/2020-12/schema') unsupported('only JSON Schema 2020-12 is supported')
+  for (const key of ['title', 'description']) if (schema[key] !== undefined && typeof schema[key] !== 'string') invalid('schema annotation must be a string')
   if (schema.$ref !== undefined) {
     if (typeof schema.$ref !== 'string') unsupported('only local value $ref is supported')
     if (stack.has(schema.$ref)) invalid('recursive value schema')
@@ -145,21 +195,40 @@ export function checkSchema(schema: Schema, root = schema, stack = new Set<strin
   if (schema.oneOf !== undefined) {
     if (!Array.isArray(schema.oneOf) || !schema.oneOf.length) invalid('oneOf requires nonempty branches')
     for (const branch of schema.oneOf) checkSchema(branch, root, stack)
+    const tagged = Object.keys(schema.oneOf[0].properties ?? {}).some(tag => {
+      const constants = new Set<string>()
+      return schema.oneOf.every((branch: Schema) => {
+        const field = branch.properties?.[tag]
+        if (branch.type !== 'object' || !branch.required?.includes(tag) || field?.type !== 'string' || typeof field.const !== 'string' || constants.has(field.const)) return false
+        constants.add(field.const); return true
+      })
+    })
+    if (!tagged) unsupported('oneOf requires a distinct required string discriminant')
   }
   if (schema.required !== undefined) {
     if (!Array.isArray(schema.required)) invalid('required must be an array')
+    if (new Set(schema.required).size !== schema.required.length) invalid('duplicate required field')
     for (const field of schema.required) if (typeof field !== 'string' || !Object.hasOwn(schema.properties ?? {}, field)) invalid('required field is not declared')
   }
   if (schema.additionalProperties !== undefined && typeof schema.additionalProperties !== 'boolean') unsupported('additionalProperties schemas are unsupported')
   if (schema.enum !== undefined && (!Array.isArray(schema.enum) || !schema.enum.length)) invalid('enum must be nonempty')
+  if (schema.enum !== undefined) {
+    if (schema.enum.some((v: unknown) => !safeJson(v)) || new Set(schema.enum.map(canonical)).size !== schema.enum.length) invalid('unsafe or duplicate enum value')
+  }
+  if (Object.hasOwn(schema, 'const') && !safeJson(schema.const)) invalid('unsafe const value')
   for (const key of ['minimum', 'maximum', 'minItems', 'maxItems', 'minLength', 'maxLength']) {
     if (schema[key] === undefined) continue
     if (typeof schema[key] !== 'number' || !Number.isFinite(schema[key])) invalid('schema bound must be finite')
+    if (!safeJson(schema[key])) invalid('unsafe schema numeric bound')
     if (!['minimum', 'maximum'].includes(key) && (!Number.isInteger(schema[key]) || schema[key] < 0)) invalid('size bound must be nonnegative integer')
+  }
+  for (const [min, max] of [['minimum', 'maximum'], ['minItems', 'maxItems'], ['minLength', 'maxLength']]) {
+    if (schema[min] !== undefined && schema[max] !== undefined && schema[min] > schema[max]) invalid('inverted schema bounds')
   }
 }
 function safeJson(value: any): boolean {
   if (typeof value === 'number') return Number.isFinite(value) && (!Number.isInteger(value) || Number.isSafeInteger(value))
+  if (typeof value === 'string') return scalarUnicode(value)
   if (Array.isArray(value)) return value.every(safeJson)
   if (value && typeof value === 'object') return Object.entries(value).every(([k, v]) => !['__proto__', 'prototype', 'constructor'].includes(k) && safeJson(v))
   return value === null || ['string', 'boolean'].includes(typeof value)

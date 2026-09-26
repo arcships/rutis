@@ -1,0 +1,516 @@
+//! Owner-side strong pins for actual objects. Identity is independent of field
+//! equality and survives a shared object's unpinned intervals while it is alive.
+use crate::error::{ErrorCode, ProtocolError, Result};
+use crate::identity::{Activation, ObjectIdentity, Sequence};
+use crate::managed::ActivationGate;
+use std::any::{Any, TypeId};
+use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, Weak,
+};
+use tokio::sync::Notify;
+
+type Object = Arc<dyn Any + Send + Sync>;
+type CleanupFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+type Disposer = Box<dyn FnOnce(Object) -> CleanupFuture + Send>;
+
+/// One allocator belongs to the entire runtime epoch, across all activations.
+#[derive(Clone, Default)]
+pub struct ObjectIds(Arc<AtomicU64>);
+impl ObjectIds {
+    fn next(&self) -> Result<Sequence> {
+        self.0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .map(|n| Sequence(n + 1))
+            .map_err(|_| error(ErrorCode::Unavailable, "object sequence exhausted"))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PinKey {
+    /// Staging pins cover the gap before a broker grants a result or export.
+    Staging(Sequence),
+    Delivery {
+        recipient: Activation,
+        id: Sequence,
+    },
+    Execution {
+        caller: Activation,
+        call: Sequence,
+    },
+}
+
+struct Entry {
+    address: (usize, TypeId),
+    weak: Weak<dyn Any + Send + Sync>,
+    held: Option<Object>,
+    pins: usize,
+    disposed: bool,
+    disposer: Option<Disposer>,
+}
+struct State {
+    open: bool,
+    entries: BTreeMap<ObjectIdentity, Entry>,
+    addresses: BTreeMap<(usize, TypeId), ObjectIdentity>,
+    pins: BTreeMap<PinKey, ObjectIdentity>,
+    released: BTreeSet<PinKey>,
+    retired: BTreeMap<(String, Sequence), Sequence>,
+    closed_epochs: BTreeMap<String, Sequence>,
+    cleaning: usize,
+    errors: Vec<ProtocolError>,
+}
+struct Inner {
+    state: Mutex<State>,
+    changed: Notify,
+    runtime: tokio::runtime::Handle,
+}
+#[derive(Clone)]
+pub struct Exports {
+    owner: Activation,
+    ids: ObjectIds,
+    inner: Arc<Inner>,
+    gate: Option<ActivationGate>,
+}
+
+fn error(code: ErrorCode, message: &str) -> ProtocolError {
+    ProtocolError::new(code, "export", message)
+}
+
+impl Exports {
+    pub fn new(owner: Activation, ids: ObjectIds) -> Self {
+        Self {
+            owner,
+            ids,
+            gate: None,
+            inner: Arc::new(Inner {
+                state: Mutex::new(State {
+                    open: true,
+                    entries: BTreeMap::new(),
+                    addresses: BTreeMap::new(),
+                    pins: BTreeMap::new(),
+                    released: BTreeSet::new(),
+                    retired: BTreeMap::new(),
+                    closed_epochs: BTreeMap::new(),
+                    cleaning: 0,
+                    errors: Vec::new(),
+                }),
+                changed: Notify::new(),
+                runtime: tokio::runtime::Handle::current(),
+            }),
+        }
+    }
+
+    /// The native context owns cleanup. Admission also checks its managed gate
+    /// synchronously, so native pre-cancellation beats an async cleanup observer.
+    pub fn managed(
+        ctx: &rutis::Ctx,
+        owner: Activation,
+        ids: ObjectIds,
+        gate: ActivationGate,
+    ) -> std::result::Result<Self, rutis::CordisError> {
+        let mut exports = Self::new(owner, ids);
+        exports.gate = Some(gate.clone());
+        let cleanup = exports.clone();
+        let token = ctx.cancellation_token();
+        let handle = ctx.handle().clone();
+        let stop_observer = tokio_util::sync::CancellationToken::new();
+        ctx.effect_named("protocol exports", move || {
+            let observer = cleanup.clone();
+            let stopped = stop_observer.clone();
+            let task = handle.spawn(async move {
+                tokio::select! { _ = token.cancelled() => {}, _ = gate.revoked() => {}, _ = stopped.cancelled() => {} }
+                observer.close();
+            });
+            rutis::Effect::AsyncDisposer(Box::new(move || {
+                cleanup.close();
+                stop_observer.cancel();
+                Box::pin(async move {
+                    task.await
+                        .map_err(|e| rutis::CordisError::PluginFailed(Box::new(e)))?;
+                    cleanup
+                        .join()
+                        .await
+                        .map_err(|e| rutis::CordisError::PluginFailed(Box::new(e)))
+                })
+            }))
+        })?;
+        Ok(exports)
+    }
+
+    fn admission_open(&self, state: &State) -> bool {
+        state.open && self.gate.as_ref().is_none_or(ActivationGate::is_open)
+    }
+
+    pub fn register<T: Any + Send + Sync>(&self, object: &Arc<T>) -> Result<ObjectIdentity> {
+        self.register_inner(object.clone(), None)
+    }
+
+    /// Only for objects whose external resource lifetime is exclusively owned
+    /// by the protocol. Objects with legitimate local users use register().
+    pub fn register_exclusive<T, F, Fut>(
+        &self,
+        object: &Arc<T>,
+        disposer: F,
+    ) -> Result<ObjectIdentity>
+    where
+        T: Any + Send + Sync,
+        F: FnOnce(Arc<T>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        let disposer: Disposer = Box::new(move |object| {
+            Box::pin(disposer(
+                object.downcast::<T>().expect("registered object type"),
+            ))
+        });
+        self.register_inner(object.clone(), Some(disposer))
+    }
+
+    fn register_inner(&self, object: Object, disposer: Option<Disposer>) -> Result<ObjectIdentity> {
+        let address = (
+            Arc::as_ptr(&object) as *const () as usize,
+            object.as_ref().type_id(),
+        );
+        // Closure captures may have user Drop implementations. Declare this
+        // before the lock so every early return also drops it after unlocking.
+        let mut discarded = None;
+        let mut state = self.inner.state.lock().unwrap();
+        if !self.admission_open(&state) {
+            return Err(error(ErrorCode::ScopeClosed, "owner activation closed"));
+        }
+        if let Some(identity) = state.addresses.get(&address) {
+            let entry = &state.entries[identity];
+            if entry.weak.strong_count() != 0 {
+                if entry.disposed {
+                    return Err(error(ErrorCode::StaleObject, "exclusive object disposed"));
+                }
+                if disposer.is_some() {
+                    return Err(error(
+                        ErrorCode::InvalidParams,
+                        "exclusive registration must use its existing identity",
+                    ));
+                }
+                return Ok(identity.clone());
+            }
+            let identity = identity.clone();
+            state.addresses.remove(&address);
+            discarded = state.entries.remove(&identity);
+        }
+        let identity = ObjectIdentity {
+            owner: self.owner.clone(),
+            object: self.ids.next()?,
+        };
+        state.addresses.insert(address, identity.clone());
+        state.entries.insert(
+            identity.clone(),
+            Entry {
+                address,
+                weak: Arc::downgrade(&object),
+                // Exclusive registration already transfers resource ownership.
+                // Hold it provisionally until the first pin, or owner rollback.
+                held: disposer.as_ref().map(|_| object.clone()),
+                pins: 0,
+                disposed: false,
+                disposer,
+            },
+        );
+        drop(state);
+        drop(discarded);
+        Ok(identity)
+    }
+
+    pub fn pin(&self, identity: &ObjectIdentity, key: PinKey) -> Result<()> {
+        let mut state = self.inner.state.lock().unwrap();
+        if !self.admission_open(&state) {
+            return Err(error(ErrorCode::ScopeClosed, "owner activation closed"));
+        }
+        if state.released.contains(&key) || retired(&state, &key) {
+            return Err(error(
+                ErrorCode::StaleObject,
+                "released pin cannot be reacquired",
+            ));
+        }
+        if let Some(old) = state.pins.get(&key) {
+            return if old == identity {
+                Ok(())
+            } else {
+                Err(error(ErrorCode::CapabilityDenied, "pin key changed object"))
+            };
+        }
+        let entry = state
+            .entries
+            .get_mut(identity)
+            .ok_or_else(|| error(ErrorCode::StaleObject, "unknown object"))?;
+        if entry.disposed {
+            return Err(error(ErrorCode::StaleObject, "exclusive object disposed"));
+        }
+        let object = entry
+            .held
+            .clone()
+            .or_else(|| entry.weak.upgrade())
+            .ok_or_else(|| error(ErrorCode::StaleObject, "local object already dropped"))?;
+        entry.held = Some(object);
+        entry.pins += 1;
+        state.pins.insert(key, identity.clone());
+        Ok(())
+    }
+
+    /// Called only by an authenticated owner dispatch after obtaining an
+    /// execution pin. Passback author APIs expose a gated facade, never this.
+    pub fn execution_object<T: Any + Send + Sync>(&self, key: &PinKey) -> Result<Arc<T>> {
+        if !matches!(key, PinKey::Execution { .. }) {
+            return Err(error(ErrorCode::CapabilityDenied, "execution pin required"));
+        }
+        let state = self.inner.state.lock().unwrap();
+        let identity = state
+            .pins
+            .get(key)
+            .ok_or_else(|| error(ErrorCode::StaleObject, "execution already finished"))?;
+        state.entries[identity]
+            .held
+            .as_ref()
+            .unwrap()
+            .clone()
+            .downcast::<T>()
+            .map_err(|_| {
+                error(
+                    ErrorCode::InterfaceMismatch,
+                    "export adapter object type mismatch",
+                )
+            })
+    }
+
+    pub fn release(&self, key: &PinKey) {
+        let cleanup = {
+            let mut state = self.inner.state.lock().unwrap();
+            if !retired(&state, key) {
+                state.released.insert(key.clone());
+            }
+            state
+                .pins
+                .remove(key)
+                .and_then(|identity| unpin(&mut state, &identity))
+        };
+        self.schedule(cleanup.into_iter().collect());
+    }
+
+    /// Admission closes synchronously. Executing tasks keep their objects;
+    /// caller cancellation and shutdown waiters do not remove execution pins.
+    pub fn close(&self) {
+        let cleanups = {
+            let mut state = self.inner.state.lock().unwrap();
+            state.open = false;
+            let keys: Vec<_> = state
+                .pins
+                .keys()
+                .filter(|k| !matches!(k, PinKey::Execution { .. }))
+                .cloned()
+                .collect();
+            let mut cleanups: Vec<_> = keys
+                .into_iter()
+                .filter_map(|key| {
+                    state.released.insert(key.clone());
+                    let identity = state.pins.remove(&key).unwrap();
+                    unpin(&mut state, &identity)
+                })
+                .collect();
+            let provisional: Vec<_> = state
+                .entries
+                .iter()
+                .filter(|(_, entry)| {
+                    entry.pins == 0 && entry.held.is_some() && entry.disposer.is_some()
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            for identity in provisional {
+                cleanups.push(take_cleanup(&mut state, &identity));
+            }
+            cleanups
+        };
+        self.schedule(cleanups);
+    }
+
+    fn schedule(&self, cleanups: Vec<(Object, Option<Disposer>)>) {
+        for (object, disposer) in cleanups {
+            if let Some(disposer) = disposer {
+                let inner = self.inner.clone();
+                // Supervise panic/abort as a cleanup error instead of leaving
+                // a counter stuck or treating an unconfirmed disposer as done.
+                let task = self
+                    .inner
+                    .runtime
+                    .spawn(async move { disposer(object).await });
+                self.inner.runtime.spawn(async move {
+                    let result = task.await.unwrap_or_else(|e| {
+                        Err(error(
+                            ErrorCode::Business,
+                            &format!("object disposer failed: {e}"),
+                        ))
+                    });
+                    let mut state = inner.state.lock().unwrap();
+                    state.cleaning -= 1;
+                    if let Err(error) = result {
+                        state.errors.push(error);
+                    }
+                    drop(state);
+                    inner.changed.notify_waiters();
+                });
+            } else {
+                drop(object);
+            }
+        }
+        self.inner.changed.notify_waiters();
+    }
+
+    pub async fn join(&self) -> Result<()> {
+        loop {
+            let changed = self.inner.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let state = self.inner.state.lock().unwrap();
+                if state.pins.is_empty() && state.cleaning == 0 {
+                    return state.errors.first().cloned().map_or(Ok(()), Err);
+                }
+            }
+            changed.await;
+        }
+    }
+
+    pub fn pins(&self, identity: &ObjectIdentity) -> usize {
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .entries
+            .get(identity)
+            .map_or(0, |e| e.pins)
+    }
+
+    /// Weak identity entries do not retain temporary objects. Prune dead
+    /// identities without reusing ids or dropping live exclusive tombstones.
+    pub fn sweep(&self) {
+        let mut state = self.inner.state.lock().unwrap();
+        let dead: Vec<_> = state
+            .entries
+            .iter()
+            .filter(|(_, e)| e.pins == 0 && e.weak.strong_count() == 0)
+            .map(|(id, e)| (id.clone(), e.address))
+            .collect();
+        let mut discarded = Vec::new();
+        for (id, address) in dead {
+            discarded.push(state.entries.remove(&id));
+            state.addresses.remove(&address);
+        }
+        drop(state);
+        drop(discarded);
+    }
+
+    /// This watermark is supplied by the broker after receiver acknowledgement,
+    /// not inferred by the owner from clocks or locally observed sparse ids.
+    pub fn retire_deliveries(
+        &self,
+        runtime: &str,
+        epoch: Sequence,
+        through: Sequence,
+    ) -> Result<()> {
+        let mut state = self.inner.state.lock().unwrap();
+        let target = (runtime.to_string(), epoch);
+        if state
+            .retired
+            .get(&target)
+            .is_some_and(|last| through < *last)
+            || state.pins.keys().any(|key| {
+                matches!(key, PinKey::Delivery { recipient, id }
+                if recipient.runtime == runtime && recipient.epoch == epoch && *id <= through)
+            })
+        {
+            return Err(error(
+                ErrorCode::InvalidParams,
+                "unconfirmed export delivery retirement",
+            ));
+        }
+        state.released.retain(|key| {
+            !matches!(key, PinKey::Delivery { recipient, id }
+            if recipient.runtime == runtime && recipient.epoch == epoch && *id <= through)
+        });
+        state.retired.insert(target, through);
+        Ok(())
+    }
+
+    /// Broker-confirmed disconnection removes delivery tombstones for the
+    /// recipient epoch. Execution pins remain until actual owner completion.
+    pub fn close_recipient_epoch(&self, runtime: &str, epoch: Sequence) {
+        let cleanups = {
+            let mut state = self.inner.state.lock().unwrap();
+            state
+                .closed_epochs
+                .entry(runtime.into())
+                .and_modify(|last| *last = (*last).max(epoch))
+                .or_insert(epoch);
+            let keys: Vec<_> = state
+                .pins
+                .keys()
+                .filter(|key| {
+                    matches!(key, PinKey::Delivery { recipient, .. }
+                if recipient.runtime == runtime && recipient.epoch <= epoch)
+                })
+                .cloned()
+                .collect();
+            let cleanups = keys
+                .into_iter()
+                .filter_map(|key| {
+                    let identity = state.pins.remove(&key).unwrap();
+                    unpin(&mut state, &identity)
+                })
+                .collect();
+            state.released.retain(|key| {
+                !matches!(key, PinKey::Delivery { recipient, .. }
+                if recipient.runtime == runtime && recipient.epoch <= epoch)
+            });
+            state
+                .retired
+                .retain(|(recipient, e), _| recipient != runtime || *e > epoch);
+            cleanups
+        };
+        self.schedule(cleanups);
+    }
+}
+
+fn retired(state: &State, key: &PinKey) -> bool {
+    match key {
+        PinKey::Delivery { recipient, id } => {
+            state
+                .retired
+                .get(&(recipient.runtime.clone(), recipient.epoch))
+                .is_some_and(|through| id <= through)
+                || state
+                    .closed_epochs
+                    .get(&recipient.runtime)
+                    .is_some_and(|closed| recipient.epoch <= *closed)
+        }
+        _ => false,
+    }
+}
+
+fn unpin(state: &mut State, identity: &ObjectIdentity) -> Option<(Object, Option<Disposer>)> {
+    let entry = state.entries.get_mut(identity).unwrap();
+    entry.pins -= 1;
+    if entry.pins != 0 {
+        return None;
+    }
+    Some(take_cleanup(state, identity))
+}
+
+fn take_cleanup(state: &mut State, identity: &ObjectIdentity) -> (Object, Option<Disposer>) {
+    let entry = state.entries.get_mut(identity).unwrap();
+    let object = entry.held.take().unwrap();
+    let disposer = entry.disposer.take();
+    if disposer.is_some() {
+        entry.disposed = true;
+        state.cleaning += 1;
+    }
+    (object, disposer)
+}

@@ -46,7 +46,8 @@ pub struct Broker {
     recipients: BTreeMap<(String, Sequence), Recipient>,
     objects: BTreeMap<ObjectIdentity, ObjectEntry>,
     calls: BTreeMap<(Activation, Sequence), ObjectIdentity>,
-    next_objects: BTreeMap<Activation, u64>,
+    next_objects: BTreeMap<(String, Sequence), u64>,
+    object_owners: BTreeMap<(String, Sequence, Sequence), Activation>,
     latest_epochs: BTreeMap<String, Sequence>,
     closed_epochs: BTreeMap<String, Sequence>,
     latest_activations: BTreeMap<(String, Sequence), Sequence>,
@@ -146,6 +147,37 @@ impl Broker {
         owner: &Activation,
         views: BTreeMap<InterfaceView, BTreeSet<String>>,
     ) -> Result<ObjectIdentity> {
+        let key = (owner.runtime.clone(), owner.epoch);
+        let sequence = self
+            .next_objects
+            .get(&key)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| error(ErrorCode::Unavailable, "object sequence exhausted"))?;
+        let identity = ObjectIdentity {
+            owner: owner.clone(),
+            object: Sequence(sequence),
+        };
+        self.register_export(owner, identity.clone(), views)?;
+        Ok(identity)
+    }
+
+    /// Runner SDKs allocate stable object identities for the entire epoch. A
+    /// repeat export can only repeat the same interface contract, never replace
+    /// the object behind a previously granted identity or widen its methods.
+    pub fn register_export(
+        &mut self,
+        owner: &Activation,
+        identity: ObjectIdentity,
+        views: BTreeMap<InterfaceView, BTreeSet<String>>,
+    ) -> Result<()> {
+        if identity.owner != *owner {
+            return Err(error(
+                ErrorCode::CapabilityDenied,
+                "export belongs to another owner",
+            ));
+        }
         if !self.activations.contains(owner) {
             return Err(error(ErrorCode::Unavailable, "object owner unavailable"));
         }
@@ -155,14 +187,29 @@ impl Broker {
                 "object must expose a declared interface view",
             ));
         }
-        let next = self.next_objects.entry(owner.clone()).or_default();
-        *next = next
-            .checked_add(1)
-            .ok_or_else(|| error(ErrorCode::Unavailable, "object sequence exhausted"))?;
-        let identity = ObjectIdentity {
-            owner: owner.clone(),
-            object: Sequence(*next),
-        };
+        if let Some(entry) = self.objects.get(&identity) {
+            return if entry.views == views {
+                Ok(())
+            } else {
+                Err(error(
+                    ErrorCode::InterfaceMismatch,
+                    "repeat export changed its interface views",
+                ))
+            };
+        }
+        let object_key = (owner.runtime.clone(), owner.epoch, identity.object);
+        if identity.object.0 == 0 || self.object_owners.contains_key(&object_key) {
+            return Err(error(
+                ErrorCode::StaleObject,
+                "object id cannot be reused in an epoch",
+            ));
+        }
+        // Native plugins can finish startup in a different order than SDK id
+        // allocation. Uniqueness is epoch-wide; announcement need not be sorted.
+        let key = (owner.runtime.clone(), owner.epoch);
+        let next = self.next_objects.entry(key).or_default();
+        *next = (*next).max(identity.object.0);
+        self.object_owners.insert(object_key, owner.clone());
         self.objects.insert(
             identity.clone(),
             ObjectEntry {
@@ -170,7 +217,7 @@ impl Broker {
                 ..Default::default()
             },
         );
-        Ok(identity)
+        Ok(())
     }
 
     /// This is only used for an owner-originated result/event or service
@@ -481,6 +528,9 @@ impl Broker {
             .and_modify(|old| *old = (*old).max(epoch))
             .or_insert(epoch);
         self.recipients.remove(&(runtime.into(), epoch));
+        self.object_owners
+            .retain(|(r, e, _), _| r != runtime || *e != epoch);
+        self.next_objects.remove(&(runtime.into(), epoch));
     }
 
     pub fn pins(&self, object: &ObjectIdentity) -> (usize, usize) {

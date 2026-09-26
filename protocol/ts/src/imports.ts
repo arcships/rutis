@@ -54,21 +54,44 @@ export class Imports {
     this.scopes.set(key, { scope: structuredClone(scope), parent: parent && canonical(parent) })
   }
 
-  receive(input: Delivery): ObjectProxy {
-    const delivery = parseDelivery(input)
-    if (BigInt(delivery.id) <= this.retired) fail('StaleObject', 'delivery is below retirement watermark')
-    if (!this.scopes.has(canonical(delivery.recipient))) fail('ScopeClosed', 'delivery scope closed')
-    const seen = this.seen.get(delivery.id)
-    if (seen && canonical(seen.delivery) !== canonical(delivery)) fail('CapabilityDenied', 'delivery id changed identity')
-    if (seen?.terminal) fail('StaleObject', 'released delivery cannot revive a wrapper')
-    const key = canonical([delivery.recipient, delivery.object, delivery.view])
-    let proxy = this.cache.get(key)?.deref()
-    if (!proxy?.active) proxy = new ObjectProxy(this, delivery.object, delivery.view, delivery.recipient)
-    wrappers.get(proxy)!.tokens.add(delivery.id)
-    this.cache.set(key, new WeakRef(proxy))
-    this.seen.set(delivery.id, { delivery, terminal: false })
-    this.controls.push({ type: 'accept', id: delivery.id, token: delivery.token })
-    return proxy
+  receive(input: Delivery): ObjectProxy { return this.receiveBatch([input])[0] }
+
+  receiveBatch(inputs: Delivery[]): ObjectProxy[] {
+    let deliveries: Delivery[]
+    try {
+      deliveries = inputs.map(parseDelivery)
+      const batch = new Map<string, Delivery>()
+      for (const delivery of deliveries) {
+        if (BigInt(delivery.id) <= this.retired) fail('StaleObject', 'delivery is below retirement watermark')
+        if (!this.scopes.has(canonical(delivery.recipient))) fail('ScopeClosed', 'delivery scope closed')
+        const seen = this.seen.get(delivery.id)
+        if (seen && canonical(seen.delivery) !== canonical(delivery)) fail('CapabilityDenied', 'delivery id changed identity')
+        if (seen?.terminal) fail('StaleObject', 'released delivery cannot revive a wrapper')
+        const old = batch.get(delivery.id)
+        if (old && canonical(old) !== canonical(delivery)) fail('CapabilityDenied', 'conflicting delivery records in one graph')
+        batch.set(delivery.id, delivery)
+      }
+    } catch (error) { this.reject(inputs); throw error }
+    return deliveries.map(delivery => {
+      const key = canonical([delivery.recipient, delivery.object, delivery.view])
+      let proxy = this.cache.get(key)?.deref()
+      if (!proxy?.active) proxy = new ObjectProxy(this, delivery.object, delivery.view, delivery.recipient)
+      wrappers.get(proxy)!.tokens.add(delivery.id)
+      this.cache.set(key, new WeakRef(proxy))
+      this.seen.set(delivery.id, { delivery, terminal: false })
+      this.controls.push({ type: 'accept', id: delivery.id, token: delivery.token })
+      return proxy
+    })
+  }
+
+  /** Failed typed graphs only release new handoffs, preserving earlier aliases. */
+  reject(inputs: Delivery[]): void {
+    for (const input of inputs) {
+      let delivery: Delivery
+      try { delivery = parseDelivery(input) } catch { continue }
+      if (BigInt(delivery.id) <= this.retired || this.seen.has(delivery.id)) continue
+      this.seen.set(delivery.id, { delivery, terminal: false }); this.releaseToken(delivery.id)
+    }
   }
 
   closeScope(scope: Scope): void {
@@ -95,6 +118,7 @@ export class Imports {
     const entries = [...this.seen].filter(([id]) => BigInt(id) > this.retired && BigInt(id) <= prefix)
     if (BigInt(entries.length) !== prefix - this.retired || entries.some(([, seen]) => !seen.terminal)) fail('InvalidParams', 'prefix has gaps or live tokens')
     for (const [id] of entries) this.seen.delete(id)
+    for (const [key, ref] of this.cache) if (!ref.deref()?.active) this.cache.delete(key)
     this.retired = prefix
   }
 

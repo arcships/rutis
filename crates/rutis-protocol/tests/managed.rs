@@ -1,5 +1,7 @@
 use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, Plugin, TypeKey};
 use rutis::{Event, Listener};
+use rutis_protocol::exports::{Exports, ObjectIds, PinKey};
+use rutis_protocol::identity::{Activation, Sequence};
 use rutis_protocol::managed::{ActivationGate, ManagedActivation};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
@@ -45,6 +47,60 @@ fn probe(injects: Vec<TypeKey>) -> Probe {
         entered: Arc::default(),
         cleanup: Arc::default(),
     }
+}
+
+#[tokio::test]
+async fn native_context_revokes_export_admission_and_joins_execution_and_disposer() {
+    let root = Ctx::root().unwrap();
+    let dependency = root.provide(1_u8).unwrap();
+    let plugin = probe(vec![TypeKey::of::<u8>()]);
+    let seen = plugin.seen.clone();
+    let managed = ManagedActivation::mount(&root, plugin).unwrap();
+    managed.view().await.unwrap();
+    let ctx = seen.lock().unwrap()[0].clone();
+    let owner = Activation {
+        runtime: "rust".into(),
+        epoch: Sequence(1),
+        activation: Sequence(1),
+    };
+    let exports =
+        Exports::managed(&ctx, owner.clone(), ObjectIds::default(), managed.gate()).unwrap();
+    let object = Arc::new(String::from("connection"));
+    let (entered, started) = tokio::sync::oneshot::channel();
+    let (finish, waiting) = tokio::sync::oneshot::channel();
+    let id = exports
+        .register_exclusive(&object, move |_| async move {
+            entered.send(()).unwrap();
+            waiting.await.unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let delivery = PinKey::Delivery {
+        recipient: owner.clone(),
+        id: Sequence(1),
+    };
+    let execution = PinKey::Execution {
+        caller: owner,
+        call: Sequence(1),
+    };
+    exports.pin(&id, delivery).unwrap();
+    exports.pin(&id, execution.clone()).unwrap();
+    let stopped = tokio::spawn(async move { dependency.dispose().await });
+    ctx.cancelled().await;
+    assert!(exports.register(&object).is_err());
+    assert!(exports.pin(&id, PinKey::Staging(Sequence(1))).is_err());
+    assert!(Arc::ptr_eq(
+        &object,
+        &exports.execution_object::<String>(&execution).unwrap()
+    ));
+    assert!(!stopped.is_finished());
+    exports.release(&execution);
+    started.await.unwrap();
+    assert!(!stopped.is_finished());
+    finish.send(()).unwrap();
+    stopped.await.unwrap().unwrap();
+    managed.stop().await.unwrap();
+    root.shutdown().await.unwrap();
 }
 
 #[tokio::test]

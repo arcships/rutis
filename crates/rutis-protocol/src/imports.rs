@@ -87,63 +87,78 @@ impl Imports {
 
     /// Only the authenticated broker connection supplies Delivery records.
     pub fn receive(&self, delivery: Delivery) -> Result<ObjectProxy> {
+        Ok(self.receive_batch(vec![delivery])?.remove(0))
+    }
+
+    /// Validate the entire envelope before attaching any token. A failed graph
+    /// only releases its new deliveries; previously returned aliases stay live.
+    pub fn receive_batch(&self, deliveries: Vec<Delivery>) -> Result<Vec<ObjectProxy>> {
         let mut state = self.0.lock().unwrap();
-        if delivery.id.0 <= state.retired {
-            return Err(error(
-                ErrorCode::StaleObject,
-                "delivery is below the confirmed retirement watermark",
-            ));
-        }
-        if !state.scopes.contains_key(&delivery.recipient) {
-            return Err(error(ErrorCode::ScopeClosed, "delivery scope closed"));
-        }
-        if let Some(seen) = state.seen.get(&delivery.id) {
-            if seen.delivery != delivery {
-                return Err(error(
-                    ErrorCode::CapabilityDenied,
-                    "delivery id changed identity",
-                ));
+        let checked = (|| {
+            let mut batch = BTreeMap::new();
+            for delivery in &deliveries {
+                check_delivery(&state, delivery)?;
+                if batch
+                    .insert(delivery.id, delivery)
+                    .is_some_and(|old| old != delivery)
+                {
+                    return Err(error(
+                        ErrorCode::CapabilityDenied,
+                        "conflicting delivery records in one graph",
+                    ));
+                }
             }
-            if seen.terminal {
-                return Err(error(
-                    ErrorCode::StaleObject,
-                    "released delivery cannot revive a wrapper",
-                ));
-            }
+            Ok(())
+        })();
+        if let Err(error) = checked {
+            reject_deliveries(&mut state, &deliveries);
+            return Err(error);
         }
-        let key = (
-            delivery.recipient.clone(),
-            delivery.object.clone(),
-            delivery.view.clone(),
-        );
-        let wrapper = state
-            .cache
-            .get(&key)
-            .and_then(Weak::upgrade)
-            .filter(|w| w.lock().unwrap().active)
-            .unwrap_or_else(|| {
-                Arc::new(Mutex::new(Wrapper {
-                    object: delivery.object.clone(),
-                    view: delivery.view.clone(),
-                    scope: delivery.recipient.clone(),
-                    tokens: BTreeSet::new(),
-                    active: true,
-                }))
-            });
-        wrapper.lock().unwrap().tokens.insert(delivery.id);
-        state.cache.insert(key, Arc::downgrade(&wrapper));
-        state.controls.push(ImportControl::Accept {
-            id: delivery.id,
-            token: delivery.token.clone(),
-        });
-        state.seen.entry(delivery.id).or_insert(Seen {
-            delivery,
-            terminal: false,
-        });
-        Ok(ObjectProxy {
-            wrapper,
-            imports: Arc::downgrade(&self.0),
-        })
+        Ok(deliveries
+            .into_iter()
+            .map(|delivery| {
+                let key = (
+                    delivery.recipient.clone(),
+                    delivery.object.clone(),
+                    delivery.view.clone(),
+                );
+                let wrapper = state
+                    .cache
+                    .get(&key)
+                    .and_then(Weak::upgrade)
+                    .filter(|w| w.lock().unwrap().active)
+                    .unwrap_or_else(|| {
+                        Arc::new(Mutex::new(Wrapper {
+                            object: delivery.object.clone(),
+                            view: delivery.view.clone(),
+                            scope: delivery.recipient.clone(),
+                            tokens: BTreeSet::new(),
+                            active: true,
+                        }))
+                    });
+                wrapper.lock().unwrap().tokens.insert(delivery.id);
+                state.cache.insert(key, Arc::downgrade(&wrapper));
+                state.controls.push(ImportControl::Accept {
+                    id: delivery.id,
+                    token: delivery.token.clone(),
+                });
+                state.seen.entry(delivery.id).or_insert(Seen {
+                    delivery,
+                    terminal: false,
+                });
+                ObjectProxy {
+                    wrapper,
+                    imports: Arc::downgrade(&self.0),
+                }
+            })
+            .collect())
+    }
+
+    /// Typed graph validation, cancelled results and unconsumed event payloads
+    /// use this before handing anything to author code. Replays never release
+    /// an already accepted token owned by a previous successful delivery.
+    pub fn reject(&self, deliveries: &[Delivery]) {
+        reject_deliveries(&mut self.0.lock().unwrap(), deliveries);
     }
 
     pub fn close_scope(&self, scope: &Scope) {
@@ -210,12 +225,60 @@ impl Imports {
             ));
         }
         state.seen.retain(|id, _| id.0 > through.0);
+        state.cache.retain(|_, wrapper| {
+            wrapper
+                .upgrade()
+                .is_some_and(|wrapper| wrapper.lock().unwrap().active)
+        });
         state.retired = through.0;
         Ok(())
     }
 
     pub fn take_controls(&self) -> Vec<ImportControl> {
         std::mem::take(&mut self.0.lock().unwrap().controls)
+    }
+}
+
+fn check_delivery(state: &State, delivery: &Delivery) -> Result<()> {
+    if delivery.id.0 <= state.retired {
+        return Err(error(
+            ErrorCode::StaleObject,
+            "delivery is below the confirmed retirement watermark",
+        ));
+    }
+    if !state.scopes.contains_key(&delivery.recipient) {
+        return Err(error(ErrorCode::ScopeClosed, "delivery scope closed"));
+    }
+    if let Some(seen) = state.seen.get(&delivery.id) {
+        if seen.delivery != *delivery {
+            return Err(error(
+                ErrorCode::CapabilityDenied,
+                "delivery id changed identity",
+            ));
+        }
+        if seen.terminal {
+            return Err(error(
+                ErrorCode::StaleObject,
+                "released delivery cannot revive a wrapper",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn reject_deliveries(state: &mut State, deliveries: &[Delivery]) {
+    for delivery in deliveries {
+        if delivery.id.0 <= state.retired || state.seen.contains_key(&delivery.id) {
+            continue;
+        }
+        state.seen.insert(
+            delivery.id,
+            Seen {
+                delivery: delivery.clone(),
+                terminal: false,
+            },
+        );
+        release_token(state, delivery.id);
     }
 }
 

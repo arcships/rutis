@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
-import { admit, validateWire, ProtocolError, type TypeExpr } from '../src/contract.ts'
+import { admit, callbackKey, validateWire, ProtocolError, type TypeExpr } from '../src/contract.ts'
+import { decodeJson, MAX_JSON_BYTES } from '../src/json.ts'
 
 const bundleBytes = readFileSync(new URL('../../fixtures/database.bundle.json', import.meta.url))
 test('T22: shared Rust/TS legal and illegal contract corpus', () => {
@@ -12,6 +13,33 @@ test('T22: shared Rust/TS legal and illegal contract corpus', () => {
     catch (caught) { assert.ok(caught instanceof ProtocolError); error = caught.code }
     assert.equal(error, entry.error, entry.name)
   }
+})
+test('T22: shared strict JSON and descriptor corpora', () => {
+  const corpus = JSON.parse(readFileSync(new URL('../../fixtures/json-corpus.json', import.meta.url), 'utf8'))
+  for (const entry of corpus) {
+    let error: string | null = null
+    try { decodeJson(Buffer.from(entry.hex, 'hex')) }
+    catch (caught) { assert.ok(caught instanceof ProtocolError); error = caught.code }
+    assert.equal(error, entry.error, entry.name)
+  }
+  assert.throws(() => decodeJson(Buffer.alloc(MAX_JSON_BYTES + 1)), ProtocolError)
+  const descriptors = JSON.parse(readFileSync(new URL('../../fixtures/descriptor-corpus.json', import.meta.url), 'utf8'))
+  for (const entry of descriptors) {
+    const bundle = JSON.parse(bundleBytes.toString())
+    if (entry.path) {
+      let parent = bundle
+      for (const part of entry.path.slice(0, -1)) parent = parent[part]
+      parent[entry.path.at(-1)] = entry.value
+    }
+    let error: string | null = null
+    try { admit(Buffer.from(entry.raw ?? JSON.stringify(bundle))) }
+    catch (caught) { assert.ok(caught instanceof ProtocolError); error = caught.code }
+    assert.equal(error, entry.error, entry.name)
+  }
+})
+test('callback signature matches across numeric spellings and Unicode key ordering', () => {
+  const corpus = JSON.parse(readFileSync(new URL('../../fixtures/callback-corpus.json', import.meta.url), 'utf8'))
+  for (const entry of corpus) assert.equal(callbackKey(entry.type), entry.fingerprint, entry.name)
 })
 test('object graph descriptor admits cyclic interface relationships and binds raw bytes', () => {
   const admitted = admit(bundleBytes)

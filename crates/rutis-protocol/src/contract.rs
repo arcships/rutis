@@ -101,34 +101,13 @@ pub enum WireValue {
 }
 
 /// Callback signature includes its ownership and complete value/object types.
-/// Sorted JSON keys make this independent of each language's serializer order.
+/// The canonical signature encoding is independent of JSON serializer order.
 pub fn callback_key(expr: &TypeExpr) -> String {
-    fn canonical(value: &Value) -> String {
-        match value {
-            Value::Object(fields) => {
-                let fields: BTreeMap<_, _> = fields.iter().collect();
-                format!(
-                    "{{{}}}",
-                    fields
-                        .into_iter()
-                        .map(|(k, v)| format!(
-                            "{}:{}",
-                            serde_json::to_string(k).unwrap(),
-                            canonical(v)
-                        ))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                )
-            }
-            Value::Array(items) => format!(
-                "[{}]",
-                items.iter().map(canonical).collect::<Vec<_>>().join(",")
-            ),
-            _ => serde_json::to_string(value).unwrap(),
-        }
-    }
     let value = serde_json::to_value(expr).expect("type expression is serializable");
-    format!("$callback:{:x}", Sha256::digest(canonical(&value)))
+    format!(
+        "$callback:{:x}",
+        Sha256::digest(crate::json::canonical(&value))
+    )
 }
 
 #[derive(Debug)]
@@ -156,7 +135,19 @@ pub fn identifier(value: &str) -> bool {
 
 impl AdmittedBundle {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
-        let bundle: Bundle = serde_json::from_slice(bytes).map_err(|e| invalid(e.to_string()))?;
+        let value = crate::json::decode(bytes)?;
+        if let Some(capabilities) = value.get("required_capabilities").and_then(Value::as_array) {
+            if capabilities
+                .iter()
+                .map(crate::json::canonical)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != capabilities.len()
+            {
+                return Err(invalid("duplicate required capability"));
+            }
+        }
+        let bundle: Bundle = serde_json::from_value(value).map_err(|e| invalid(e.to_string()))?;
         if !identifier(&bundle.id)
             || !valid_version(&bundle.version)
             || bundle.interfaces.is_empty()
@@ -197,6 +188,14 @@ impl AdmittedBundle {
         for (name, event) in &bundle.events {
             if !identifier(name) || event.modes.is_empty() {
                 return Err(invalid("invalid event"));
+            }
+            if event
+                .modes
+                .iter()
+                .enumerate()
+                .any(|(i, mode)| event.modes[..i].contains(mode))
+            {
+                return Err(invalid("duplicate event mode"));
             }
             for mode in &event.modes {
                 if !matches!(mode, EventMode::Parallel | EventMode::Serial) {
@@ -318,6 +317,17 @@ fn check_schema(schema: &Value, root: &Value, stack: &mut BTreeSet<String>) -> R
             return Err(unsupported(format!("schema keyword {key} is unsupported")));
         }
     }
+    if obj
+        .get("$schema")
+        .is_some_and(|v| v.as_str() != Some("https://json-schema.org/draft/2020-12/schema"))
+    {
+        return Err(unsupported("only JSON Schema 2020-12 is supported"));
+    }
+    for key in ["title", "description"] {
+        if obj.get(key).is_some_and(|v| !v.is_string()) {
+            return Err(invalid("schema annotation must be a string"));
+        }
+    }
     if let Some(reference) = obj.get("$ref") {
         let path = reference
             .as_str()
@@ -366,15 +376,52 @@ fn check_schema(schema: &Value, root: &Value, stack: &mut BTreeSet<String>) -> R
         for branch in branches {
             check_schema(branch, root, stack)?;
         }
+        // The first release supports discriminated object unions, not general
+        // overlapping alternatives. One required string tag selects a branch.
+        let first = &branches[0];
+        let tagged = first
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|fields| {
+                fields.keys().any(|tag| {
+                    let mut constants = BTreeSet::new();
+                    branches.iter().all(|branch| {
+                        if branch.get("type").and_then(Value::as_str) != Some("object")
+                            || !branch
+                                .get("required")
+                                .and_then(Value::as_array)
+                                .is_some_and(|r| r.contains(&Value::String(tag.clone())))
+                        {
+                            return false;
+                        }
+                        branch
+                            .get("properties")
+                            .and_then(|p| p.get(tag))
+                            .filter(|s| s.get("type").and_then(Value::as_str) == Some("string"))
+                            .and_then(|s| s.get("const"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|constant| constants.insert(constant))
+                    })
+                })
+            });
+        if !tagged {
+            return Err(unsupported(
+                "oneOf requires a distinct required string discriminant",
+            ));
+        }
     }
     if let Some(required) = obj.get("required") {
-        for field in required
+        let required = required
             .as_array()
-            .ok_or_else(|| invalid("required must be an array"))?
-        {
+            .ok_or_else(|| invalid("required must be an array"))?;
+        let mut names = BTreeSet::new();
+        for field in required {
             let field = field
                 .as_str()
                 .ok_or_else(|| invalid("required names must be strings"))?;
+            if !names.insert(field) {
+                return Err(invalid("duplicate required field"));
+            }
             if obj.get("properties").and_then(|p| p.get(field)).is_none() {
                 return Err(invalid("required field is not declared"));
             }
@@ -392,6 +439,18 @@ fn check_schema(schema: &Value, root: &Value, stack: &mut BTreeSet<String>) -> R
     {
         return Err(invalid("enum must be a nonempty array"));
     }
+    if let Some(values) = obj.get("enum").and_then(Value::as_array) {
+        let mut seen = BTreeSet::new();
+        if values
+            .iter()
+            .any(|v| !safe_json(v) || !seen.insert(crate::json::canonical(v)))
+        {
+            return Err(invalid("unsafe or duplicate enum value"));
+        }
+    }
+    if obj.get("const").is_some_and(|v| !safe_json(v)) {
+        return Err(invalid("unsafe const value"));
+    }
     for key in [
         "minimum",
         "maximum",
@@ -405,9 +464,26 @@ fn check_schema(schema: &Value, root: &Value, stack: &mut BTreeSet<String>) -> R
                 .as_f64()
                 .filter(|v| v.is_finite())
                 .ok_or_else(|| invalid("schema bounds must be finite numbers"))?;
+            if !safe_json(obj.get(key).unwrap()) {
+                return Err(invalid("unsafe schema numeric bound"));
+            }
             if key != "minimum" && key != "maximum" && (bound < 0.0 || bound.fract() != 0.0) {
                 return Err(invalid("size bounds must be nonnegative integers"));
             }
+        }
+    }
+    for (min, max) in [
+        ("minimum", "maximum"),
+        ("minItems", "maxItems"),
+        ("minLength", "maxLength"),
+    ] {
+        if obj
+            .get(min)
+            .and_then(Value::as_f64)
+            .zip(obj.get(max).and_then(Value::as_f64))
+            .is_some_and(|(min, max)| min > max)
+        {
+            return Err(invalid("inverted schema bounds"));
         }
     }
     Ok(())
@@ -458,14 +534,18 @@ fn validate_json_inner(schema: &Value, root: &Value, value: &Value) -> Result<()
     }
     if schema
         .get("const")
-        .is_some_and(|expected| value != expected)
+        .is_some_and(|expected| crate::json::canonical(value) != crate::json::canonical(expected))
     {
         return Err(invalid("const mismatch"));
     }
     if schema
         .get("enum")
         .and_then(Value::as_array)
-        .is_some_and(|values| !values.contains(value))
+        .is_some_and(|values| {
+            !values
+                .iter()
+                .any(|v| crate::json::canonical(v) == crate::json::canonical(value))
+        })
     {
         return Err(invalid("enum mismatch"));
     }

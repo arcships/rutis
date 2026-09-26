@@ -1,0 +1,194 @@
+[
+  {
+    "name": "integral",
+    "type": {
+      "kind": "callback",
+      "ownership": "borrow",
+      "params": {
+        "kind": "value",
+        "schema": {
+          "const": 1
+        }
+      },
+      "result": {
+        "kind": "value",
+        "schema": {
+          "type": "null"
+        }
+      }
+    },
+    "fingerprint": "$callback:e4ea2252611d6c874fb31b339283f31e42da1bc48dd6540c2eca73af7db6ddf0"
+  },
+  {
+    "name": "fraction spelling",
+    "type": {
+      "kind": "callback",
+      "ownership": "borrow",
+      "params": {
+        "kind": "value",
+        "schema": {
+          "const": 1.0
+        }
+      },
+      "result": {
+        "kind": "value",
+        "schema": {
+          "type": "null"
+        }
+      }
+    },
+    "fingerprint": "$callback:e4ea2252611d6c874fb31b339283f31e42da1bc48dd6540c2eca73af7db6ddf0"
+  },
+  {
+    "name": "zero",
+    "type": {
+      "kind": "callback",
+      "ownership": "borrow",
+      "params": {
+        "kind": "value",
+        "schema": {
+          "const": 0
+        }
+      },
+      "result": {
+        "kind": "value",
+        "schema": {
+          "type": "null"
+        }
+      }
+    },
+    "fingerprint": "$callback:ad4f9c7a20c90333280b6c6373a11a29e32705f915d59e7be13458dffe70a3ec"
+  },
+  {
+    "name": "negative zero",
+    "type": {
+      "kind": "callback",
+      "ownership": "borrow",
+      "params": {
+        "kind": "value",
+        "schema": {
+          "const": -0.0
+        }
+      },
+      "result": {
+        "kind": "value",
+        "schema": {
+          "type": "null"
+        }
+      }
+    },
+    "fingerprint": "$callback:ad4f9c7a20c90333280b6c6373a11a29e32705f915d59e7be13458dffe70a3ec"
+  },
+  {
+    "name": "small exponent",
+    "type": {
+      "kind": "callback",
+      "ownership": "borrow",
+      "params": {
+        "kind": "value",
+        "schema": {
+          "const": 1e-07
+        }
+      },
+      "result": {
+        "kind": "value",
+        "schema": {
+          "type": "null"
+        }
+      }
+    },
+    "fingerprint": "$callback:166ad373272ebc892abe27bcfd571a6121f86c90ca6bf75513dcc36e71ff0871"
+  },
+  {
+    "name": "small decimal",
+    "type": {
+      "kind": "callback",
+      "ownership": "borrow",
+      "params": {
+        "kind": "value",
+        "schema": {
+          "const": 1e-07
+        }
+      },
+      "result": {
+        "kind": "value",
+        "schema": {
+          "type": "null"
+        }
+      }
+    },
+    "fingerprint": "$callback:166ad373272ebc892abe27bcfd571a6121f86c90ca6bf75513dcc36e71ff0871"
+  },
+  {
+    "name": "roundtrip fraction",
+    "type": {
+      "kind": "callback",
+      "ownership": "borrow",
+      "params": {
+        "kind": "value",
+        "schema": {
+          "const": 1.2345678901234567
+        }
+      },
+      "result": {
+        "kind": "value",
+        "schema": {
+          "type": "null"
+        }
+      }
+    },
+    "fingerprint": "$callback:4cc9dbd971ab60b9eea8932b3a05779b3e2e87ad8ee4364c0f73305f43b72d86"
+  },
+  {
+    "name": "UTF-8 sort differs from UTF-16",
+    "type": {
+      "kind": "callback",
+      "ownership": "borrow",
+      "params": {
+        "kind": "value",
+        "schema": {
+          "const": {
+            "": 1,
+            "😀": 2
+          }
+        }
+      },
+      "result": {
+        "kind": "value",
+        "schema": {
+          "type": "null"
+        }
+      }
+    },
+    "fingerprint": "$callback:6124da4edae75301de9e989e82327517b820afe48f6b995ad985bf2e8ced74c5"
+  },
+  {
+    "name": "nested literals",
+    "type": {
+      "kind": "callback",
+      "ownership": "borrow",
+      "params": {
+        "kind": "value",
+        "schema": {
+          "const": [
+            true,
+            false,
+            null,
+            "é",
+            [
+              "日本語",
+              2.5
+            ]
+          ]
+        }
+      },
+      "result": {
+        "kind": "value",
+        "schema": {
+          "type": "null"
+        }
+      }
+    },
+    "fingerprint": "$callback:6a1f56f595d69d4ec94661679a77757377d3c5a69a9f09c7580cc11770e15d47"
+  }
+]

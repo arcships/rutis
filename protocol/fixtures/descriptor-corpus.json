@@ -1,0 +1,769 @@
+[
+  {
+    "name": "unknown bundle field",
+    "path": [
+      "unknown"
+    ],
+    "value": true,
+    "error": "InvalidParams"
+  },
+  {
+    "name": "missing bundle identity",
+    "path": [
+      "id"
+    ],
+    "value": null,
+    "error": "InvalidParams"
+  },
+  {
+    "name": "invalid leading zero version",
+    "path": [
+      "version"
+    ],
+    "value": "01.0.0",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "empty interfaces",
+    "path": [
+      "interfaces"
+    ],
+    "value": {},
+    "error": "InvalidParams"
+  },
+  {
+    "name": "unknown interface",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "result",
+      "interface"
+    ],
+    "value": "Missing",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "numeric interface name",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "result",
+      "interface"
+    ],
+    "value": 1,
+    "error": "InvalidParams"
+  },
+  {
+    "name": "invalid ownership",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "result",
+      "ownership"
+    ],
+    "value": "other",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "borrow return",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "result",
+      "ownership"
+    ],
+    "value": "borrow",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "missing type kind",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "result"
+    ],
+    "value": {
+      "interface": "Connection",
+      "ownership": "scope"
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "unknown method field",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "unknown"
+    ],
+    "value": true,
+    "error": "InvalidParams"
+  },
+  {
+    "name": "duplicate method/property",
+    "path": [
+      "interfaces",
+      "Database",
+      "properties"
+    ],
+    "value": {
+      "connect": {
+        "kind": "value",
+        "schema": {
+          "type": "null"
+        }
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "unknown nested record interface",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params"
+    ],
+    "value": {
+      "kind": "record",
+      "fields": {
+        "x": {
+          "kind": "object",
+          "interface": "Missing",
+          "ownership": "scope"
+        }
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "unknown ownership shape",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params"
+    ],
+    "value": {
+      "kind": "object",
+      "interface": "Connection",
+      "ownership": []
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "required capability type",
+    "path": [
+      "required_capabilities"
+    ],
+    "value": [
+      1
+    ],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "duplicate capability",
+    "path": [
+      "required_capabilities"
+    ],
+    "value": [
+      "object.scope",
+      "object.scope"
+    ],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "delegate capability",
+    "path": [
+      "required_capabilities"
+    ],
+    "value": [
+      "object.delegate"
+    ],
+    "error": "UnsupportedCapability"
+  },
+  {
+    "name": "scope callback",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "withCallback",
+      "params",
+      "ownership"
+    ],
+    "value": "scope",
+    "error": "UnsupportedCapability"
+  },
+  {
+    "name": "returned callback",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "result"
+    ],
+    "value": {
+      "kind": "callback",
+      "params": {
+        "kind": "value",
+        "schema": {
+          "type": "null"
+        }
+      },
+      "result": {
+        "kind": "value",
+        "schema": {
+          "type": "null"
+        }
+      },
+      "ownership": "borrow"
+    },
+    "error": "UnsupportedCapability"
+  },
+  {
+    "name": "stream",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "result"
+    ],
+    "value": {
+      "kind": "stream",
+      "item": {
+        "kind": "value",
+        "schema": {
+          "type": "null"
+        }
+      }
+    },
+    "error": "UnsupportedCapability"
+  },
+  {
+    "name": "unknown mode",
+    "path": [
+      "events",
+      "session/event",
+      "modes"
+    ],
+    "value": [
+      "unexpected"
+    ],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "empty event modes",
+    "path": [
+      "events",
+      "session/event",
+      "modes"
+    ],
+    "value": [],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "duplicate event modes",
+    "path": [
+      "events",
+      "session/event",
+      "modes"
+    ],
+    "value": [
+      "parallel",
+      "parallel"
+    ],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "waterfall mode",
+    "path": [
+      "events",
+      "session/event",
+      "modes"
+    ],
+    "value": [
+      "waterfall"
+    ],
+    "error": "UnsupportedCapability"
+  },
+  {
+    "name": "non-schema annotation",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "type": "string",
+      "title": 3
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "wrong schema draft",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "$schema": "https://json-schema.org/draft-07/schema"
+    },
+    "error": "UnsupportedCapability"
+  },
+  {
+    "name": "unsupported regex",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "type": "string",
+      "pattern": ".*"
+    },
+    "error": "UnsupportedCapability"
+  },
+  {
+    "name": "external ref",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "$ref": "https://invalid.example/schema"
+    },
+    "error": "UnsupportedCapability"
+  },
+  {
+    "name": "missing ref",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "$ref": "#/$defs/Missing"
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "invalid pointer escape",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "$defs": {
+        "x/y": {
+          "type": "string"
+        }
+      },
+      "$ref": "#/$defs/x~2y"
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "local escaped pointer",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "$defs": {
+        "x/y": {
+          "type": "string"
+        }
+      },
+      "$ref": "#/$defs/x~1y"
+    },
+    "error": null
+  },
+  {
+    "name": "recursive value",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "$defs": {
+        "X": {
+          "$ref": "#/$defs/X"
+        }
+      },
+      "$ref": "#/$defs/X"
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "boolean schema",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": true,
+    "error": "InvalidParams"
+  },
+  {
+    "name": "unknown schema type",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "type": "date"
+    },
+    "error": "UnsupportedCapability"
+  },
+  {
+    "name": "properties must be map",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "type": "object",
+      "properties": []
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "required undeclared",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "type": "object",
+      "required": [
+        "x"
+      ]
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "duplicate required field",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "x",
+        "x"
+      ]
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "additionalProperties schema",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "error": "UnsupportedCapability"
+  },
+  {
+    "name": "enum must not be empty",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "enum": []
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "enum duplicates number spellings",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "enum": [
+        1,
+        1.0
+      ]
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "negative array bound",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "type": "array",
+      "minItems": -1
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "fractional string bound",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "type": "string",
+      "minLength": 1.5
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "inverted numeric bounds",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "type": "number",
+      "minimum": 3,
+      "maximum": 2
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "empty union",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "oneOf": []
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "unrestricted union rejected",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "error": "UnsupportedCapability"
+  },
+  {
+    "name": "discriminated union",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "tag": {
+              "type": "string",
+              "const": "ok"
+            }
+          },
+          "required": [
+            "tag"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "tag": {
+              "type": "string",
+              "const": "error"
+            }
+          },
+          "required": [
+            "tag"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "name": "repeated discriminant",
+    "path": [
+      "interfaces",
+      "Database",
+      "methods",
+      "connect",
+      "params",
+      "schema"
+    ],
+    "value": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "tag": {
+              "type": "string",
+              "const": "ok"
+            }
+          },
+          "required": [
+            "tag"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "tag": {
+              "type": "string",
+              "const": "ok"
+            }
+          },
+          "required": [
+            "tag"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "error": "UnsupportedCapability"
+  },
+  {
+    "name": "raw valid descriptor",
+    "raw": "{\"id\":\"sample\",\"version\":\"1.0.0\",\"interfaces\":{\"Object\":{\"methods\":{}}}}",
+    "error": null
+  },
+  {
+    "name": "raw duplicate identity",
+    "raw": "{\"id\":\"sample\",\"id\":\"other\",\"version\":\"1.0.0\",\"interfaces\":{\"Object\":{\"methods\":{}}}}",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "duplicate interface map",
+    "raw": "{\"id\":\"sample\",\"version\":\"1.0.0\",\"interfaces\":{\"Object\":{\"methods\":{}},\"Object\":{\"methods\":{}}}}",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "escaped duplicate identity",
+    "raw": "{\"id\":\"sample\",\"\\u0069d\":\"other\",\"version\":\"1.0.0\",\"interfaces\":{\"Object\":{\"methods\":{}}}}",
+    "error": "InvalidParams"
+  }
+]

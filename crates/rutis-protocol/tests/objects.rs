@@ -88,6 +88,114 @@ impl Setup {
 }
 
 #[test]
+fn failed_graph_releases_only_new_deliveries_and_batch_is_atomic() {
+    let mut s = Setup::new();
+    let old = s.offer(None, "route-a");
+    let alias = s.imports.receive(old.clone()).unwrap();
+    s.flush();
+    let new = s.offer(None, "route-a");
+    let invalid = Delivery {
+        token: "forged".into(),
+        ..old.clone()
+    };
+    let error = s
+        .imports
+        .receive_batch(vec![new.clone(), invalid])
+        .err()
+        .unwrap();
+    assert_eq!(error.code, ErrorCode::CapabilityDenied);
+    assert!(alias.delivery().is_ok());
+    s.flush();
+    assert_eq!(s.broker.pins(&s.object), (1, 0));
+    assert_eq!(
+        s.broker.state(&s.caller, new.id),
+        Some(DeliveryState::Released)
+    );
+    // Payload validation rejects a new handoff plus an idempotent replay of a
+    // previously accepted object, without closing that older wrapper.
+    let rejected = s.offer(None, "route-a");
+    s.imports.reject(&[old, rejected.clone()]);
+    s.flush();
+    assert!(alias.delivery().is_ok());
+    assert_eq!(
+        s.broker.state(&s.caller, rejected.id),
+        Some(DeliveryState::Released)
+    );
+    let next = s.offer(None, "route-a");
+    let batch = s.imports.receive_batch(vec![next.clone(), next]).unwrap();
+    assert!(batch[0].same_wrapper(&alias));
+    assert!(batch[0].same_wrapper(&batch[1]));
+    alias.release();
+    s.flush();
+    assert_eq!(s.broker.pins(&s.object), (0, 0));
+    s.imports.acknowledge_retirement(Sequence(4)).unwrap();
+}
+
+#[test]
+fn owner_supplied_export_identity_is_stable_and_epoch_wide_ids_are_unique() {
+    let mut broker = Broker::default();
+    let one = activation("rust");
+    let two = Activation {
+        activation: Sequence(2),
+        ..one.clone()
+    };
+    broker.start_activation(one.clone()).unwrap();
+    broker.start_activation(two.clone()).unwrap();
+    let views = BTreeMap::from([(view("route-a"), BTreeSet::from(["query".into()]))]);
+    let id = ObjectIdentity {
+        owner: one.clone(),
+        object: Sequence(5),
+    };
+    broker
+        .register_export(&one, id.clone(), views.clone())
+        .unwrap();
+    broker
+        .register_export(&one, id.clone(), views.clone())
+        .unwrap();
+    let reused = ObjectIdentity {
+        owner: two.clone(),
+        object: Sequence(5),
+    };
+    assert_eq!(
+        broker
+            .register_export(&two, reused, views.clone())
+            .unwrap_err()
+            .code,
+        ErrorCode::StaleObject
+    );
+    assert_eq!(
+        broker
+            .register_export(&two, id.clone(), views.clone())
+            .unwrap_err()
+            .code,
+        ErrorCode::CapabilityDenied
+    );
+    let widened = BTreeMap::from([(
+        view("route-a"),
+        BTreeSet::from(["query".into(), "close".into()]),
+    )]);
+    assert_eq!(
+        broker.register_export(&one, id, widened).unwrap_err().code,
+        ErrorCode::InterfaceMismatch
+    );
+    assert_eq!(
+        broker.register_object(&two, views).unwrap().object,
+        Sequence(6)
+    );
+    let delayed = ObjectIdentity {
+        owner: one.clone(),
+        object: Sequence(2),
+    };
+    broker
+        .register_export(
+            &one,
+            delayed,
+            BTreeMap::from([(view("route-a"), BTreeSet::from(["query".into()]))]),
+        )
+        .unwrap();
+}
+
+#[test]
 fn t04_t07_proxy_identity_and_independent_delivery_pins() {
     let mut s = Setup::new();
     let d1 = s.offer(None, "route-a");

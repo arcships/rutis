@@ -1,4 +1,5 @@
-use rutis_protocol::contract::{validate_wire, AdmittedBundle, TypeExpr, WireValue};
+use rutis_protocol::contract::{callback_key, validate_wire, AdmittedBundle, TypeExpr, WireValue};
+use rutis_protocol::json::{decode, MAX_JSON_BYTES};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -27,6 +28,67 @@ fn t22_shared_contract_corpus() {
                     .map_err(|e| format!("{:?}", e.code))
             });
         assert_eq!(result.err(), case.error, "{}", case.name);
+    }
+}
+
+#[test]
+fn t22_strict_json_and_descriptor_corpora() {
+    let cases: Value = serde_json::from_slice(include_bytes!(
+        "../../../protocol/fixtures/json-corpus.json"
+    ))
+    .unwrap();
+    for case in cases.as_array().unwrap() {
+        let hex = case["hex"].as_str().unwrap();
+        let bytes: Vec<u8> = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect();
+        let error = decode(&bytes).err().map(|e| format!("{:?}", e.code));
+        assert_eq!(error.as_deref(), case["error"].as_str(), "{}", case["name"]);
+    }
+    assert!(decode(&vec![b' '; MAX_JSON_BYTES + 1]).is_err());
+    let cases: Value = serde_json::from_slice(include_bytes!(
+        "../../../protocol/fixtures/descriptor-corpus.json"
+    ))
+    .unwrap();
+    for case in cases.as_array().unwrap() {
+        let bytes = if let Some(raw) = case["raw"].as_str() {
+            raw.as_bytes().to_vec()
+        } else {
+            let mut bundle: Value = serde_json::from_slice(BUNDLE).unwrap();
+            let path = case["path"].as_array().unwrap();
+            let mut parent = &mut bundle;
+            for part in &path[..path.len() - 1] {
+                parent = parent.get_mut(part.as_str().unwrap()).unwrap();
+            }
+            parent.as_object_mut().unwrap().insert(
+                path.last().unwrap().as_str().unwrap().into(),
+                case["value"].clone(),
+            );
+            serde_json::to_vec(&bundle).unwrap()
+        };
+        let error = AdmittedBundle::parse(&bytes)
+            .err()
+            .map(|e| format!("{:?}", e.code));
+        assert_eq!(error.as_deref(), case["error"].as_str(), "{}", case["name"]);
+    }
+}
+
+#[test]
+fn callback_signature_is_independent_of_number_spelling_and_unicode_key_order() {
+    let cases: Value = serde_json::from_slice(include_bytes!(
+        "../../../protocol/fixtures/callback-corpus.json"
+    ))
+    .unwrap();
+    for case in cases.as_array().unwrap() {
+        let expr: TypeExpr = serde_json::from_value(case["type"].clone()).unwrap();
+        assert_eq!(
+            callback_key(&expr),
+            case["fingerprint"].as_str().unwrap(),
+            "{}",
+            case["name"]
+        );
     }
 }
 

@@ -601,7 +601,7 @@
       "index": 0
     },
     "references": [
-      "$callback:06cd542d1f4e8edc742b1279169ae5edb44dfd383db9d3ffcd058ab47bff5b44"
+      "$callback:ef6e854d2f3354a0f169b69c18abd1e193cf6547d7e4dab395c5d6c4faaae90d"
     ],
     "error": null
   },
@@ -631,5 +631,43 @@
       "$callback"
     ],
     "error": "InvalidParams"
+  },
+  {
+    "name": "numeric const uses JSON number equality",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "const": 1.0
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": 1
+    },
+    "references": [],
+    "error": null
+  },
+  {
+    "name": "Unicode object enum key order",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "enum": [
+          {
+            "😀": 2,
+            "": 1
+          }
+        ]
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": {
+        "": 1,
+        "😀": 2
+      }
+    },
+    "references": [],
+    "error": null
   }
 ]

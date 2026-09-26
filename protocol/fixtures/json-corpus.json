@@ -1,0 +1,177 @@
+[
+  {
+    "name": "simple JSON",
+    "hex": "7b2278223a5b747275652c66616c73652c6e756c6c2c312c312e302c3165302c2d302c22f09f9880225d7d",
+    "error": null
+  },
+  {
+    "name": "duplicate keys",
+    "hex": "7b2278223a312c2278223a327d",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "escaped duplicate keys",
+    "hex": "7b2278223a312c225c7530303738223a327d",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "nested duplicate keys",
+    "hex": "7b2278223a5b7b2261223a6e756c6c2c2261223a6e756c6c7d5d7d",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "array depth boundary",
+    "hex": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b305d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d",
+    "error": null
+  },
+  {
+    "name": "empty array depth boundary",
+    "hex": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d",
+    "error": null
+  },
+  {
+    "name": "array beyond depth boundary",
+    "hex": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b305d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "object depth boundary",
+    "hex": "7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a6e756c6c7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d",
+    "error": null
+  },
+  {
+    "name": "object beyond depth boundary",
+    "hex": "7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a7b2278223a6e756c6c7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "large integer must be string",
+    "hex": "39303037313939323534373430393933",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "largest exact integer",
+    "hex": "39303037313939323534373430393931",
+    "error": null
+  },
+  {
+    "name": "large integer spelled as fraction",
+    "hex": "393030373139393235343734303939322e30",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "overflowing number",
+    "hex": "3165343030",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "finite fraction",
+    "hex": "312e32333435363738393031323334353637",
+    "error": null
+  },
+  {
+    "name": "underflow rounds to zero",
+    "hex": "31652d343030",
+    "error": null
+  },
+  {
+    "name": "lone high surrogate",
+    "hex": "225c756438303022",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "lone low surrogate",
+    "hex": "225c756466666622",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "valid surrogate pair",
+    "hex": "225c75643833645c756465303022",
+    "error": null
+  },
+  {
+    "name": "unescaped control",
+    "hex": "22610a6222",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "unknown string escape",
+    "hex": "225c7122",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "unterminated string",
+    "hex": "225c22",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "trailing document",
+    "hex": "7b7d207b7d",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "trailing comma array",
+    "hex": "5b312c5d",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "trailing comma object",
+    "hex": "7b2261223a312c7d",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "leading zero",
+    "hex": "3031",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "leading plus",
+    "hex": "2b31",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "fraction without digit",
+    "hex": "312e",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "exponent without digit",
+    "hex": "3165",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "whitespace subset",
+    "hex": "0b6e756c6c",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "UTF-8 BOM",
+    "hex": "efbbbf7b7d",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "no content",
+    "hex": "",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "invalid UTF-8",
+    "hex": "ff",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "overlong UTF-8",
+    "hex": "c0af",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "UTF-8 encoded surrogate",
+    "hex": "eda080",
+    "error": "InvalidParams"
+  },
+  {
+    "name": "truncated UTF-8",
+    "hex": "f09f",
+    "error": "InvalidParams"
+  }
+]
