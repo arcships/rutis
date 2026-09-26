@@ -1,0 +1,16 @@
+[package]
+name = "rutis-greeter-fixture-v1"
+version = "1.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["dylib"]
+test = false
+doctest = false
+
+[features]
+export = []
+
+[dependencies]
+rutis-sdk = { path = "../../../crates/rutis-sdk" }

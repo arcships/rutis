@@ -26,7 +26,7 @@ jobs:
       # 依赖同构);hack 本地 rutui 时按惯例在工作区根加未提交的 [patch]。
 
       - name: install rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.1
 
       - uses: Swatinem/rust-cache@v2
 
@@ -37,3 +37,66 @@ jobs:
 
       - name: cargo check (all targets)
         run: cargo check --workspace --all-targets
+
+  dylib-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: dylib host child environment
+        run: cargo test -p rutis-cli --features dylib-plugins --bin rutis-cli
+      - name: plugin swap and pre-dlopen rejection
+        run: bash tools/test-dylib.sh
+      - name: launcher pre-execution verification
+        run: bash tools/test-dylib-launcher.sh
+      - name: reproducible SDK across source and target paths
+        run: bash tools/test-dylib-repro.sh
+
+  static-platforms:
+    strategy:
+      matrix:
+        os: [macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: keep workspace static builds available
+        run: cargo check --workspace --all-targets
+
+  sdk-repro:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        slot: [a, b]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: source-${{ matrix.slot }}
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - name: build SDK at independent paths
+        working-directory: source-${{ matrix.slot }}
+        env:
+          CARGO_HOME: ${{ runner.temp }}/cargo-${{ matrix.slot }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/target-${{ matrix.slot }}
+        run: |
+          mkdir -p "$CARGO_HOME"
+          export RUSTFLAGS="--remap-path-prefix=$PWD=/src --remap-path-prefix=$CARGO_HOME=/cargo --remap-path-prefix=$CARGO_TARGET_DIR=/target -C link-arg=-Wl,-rpath,\$ORIGIN"
+          export RUTIS_SDK_LOCKFILE="$PWD/Cargo.lock"
+          cargo build --release --locked -p rutis-sdk
+          sha256sum "$CARGO_TARGET_DIR/release/librutis_sdk.so" | cut -d ' ' -f 1 > "$RUNNER_TEMP/sdk.sha"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-hash-${{ matrix.slot }}
+          path: ${{ runner.temp }}/sdk.sha
+
+  sdk-repro-compare:
+    runs-on: ubuntu-24.04
+    needs: sdk-repro
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sdk-hash-*
+          path: hashes
+      - run: cmp hashes/sdk-hash-a/sdk.sha hashes/sdk-hash-b/sdk.sha

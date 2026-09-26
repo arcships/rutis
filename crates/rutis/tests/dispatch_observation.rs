@@ -62,6 +62,38 @@ async fn child(parent: &Ctx) -> (rutis::FiberView, Ctx) {
 }
 
 #[tokio::test]
+async fn old_context_still_notifies_non_instance_dispatch_observers() {
+    let root = Ctx::root().unwrap();
+    let bus = root.events().clone();
+    let (view, old) = child(&root).await;
+    tokio::time::timeout(Duration::from_secs(2), view.restart())
+        .await
+        .expect("restart timed out")
+        .unwrap();
+    let seen = Arc::new(AtomicUsize::new(0));
+    let count = seen.clone();
+    let observer = bus
+        .observe_dispatch(&root, move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+    bus.emit(&old, Arc::new(Ping(1)));
+    assert_eq!(seen.load(Ordering::SeqCst), 1);
+    tokio::time::timeout(Duration::from_secs(2), view.dispose())
+        .await
+        .expect("view dispose timed out")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), observer.dispose())
+        .await
+        .expect("observer dispose timed out")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), root.shutdown())
+        .await
+        .expect("root shutdown timed out")
+        .unwrap();
+}
+
+#[tokio::test]
 async fn all_modes_observe_before_listener_selection_even_when_empty() {
     let root = Ctx::root().unwrap();
     let bus = root.events().clone();

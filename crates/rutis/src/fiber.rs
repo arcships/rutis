@@ -504,12 +504,13 @@ impl FiberInner {
         }
         this.new_generation_token();
         this.accesses.lock().unwrap().clear();
-        {
+        let generation = {
             let mut tr = this.transition.lock().unwrap();
             tr.generation += 1;
             tr.error = None;
             Self::set_state(this, &mut tr, FiberState::Loading);
-        }
+            tr.generation
+        };
         this.flush_status();
         drop(_admission);
 
@@ -543,7 +544,7 @@ impl FiberInner {
         // apply:直接等待退出(D7 第③步"等 apply 退出",不中止)。
         // 预取消(dispose/restart/驱逐)使观察 token 的插件经 ctx.cancelled()
         // 协作返回;不观察则 dispose 无限等待(协作取消限制,D27)。
-        let ctx = this.ctx.clone();
+        let ctx = this.ctx.for_generation(generation);
         // async block 把创建 Future 的同步回调也放进 unwind 边界。
         let outcome = CatchUnwind::new(async { plugin.apply(&ctx).await }).await;
         let result: Result<Effect, CordisError> = outcome.unwrap_or_else(|p| Err(panic_error(p)));
