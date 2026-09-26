@@ -176,3 +176,19 @@ test('M0: generator effects remain native and an initial config failure cannot b
   await invalid.stop()
   await root.fiber.dispose()
 })
+
+test('M0/T15: explicit disposal of a necessary service revokes its still-loaded managed root', async () => {
+  const root = new Context()
+  let remove!: () => void
+  const activation = new ManagedActivation(root, {
+    apply(ctx) { remove = ctx.provide('connection', {}) },
+  }, {}, {}, undefined, ['connection'])
+  activation.requireExport('connection')
+  await activation.ready()
+  assert.equal(activation.native.state, NativeState.ACTIVE)
+  await remove()
+  assert.equal(activation.isOpen, false)
+  assert.equal(activation.native.uid, null)
+  await activation.stop()
+  await root.fiber.dispose()
+})

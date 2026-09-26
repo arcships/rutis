@@ -43,6 +43,17 @@ impl ActivationGate {
         self.observe(ctx)
     }
 
+    /// A necessary named service owns a native dependency guard. The runner
+    /// must await this guard becoming Active before publishing the export.
+    /// Native service removal pre-cancels the guard even if the provider fiber
+    /// itself stays Active, so direct disposal cannot leave a callable export.
+    pub fn track_service(&self, ctx: &Ctx, key: TypeKey) -> FiberView {
+        ctx.plugin(ExportGuard {
+            gate: self.clone(),
+            injects: vec![key],
+        })
+    }
+
     pub async fn revoked(&self) {
         self.1.cancelled().await;
     }
@@ -56,7 +67,7 @@ impl ActivationGate {
             let task = handle.spawn(async move {
                 tokio::select! {
                     _ = token.cancelled() => { gate.close(); refreshed.refresh(); }
-                    _ = gate.revoked() => {}
+                    _ = gate.revoked() => { refreshed.refresh(); }
                 }
             });
             Effect::AsyncDisposer(Box::new(move || {
@@ -82,6 +93,25 @@ impl ActivationGate {
 }
 
 struct Permit;
+
+struct ExportGuard {
+    gate: ActivationGate,
+    injects: Vec<TypeKey>,
+}
+impl Plugin for ExportGuard {
+    fn name(&self) -> &str {
+        "protocol-export-guard"
+    }
+    fn injects(&self) -> &[TypeKey] {
+        &self.injects
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            self.gate.track_export(ctx)?;
+            Ok(Effect::Done)
+        })
+    }
+}
 
 struct ValidationAdmission(ActivationGate, bool);
 impl Drop for ValidationAdmission {

@@ -137,6 +137,48 @@ impl Plugin for Child {
     }
 }
 
+struct NamedExport {
+    disposer: Arc<Mutex<Option<rutis::Disposer>>>,
+    seen: Arc<Mutex<Option<Ctx>>>,
+}
+impl Plugin for NamedExport {
+    fn name(&self) -> &str {
+        "named-export"
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            *self.disposer.lock().unwrap() = Some(ctx.provide(7_u32)?);
+            *self.seen.lock().unwrap() = Some(ctx.clone());
+            Ok(Effect::Done)
+        })
+    }
+}
+
+#[tokio::test]
+async fn disposing_a_necessary_service_while_its_native_provider_stays_active_revokes_root() {
+    let root = Ctx::root().unwrap();
+    let p = probe(vec![]);
+    let seen = p.seen.clone();
+    let activation = ManagedActivation::mount(&root, p).unwrap();
+    activation.view().await.unwrap();
+    let provider_ctx: Arc<Mutex<Option<Ctx>>> = Arc::default();
+    let disposer: Arc<Mutex<Option<rutis::Disposer>>> = Arc::default();
+    let child = seen.lock().unwrap()[0].plugin(NamedExport {
+        disposer: disposer.clone(),
+        seen: provider_ctx.clone(),
+    });
+    (&child).await.unwrap();
+    let ctx = provider_ctx.lock().unwrap().as_ref().unwrap().clone();
+    let guard = activation.gate().track_service(&ctx, TypeKey::of::<u32>());
+    (&guard).await.unwrap();
+    assert_eq!(guard.state().state, FiberState::Active);
+    let removed = disposer.lock().unwrap().take().unwrap().dispose();
+    removed.await.unwrap();
+    assert!(!activation.gate().is_open());
+    activation.stop().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn necessary_child_export_and_root_share_revocation() {
     let root = Ctx::root().unwrap();

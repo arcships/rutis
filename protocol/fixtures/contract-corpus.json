@@ -1,0 +1,635 @@
+[
+  {
+    "name": "valid named connection",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": {
+        "name": "main"
+      }
+    },
+    "references": [],
+    "error": null
+  },
+  {
+    "name": "unicode connection",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": {
+        "name": "数据"
+      }
+    },
+    "references": [],
+    "error": null
+  },
+  {
+    "name": "missing required field",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": {}
+    },
+    "references": [],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "undeclared field",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": {
+        "name": "a",
+        "extra": 1
+      }
+    },
+    "references": [],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "empty string",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": {
+        "name": ""
+      }
+    },
+    "references": [],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "wrong scalar type",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": {
+        "name": 1
+      }
+    },
+    "references": [],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "data id never becomes an object",
+    "type": {
+      "kind": "object",
+      "interface": "Connection",
+      "ownership": "scope"
+    },
+    "value": {
+      "kind": "value",
+      "value": {
+        "id": "1"
+      }
+    },
+    "references": [],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "object ref",
+    "type": {
+      "kind": "object",
+      "interface": "Connection",
+      "ownership": "scope"
+    },
+    "value": {
+      "kind": "ref",
+      "index": 0
+    },
+    "references": [
+      "Connection"
+    ],
+    "error": null
+  },
+  {
+    "name": "wrong interface",
+    "type": {
+      "kind": "object",
+      "interface": "Connection",
+      "ownership": "scope"
+    },
+    "value": {
+      "kind": "ref",
+      "index": 0
+    },
+    "references": [
+      "Database"
+    ],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "missing reference entry",
+    "type": {
+      "kind": "object",
+      "interface": "Connection",
+      "ownership": "scope"
+    },
+    "value": {
+      "kind": "ref",
+      "index": 1
+    },
+    "references": [
+      "Connection"
+    ],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "unexpected wire field",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "type": "null"
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": null,
+      "extra": 1
+    },
+    "references": [],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "unknown wire tag",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "type": "null"
+      }
+    },
+    "value": {
+      "kind": "pointer",
+      "address": "0x1234"
+    },
+    "references": [],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "negative reference index",
+    "type": {
+      "kind": "object",
+      "interface": "Connection",
+      "ownership": "scope"
+    },
+    "value": {
+      "kind": "ref",
+      "index": -1
+    },
+    "references": [
+      "Connection"
+    ],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "optional absent",
+    "type": {
+      "kind": "optional",
+      "item": {
+        "kind": "object",
+        "interface": "Connection",
+        "ownership": "scope"
+      }
+    },
+    "value": {
+      "kind": "optional",
+      "value": null
+    },
+    "references": [],
+    "error": null
+  },
+  {
+    "name": "optional object",
+    "type": {
+      "kind": "optional",
+      "item": {
+        "kind": "object",
+        "interface": "Connection",
+        "ownership": "scope"
+      }
+    },
+    "value": {
+      "kind": "optional",
+      "value": {
+        "kind": "ref",
+        "index": 0
+      }
+    },
+    "references": [
+      "Connection"
+    ],
+    "error": null
+  },
+  {
+    "name": "object list",
+    "type": {
+      "kind": "list",
+      "item": {
+        "kind": "object",
+        "interface": "Connection",
+        "ownership": "scope"
+      }
+    },
+    "value": {
+      "kind": "list",
+      "items": [
+        {
+          "kind": "ref",
+          "index": 0
+        },
+        {
+          "kind": "ref",
+          "index": 0
+        }
+      ]
+    },
+    "references": [
+      "Connection"
+    ],
+    "error": null
+  },
+  {
+    "name": "record with object",
+    "type": {
+      "kind": "record",
+      "fields": {
+        "connection": {
+          "kind": "object",
+          "interface": "Connection",
+          "ownership": "scope"
+        },
+        "count": {
+          "kind": "value",
+          "schema": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "value": {
+      "kind": "record",
+      "fields": {
+        "connection": {
+          "kind": "ref",
+          "index": 0
+        },
+        "count": {
+          "kind": "value",
+          "value": 2
+        }
+      }
+    },
+    "references": [
+      "Connection"
+    ],
+    "error": null
+  },
+  {
+    "name": "record missing field",
+    "type": {
+      "kind": "record",
+      "fields": {
+        "connection": {
+          "kind": "object",
+          "interface": "Connection",
+          "ownership": "scope"
+        },
+        "count": {
+          "kind": "value",
+          "schema": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "value": {
+      "kind": "record",
+      "fields": {
+        "count": {
+          "kind": "value",
+          "value": 2
+        }
+      }
+    },
+    "references": [
+      "Connection"
+    ],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "safe integer boundary",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "type": "integer"
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": 9007199254740991
+    },
+    "references": [],
+    "error": null
+  },
+  {
+    "name": "unsafe integer",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "type": "integer"
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": 9007199254740992
+    },
+    "references": [],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "large integer as declared string",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "type": "string"
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": "18446744073709551615"
+    },
+    "references": [],
+    "error": null
+  },
+  {
+    "name": "fractional integer",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "type": "integer"
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": 1.5
+    },
+    "references": [],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "unicode length counts scalars",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": "😀"
+    },
+    "references": [],
+    "error": null
+  },
+  {
+    "name": "prototype data rejected",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "type": "object"
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": {
+        "__proto__": {}
+      }
+    },
+    "references": [],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "enum match",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "enum": [
+          "a",
+          "b"
+        ]
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": "b"
+    },
+    "references": [],
+    "error": null
+  },
+  {
+    "name": "enum mismatch",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "enum": [
+          "a",
+          "b"
+        ]
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": "c"
+    },
+    "references": [],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "local value ref",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "$defs": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "$ref": "#/$defs/name"
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": "main"
+    },
+    "references": [],
+    "error": null
+  },
+  {
+    "name": "local value ref type mismatch",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "$defs": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "$ref": "#/$defs/name"
+      }
+    },
+    "value": {
+      "kind": "value",
+      "value": 1
+    },
+    "references": [],
+    "error": "InvalidParams"
+  },
+  {
+    "name": "borrow callback signature",
+    "type": {
+      "kind": "callback",
+      "params": {
+        "kind": "value",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "result": {
+        "kind": "value",
+        "schema": {
+          "type": "null"
+        }
+      },
+      "ownership": "borrow"
+    },
+    "value": {
+      "kind": "ref",
+      "index": 0
+    },
+    "references": [
+      "$callback:06cd542d1f4e8edc742b1279169ae5edb44dfd383db9d3ffcd058ab47bff5b44"
+    ],
+    "error": null
+  },
+  {
+    "name": "callback signature mismatch",
+    "type": {
+      "kind": "callback",
+      "params": {
+        "kind": "value",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "result": {
+        "kind": "value",
+        "schema": {
+          "type": "null"
+        }
+      },
+      "ownership": "borrow"
+    },
+    "value": {
+      "kind": "ref",
+      "index": 0
+    },
+    "references": [
+      "$callback"
+    ],
+    "error": "InvalidParams"
+  }
+]
