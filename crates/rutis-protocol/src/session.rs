@@ -1145,13 +1145,32 @@ impl RootDelivery {
         self.graphs.take();
         Ok(result)
     }
-    pub async fn start(mut self, instance: &str) -> Result<Value> {
-        let result = self.host.peer(&self.recipient)?.request("plugin/start", json!({
+    pub async fn start(self, instance: &str) -> Result<Value> {
+        self.begin_start(instance)?.await
+    }
+    /// Queue start synchronously so a paired stop cannot overtake it while the
+    /// Host native apply is awaiting the response. The receipt owns all roots.
+    pub(crate) fn begin_start(self, instance: &str) -> Result<HandlerFuture> {
+        let response = self.queue_start(instance)?;
+        Ok(self.start_response(response))
+    }
+    pub(crate) fn queue_start(&self, instance: &str) -> Result<oneshot::Receiver<Result<Value>>> {
+        self.host.peer(&self.recipient)?.start_request("plugin/start", json!({
             "instance": instance, "activation": self.recipient, "required": self.graphs.as_ref().unwrap(),
-        })).await?;
-        self.accepted()?;
-        self.graphs.take();
-        Ok(result)
+        }))
+    }
+    pub(crate) fn start_response(
+        mut self,
+        response: oneshot::Receiver<Result<Value>>,
+    ) -> HandlerFuture {
+        Box::pin(async move {
+            let result = response
+                .await
+                .map_err(|_| fail(ErrorCode::Unavailable, "start ACK lost"))??;
+            self.accepted()?;
+            self.graphs.take();
+            Ok(result)
+        })
     }
     pub async fn receive(
         mut self,
@@ -1208,6 +1227,7 @@ impl Drop for RootDelivery {
 struct HostMember {
     published: bool,
     closed: bool,
+    close_hooks: Vec<std::sync::Weak<dyn Fn() + Send + Sync>>,
 }
 struct Connection {
     peer: WeakPeer,
@@ -1222,6 +1242,8 @@ struct HostState {
     scopes: BTreeMap<Activation, u64>,
     deliveries: BTreeMap<(RuntimeIdentity, Sequence), Delivery>,
     retired: BTreeMap<RuntimeIdentity, Sequence>,
+    runtime_hooks: BTreeMap<RuntimeIdentity, Vec<std::sync::Weak<dyn Fn() + Send + Sync>>>,
+    disconnected: BTreeSet<RuntimeIdentity>,
 }
 /// Authoritative multi-runtime router. Every handler is bound to the inherited
 /// stream's identity, never an identity supplied by business configuration.
@@ -1235,6 +1257,24 @@ impl HostObjects {
             bundles,
             state: Mutex::default(),
         })
+    }
+    /// Pending proxies belong to their epoch before member apply can capture
+    /// RuntimeReady. Disconnect seals them synchronously as well.
+    pub(crate) fn on_runtime_close(
+        &self,
+        identity: &RuntimeIdentity,
+        hook: &Arc<dyn Fn() + Send + Sync>,
+    ) {
+        let closed = {
+            let mut state = self.state.lock().unwrap();
+            let hooks = state.runtime_hooks.entry(identity.clone()).or_default();
+            hooks.retain(|hook| hook.strong_count() != 0);
+            hooks.push(Arc::downgrade(hook));
+            state.disconnected.contains(identity)
+        };
+        if closed {
+            hook();
+        }
     }
     /// Reserve IDs in Host order before independently sending member starts.
     pub fn reserve(&self, activation: Activation) -> Result<()> {
@@ -1251,8 +1291,31 @@ impl HostObjects {
             HostMember {
                 published: false,
                 closed: false,
+                close_hooks: Vec::new(),
             },
         );
+        Ok(())
+    }
+    /// Native Host proxies keep this lease until cleanup. Revoke/disconnect
+    /// calls it synchronously outside the broker lock, before remote ACKs.
+    pub(crate) fn on_close(
+        &self,
+        owner: &Activation,
+        hook: &Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<()> {
+        let closed = {
+            let mut state = self.state.lock().unwrap();
+            let member = state
+                .members
+                .get_mut(owner)
+                .ok_or_else(|| fail(ErrorCode::Unavailable, "unknown Host member"))?;
+            member.close_hooks.retain(|hook| hook.strong_count() != 0);
+            member.close_hooks.push(Arc::downgrade(hook));
+            member.closed
+        };
+        if closed {
+            hook();
+        }
         Ok(())
     }
     pub fn publish(&self, activation: &Activation) -> Result<()> {
@@ -1617,6 +1680,23 @@ impl HostObjects {
         roots: Vec<RoutedRoot>,
         recipient: Activation,
     ) -> Result<RootDelivery> {
+        self.offer_routes_mode(roots, recipient, true).await
+    }
+    /// Only the Host native mirror uses this mode after a validated ready
+    /// table. Its real SDK scope accepts roots while availability stays false.
+    pub(crate) async fn mirror_routes(
+        self: &Arc<Self>,
+        roots: Vec<RoutedRoot>,
+        recipient: Activation,
+    ) -> Result<RootDelivery> {
+        self.offer_routes_mode(roots, recipient, false).await
+    }
+    async fn offer_routes_mode(
+        self: &Arc<Self>,
+        roots: Vec<RoutedRoot>,
+        recipient: Activation,
+        published: bool,
+    ) -> Result<RootDelivery> {
         let host = self.clone();
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
@@ -1624,7 +1704,7 @@ impl HostObjects {
                 .iter()
                 .map(|r| (r.name.clone(), r.contract.clone()))
                 .collect();
-            let result = host.handoff_routes(&roots, &recipient).await;
+            let result = host.handoff_routes(&roots, &recipient, published).await;
             let result = match result {
                 Ok(graphs) => Ok(RootDelivery {
                     host,
@@ -1648,6 +1728,7 @@ impl HostObjects {
         &self,
         roots: &[RoutedRoot],
         recipient: &Activation,
+        published: bool,
     ) -> Result<BTreeMap<String, WireGraph>> {
         let scopes = GraphScopes::in_scope(root(recipient));
         let mut offers = Vec::<StageOffer>::new();
@@ -1660,7 +1741,7 @@ impl HostObjects {
                     if !state
                         .members
                         .get(&route.owner)
-                        .is_some_and(|m| !m.closed && m.published)
+                        .is_some_and(|m| !m.closed && (!published || m.published))
                     {
                         return Err(fail(
                             ErrorCode::Unavailable,
@@ -2024,19 +2105,32 @@ impl HostObjects {
         }))
     }
     pub fn close_member(self: &Arc<Self>, owner: &Activation) -> HandlerFuture {
-        let peers = {
+        let (peers, hooks) = {
             let mut state = self.state.lock().unwrap();
+            let mut hooks = Vec::new();
             if let Some(member) = state.members.get_mut(owner) {
                 member.closed = true;
                 member.published = false;
+                hooks.extend(
+                    member
+                        .close_hooks
+                        .iter()
+                        .filter_map(std::sync::Weak::upgrade),
+                );
+                member.close_hooks.clear();
             }
             state.broker.close_activation(owner);
-            state
+            let peers = state
                 .peers
                 .iter()
                 .filter_map(|(id, p)| p.peer.upgrade().map(|p| (id.clone(), p)))
-                .collect::<Vec<_>>()
+                .filter(|(_, peer)| !peer.is_closed())
+                .collect::<Vec<_>>();
+            (peers, hooks)
         };
+        for hook in hooks {
+            hook();
+        }
         let host = self.clone();
         let requests = peers
             .into_iter()
@@ -2076,8 +2170,16 @@ impl HostObjects {
     }
 
     pub fn disconnect(self: &Arc<Self>, identity: &RuntimeIdentity) {
-        let (owners, peers, releases) = {
+        let (owners, peers, releases, hooks) = {
             let mut state = self.state.lock().unwrap();
+            state.disconnected.insert(identity.clone());
+            let mut hooks = state
+                .runtime_hooks
+                .remove(identity)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(std::sync::Weak::upgrade)
+                .collect::<Vec<_>>();
             let releases = state
                 .deliveries
                 .iter()
@@ -2092,6 +2194,13 @@ impl HostObjects {
                     if identity.contains(owner) {
                         member.closed = true;
                         member.published = false;
+                        hooks.extend(
+                            member
+                                .close_hooks
+                                .iter()
+                                .filter_map(std::sync::Weak::upgrade),
+                        );
+                        member.close_hooks.clear();
                         Some(owner.clone())
                     } else {
                         None
@@ -2104,8 +2213,11 @@ impl HostObjects {
                 .filter(|(id, _)| *id != identity)
                 .filter_map(|(id, p)| p.peer.upgrade().map(|p| (id.clone(), p)))
                 .collect::<Vec<_>>();
-            (owners, peers, releases)
+            (owners, peers, releases, hooks)
         };
+        for hook in hooks {
+            hook();
+        }
         let host = self.clone();
         let release_requests = releases
             .iter()

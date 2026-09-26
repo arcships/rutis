@@ -67,6 +67,7 @@ pub struct Imports(Arc<Mutex<State>>);
 pub struct ObjectProxy {
     wrapper: Arc<Mutex<Wrapper>>,
     imports: Weak<Mutex<State>>,
+    availability: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 fn error(code: ErrorCode, message: &str) -> ProtocolError {
@@ -427,6 +428,7 @@ fn attach_batch(
             ObjectProxy {
                 wrapper,
                 imports: imports.clone(),
+                availability: None,
             }
         })
         .collect()
@@ -453,6 +455,7 @@ fn materialize(
             DecodedValue::Object(ObjectProxy {
                 wrapper: wrapper.clone(),
                 imports,
+                availability: None,
             })
         }
         SnapshotValue::Record(fields) => DecodedValue::Record(
@@ -558,6 +561,22 @@ fn release_wrapper(state: &mut State, wrapper_arc: &Arc<Mutex<Wrapper>>) {
 }
 
 impl ObjectProxy {
+    pub(crate) fn with_availability(mut self, check: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
+        self.availability = Some(match self.availability.take() {
+            Some(previous) => Arc::new(move || previous() && check()),
+            None => check,
+        });
+        self
+    }
+    fn require_available(&self) -> Result<()> {
+        if self.availability.as_ref().is_some_and(|check| !check()) {
+            return Err(error(
+                ErrorCode::Unavailable,
+                "native service publication is closed",
+            ));
+        }
+        Ok(())
+    }
     pub fn same_wrapper(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.wrapper, &other.wrapper)
     }
@@ -575,6 +594,7 @@ impl ObjectProxy {
     }
 
     pub fn delivery(&self) -> Result<Delivery> {
+        self.require_available()?;
         let imports = self
             .imports
             .upgrade()
@@ -595,6 +615,7 @@ impl ObjectProxy {
     /// An identity link resolves the current live wrapper in this same scope;
     /// explicit release never resurrects a previously returned child alias.
     pub fn property(&self, name: &str) -> Result<DecodedValue> {
+        self.require_available()?;
         let imports = self
             .imports
             .upgrade()
@@ -618,7 +639,37 @@ impl ObjectProxy {
                 .cloned()
                 .ok_or_else(|| error(ErrorCode::CapabilityDenied, "property is not declared"))?
         };
-        materialize(&state, &snapshot, Arc::downgrade(&imports))
+        let value = materialize(&state, &snapshot, Arc::downgrade(&imports))?;
+        fn guarded(
+            value: DecodedValue,
+            check: &Arc<dyn Fn() -> bool + Send + Sync>,
+        ) -> DecodedValue {
+            match value {
+                DecodedValue::Object(proxy) => {
+                    DecodedValue::Object(proxy.with_availability(check.clone()))
+                }
+                DecodedValue::Record(fields) => DecodedValue::Record(
+                    fields
+                        .into_iter()
+                        .map(|(key, value)| (key, guarded(value, check)))
+                        .collect(),
+                ),
+                DecodedValue::List(values) => DecodedValue::List(
+                    values
+                        .into_iter()
+                        .map(|value| guarded(value, check))
+                        .collect(),
+                ),
+                DecodedValue::Optional(value) => {
+                    DecodedValue::Optional(value.map(|value| Box::new(guarded(*value, check))))
+                }
+                value => value,
+            }
+        }
+        Ok(match &self.availability {
+            Some(check) => guarded(value, check),
+            None => value,
+        })
     }
 
     pub fn release(&self) {
@@ -627,5 +678,68 @@ impl ObjectProxy {
         } else {
             self.wrapper.lock().unwrap().active = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn staged_publication_preserves_wrappers_but_closes_captured_property_cycles() {
+        let bundle = AdmittedBundle::parse(include_bytes!(
+            "../../../protocol/fixtures/database.bundle.json"
+        ))
+        .unwrap();
+        let mut graph: WireGraph = serde_json::from_slice(include_bytes!(
+            "../../../protocol/fixtures/session.graph.json"
+        ))
+        .unwrap();
+        for reference in &mut graph.references {
+            reference.delivery.view.bundle_sha256 = bundle.sha256().into();
+        }
+        let scope = graph.references[0].delivery.recipient.clone();
+        let imports = Imports::default();
+        imports.open_scope(scope.clone(), None).unwrap();
+        let proxy = imports
+            .receive_graph(
+                &bundle,
+                &bundle.bundle().interfaces["Agent"].properties["session"],
+                graph,
+                &GraphScopes::in_scope(scope),
+            )
+            .unwrap()
+            .into_object()
+            .unwrap();
+        let published = Arc::new(AtomicBool::new(false));
+        let check = published.clone();
+        let guarded = proxy
+            .clone()
+            .with_availability(Arc::new(move || check.load(Ordering::SeqCst)));
+        assert!(
+            proxy.delivery().is_ok(),
+            "staging must retain its SDK roots"
+        );
+        assert_eq!(guarded.delivery().unwrap_err().code, ErrorCode::Unavailable);
+        assert_eq!(
+            guarded.property("agent").err().unwrap().code,
+            ErrorCode::Unavailable
+        );
+        published.store(true, Ordering::SeqCst);
+        let child = guarded.property("agent").unwrap().into_object().unwrap();
+        let back = child.property("session").unwrap().into_object().unwrap();
+        assert!(guarded.same_wrapper(&proxy));
+        assert!(guarded.same_wrapper(&back));
+        assert!(child.delivery().is_ok());
+        published.store(false, Ordering::SeqCst);
+        assert_eq!(child.delivery().unwrap_err().code, ErrorCode::Unavailable);
+        assert_eq!(
+            back.property("agent").err().unwrap().code,
+            ErrorCode::Unavailable
+        );
+        child.release();
+        guarded.release();
+        assert_eq!(imports.retained_objects(), 0);
     }
 }

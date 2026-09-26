@@ -31,7 +31,12 @@ fn dependencies(
     }
 }
 pub fn prepare() -> PreparedDeployment {
-    let root = std::env::temp_dir().join(format!("rutis-native-runners-{}", std::process::id()));
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "rutis-native-runners-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
     fs::create_dir(&root).unwrap();
     struct Cleanup(std::path::PathBuf);
     impl Drop for Cleanup {
@@ -156,8 +161,10 @@ pub fn prepare() -> PreparedDeployment {
     }
     for language in ["rust", "node"] {
         let other = if language == "rust" { "node" } else { "rust" };
-        let name = format!("{language}-cancel");
-        deployment["instances"][&name] = json!({"package":format!("{language}-consumer"),"group":language,"config":{"label":name},"routes":{"rpc":{"kind":"instance","instance":format!("{other}-provider"),"service":"rpc"}},"exports":[],"events":{}});
+        for suffix in ["cancel", "late", "missing"] {
+            let name = format!("{language}-{suffix}");
+            deployment["instances"][&name] = json!({"package":format!("{language}-consumer"),"group":language,"config":{"label":name},"routes":if suffix == "missing" { json!({}) } else { json!({"rpc":{"kind":"instance","instance":format!("{other}-provider"),"service":"rpc"}}) },"exports":[],"events":{}});
+        }
     }
     PreparedDeployment::prepare(&root, &serde_json::to_vec(&deployment).unwrap()).unwrap()
 }

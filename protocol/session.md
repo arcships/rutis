@@ -5,7 +5,7 @@
 本进程的实际 native 表、暂存图与已接收代理；作者不分配 grant、object id 或 token。
 
 这是 M1/M2 的可复用传输层。默认 Rust/Node native driver 已接命名服务传输并拒绝
-事件能力；完整 HostProxy 图、内部 child
+事件能力；首代 [HostProxy 原生图](host.md) 已接入。内部 child
 精确 creator context、更新恢复、事件和完整 T24 尚未验收。
 
 ## 接入顺序

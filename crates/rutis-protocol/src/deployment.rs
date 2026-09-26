@@ -64,6 +64,113 @@ impl DeploymentObjects {
     pub fn plan(&self) -> &PreparedDeployment {
         &self.plan
     }
+    pub(crate) fn bundles(&self) -> Bundles {
+        self.bundles.clone()
+    }
+    pub(crate) fn capture_required(
+        &self,
+        instance: &str,
+        name: &str,
+        proof: &crate::identity::Delivery,
+    ) -> Result<()> {
+        let state = self.state.lock().unwrap();
+        let route = &self.plan.instances()[instance].routes()[name];
+        let (owner, table, service, source) = match route.provider() {
+            Some(Provider::Instance { instance, service }) => {
+                let member = state.members.get(instance).ok_or_else(|| {
+                    fail(ErrorCode::Unavailable, "captured provider is not reserved")
+                })?;
+                (
+                    &member.activation,
+                    member.table.as_ref().ok_or_else(|| {
+                        fail(ErrorCode::Unavailable, "captured provider is not staged")
+                    })?,
+                    service,
+                    Some(self.mirror_source(instance, service)),
+                )
+            }
+            Some(Provider::Native { service }) => {
+                let (owner, table) = state.native.get(service).ok_or_else(|| {
+                    fail(
+                        ErrorCode::Unavailable,
+                        "captured native provider is not staged",
+                    )
+                })?;
+                (owner, table, service, None)
+            }
+            None => return Err(fail(ErrorCode::Unavailable, "required route is missing")),
+        };
+        self.host.require_published(owner)?;
+        let graph = &table.services[service].graph;
+        let crate::contract::WireValue::Ref { index } = graph.root else {
+            return Err(fail(
+                ErrorCode::InterfaceMismatch,
+                "captured provider has no object root",
+            ));
+        };
+        let original = &graph.references[index].source;
+        if &proof.object.owner != owner
+            || &proof.object != original.object()
+            || proof.view.interface != original.view().interface
+            || proof.view.bundle_sha256 != original.view().bundle_sha256
+            || proof.view.source != source.as_deref().unwrap_or(&original.view().source)
+        {
+            return Err(fail(
+                ErrorCode::CapabilityDenied,
+                "captured native binding differs from frozen provider",
+            ));
+        }
+        Ok(())
+    }
+    fn mirror_source(&self, instance: &str, service: &str) -> String {
+        format!(
+            "route.{}",
+            crate::prepare::digest(
+                crate::json::canonical(&serde_json::json!([
+                    "host-mirror",
+                    self.plan.sha256(),
+                    instance,
+                    service
+                ]))
+                .as_bytes()
+            )
+        )
+    }
+    pub(crate) async fn mirror(
+        self: &Arc<Self>,
+        instance: &str,
+        recipient: Activation,
+    ) -> Result<RootDelivery> {
+        let roots = {
+            let state = self.state.lock().unwrap();
+            let prepared = &self.plan.instances()[instance];
+            let member = state
+                .members
+                .get(instance)
+                .ok_or_else(|| fail(ErrorCode::Unavailable, "mirror owner not reserved"))?;
+            let table = member
+                .table
+                .as_ref()
+                .ok_or_else(|| fail(ErrorCode::Unavailable, "mirror owner not staged"))?;
+            let contracts = member_contracts(prepared.package())?.provides;
+            prepared
+                .exports()
+                .iter()
+                .map(|name| {
+                    let source = self.mirror_source(instance, name);
+                    RoutedRoot {
+                        name: name.clone(),
+                        service: name.clone(),
+                        owner: member.activation.clone(),
+                        source,
+                        contract: contracts[name].clone(),
+                        original: table.services[name].graph.clone(),
+                    }
+                })
+                .collect()
+        };
+        self.host.mirror_routes(roots, recipient).await
+    }
     /// Reserve in Host order before independent native starts. A runtime epoch
     /// belongs to exactly one prepared group, and shared members use that epoch.
     pub fn reserve(&self, instance: &str, activation: Activation) -> Result<()> {

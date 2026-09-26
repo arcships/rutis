@@ -32,7 +32,7 @@ use std::{
     process::Stdio,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Weak,
+        Arc, Mutex, Weak,
     },
     time::Duration,
 };
@@ -397,6 +397,64 @@ struct Fence {
     entered: tokio::sync::Notify,
     resume: tokio::sync::Notify,
 }
+/// Delay the real child's activate response without blocking its request pump
+/// or changing frame contents. A stop can pass while that ACK is still held.
+fn delayed_activate(stream: tokio::net::UnixStream, fence: Arc<Fence>) -> tokio::io::DuplexStream {
+    let (peer, bridge) = tokio::io::duplex(65536);
+    let (mut host_read, mut host_write) = tokio::io::split(bridge);
+    let (mut child_read, mut child_write) = stream.into_split();
+    let activations = Arc::new(Mutex::new(std::collections::BTreeSet::<String>::new()));
+    let outbound = activations.clone();
+    tokio::spawn(async move {
+        while let Ok(Some(frame)) = rutis_protocol::frame::read(&mut host_read).await {
+            if frame["type"] == "request" && frame["method"] == "plugin/activate" {
+                outbound
+                    .lock()
+                    .unwrap()
+                    .insert(frame["id"].as_str().unwrap().into());
+            }
+            if rutis_protocol::frame::write(&mut child_write, &frame)
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let (tx, mut frames) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(frame) = frames.recv().await {
+            if rutis_protocol::frame::write(&mut host_write, &frame)
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    tokio::spawn(async move {
+        while let Ok(Some(frame)) = rutis_protocol::frame::read(&mut child_read).await {
+            let held = frame["type"] == "response"
+                && activations
+                    .lock()
+                    .unwrap()
+                    .remove(frame["id"].as_str().unwrap())
+                && fence.enabled.swap(false, Ordering::SeqCst);
+            if held {
+                let fence = fence.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    fence.entered.notify_one();
+                    fence.resume.notified().await;
+                    let _ = tx.send(frame);
+                });
+            } else if tx.send(frame).is_err() {
+                break;
+            }
+        }
+    });
+    peer
+}
 fn handler(host: &Arc<HostObjects>, runtime: &str, fence: Arc<Fence>) -> Handler {
     let fallback: Handler = Arc::new(|_, _| {
         Box::pin(async {
@@ -437,6 +495,15 @@ impl Process {
         runtime: &str,
         group: &SnapshotGroup,
         fence: Arc<Fence>,
+    ) -> Self {
+        Self::launch_held(host, runtime, group, fence, None)
+    }
+    fn launch_held(
+        host: &Arc<HostObjects>,
+        runtime: &str,
+        group: &SnapshotGroup,
+        fence: Arc<Fence>,
+        activate: Option<Arc<Fence>>,
     ) -> Self {
         let (parent, child_socket) = std::os::unix::net::UnixStream::pair().unwrap();
         parent.set_nonblocking(true).unwrap();
@@ -487,10 +554,15 @@ impl Process {
             }
             text
         });
-        let peer = Peer::start(
-            tokio::net::UnixStream::from_std(parent).unwrap(),
-            handler(host, runtime, fence),
-        );
+        let stream = tokio::net::UnixStream::from_std(parent).unwrap();
+        let peer = if let Some(activate) = activate {
+            Peer::start(
+                delayed_activate(stream, activate),
+                handler(host, runtime, fence),
+            )
+        } else {
+            Peer::start(stream, handler(host, runtime, fence))
+        };
         host.attach(identity(runtime), &peer).unwrap();
         Self {
             child,
@@ -504,8 +576,13 @@ impl Process {
         assert_eq!(record[key], expected, "{record}");
         record
     }
-    async fn finish(mut self) {
-        self.peer.request("runtime/stop", json!({})).await.unwrap();
+    async fn finish(self) {
+        self.finish_count(2).await;
+    }
+    async fn finish_count(mut self, count: usize) {
+        if !self.peer.is_closed() {
+            self.peer.request("runtime/stop", json!({})).await.unwrap();
+        }
         self.peer.close(ProtocolError::new(
             ErrorCode::Unavailable,
             "test",
@@ -523,9 +600,16 @@ impl Process {
             }
         }
         cleaned.sort();
-        assert_eq!(cleaned.len(), 2);
-        assert!(cleaned[0].ends_with("consumer"));
-        assert!(cleaned[1].ends_with("provider"));
+        assert_eq!(cleaned.len(), count, "{cleaned:?}");
+        assert!(cleaned.iter().any(|name| name.ends_with("provider")));
+        assert_eq!(
+            cleaned
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            count,
+            "duplicate native cleanup: {cleaned:?}"
+        );
     }
 }
 #[tokio::test]
@@ -696,6 +780,346 @@ async fn frozen_default_drivers_accept_before_construction_and_route_bidirection
         rust.finish().await;
         node.finish().await;
         assert!(snapshot.root().exists());
+        snapshot.cleanup().unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn host_proxy_stop_passes_a_loading_start_and_late_activate_ack_cannot_reopen_it() {
+    use rutis::FiberState;
+    use rutis_protocol::{host::HostGraph, lifecycle::publish_ready};
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let plan = native_plan::prepare();
+        let snapshot = Snapshot::materialize(&plan).unwrap();
+        let objects = DeploymentObjects::new(plan.clone()).unwrap();
+        let host = objects.host();
+        let graph = HostGraph::new(objects, identity("host")).unwrap();
+        let root = Ctx::root().unwrap();
+        let rust_accept = Arc::new(Fence::default());
+        let node_accept = Arc::new(Fence::default());
+        let node_activate = Arc::new(Fence::default());
+        let mut rust = Process::launch(
+            &host,
+            "rust",
+            &snapshot.groups()["rust"],
+            rust_accept.clone(),
+        );
+        let mut node = Process::launch_held(
+            &host,
+            "node",
+            &snapshot.groups()["node"],
+            node_accept.clone(),
+            Some(node_activate.clone()),
+        );
+        let rust_launch = Hello::prepared(
+            &plan,
+            "rust",
+            &snapshot.groups()["rust"],
+            "rust".into(),
+            Sequence(1),
+        )
+        .unwrap();
+        let node_launch = Hello::prepared(
+            &plan,
+            "node",
+            &snapshot.groups()["node"],
+            "node".into(),
+            Sequence(1),
+        )
+        .unwrap();
+        hello(&rust.peer, &rust_launch).await.unwrap();
+        hello(&node.peer, &node_launch).await.unwrap();
+        let missing = graph
+            .mount(&root, "rust-missing", rust_launch.identity.clone())
+            .unwrap();
+        let rust_provider = graph
+            .mount(&root, "rust-provider", rust_launch.identity.clone())
+            .unwrap();
+        let node_provider = graph
+            .mount(&root, "node-provider", node_launch.identity.clone())
+            .unwrap();
+        let rust_ready =
+            publish_ready(&root, rust_launch.identity.clone(), rust.peer.clone()).unwrap();
+        let node_ready =
+            publish_ready(&root, node_launch.identity.clone(), node.peer.clone()).unwrap();
+        rust_provider.ready().await.unwrap();
+        node_provider.ready().await.unwrap();
+        rust.record("constructed", "provider").await;
+        node.record("loaded", "node-provider").await;
+        assert_eq!(missing.native().view().state().state, FiberState::Pending);
+        assert!(missing.activation().is_none());
+        for (runtime, launch, process, fence) in [
+            ("rust", &rust_launch, &mut rust, &rust_accept),
+            ("node", &node_launch, &mut node, &node_accept),
+        ] {
+            fence.enabled.store(true, Ordering::SeqCst);
+            let cancelled = graph
+                .mount(&root, &format!("{runtime}-cancel"), launch.identity.clone())
+                .unwrap();
+            fence.entered.notified().await;
+            assert_eq!(cancelled.native().view().state().state, FiberState::Loading);
+            let ctx = cancelled.native().native_context().unwrap();
+            let stopped = cancelled.stop();
+            drop(stopped);
+            let activation = cancelled.activation().unwrap();
+            assert_eq!(
+                process
+                    .peer
+                    .request("plugin/state", json!({"activation":activation}))
+                    .await
+                    .unwrap()["phase"],
+                "closing",
+                "remote stop is sent before Host native apply/effect drain can finish"
+            );
+            assert!(ctx
+                .effect(|| panic!("stopped Loading context admitted a new effect"))
+                .is_err());
+            assert!(process.records.try_recv().is_err());
+            fence.resume.notify_one();
+            cancelled.stop().await.unwrap();
+            assert!(cancelled.ready().await.is_err());
+            assert!(
+                process.records.try_recv().is_err(),
+                "cancelled root admission entered business apply"
+            );
+            assert!(graph
+                .mount(&root, &format!("{runtime}-cancel"), launch.identity.clone())
+                .is_err());
+        }
+        node_activate.enabled.store(true, Ordering::SeqCst);
+        let late = graph
+            .mount(&root, "node-late", node_launch.identity.clone())
+            .unwrap();
+        node_activate.entered.notified().await;
+        node.record("loaded", "node-consumer").await;
+        node.record("exercised", "node-late").await;
+        assert_eq!(late.native().view().state().state, FiberState::Active);
+        assert!(!late.is_available());
+        let old = late.native().native_context().unwrap();
+        late.stop().await.unwrap();
+        assert!(!late.is_available());
+        assert!(old
+            .effect(|| panic!("old late-ACK context entered effect"))
+            .is_err());
+        node_activate.resume.notify_one();
+        assert!(late.ready().await.is_err());
+        assert!(!late.is_available());
+        assert!(node_provider.is_available());
+        assert!(rust_provider.is_available());
+        rust_provider.stop().await.unwrap();
+        rust.peer.close(ProtocolError::new(
+            ErrorCode::Unavailable,
+            "test",
+            "confirmed provider stop then epoch close",
+        ));
+        assert!(
+            !missing.native().gate().is_open(),
+            "Pending proxy also closes synchronously on epoch disconnect"
+        );
+        assert!(
+            graph
+                .mount(&root, "rust-late", rust_launch.identity)
+                .is_err(),
+            "closed epoch cannot admit an unentered instance"
+        );
+        graph.shutdown().await.unwrap();
+        root.shutdown().await.unwrap();
+        drop(rust_ready);
+        drop(node_ready);
+        rust.finish_count(1).await;
+        node.finish_count(2).await;
+        drop(late);
+        drop(missing);
+        drop(rust_provider);
+        drop(node_provider);
+        drop(graph);
+        snapshot.cleanup().unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn native_host_graph_waits_for_activate_ack_refreshes_real_keys_and_closes_consumers_synchronously(
+) {
+    use rutis::FiberState;
+    use rutis_protocol::{host::HostGraph, lifecycle::publish_ready};
+    tokio::time::timeout(Duration::from_secs(50), async {
+        let plan = native_plan::prepare();
+        let snapshot = Snapshot::materialize(&plan).unwrap();
+        let objects = DeploymentObjects::new(plan.clone()).unwrap();
+        let host = objects.host();
+        let graph = HostGraph::new(objects, identity("host")).unwrap();
+        let root = Ctx::root().unwrap();
+        let activate = Arc::new(Fence::default());
+        activate.enabled.store(true, Ordering::SeqCst);
+        let mut rust = Process::launch_held(
+            &host,
+            "rust",
+            &snapshot.groups()["rust"],
+            Arc::default(),
+            Some(activate.clone()),
+        );
+        let mut node = Process::launch(&host, "node", &snapshot.groups()["node"], Arc::default());
+        let rust_launch = Hello::prepared(
+            &plan,
+            "rust",
+            &snapshot.groups()["rust"],
+            "rust".into(),
+            Sequence(1),
+        )
+        .unwrap();
+        let node_launch = Hello::prepared(
+            &plan,
+            "node",
+            &snapshot.groups()["node"],
+            "node".into(),
+            Sequence(1),
+        )
+        .unwrap();
+        let rust_provider = graph
+            .mount(&root, "rust-provider", rust_launch.identity.clone())
+            .unwrap();
+        let rust_consumer = graph
+            .mount(&root, "rust-consumer", rust_launch.identity.clone())
+            .unwrap();
+        let node_provider = graph
+            .mount(&root, "node-provider", node_launch.identity.clone())
+            .unwrap();
+        let node_consumer = graph
+            .mount(&root, "node-consumer", node_launch.identity.clone())
+            .unwrap();
+        hello(&rust.peer, &rust_launch).await.unwrap();
+        hello(&node.peer, &node_launch).await.unwrap();
+        for proxy in [
+            &rust_provider,
+            &rust_consumer,
+            &node_provider,
+            &node_consumer,
+        ] {
+            assert_eq!(proxy.native().view().state().state, FiberState::Pending);
+            assert!(proxy.activation().is_none());
+        }
+        assert!(rust.records.try_recv().is_err());
+        assert!(node.records.try_recv().is_err());
+        let rust_ready = publish_ready(&root, rust_launch.identity, rust.peer.clone()).unwrap();
+        activate.entered.notified().await;
+        assert_eq!(
+            rust_provider.native().view().state().state,
+            FiberState::Active
+        );
+        assert!(!rust_provider.is_available());
+        let rust_key = plan.export_key("rust-provider", "rpc").unwrap();
+        let raw = root
+            .get_as::<rutis_protocol::imports::ObjectProxy>(rust_key.clone())
+            .unwrap();
+        assert_eq!(raw.delivery().unwrap_err().code, ErrorCode::Unavailable);
+        assert_eq!(
+            rust.peer
+                .request(
+                    "plugin/state",
+                    json!({"activation":rust_provider.activation().unwrap()})
+                )
+                .await
+                .unwrap()["phase"],
+            "published",
+            "real remote activate completed but its ACK remains held"
+        );
+        assert_eq!(
+            node_consumer.native().view().state().state,
+            FiberState::Pending
+        );
+        let node_ready = publish_ready(&root, node_launch.identity, node.peer.clone()).unwrap();
+        node_provider.ready().await.unwrap();
+        rust_consumer.ready().await.unwrap();
+        assert_eq!(
+            node_consumer.native().view().state().state,
+            FiberState::Pending,
+            "remote availability cannot precede activate ACK"
+        );
+        assert!(
+            rust_consumer.is_available(),
+            "a sibling in the same Rust runtime can publish while provider ACK is held"
+        );
+        rust.record("constructed", "provider").await;
+        rust.record("constructed", "consumer").await;
+        rust.record("exercised", "rust-consumer").await;
+        node.record("loaded", "node-provider").await;
+        assert!(node.records.try_recv().is_err());
+        activate.resume.notify_one();
+        rust_provider.ready().await.unwrap();
+        node_consumer.ready().await.unwrap();
+        node.record("loaded", "node-consumer").await;
+        node.record("exercised", "node-consumer").await;
+        let captured = node_consumer.captured();
+        assert!(Arc::ptr_eq(
+            &captured[0],
+            &root
+                .get_as::<rutis_protocol::imports::ObjectProxy>(rust_key.clone())
+                .unwrap()
+        ));
+        assert_eq!(
+            captured[0].delivery().unwrap().object.owner,
+            rust_provider.activation().unwrap()
+        );
+        let client = rust_provider
+            .service::<InterfaceDatabaseClient>("rpc")
+            .unwrap();
+        let connection = client
+            .connect(InterfaceDatabaseMethod0Params {
+                name: "actual-host-type-key".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            connection
+                .query(InterfaceConnectionMethod0Params { sql: "host".into() })
+                .await
+                .unwrap()[0]["owner"],
+            "rust"
+        );
+        let rust_ctx = rust_provider.native().native_context().unwrap();
+        let node_ctx = node_consumer.native().native_context().unwrap();
+        let revoked = host.close_member(&rust_provider.activation().unwrap());
+        assert!(!rust_provider.is_available());
+        assert!(!node_consumer.is_available());
+        assert!(rust_ctx
+            .effect(|| panic!("old provider effect factory entered"))
+            .is_err());
+        assert!(node_ctx
+            .effect(|| panic!("old consumer effect factory entered"))
+            .is_err());
+        assert!(captured[0].delivery().is_err());
+        if let Some(value) = root.get_as::<rutis_protocol::imports::ObjectProxy>(rust_key.clone()) {
+            assert!(value.delivery().is_err());
+        }
+        assert!(rust_consumer.is_available());
+        assert!(node_provider.is_available());
+        assert!(connection
+            .query(InterfaceConnectionMethod0Params {
+                sql: "stale".into()
+            })
+            .await
+            .is_err());
+        revoked.await.unwrap();
+        rust_provider.stop().await.unwrap();
+        assert!(root
+            .get_as::<rutis_protocol::imports::ObjectProxy>(rust_key)
+            .is_none());
+        node_consumer.stop().await.unwrap();
+        graph.shutdown().await.unwrap();
+        root.shutdown().await.unwrap();
+        drop(rust_ready);
+        drop(node_ready);
+        rust.finish().await;
+        node.finish().await;
+        drop(rust_provider);
+        drop(rust_consumer);
+        drop(node_provider);
+        drop(node_consumer);
+        drop(graph);
         snapshot.cleanup().unwrap();
     })
     .await

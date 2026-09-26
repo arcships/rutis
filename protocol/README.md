@@ -1,12 +1,12 @@
 # 实验对象协议实现约定
 
 此目录与 `rutis-protocol` crate 实施 [#59 设计](../docs/design-protocol-plugins-2026-09-25.md)。
-当前 M1 与 M2 在推进，尚未形成可部署的 Rust↔Cordis 协议插件系统。已有两端生成绑定、对象图、私有 socket 上的真实跨语言调用与回收 ACK，以及 prepare、冻结启动和默认服务 driver；完整 HostProxy 发布图、监督恢复和 broker 事件仍在开发。
+当前 M1 与 M2 在推进，尚未形成可部署的 Rust↔Cordis 协议插件系统。已有两端生成绑定、对象图、私有 socket 上的真实跨语言调用与回收 ACK，以及 prepare、冻结启动、默认服务 driver 和首代 Host 原生代理发布图；监督恢复、broker 事件及完整迁移验收仍在开发。
 实施证据及完整验收范围见[验收记录](../docs/protocol-plugin-implementation.md)。旧 `rutis-cordis` 桥继续独立存在。
 
 Rust/Node 私有连接的 hello/start/activate/stop、native RuntimeReady 与发布门控见[生命周期控制](lifecycle.md)。通用 Node 入口使用冻结快照的启动 catalog 和 bundle 原字节；启用服务传输的默认驱动支持 object.scope/callback.borrow，事件能力在 hello 拒绝。
 
-命名原生端口、生成客户端注入、跨 bundle 整表 broker 事务和 owner pin 确认见[服务绑定](services.md)。[私有 session](session.md) 已接入权威 broker 和 named roots，默认 driver 也已在实际冻结子进程中验证；完整 HostProxy 图仍待装配。
+命名原生端口、生成客户端注入、跨 bundle 整表 broker 事务和 owner pin 确认见[服务绑定](services.md)。[私有 session](session.md) 已接入权威 broker 和 named roots；[Host 原生图](host.md) 在实际冻结子进程中验证 RuntimeReady、原生 Active、activate ACK 与 availability/refresh 的发布顺序及同步关闭。
 
 [冻结根交付](deployment.md) 从 prepared routes 捕获整张 required 表，复用 owner 保留清单，为多个消费者建立独立 source views，并跨 provider 原子签发；仍需接入完整 native Host 发布图。
 

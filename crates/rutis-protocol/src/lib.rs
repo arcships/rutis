@@ -9,6 +9,7 @@ pub mod exports;
 pub mod factories;
 pub mod frame;
 pub mod graph;
+pub mod host;
 pub mod identity;
 pub mod imports;
 pub mod json;

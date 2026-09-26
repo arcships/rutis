@@ -2,8 +2,8 @@
 
 Rust `lifecycle::{Runner,NativeDriver,Hello,RuntimeReady}` 与 TS
 `lifecycle::{Runner,NativeModuleDriver}` 在真实 native fiber 外记录宿主意图。
-两端默认服务 driver 已能在私有帧连接中工作；完整宿主业务图装配与
-supervisor 仍在开发，协议尚未冻结。
+两端默认服务 driver 已能在私有帧连接中工作；首代 [Host 原生图](host.md) 已接入，
+supervisor 与完整迁移仍在开发，协议尚未冻结。
 
 ## 引导
 
@@ -101,8 +101,10 @@ start 才返回 staged。缺少声明的 Rust export 直接失败并 join cleanu
 `native_runner_ipc` 从四个独立包的冻结字节启动真实 Rust 子进程与编译后的 Node
 runner，在原包删除后运行双向 DI、状态对象、循环属性、owner passback、两层回调。
 真实 Host 延迟两端 Accept ACK，验证构造/import 未开始；期间 stop 阻止迟到业务。
-每个实际 runtime 正常退出，native cleanup 都被核对。该用例直接操作控制层，仍不
-构成 RuntimeReady → HostProxy Active → availability/refresh 的完整 Host 图证据。
+每个实际 runtime 正常退出，native cleanup 都被核对。最初的用例直接操作控制层；
+后续 HostGraph 用例覆盖 RuntimeReady → HostProxy Active → activate ACK →
+availability/refresh，以及 Loading stop、迟到 activate ACK 和 Pending epoch 失效，
+见 [Host 原生图](host.md)。完整监督恢复和迁移仍待验收。
 
 `tests/lifecycle.rs` 使用真实 rutis Ctx、effect 与 native fiber 验证独立 RuntimeReady、
 一个成员 Loading 时另一个发布、构造/stop 交错、发布前拒绝、失效后旧 Ctx 闭锁、

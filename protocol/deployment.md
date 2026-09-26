@@ -2,7 +2,8 @@
 
 Rust `deployment::DeploymentObjects` 持有完整 `PreparedDeployment`，从冻结的 bundle
 原字节创建 `HostObjects`，选择每个消费者的完整 required 表。它是生产 Host 图的
-路由装配层，已接默认 Rust/Node 服务 driver；完整 HostProxy 与监督者仍待接入。
+路由装配层，已接默认 Rust/Node 服务 driver 与首代 [HostProxy 原生图](host.md)；
+监督者的快照租约与恢复仍待接入。
 
 ## Host 顺序
 
@@ -12,11 +13,11 @@ Rust `deployment::DeploymentObjects` 持有完整 `PreparedDeployment`，从冻�
 2. native Ready 后，把 runner 报告的完整 `ServiceTable` 交给 `stage`。检查完整
    provides 名称、精确契约、真实 owner 和每项原始 source；不能把一个服务的图
    冒充另一个服务。未启用的 provides 仍须满足声明，但不进入授权路由。
-3. Host 原生代理成为 Active 后才调用 `publish` 并完成远端 activate。两端各自的
+3. Host 原生代理成为 Active 并取得远端 activate ACK 后才调用 `publish`。两端各自的
    发布屏障仍独立；此对象层不会把简单的 stage 当作 Native Active 或 activate ACK。
 4. 依赖可用时调用 `offer_required(consumer)`。缺少 route、尚未 staged 或尚未
    Published 的 provider 返回 Unavailable，不开始 issuance、不关闭消费者；完整
-   Host native graph 应把这些业务依赖保持为 Pending。
+   HostGraph 把这些业务依赖保持为真实原生 Pending。
 5. 成功返回的 `RootDelivery` 通过 `start(instance)` 接到默认 driver，也可通过
    `receive` 或 `send` 接到自定义 SDK 装配。整张表只能
    签发一次，丢弃或失败后不能重新绑定这代。整表 Accept ACK 才允许业务构造。
@@ -67,7 +68,8 @@ native adapter 选择。启动 apply 内执行 stateful query、循环对象和�
 
 测试的路由选择来自真正 prepared 元数据及冻结字节，原包在调用前删除。其管理
 入口仍是标注 fixture，Rust actor 在 Host 测试进程中；计划内 Node entry 明确拒绝
-装载，实际 Cordis 子进程使用 session fixture。该证据只支持冻结根装配，不支持
-frozen runner → RuntimeReady → HostProxy Active 的完整发布链。事件能力在 metadata
+装载，实际 Cordis 子进程使用 session fixture。该用例只支持冻结根装配；另一个
+`native_runner_ipc` 用例覆盖实际 frozen runner → RuntimeReady → HostProxy Active
+发布链，见 [Host 原生图](host.md)。事件能力在 metadata
 中通过完整 bundle 检查，但本用例没有 broker 事件，不计作 M4。内部 child 精确
 creator context、监督恢复、真实旧桥迁移和完整 T24 也仍待验收。

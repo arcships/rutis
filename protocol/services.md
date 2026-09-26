@@ -2,8 +2,8 @@
 
 Rust `services::{Bundles,NativePorts,ServiceTable,StagedServices}` 与 TS `services.ts`
 把精确 bundle、wire 服务名与本地原生服务键绑定。当前实现是生产装配所需的 SDK
-基础；默认生命周期 driver 已安装对象传输并通过实际冻结子进程验证，HostProxy
-业务图仍待接入，不能用这些 API 或单元测试宣布 M2 完成。
+基础；默认生命周期 driver 与首代 [HostProxy 原生图](host.md) 已通过实际冻结
+子进程验证。监督恢复和完整迁移仍待验收，不能用这些 API 或单元测试宣布 M2 完成。
 
 ## 本地绑定与装载
 

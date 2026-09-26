@@ -48,7 +48,7 @@ CI 增加锁定依赖的 TS 检查；Rust crate 纳入现有 workspace 测试。
 | 阶段 | 状态 | 尚需取得的证据 |
 | --- | --- | --- |
 | M1 | 开发中 | 两端草稿编码、事务授权与生成 dispatch 已接入私有 socket；完整失败交错、独占资源跨语言清理、生产连接的控制流与复用评估仍需补齐 |
-| M2 | 开发中 | prepare、冻结快照、默认 Rust/Node 服务 driver 及真实子进程双向 DI 已有证据；完整 HostProxy 服务图与发布装配、快照监督租约、真实旧桥迁移和 T24 测量尚未完成 |
+| M2 | 开发中 | prepare、冻结快照、默认 Rust/Node 服务 driver、首代 HostProxy 原生发布/关闭及真实子进程双向 DI 已有证据；native adapter 自动 slot 安装、快照监督租约、共享/单独完整拓扑、真实旧桥迁移和 T24 测量尚未完成 |
 | M3 | 待完成 | 调用取消/完成、更新/失败回滚、组恢复屏障、Linux 进程和受管后代回收 |
 | M4 | 待完成 | broker 权威事件列表、parallel/serial、scope、ready、once 与扩展拒绝 |
 | M5 | 待完成 | T01–T24 逐项运行时证据、旧桥回归、迁移/回退指南、基础协议冻结 |
@@ -81,19 +81,19 @@ CI 增加锁定依赖的 TS 检查；Rust crate 纳入现有 workspace 测试。
 - 双端 `GraphExporter` 先暂存真实对象，完整验证草稿，再向 broker 请求授权。broker 整图事务拒绝伪造 owner/source/foreign proof，不留下交付 id 缺口；SDK commit 只确认对应的真实对象与视图。Rust snapshot panic 与两端验证失败释放 staging；原生闭锁后纯值结果也不能编码。同一 owner 的多个 bundle 编码器共用 staging 编号空间；Rust 内存链路复用同一编码器，owner pin 失败通过完整拒绝 manifest 记录接收前缀。
 - 双端帧接收泵支持重入和并发，拒绝重复/倒序请求 id；Rust 独立 writer 在等待者被丢弃时继续完成已排队帧，关闭时可打断阻塞写并释放 stream。TS 编码前拒绝 undefined、NaN、Date、稀疏数组和自定义原型，防止 stringify 改变数据含义。
 
-可执行证据：Rust bindings 8、contracts 5、drafts 5、exports 10、factories 6、frames 5、graphs 7、objects 13、managed 14、objects_ipc 1、prepare 21、lifecycle 12、services 7、session_ipc 2、native_runner_ipc 3 项（合计 119，其中 lifecycle 与 native_runner_ipc 各一项是子进程入口）；TS bindings 7、contracts 5、drafts 4、exports 8、frames 5、graphs 5、imports 6、managed 8、lifecycle 12、services 10、session 1 项（合计 71）。共享语料包含 JSON 35、描述符 50、wire value 32、回调签名 9、对象图 31、帧 10、lifecycle hello 17、named services 12 个用例。Rust 使用两个真实线程同时交付/释放；两端另验证原生失效时的执行 pin 和慢对象清理。
+可执行证据：Rust imports 单元 1、bindings 8、contracts 5、drafts 5、exports 10、factories 6、frames 5、graphs 7、objects 13、managed 14、objects_ipc 1、prepare 21、lifecycle 12、services 7、session_ipc 2、native_runner_ipc 5 项（合计 122，其中 lifecycle 与 native_runner_ipc 各一项是子进程入口）；TS bindings 7、contracts 5、drafts 4、exports 8、frames 5、graphs 5、imports 6、managed 8、lifecycle 12、services 10、session 1 项（合计 71）。共享语料包含 JSON 35、描述符 50、wire value 32、回调签名 9、对象图 31、帧 10、lifecycle hello 17、named services 12 个用例。Rust 使用两个真实线程同时交付/释放；两端另验证原生失效时的执行 pin 和慢对象清理。
 
 Linux `objects_ipc` 运行独立 Node 进程与真实 managed rutis/Cordis Ctx，使用继承的私有 Unix stream fd 3，stdout 诊断另行读取。Rust 权威 broker 从固定连接取得 Node activation，校验 family/version/raw SHA/capabilities；两端生成客户端实际 connect/query，保留同一状态对象和 session→agent→session 循环，owner pass-back 仍走 broker。两端借用 callback 重入第三层调用并等待登记子任务；保存的 callback 到期后拒绝调用。Node 在业务 dispatch 前通过控制帧确认参数 grant，避免回调/pass-back 读取尚未 accepted 的引用。丢弃 Rust waiter 后 Node 实际执行仍持有 execution pin，完成后才释放。
 
 同一私有 socket fixture 已完成 Node 接收 SDK 的前缀提议、broker 独立检查、owner 回收通知、ACK 后 SDK 清理；Rust 接收端也走同一 broker 和 Node owner 通知。活的首份 grant 阻止后续已释放 borrow 的回收，旧 id 的控制重传不能恢复授权，低于水位的接收和 pin 拒绝。后续 `session_ipc` 又覆盖多个 activation 共用前缀和全部成员关闭后的 epoch 回收。当前约定见 [protocol README](../protocol/README.md)。这些是 conformance 证据；完整断连/取消/finished 故障交错与 supervisor 尚未验收。
 
-本阶段工作区回归：`cargo test --workspace` 486 passed / 0 failed / 2 ignored，新对象协议私有 Node socket、Rust 生命周期子进程、冻结目录的默认 Rust/Node 服务 driver 与旧桥真实 Node TCP e2e 均通过。两个 ignored 是依赖外部 min-cordis/dsh 检出的 host e2e 与需要真实模型后端的 agent e2e，不能计入通过。`cargo check --workspace --all-targets`、全仓 fmt、协议 crate clippy `-D warnings`、TS check/build/test 通过；没有执行外部 min-cordis/dsh 整体迁移验收。Linux Rust CI 安装锁定 Node/TS 依赖并运行该新互通测试，旧桥的跳过变量不跳过它。
+本阶段工作区回归：`cargo test --workspace` 489 passed / 0 failed / 2 ignored，新对象协议私有 Node socket、Rust 生命周期子进程、冻结目录的默认 Rust/Node 服务 driver、首代 Host 原生发布/关闭与旧桥真实 Node TCP e2e 均通过。后续关闭确认补查重跑整个 protocol crate。两个 ignored 是依赖外部 min-cordis/dsh 检出的 host e2e 与需要真实模型后端的 agent e2e，不能计入通过。`cargo check --workspace --all-targets`、全仓 fmt、协议 crate clippy `-D warnings`、TS check/build/test 通过；没有执行外部 min-cordis/dsh 整体迁移验收。Linux Rust CI 安装锁定 Node/TS 依赖并运行该新互通测试，旧桥的跳过变量不跳过它。
 
 M1 后续必须补齐以下内容，之后才能称为 M1 完成或冻结该实验协议：
 
-1. 将已有多 bundle、多 member 的私有 session 接入 frozen runner 与完整 HostProxy 图；真实 IPC 的 fixture 管理入口仍不能代替生产 prepare/生命周期装配。
+1. 扩展首代 frozen runner/HostProxy 原生图到多 bundle 和 native adapter 自动 slot 安装；早期私有 session 的 fixture 管理入口不能代替这些装配证据。
 2. 补齐双端完整结果丢弃、scope 回收、独占资源 disposer、handler/子任务失败收敛及原生依赖失效交错；Rust 已有状态返回、owner facade、循环图与嵌套 borrow 内存证据，不能等同于跨语言验收。
-3. 将已有严格帧/握手检查及只读 prepare 接入生产连接状态机；两端生命周期控制已有证据，实际 native 路由绑定和完整 HostActive 装配仍待 M2。
+3. 将已有严格帧/握手检查、只读 prepare 与首代 HostActive 装配接入生产监督状态机；两端 instance 原生路由已有证据，实际 native adapter 及更新恢复仍待完成。
 4. 补齐 epoch 记录回收、断连/迟到消息与取消/finished 交错；多 activation 的正常终态回收 ACK 已有真实 session 证据，但不代替故障控制流和监督恢复。
 5. 检查生成绑定在实际迁移插件中的可用性，完成成熟实现复用评估及完整 M1 门槛记录，之后再冻结实验协议。
 
@@ -149,7 +149,7 @@ hook 在帧锁外执行，断连先撤销、后独立推进 cleanup。实际 Rus
 具体行为和边界见[生命周期控制](../protocol/lifecycle.md)。
 
 默认 native driver 的命名对象服务装配现已接入，见后面的冻结默认 driver 证据；
-hello 继续明确拒绝事件能力，完整 HostProxy 发布图仍未完成。
+hello 继续明确拒绝事件能力。后续 HostProxy 首代发布证据见末节。
 完整宿主业务图、StopUnconfirmed 管理 API、配置更新和 supervisor 同样尚未验收。
 
 TS `lifecycle` 和编译后的通用 `node-runner` 接入同一控制形状，hello 保持模块惰性，
@@ -205,7 +205,8 @@ Loading 原始 Ctx 的 effect 拒绝需要下面记录的本仓库 rutis 公开�
 行为和调用顺序见[服务绑定](../protocol/services.md)。这仍是 SDK/事务基础证据：
 默认 driver 的对象 transport 已接入，事件仍拒绝。冻结根选择与 source alias 已有
 后续私有 session 证据，默认服务 driver 也已复用这份 registry 和私有命名服务交付。
-HostActive 完整业务图、internal child 对象精确 creator Ctx 以及迁移/恢复/T24 尚待完成。
+首代 instance HostActive 图已有后续证据；native adapter 自动 slot 安装、internal child
+对象精确 creator Ctx 以及迁移/恢复/T24 尚待完成。
 M0–M5 和 T01–T24 的最终验收范围保持不变，目标没有标为完成。
 
 
@@ -297,8 +298,8 @@ Host 只允许 own view 改为已选择的 `PreparedRoute.source`，foreign proo
 
 路由计划来自实际 prepare，冻结原字节后删除源包；计划内 Node entry 是明确拒绝
 装载的元数据 fixture，实际 Node/Cordis 使用 session 子进程。详情见[冻结根交付](../protocol/deployment.md)。
-这完成了根选择与交付装配层的证据，默认 service-capable driver 的后续证据见下；完整
-HostProxy 发布链、runtime/snapshot 监督租约、内部 child creator context、事件、
+这完成了根选择与交付装配层的证据，默认 service-capable driver 与首代 HostProxy
+发布链的后续证据见下；runtime/snapshot 监督租约、内部 child creator context、事件、
 真实旧桥迁移、共享/单独双语言完整拓扑与 T24 仍待完成。全目标保持开发中。
 
 ## M2 默认服务 driver 与冻结子进程
@@ -337,8 +338,52 @@ Node provider/consumer 是不同 module 的实际包，共享一份 canonical Co
 guard；TS 另验证 missing bundle、ports mismatch、catalog 原字节摘要，以及有/无
 服务传输的 module load/stop 交错。
 
-这是 frozen runner 与默认服务生命周期的证据。测试直接操作控制层的 stage 和
-activate，尚未接完整 RuntimeReady → HostProxy native Active → availability/refresh
-发布图，不计作整个 M2/T01–T24 完成。内部 child 对象精确 creator Ctx、共享/单独
+这是 frozen runner 与默认服务生命周期的证据。此用例直接操作控制层的 stage 和
+activate；后续 Host 原生发布图证据见下。不计作整个 M2/T01–T24 完成。
+内部 child 对象精确 creator Ctx、共享/单独
 完整拓扑、快照监督租约、Linux descendant reaping、更新恢复、broker 事件、真实
 旧桥迁移与完整 T24 仍待验收。
+
+## M2 首代 Host 原生发布与同步关闭
+
+`host::{HostGraph,HostProxy}` 挂载真实 rutis 依赖 fiber，inject 精确 RuntimeReady
+和 prepared route 的 ObjectProxy TypeKeys。缺依赖保持原生 Pending，无 activation
+或远端构造。原始 Host Ctx 先登记 rollback effect，再捕获真实 Arc 和冻结的
+owner/object/interface/bundle/source，按 Host 顺序保留 remote 与 Host SDK activation。
+编号分配与 broker reserve 在同一 metadata 顺序内，避免并发 fiber 的准入倒序。
+
+整张 required 表经真实 broker 和默认 driver Accept 后启动，完整 ready table 校验后
+为启用的 exports 建独立 mirror source，复用保留的 native 清单和 dispatcher。
+Host 的真实 SDK 接收/确认整表，再绑定原始 Ctx；实际原生键保存 ObjectProxy，
+availability 为 false。独立发布任务观察原生 Active，再等待远端精确 activate ACK，
+确认 gate 仍开才发布、设置 availability 和 refresh。原生初次 await 的 Pending
+不作为失败；同组成员没有 ready 屏障。
+
+可选 `get_as` 能读取尚未可用的注册值，因此 SDK facade 的 delivery/方法/缓存属性
+另检查 publication，属性导航继承相同检查而不改变 wrapper 身份。单元用例验证
+暂存根仍被 SDK 保留，循环属性返回的旧 wrapper 在关闭后拒绝访问。
+
+stop 在调用点关闭 availability 和 gate、封闭原始 Ctx，并同步排队远端 stop，
+早于 Host native effect drain。配对锁保证 start/stop 入队顺序，但不跨 await。
+Loading start 的关闭结果属于 ready 失败，独立 cleanup effect 仍 join 真实 stop ACK；
+配对清理还 join broker revoke 与本地 SDK Release ACK，cleanup 错误不丢弃。
+已断连 epoch 已有撤销证据，不要求它回复新的 revoke；这不替代远端 native stop。
+Host member 的弱关闭租约在 broker 锁外同步封闭 provider 和
+实际捕获它的消费者；epoch 租约也封闭尚未进入 apply 的 Pending 代理。
+
+`native_runner_ipc` 的 HostGraph 用例从同一四包冻结快照启动实际 Rust/Node 子进程，
+不直接操作 stage/activate。Rust activate ACK 延迟时，Host provider 虽 Active，
+SDK 与原生 availability 仍关闭，Node consumer 保持 Pending；同组另一位 Rust
+成员独立发布。放行 ACK 后 refresh 启动消费者，捕获 Arc 与真实原生 slot 相同。
+撤销 provider 的 future 尚未 poll，两个旧 Ctx 与返回对象已拒绝新操作。
+
+取消用例分别持有两端真实 Accept ACK，在 Host Loading 时发 stop，查询远端 Closing
+并检查无构造/import；丢弃首个 stop waiter 后，重复 stop 仍 join 清理。
+Node activate ACK 延迟时仍完成 stop，旧 ACK 到达不恢复
+availability 或旧 Ctx。已断连 epoch 封闭 missing-route Pending，拒绝新挂载。
+全部实际 cleanup 计数与子进程正常退出确认后才释放 snapshot。
+
+API 顺序和边界见 [Host 原生图](../protocol/host.md)。这完成首代 instance 路由的
+发布/关闭纵向证据，尚不拥有 snapshot 监督租约、Linux descendant reaping 或恢复
+换代。native adapter 自动原生 slot 安装、内部 child 对象精确 creator Ctx、共享/单独
+完整拓扑、broker 事件、真实旧桥迁移与 T24 仍需完成；全目标保持开发中。
