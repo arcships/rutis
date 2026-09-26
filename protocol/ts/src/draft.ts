@@ -57,6 +57,27 @@ export class GraphExporter {
     if (this.exports !== other.exports || this.admitted.sha256 !== other.admitted.sha256) fail('CapabilityDenied', 'dispatchers belong to another native table or bundle')
     for (const [key, dispatch] of other.dispatchers) this.dispatchers.set(key, dispatch)
   }
+  /** Used only by the private Host route control. Full commit validation stays
+   * unchanged; alias views use the same actual native dispatcher. */
+  stageRoute(type: TypeExpr, original: DraftGraph, source: string): StagedGraph {
+    this.exports.requireOpen()
+    const draft = structuredClone(original)
+    const aliases: [string, Dispatcher][] = []
+    for (const reference of draft.references) if (reference.source.kind === 'own') {
+      const { object, view } = reference.source
+      if (canonical(object.owner) !== canonical(this.owner) || view.bundle_sha256 !== this.admitted.sha256 || view.source !== this.source) fail('CapabilityDenied', 'route changed native manifest')
+      const dispatcher = this.dispatcher(object, view)
+      view.source = source; aliases.push([canonical([object, view]), dispatcher])
+    }
+    const root = { activation: this.owner, scope: '1' }
+    draftGraph(this.admitted, type, draft, { scope: root, borrow: root })
+    const pins: PinKey[] = []
+    try {
+      for (const reference of draft.references) if (reference.source.kind === 'own') pins.push(this.exports.stage(reference.source.object))
+      for (const [key, dispatcher] of aliases) this.dispatchers.set(key, dispatcher)
+      return new StagedGraph(this.admitted, this.exports, type, draft, pins)
+    } catch (error) { for (const pin of pins) this.exports.release(pin); throw error }
+  }
   encode(type: TypeExpr, value: Outbound): StagedGraph {
     this.exports.requireOpen()
     const references: DraftReference[] = []

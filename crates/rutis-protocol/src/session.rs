@@ -136,9 +136,25 @@ struct ServiceCommit {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RouteStage {
+    activation: Activation,
+    service: String,
+    source: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OwnerRetire {
     runtime: RuntimeIdentity,
     through: Sequence,
+}
+/// Frozen Host selections, never accepted from runtime payloads.
+pub(crate) struct RoutedRoot {
+    pub name: String,
+    pub service: String,
+    pub owner: Activation,
+    pub source: String,
+    pub contract: CatalogService,
+    pub original: DraftGraph,
 }
 
 struct NativeMember {
@@ -527,6 +543,48 @@ impl RuntimeObjects {
         state.stages.remove(&stage);
         Ok(())
     }
+    fn stage_route(&self, request: RouteStage) -> Result<StageOffer> {
+        self.identity.require(&request.activation)?;
+        if !request
+            .source
+            .strip_prefix("route.")
+            .is_some_and(crate::prepare::sha256_field)
+        {
+            return Err(fail(
+                ErrorCode::InvalidParams,
+                "invalid prepared route source",
+            ));
+        }
+        let mut state = self.state.lock().unwrap();
+        let member = state
+            .members
+            .get_mut(&request.activation)
+            .ok_or_else(|| fail(ErrorCode::Unavailable, "unknown route owner"))?;
+        if !member.gate.is_open() {
+            return Err(fail(ErrorCode::ScopeClosed, "route owner closed"));
+        }
+        let services = member
+            .services
+            .as_ref()
+            .ok_or_else(|| fail(ErrorCode::Unavailable, "native service table is not staged"))?;
+        let staged = services.stage_route(&request.service, &request.source)?;
+        let named = services.exporter(&request.service)?;
+        member.exporters[&services.contracts()[&request.service].bundle_sha256]
+            .merge_registered(&named)?;
+        state.next_stage = state
+            .next_stage
+            .checked_add(1)
+            .ok_or_else(|| fail(ErrorCode::Unavailable, "stage sequence exhausted"))?;
+        let stage = Sequence(state.next_stage);
+        let offer = StageOffer {
+            activation: request.activation.clone(),
+            stage,
+            source: request.source,
+            draft: staged.draft.clone(),
+        };
+        state.stages.insert(stage, (request.activation, staged));
+        Ok(offer)
+    }
     pub async fn flush(self: &Arc<Self>) -> Result<()> {
         let completion = {
             let mut tail = self.control_tail.lock().unwrap();
@@ -670,6 +728,7 @@ impl RuntimeObjects {
                 staged.commit(&request.graphs, &request.scopes)?;
                 ready(Value::Null)
             }
+            "object/route" => ready(wire(self.stage_route(decode(value)?)?)),
             "object/reject" => {
                 let deliveries: Vec<Delivery> = decode(value)?;
                 self.imports.reject(&deliveries);
@@ -1098,6 +1157,11 @@ impl HostObjects {
     }
     /// Reserve IDs in Host order before independently sending member starts.
     pub fn reserve(&self, activation: Activation) -> Result<()> {
+        RuntimeIdentity {
+            runtime: activation.runtime.clone(),
+            epoch: activation.epoch,
+        }
+        .require(&activation)?;
         let mut state = self.state.lock().unwrap();
         state.broker.start_activation(activation.clone())?;
         state.broker.open_scope(root(&activation), None)?;
@@ -1121,6 +1185,23 @@ impl HostObjects {
         }
         member.published = true;
         Ok(())
+    }
+    pub(crate) fn require_published(&self, activation: &Activation) -> Result<()> {
+        if self
+            .state
+            .lock()
+            .unwrap()
+            .members
+            .get(activation)
+            .is_some_and(|m| m.published && !m.closed)
+        {
+            Ok(())
+        } else {
+            Err(fail(
+                ErrorCode::Unavailable,
+                "prepared provider has not been published",
+            ))
+        }
     }
     pub fn attach(self: &Arc<Self>, identity: RuntimeIdentity, peer: &Peer) -> Result<()> {
         let weak = Arc::downgrade(self);
@@ -1449,6 +1530,186 @@ impl HostObjects {
         });
         rx.await
             .map_err(|_| fail(ErrorCode::Unavailable, "service handoff task lost"))?
+    }
+    pub(crate) async fn offer_routes(
+        self: &Arc<Self>,
+        roots: Vec<RoutedRoot>,
+        recipient: Activation,
+    ) -> Result<RootDelivery> {
+        let host = self.clone();
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let contracts = roots
+                .iter()
+                .map(|r| (r.name.clone(), r.contract.clone()))
+                .collect();
+            let result = host.handoff_routes(&roots, &recipient).await;
+            let result = match result {
+                Ok(graphs) => Ok(RootDelivery {
+                    host,
+                    recipient,
+                    contracts,
+                    graphs: Some(graphs),
+                    local: None,
+                }),
+                Err(error) => {
+                    drop(host.close_member(&recipient));
+                    Err(error)
+                }
+            };
+            // Issuance and rollback survive abandonment of a Host apply waiter.
+            let _ = tx.send(result);
+        });
+        rx.await
+            .map_err(|_| fail(ErrorCode::Unavailable, "prepared root handoff task lost"))?
+    }
+    async fn handoff_routes(
+        &self,
+        roots: &[RoutedRoot],
+        recipient: &Activation,
+    ) -> Result<BTreeMap<String, WireGraph>> {
+        let scopes = GraphScopes::in_scope(root(recipient));
+        let mut offers = Vec::<StageOffer>::new();
+        let mut graphs = BTreeMap::new();
+        let mut issued = false;
+        let result = async {
+            for route in roots {
+                {
+                    let state = self.state.lock().unwrap();
+                    if !state
+                        .members
+                        .get(&route.owner)
+                        .is_some_and(|m| !m.closed && m.published)
+                    {
+                        return Err(fail(
+                            ErrorCode::Unavailable,
+                            "prepared provider has not been published",
+                        ));
+                    }
+                }
+                let offer: StageOffer = decode(
+                    self.peer(&route.owner)?
+                        .request(
+                            "object/route",
+                            wire(RouteStage {
+                                activation: route.owner.clone(),
+                                service: route.service.clone(),
+                                source: route.source.clone(),
+                            }),
+                        )
+                        .await?,
+                )?;
+                offers.push(offer);
+                let offer = offers.last().unwrap();
+                let mut expected = route.original.clone();
+                for reference in &mut expected.references {
+                    if let DraftSource::Own { view, .. } = &mut reference.source {
+                        view.source = route.source.clone();
+                    }
+                }
+                if offer.activation != route.owner
+                    || offer.source != route.source
+                    || crate::json::canonical(&wire(&offer.draft))
+                        != crate::json::canonical(&wire(expected))
+                {
+                    return Err(fail(
+                        ErrorCode::CapabilityDenied,
+                        "owner changed the frozen route manifest",
+                    ));
+                }
+            }
+            // One transaction across every required root and every provider.
+            // A rejected final graph leaves no earlier views or sequence gaps.
+            {
+                let mut state = self.state.lock().unwrap();
+                let mut transaction = state.broker.clone();
+                for (route, offer) in roots.iter().zip(&offers) {
+                    let graph = transaction.offer_graph(
+                        &route.owner,
+                        self.bundles.service(&route.contract)?.as_ref(),
+                        &crate::services::service_type(&route.contract),
+                        &offer.draft,
+                        &scopes,
+                        &route.source,
+                    )?;
+                    graphs.insert(route.name.clone(), graph);
+                }
+                state.broker = transaction;
+                for graph in graphs.values() {
+                    Self::remember(&mut state, graph);
+                }
+                issued = true;
+            }
+            for (route, offer) in roots.iter().zip(&offers) {
+                let graph = &graphs[&route.name];
+                self.peer(&route.owner)?
+                    .request(
+                        "object/commit",
+                        wire(Commit {
+                            activation: route.owner.clone(),
+                            stage: offer.stage,
+                            deliveries: graph
+                                .references
+                                .iter()
+                                .map(|r| r.delivery.clone())
+                                .collect(),
+                            scopes: scopes.clone(),
+                        }),
+                    )
+                    .await?;
+                self.pin_foreign(&offer.draft, graph).await?;
+            }
+            Ok(())
+        }
+        .await;
+        // Only committed metadata can require recipient envelope rejection.
+        // If the atomic transaction failed, graphs contains local candidates
+        // but no grants; do not fabricate receipt evidence for those candidates.
+        let mut errors = Vec::new();
+        if result.is_err() && issued {
+            for graph in graphs.values() {
+                if let Err(error) = self.reject(graph).await {
+                    errors.push(error);
+                }
+            }
+        }
+        for (route, offer) in roots.iter().zip(&offers) {
+            match self.peer(&route.owner) {
+                Ok(peer) => {
+                    if let Err(error) = peer
+                        .request(
+                            "object/abort",
+                            wire(SelectStage {
+                                activation: route.owner.clone(),
+                                stage: offer.stage,
+                            }),
+                        )
+                        .await
+                    {
+                        errors.push(error);
+                    }
+                }
+                Err(error) => errors.push(error),
+            }
+        }
+        if !errors.is_empty() {
+            // Even successful commits have not been exposed when staging
+            // cleanup cannot be confirmed; reject the whole issued table.
+            if result.is_ok() && issued {
+                for graph in graphs.values() {
+                    let _ = self.reject(graph).await;
+                }
+            }
+            return Err(fail(
+                ErrorCode::Unavailable,
+                format!(
+                    "prepared root cleanup failed: {}; handoff: {:?}",
+                    errors[0],
+                    result.err()
+                ),
+            ));
+        }
+        result.map(|_| graphs)
     }
     async fn handoff_services(
         &self,

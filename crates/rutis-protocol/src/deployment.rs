@@ -1,0 +1,259 @@
+//! Frozen service selections for the native Host graph. Business declarations
+//! cannot supply routes or replace an activation's captured owner bindings.
+use crate::{
+    error::{ErrorCode, ProtocolError, Result},
+    identity::Activation,
+    lifecycle::member_contracts,
+    prepare::{FileKind, PreparedDeployment, Provider},
+    runner_image::CatalogService,
+    services::{validate_table, Bundles, ServiceTable},
+    session::{HostObjects, RootDelivery, RoutedRoot, RuntimeIdentity},
+};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
+
+fn fail(code: ErrorCode, message: &str) -> ProtocolError {
+    ProtocolError::new(code, "deployment_objects", message)
+}
+struct Member {
+    activation: Activation,
+    table: Option<ServiceTable>,
+    issued: bool,
+}
+#[derive(Default)]
+struct State {
+    members: BTreeMap<String, Member>,
+    groups: BTreeMap<String, RuntimeIdentity>,
+    native: BTreeMap<String, (Activation, ServiceTable)>,
+}
+/// Retains a single immutable deployment and one initial activation per member.
+/// Recovery replacement requires the later supervisor's cleanup/reaping proof;
+/// this layer intentionally exposes no unchecked rebind operation.
+pub struct DeploymentObjects {
+    plan: PreparedDeployment,
+    bundles: Bundles,
+    host: Arc<HostObjects>,
+    state: Mutex<State>,
+}
+impl DeploymentObjects {
+    pub fn new(plan: PreparedDeployment) -> Result<Arc<Self>> {
+        let mut bytes = BTreeMap::new();
+        for package in plan.packages().values() {
+            for file in &package.manifest().files {
+                if file.kind == FileKind::Bundle {
+                    let frozen = package.file(&file.path)?;
+                    bytes
+                        .entry(frozen.sha256().to_owned())
+                        .or_insert_with(|| frozen.bytes().to_vec());
+                }
+            }
+        }
+        let bundles = Bundles::admit(bytes.into_values())?;
+        Ok(Arc::new(Self {
+            host: HostObjects::new(bundles.clone()),
+            bundles,
+            plan,
+            state: Mutex::default(),
+        }))
+    }
+    pub fn host(&self) -> Arc<HostObjects> {
+        self.host.clone()
+    }
+    pub fn plan(&self) -> &PreparedDeployment {
+        &self.plan
+    }
+    /// Reserve in Host order before independent native starts. A runtime epoch
+    /// belongs to exactly one prepared group, and shared members use that epoch.
+    pub fn reserve(&self, instance: &str, activation: Activation) -> Result<()> {
+        let prepared = self
+            .plan
+            .instances()
+            .get(instance)
+            .ok_or_else(|| fail(ErrorCode::InvalidParams, "unknown prepared member"))?;
+        let group = prepared.group();
+        let identity = RuntimeIdentity {
+            runtime: activation.runtime.clone(),
+            epoch: activation.epoch,
+        };
+        let mut state = self.state.lock().unwrap();
+        if state.members.contains_key(instance) {
+            return Err(fail(
+                ErrorCode::ScopeClosed,
+                "prepared member cannot rebind before recovery barriers",
+            ));
+        }
+        if state.groups.get(group).is_some_and(|old| *old != identity)
+            || state
+                .groups
+                .iter()
+                .any(|(name, old)| name != group && old.runtime == identity.runtime)
+        {
+            return Err(fail(
+                ErrorCode::CapabilityDenied,
+                "runtime epoch differs from prepared group binding",
+            ));
+        }
+        self.host.reserve(activation.clone())?;
+        state.groups.insert(group.into(), identity);
+        state.members.insert(
+            instance.into(),
+            Member {
+                activation,
+                table: None,
+                issued: false,
+            },
+        );
+        Ok(())
+    }
+    /// Stage the complete declared provides table, including disabled exports.
+    /// Route selection below separately checks the frozen publication allowlist.
+    pub fn stage(&self, instance: &str, table: ServiceTable) -> Result<()> {
+        let prepared = self
+            .plan
+            .instances()
+            .get(instance)
+            .ok_or_else(|| fail(ErrorCode::InvalidParams, "unknown prepared member"))?;
+        let contracts = member_contracts(prepared.package())?.provides;
+        validate_table(&table, &contracts, &self.bundles)?;
+        let mut state = self.state.lock().unwrap();
+        let member = state
+            .members
+            .get_mut(instance)
+            .ok_or_else(|| fail(ErrorCode::Unavailable, "prepared member not reserved"))?;
+        if member.activation != table.activation || member.table.is_some() {
+            return Err(fail(
+                ErrorCode::CapabilityDenied,
+                "staged table changed prepared owner",
+            ));
+        }
+        member.table = Some(table);
+        Ok(())
+    }
+    /// Explicit SDK registration of Host native adapters. Only services in the
+    /// prepared native catalog are eligible; this is not a third-party proxy.
+    pub fn stage_native(&self, table: ServiceTable) -> Result<()> {
+        let mut contracts = BTreeMap::<String, CatalogService>::new();
+        for name in table.services.keys() {
+            contracts.insert(
+                name.clone(),
+                self.plan
+                    .native_services()
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| {
+                        fail(ErrorCode::CapabilityDenied, "undeclared native adapter")
+                    })?,
+            );
+        }
+        validate_table(&table, &contracts, &self.bundles)?;
+        let mut state = self.state.lock().unwrap();
+        if table
+            .services
+            .keys()
+            .any(|name| state.native.contains_key(name))
+        {
+            return Err(fail(
+                ErrorCode::CapabilityDenied,
+                "native adapter cannot rebind",
+            ));
+        }
+        for name in table.services.keys() {
+            state
+                .native
+                .insert(name.clone(), (table.activation.clone(), table.clone()));
+        }
+        Ok(())
+    }
+    /// Provider publication is called only after its native Host proxy is Active.
+    /// Runtime publication remains the separate activate ACK on its private peer.
+    pub fn publish(&self, instance: &str) -> Result<()> {
+        let state = self.state.lock().unwrap();
+        let member = state
+            .members
+            .get(instance)
+            .filter(|m| m.table.is_some())
+            .ok_or_else(|| {
+                fail(
+                    ErrorCode::Unavailable,
+                    "prepared services have not been staged",
+                )
+            })?;
+        self.host.publish(&member.activation)
+    }
+    /// Capture the entire required table from this frozen plan. Different
+    /// provider names and bundle SHAs may coexist; no root is exposed until all
+    /// owner commits and the actual receiver's Accept acknowledgements finish.
+    pub async fn offer_required(self: &Arc<Self>, instance: &str) -> Result<RootDelivery> {
+        let (recipient, roots) = {
+            let mut state = self.state.lock().unwrap();
+            let prepared = self
+                .plan
+                .instances()
+                .get(instance)
+                .ok_or_else(|| fail(ErrorCode::InvalidParams, "unknown prepared consumer"))?;
+            let recipient = state
+                .members
+                .get(instance)
+                .ok_or_else(|| fail(ErrorCode::Unavailable, "prepared consumer not reserved"))?
+                .activation
+                .clone();
+            if state.members[instance].issued {
+                return Err(fail(
+                    ErrorCode::ScopeClosed,
+                    "prepared required roots were already issued",
+                ));
+            }
+            let mut roots = Vec::new();
+            for (name, route) in prepared.routes() {
+                let (owner, table, service) = match route.provider() {
+                    Some(Provider::Instance { instance, service }) => {
+                        if !self.plan.instances()[instance].exports().contains(service) {
+                            return Err(fail(
+                                ErrorCode::CapabilityDenied,
+                                "prepared provider export is disabled",
+                            ));
+                        }
+                        let member = state.members.get(instance).ok_or_else(|| {
+                            fail(ErrorCode::Unavailable, "prepared provider not reserved")
+                        })?;
+                        let table = member.table.as_ref().ok_or_else(|| {
+                            fail(ErrorCode::Unavailable, "prepared provider not staged")
+                        })?;
+                        (&member.activation, table, service)
+                    }
+                    Some(Provider::Native { service }) => {
+                        let (owner, table) = state.native.get(service).ok_or_else(|| {
+                            fail(ErrorCode::Unavailable, "native adapter not staged")
+                        })?;
+                        (owner, table, service)
+                    }
+                    None => {
+                        return Err(fail(
+                            ErrorCode::Unavailable,
+                            "prepared route is missing; native consumer remains Pending",
+                        ))
+                    }
+                };
+                self.host.require_published(owner)?;
+                let contract = route.contract();
+                roots.push(RoutedRoot {
+                    name: name.clone(),
+                    service: service.clone(),
+                    owner: owner.clone(),
+                    source: route.source().into(),
+                    contract: CatalogService {
+                        interface: contract.interface.clone(),
+                        version: contract.version.clone(),
+                        bundle_sha256: contract.bundle_sha256.clone(),
+                    },
+                    original: table.services[service].graph.clone(),
+                });
+            }
+            state.members.get_mut(instance).unwrap().issued = true;
+            (recipient, roots)
+        };
+        self.host.offer_routes(roots, recipient).await
+    }
+}

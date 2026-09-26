@@ -8,6 +8,8 @@ Rust/Node 私有连接的 hello/start/activate/stop、native RuntimeReady 与发
 
 命名原生端口、生成客户端注入、跨 bundle 整表 broker 事务和 owner pin 确认见[服务绑定](services.md)。这些 SDK 基础已有两端原生测试；[私有 session](session.md) 已用实际多成员 IPC 接入权威 broker 和 named roots，默认 driver 与完整 HostProxy 图仍待装配。
 
+[冻结根交付](deployment.md) 从 prepared routes 捕获整张 required 表，复用 owner 保留清单，为多个消费者建立独立 source views，并跨 provider 原子签发；仍需接入完整 native Host 发布图。
+
 包/部署 JSON 格式、原字节文件库存、精确路由、静态 ELF catalog、私有启动快照与只读 CLI 见[prepare 约定](package-format.md)。prepare 冻结计划，快照固定 artifact 与 Node canonical dependency tree；实际 runner 仍需接入 RuntimeReady 与成员发布屏障。
 
 ## JSON 与描述符

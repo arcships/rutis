@@ -137,6 +137,56 @@ impl GraphExporter {
         self.dispatchers.lock().unwrap().extend(registered);
         Ok(())
     }
+    /// Host-selected route aliases retain the exact native identity and
+    /// dispatcher. Ordinary commit still compares every full source view.
+    pub(crate) fn stage_route(
+        &self,
+        expr: &TypeExpr,
+        original: &DraftGraph,
+        source: &str,
+    ) -> Result<StagedGraph> {
+        self.exports.require_open()?;
+        let mut draft = original.clone();
+        let mut aliases = Vec::new();
+        for reference in &mut draft.references {
+            if let DraftSource::Own { object, view } = &mut reference.source {
+                if object.owner != *self.exports.owner()
+                    || view.bundle_sha256 != self.bundle.sha256()
+                    || view.source != self.source
+                {
+                    return Err(fail(
+                        ErrorCode::CapabilityDenied,
+                        "route changed native manifest",
+                    ));
+                }
+                let dispatcher = self.dispatcher(object, view)?;
+                view.source = source.into();
+                aliases.push(((object.clone(), view.clone()), dispatcher));
+            }
+        }
+        let scope = Scope {
+            activation: self.exports.owner().clone(),
+            scope: Sequence(1),
+        };
+        draft.validate(&self.bundle, expr, &GraphScopes::in_scope(scope))?;
+        let mut staged = StagedGraph {
+            bundle: self.bundle.clone(),
+            exports: self.exports.clone(),
+            expr: expr.clone(),
+            draft,
+            pins: Vec::new(),
+            closed: false,
+            committed: None,
+        };
+        // Drop rolls back earlier pins if a later native object is unavailable.
+        for reference in &staged.draft.references {
+            if let DraftSource::Own { object, .. } = &reference.source {
+                staged.pins.push(self.exports.stage(object)?);
+            }
+        }
+        self.dispatchers.lock().unwrap().extend(aliases);
+        Ok(staged)
+    }
     pub fn encode(&self, expr: &TypeExpr, value: Outbound) -> Result<StagedGraph> {
         self.exports.require_open()?;
         let mut encoder = Encoder {

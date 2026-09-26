@@ -5,7 +5,7 @@
 本进程的实际 native 表、暂存图与已接收代理；作者不分配 grant、object id 或 token。
 
 这是 M1/M2 的可复用传输层。默认 Rust/Node native driver 仍拒绝未安装的命名服务和
-事件能力；通用 frozen runner、完整 HostProxy 图、prepared route source、内部 child
+事件能力；通用 frozen runner、完整 HostProxy 图、内部 child
 精确 creator context、更新恢复、事件和完整 T24 尚未验收。
 
 ## 接入顺序
@@ -13,6 +13,10 @@
 Host 在发送独立 start 前按顺序 `reserve` activation，并把每条继承连接的 runtime /
 epoch 固定到 `HostObjects.handler`。消息中的 recipient、stage owner 必须属于这条
 连接；已关闭的连接不能重新绑定。成员到达可以乱序，Host 的 id 分配保持单调。
+
+`DeploymentObjects` 从同一个 frozen plan 选择跨 provider 的完整 required 表，见
+[冻结根交付](deployment.md)。私有 `object/route` 为保留的 native 清单创建每个
+prepared source 的独立 stage；不改变原始 commit 对完整 view 的核对。
 
 runtime driver 使用生命周期 `MountRequest` 的同一个 gate，在构造前 `reserve`。
 把整个 required 根表接收到本代 scope 1，等待 Accept ACK，再绑定生成客户端和
@@ -46,6 +50,7 @@ activate 成功后才开放普通 object execute；stop 意图同步关闭对象
 | controls | runtime → Host | runtime-wide Accept/Release；按 Host 已发出的 delivery 找到真实 recipient |
 | open / pin | Host → owner | 排入单调 scope 和执行 pin，先于异步参数交付 |
 | commit / services-commit | Host → owner | 核对原始 native manifest 后转换 staging pins |
+| route | Host → owner | Host 选择保留的服务和 prepared source，产生独立 stage；原对象和 dispatcher 保持一致 |
 | execute | Host → owner | 精确 bundle/view dispatcher，原始业务 context，参数接受先于用户代码 |
 | end | Host → owner | 实际 handler 和登记后代结束后关闭 Borrow scope、释放执行 pin |
 | reject / abort | Host → runtime | 未消费的新 envelope 拒收或暂存图中止；不释放以前成功接受的重传 token |
@@ -85,7 +90,8 @@ activation。owner pins 确认前不推进 SDK watermark。
 
 `tests/session_ipc.rs` 启动实际 Node 子进程，继承匿名 Unix fd 3；Rust Host 内另一条
 匿名私有流承载 Rust runtime actor。两 Rust、两 Cordis 原生成员运行两份精确 bundle
-的双向 named DI。额外第三个 Node provider 验证丢弃完整根交付：两个真实 owner
+的双向 named DI，根由冻结的 prepared routes 选择；另加一对消费者验证多次 route、
+跨 provider required 表和 native adapter 选择。额外第三个 Node provider 验证丢弃完整根交付：两个真实 owner
 pins 从 2 降到 0，预留 Rust 接收者没有构造业务成员。
 
 用例执行 connect/query、重复对象、循环属性、owner passback、两层借用回调及原始

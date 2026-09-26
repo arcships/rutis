@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs'
 import { Context } from '@deepseek-ai/cordis'
 import { Peer } from '../../src/frame.ts'
 import { Exports } from '../../src/exports.ts'
+import { ProtocolError } from '../../src/error.ts'
 import { ActivationGate } from '../../src/managed.ts'
 import { Bundles, NativePorts, type NativeServices } from '../../src/services.ts'
 import { RuntimeObjects } from '../../src/session.ts'
@@ -32,6 +33,9 @@ let slowEntered = false
 let resumeSlow: (() => void) | undefined
 let childEntered = false
 let resumeChild: (() => void) | undefined
+let tamperRoute = false
+let failRouteCommit = false
+const routeStages = new Map<string, string>()
 
 async function fixture(method: string, input: unknown): Promise<unknown> {
   const value = input as any
@@ -71,9 +75,9 @@ async function fixture(method: string, input: unknown): Promise<unknown> {
       return { table: runtime.stageServices(staged), contracts }
     }
     case 'fixture/publish': runtime.publish(owner(value.activation)); return null
-    case 'fixture/reserve': { const gate = new ActivationGate(); gates.set('2', gate); runtime.reserve(owner('2'), gate); return null }
+    case 'fixture/reserve': { const index = value?.activation ?? '2'; const gate = new ActivationGate(); gates.set(index, gate); runtime.reserve(owner(index), gate); return null }
     case 'fixture/consume': {
-      const identity = owner('2'); const gate = gates.get('2')!
+      const index = value.activation.activation; const identity = owner(index); const gate = gates.get(index)!
       const ports = new NativePorts()
       ports.require('rpc', 'nativeRpc', contracts.rpc, bundles, rpc.bindInterfaceDatabase)
       ports.require('data', 'nativeData', contracts.data, bundles, db.bindInterfaceDatabase)
@@ -92,7 +96,7 @@ async function fixture(method: string, input: unknown): Promise<unknown> {
           results.push({ rows: await first.query({ sql: name }), identity: first === second, cycle: first.session.agent.session === first.session, passback: await database.inspect(first), callbacks })
         }
       } }, {}, identity, values, runtime.caller(identity), gate)
-      members.set('2', member); await member.native.ready()
+      members.set(index, member); await member.native.ready()
       return { results, distinct: members.get('1')!.native.nativeContext !== member.native.nativeContext }
     }
     case 'fixture/fence': {
@@ -102,7 +106,9 @@ async function fixture(method: string, input: unknown): Promise<unknown> {
       await Promise.all([first, second]); return null
     }
     case 'fixture/pins': return providerTables.get(value.activation)!.pins(providerObjects.get(value.activation)!)
-    case 'fixture/status': return { slowEntered, childEntered, connectEntered, fenceSecondFinished, consumerOpen: gates.get('2')?.isOpen, cleanup }
+    case 'fixture/status': return { slowEntered, childEntered, connectEntered, fenceSecondFinished, consumerOpen: gates.get('2')?.isOpen ?? false, extraOpen: gates.get('4')?.isOpen ?? false, cleanup }
+    case 'fixture/tamper-route': tamperRoute = true; return null
+    case 'fixture/fail-route-commit': failRouteCommit = true; return null
     case 'fixture/resume': resumeSlow?.(); resumeChild?.(); resumeConnect?.(); return null
     case 'fixture/query': { const database = members.get('2')!.native.nativeContext!.get('nativeRpc') as rpc.InterfaceDatabase; return (await database.connect({ name: 'fixture' })).query({ sql: value.sql }) }
     case 'fixture/expired': { await borrowed!.call('expired'); throw new Error('expired callback unexpectedly ran') }
@@ -112,5 +118,21 @@ async function fixture(method: string, input: unknown): Promise<unknown> {
     default: throw new Error(`unknown fixture command ${method}`)
   }
 }
-const peer = new Peer(new Socket({ fd: 3, readable: true, writable: true }), runtime.handler(fixture)); runtime.attach(peer)
+const handler = runtime.handler(fixture)
+const peer = new Peer(new Socket({ fd: 3, readable: true, writable: true }), async (method, value) => {
+  if (method === 'object/commit' && routeStages.get((value as any).stage) === 'rpc' && failRouteCommit) {
+    failRouteCommit = false
+    throw new ProtocolError('CapabilityDenied', 'fixture', 'rejecting the second actual root commit')
+  }
+  const reply = await handler(method, value)
+  if (method === 'object/route') routeStages.set((reply as any).stage, (value as any).service)
+  if (method === 'object/abort') routeStages.delete((value as any).stage)
+  if (method === 'object/route' && (value as any).service === 'data' && tamperRoute) {
+    tamperRoute = false
+    const changed = structuredClone(reply) as any
+    changed.draft.references[0].source.view.source = 'route.' + '0'.repeat(64)
+    return changed
+  }
+  return reply
+}); runtime.attach(peer)
 process.stdout.write('multi-member Cordis diagnostics remain on stdout\n')

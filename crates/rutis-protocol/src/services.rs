@@ -654,6 +654,20 @@ impl StagedServices {
             .cloned()
             .ok_or_else(|| fail(ErrorCode::InvalidParams, "unknown named exporter"))
     }
+    pub(crate) fn stage_route(&self, name: &str, source: &str) -> Result<StagedGraph> {
+        if self.aborted || self.committed.is_some() {
+            return Err(fail(
+                ErrorCode::ScopeClosed,
+                "service manifest is not retained for routes",
+            ));
+        }
+        let exporter = self.exporter(name)?;
+        exporter.stage_route(
+            &service_type(&self.contracts[name]),
+            &self.table.services[name].graph,
+            source,
+        )
+    }
     pub fn commit(
         &mut self,
         graphs: &BTreeMap<String, WireGraph>,

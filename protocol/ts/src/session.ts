@@ -164,6 +164,19 @@ export class RuntimeObjects {
     if (stage && canonical(stage.owner) !== canonical(owner)) fail('CapabilityDenied', 'staging graph belongs to another member')
     stage?.graph.abort(); this.stages.delete(id)
   }
+  private stageRoute(owner: Activation, name: string, source: string): StageOffer {
+    const member = this.member(owner)
+    if (!member.gate.isOpen) fail('ScopeClosed', 'route owner closed')
+    if (!/^route\.[0-9a-f]{64}$/.test(source)) fail('InvalidParams', 'invalid prepared route source')
+    const services = member.services
+    if (!services) fail('Unavailable', 'native service table is not staged')
+    const graph = services.stageRoute(name, source)
+    try {
+      this.exporter(owner, services.contracts[name].bundle_sha256).mergeRegistered(services.exporter(name))
+      const stage = this.stageIds.allocate(); this.stages.set(stage, { owner: member.owner, graph })
+      return { activation: member.owner, stage, source, draft: graph.draft }
+    } catch (error) { graph.abort(); throw error }
+  }
   flush(): Promise<void> {
     const controls = this.imports.takeControls()
     if (!controls.length) return this.controlTail
@@ -240,6 +253,11 @@ export class RuntimeObjects {
         const services = this.member(value.activation).services
         if (!services) fail('StaleObject', 'no staged service table')
         services.commit(value.graphs, value.scopes); return null
+      }
+      case 'object/route': {
+        keys(value, ['activation', 'service', 'source'])
+        if (typeof value.service !== 'string' || !identifier(value.service) || typeof value.source !== 'string') fail('InvalidParams', 'invalid route stage request')
+        return this.stageRoute(value.activation, value.service, value.source)
       }
       case 'object/reject': {
         if (!Array.isArray(value)) fail('InvalidParams', 'invalid rejected deliveries')

@@ -200,6 +200,11 @@ export class StagedServices {
     return exporter
   }
   mergeDispatchers(target: GraphExporter): void { for (const exporter of this.exporters.values()) target.mergeRegistered(exporter) }
+  stageRoute(name: string, source: string): StagedGraph {
+    if (this.aborted || this.committed) fail('ScopeClosed', 'service manifest is not retained for routes')
+    const exporter = this.exporter(name)
+    return exporter.stageRoute(serviceType(this.contracts[name]), this.table.services[name].graph, source)
+  }
   commit(graphs: Record<string, WireGraph>, scopes: GraphScopes): void {
     if (this.aborted) fail('ScopeClosed', 'named service handoff aborted')
     this.exports.requireOpen()

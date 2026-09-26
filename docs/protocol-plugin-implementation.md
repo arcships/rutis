@@ -203,8 +203,8 @@ stop handler 的确认 future 尚未 poll 时，原始 Ctx 已拒绝 effect/prov
 Loading 原始 Ctx 的 effect 拒绝需要下面记录的本仓库 rutis 公开扩展；不维护 Cordis fork。
 
 行为和调用顺序见[服务绑定](../protocol/services.md)。这仍是 SDK/事务基础证据：
-默认 driver 继续拒绝未安装的对象/事件 transport。prepare route source 的授权
-绑定、默认 driver 对多 bundle dispatcher registry 和私有命名服务交付的装配、HostActive
+默认 driver 继续拒绝未安装的对象/事件 transport。冻结根选择与 source alias 已有
+后续私有 session 证据；默认 driver 对多 bundle dispatcher registry 和私有命名服务交付的装配、HostActive
 完整业务图、internal child 对象精确 creator Ctx 以及迁移/恢复/T24 尚待完成。
 M0–M5 和 T01–T24 的最终验收范围保持不变，目标没有标为完成。
 
@@ -269,6 +269,34 @@ owner；不为此伪造新业务 activation。用例核对所有 native 清理�
 约定、顺序和边界见[私有 session](../protocol/session.md)。管理/装载入口仍是标注
 fixture，Rust runtime actor 在 Host 测试进程中，Node 使用实际子进程。尚不能把它
 作为 frozen plan → RuntimeReady → HostProxy Active → activate 的完整装配证据。
-prepared route source 与授权 view、独立包双语言共享/单独拓扑、内部 child 对象
-精确 creator context、StopUnconfirmed 与 reaping、事件、真实旧桥迁移和 T24
+独立包双语言共享/单独拓扑、内部 child 对象精确 creator context、StopUnconfirmed
+与 reaping、事件、真实旧桥迁移和 T24
 继续保留在 M0–M5/T01–T24 最终验收中，目标未标为完成。
+
+## M2 冻结 required 表与多消费者 source
+
+`DeploymentObjects` 保留同一个 prepared plan，绑定首代成员和 runtime group，检查
+完整 provides 表，并按 frozen exports allowlist、instance/native provider 和精确
+bundle 选择消费者的整张 required 表。缺路由或 provider 未发布不关闭消费者；
+签发之后禁止重复 required 交付或 unchecked rebind。
+
+两端私有 `object/route` 从原始保留清单复制独立 stage，沿用真实对象和原 dispatcher。
+Host 只允许 own view 改为已选择的 `PreparedRoute.source`，foreign proof 保持原样；
+然后跨多个 owner 和 bundle 原子签发表，并等待每个实际 native commit。原整图与
+整表 commit 对完整 view 的核对没有放宽，原 staging pins 保留到 native 关闭。
+
+现有真实 `session_ipc` 扩展到额外一对消费者，运行两 owner / 两 bundle 的 native
+注入，其中一项经 frozen native adapter 选择。同一 owner 根保持 object identity，
+消费者 source 不同；各自原始 apply 仍执行 stateful query、循环属性和回调。
+发布前、重复交付、错误 group 与旧代 rebind 均有实际拒绝证据。
+
+故障用例篡改最后一份 owner 清单，拒绝后暂存 pins 回到原值；另一用例拒绝第二个
+实际 commit，首个已转换的 delivery pin 和余下 stage 均清理。旧消费者继续运行，
+有效 token 的 source 替换拒绝，失败消费者没有业务构造。最终连续前缀回收覆盖这
+些拒收 envelopes，Node cleanup 4 / Rust cleanup 3 及真实 Node 退出均被检查。
+
+路由计划来自实际 prepare，冻结原字节后删除源包；计划内 Node entry 是明确拒绝
+装载的元数据 fixture，实际 Node/Cordis 使用 session 子进程。详情见[冻结根交付](../protocol/deployment.md)。
+这完成了根选择与交付装配层的证据，尚未完成默认 service-capable driver、完整
+HostProxy 发布链、runtime/snapshot 监督租约、内部 child creator context、事件、
+真实旧桥迁移、共享/单独双语言完整拓扑与 T24。全目标保持开发中。

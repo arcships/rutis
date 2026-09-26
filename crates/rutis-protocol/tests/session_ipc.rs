@@ -1,6 +1,11 @@
 //! Shared runtime actors and authoritative Host routing over private Unix
 //! streams, including an actual Node child. This is not the frozen-plan loader.
 #![cfg(target_os = "linux")]
+#[path = "support/session_plan.rs"]
+mod session_plan;
+rutis_protocol::embed_runner_catalog!(include_bytes!(
+    "../../../protocol/fixtures/session.runner.catalog.json"
+));
 #[allow(dead_code, unused_variables, non_snake_case)]
 mod rpc {
     include!("../../../protocol/generated/rpc.rs");
@@ -11,6 +16,7 @@ mod data {
 }
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, TypeKey};
 use rutis_protocol::{
+    deployment::DeploymentObjects,
     error::{ErrorCode, Execution, ProtocolError, Result},
     exports::Exports,
     frame::{Handler, Peer},
@@ -300,11 +306,20 @@ async fn named_native_services_route_between_two_rust_and_two_cordis_members() {
 }
 async fn scenario() {
     let bundles = bundles();
-    let host = HostObjects::new(bundles.clone());
+    let deployment = DeploymentObjects::new(session_plan::prepare()).unwrap();
+    let host = deployment.host();
     let runtime = RuntimeObjects::new(identity("rust"), bundles.clone());
     for runtime in ["rust", "node"] {
         for index in 1..=2 {
-            host.reserve(owner(runtime, index)).unwrap();
+            deployment
+                .reserve(
+                    &format!(
+                        "{runtime}-{}",
+                        if index == 1 { "provider" } else { "consumer" }
+                    ),
+                    owner(runtime, index),
+                )
+                .unwrap();
         }
     }
     let (host_stream, runtime_stream) = tokio::net::UnixStream::pair().unwrap();
@@ -347,6 +362,9 @@ async fn scenario() {
         use tokio::io::AsyncReadExt;
         let mut output = String::new();
         stderr.read_to_string(&mut output).await.unwrap();
+        if !output.is_empty() {
+            eprintln!("Node session diagnostics: {output}");
+        }
         output
     });
     let node_fence = Arc::new(Fence::default());
@@ -367,7 +385,19 @@ async fn scenario() {
     };
     let node_table: ServiceTable = serde_json::from_value(started["table"].clone()).unwrap();
     let contracts = serde_json::from_value(started["contracts"].clone()).unwrap();
-    host.publish(&owner("node", 1)).unwrap();
+    deployment
+        .stage("node-provider", node_table.clone())
+        .unwrap();
+    assert_eq!(
+        deployment
+            .offer_required("rust-consumer")
+            .await
+            .err()
+            .unwrap()
+            .code,
+        ErrorCode::Unavailable
+    );
+    deployment.publish("node-provider").unwrap();
     node_peer
         .request("fixture/publish", json!({"activation":"1"}))
         .await
@@ -475,17 +505,28 @@ async fn scenario() {
         .stage(&provider_bindings, bundles.clone(), exports)
         .unwrap();
     let rust_table = runtime.stage_services(staged).unwrap();
-    host.publish(&rust_provider).unwrap();
+    assert_eq!(
+        deployment
+            .stage_native(rust_table.clone())
+            .unwrap_err()
+            .code,
+        ErrorCode::CapabilityDenied
+    );
+    deployment
+        .stage_native(ServiceTable {
+            activation: rust_provider.clone(),
+            services: BTreeMap::from([("data".into(), rust_table.services["data"].clone())]),
+        })
+        .unwrap();
+    deployment.stage("rust-provider", rust_table).unwrap();
+    deployment.publish("rust-provider").unwrap();
     runtime.publish(&rust_provider).unwrap();
 
     node_peer
         .request("fixture/reserve", Value::Null)
         .await
         .unwrap();
-    let node_roots = host
-        .offer_services(&rust_provider, &rust_table, &contracts, &owner("node", 2))
-        .await
-        .unwrap();
+    let node_roots = deployment.offer_required("node-consumer").await.unwrap();
     let node_results = node_roots.send("fixture/consume").await.unwrap();
     assert_eq!(node_results["distinct"], true);
     for result in node_results["results"].as_array().unwrap() {
@@ -506,13 +547,20 @@ async fn scenario() {
     runtime
         .reserve(consumer_owner.clone(), consumer_gate.clone())
         .unwrap();
-    let values = host
-        .offer_services(&owner("node", 1), &node_table, &contracts, &consumer_owner)
+    let values = deployment
+        .offer_required("rust-consumer")
         .await
         .unwrap()
         .receive(&runtime)
         .await
         .unwrap();
+    for (name, value) in &values {
+        let proof = value.clone().into_object().unwrap().delivery().unwrap();
+        assert_eq!(
+            proof.view.source,
+            deployment.plan().instances()["rust-consumer"].routes()[name].source()
+        );
+    }
     let mut requires = NativePorts::default();
     requires
         .require::<rpc::InterfaceDatabaseClient>(
@@ -574,6 +622,16 @@ async fn scenario() {
     host.publish(&consumer_owner).unwrap();
     runtime.publish(&consumer_owner).unwrap();
     let original = consumer.native_context().unwrap();
+    assert_eq!(
+        deployment
+            .offer_required("rust-consumer")
+            .await
+            .err()
+            .unwrap()
+            .code,
+        ErrorCode::ScopeClosed
+    );
+    assert!(consumer.gate().is_open());
     let db = original.require::<rpc::InterfaceDatabaseClient>().unwrap();
     let connection = db
         .connect(rpc::InterfaceDatabaseMethod0Params {
@@ -731,6 +789,216 @@ async fn scenario() {
     })
     .await;
 
+    // A second native consumer captures a distinct frozen source view of the
+    // same RPC owner. Its other bundle comes from a different actual provider.
+    assert_eq!(
+        deployment
+            .reserve("rust-extra", owner("node", 4))
+            .unwrap_err()
+            .code,
+        ErrorCode::CapabilityDenied
+    );
+    deployment.reserve("rust-extra", owner("rust", 4)).unwrap();
+    deployment.reserve("node-extra", owner("node", 4)).unwrap();
+    let extra_owner = owner("rust", 4);
+    let extra_gate = ActivationGate::default();
+    runtime
+        .reserve(extra_owner.clone(), extra_gate.clone())
+        .unwrap();
+    let values = deployment
+        .offer_required("rust-extra")
+        .await
+        .unwrap()
+        .receive(&runtime)
+        .await
+        .unwrap();
+    for (name, value) in &values {
+        let proof = value.clone().into_object().unwrap().delivery().unwrap();
+        assert_eq!(
+            proof.view.source,
+            deployment.plan().instances()["rust-extra"].routes()[name].source()
+        );
+        if name == "rpc" {
+            assert_eq!(proof.object, db.client().proxy().identity());
+            assert_ne!(proof.view, db.client().proxy().delivery().unwrap().view);
+        }
+    }
+    let mut extra_bindings = requires.scope(&native_root, extra_owner.clone(), extra_gate.clone());
+    requires
+        .install(&mut extra_bindings, values, runtime.caller(&extra_owner))
+        .unwrap();
+    let actor = runtime.clone();
+    let actual_owner = extra_owner.clone();
+    let gate = extra_gate.clone();
+    let disposed = cleanup.clone();
+    let extra_consumer = ManagedActivation::mount_gated(
+        extra_bindings.ctx(),
+        Native {
+            injects: requires.required_keys(),
+            run: Arc::new(move |ctx| {
+                let actor = actor.clone();
+                let owner = actual_owner.clone();
+                let gate = gate.clone();
+                let disposed = disposed.clone();
+                Box::pin(async move {
+                    let exports = Exports::managed(&ctx, owner.clone(), actor.ids(), gate)?;
+                    actor.bind(&owner, ctx.clone(), exports).unwrap();
+                    ctx.effect(move || {
+                        Effect::Disposer(Box::new(move || {
+                            disposed.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        }))
+                    })?;
+                    assert_eq!(exercise_rpc(&ctx).await[0]["owner"], "node");
+                    assert_eq!(exercise_data(&ctx).await[0]["owner"], "rust");
+                    Ok(Effect::Done)
+                })
+            }),
+        },
+        extra_gate,
+    )
+    .unwrap();
+    extra_bindings.adopt(&extra_consumer).unwrap();
+    extra_consumer.view().await.unwrap();
+    let extra_original = extra_consumer.native_context().unwrap();
+    host.publish(&extra_owner).unwrap();
+    runtime.publish(&extra_owner).unwrap();
+    node_peer
+        .request("fixture/reserve", json!({"activation":"4"}))
+        .await
+        .unwrap();
+    let extra_results = deployment
+        .offer_required("node-extra")
+        .await
+        .unwrap()
+        .send("fixture/consume")
+        .await
+        .unwrap();
+    let rows = extra_results["results"].as_array().unwrap();
+    assert_eq!(rows[rows.len() - 2]["rows"][0]["owner"], "rust");
+    assert_eq!(rows[rows.len() - 1]["rows"][0]["owner"], "node");
+    host.publish(&owner("node", 4)).unwrap();
+    node_peer
+        .request("fixture/publish", json!({"activation":"4"}))
+        .await
+        .unwrap();
+
+    // The SDK owner creates actual staging pins, then the fixture corrupts the
+    // last returned source. The Host rejects the entire frozen root manifest
+    // before issuing any grant; all fresh stage pins return to baseline.
+    deployment.reserve("rust-failed", owner("rust", 5)).unwrap();
+    let failed_gate = ActivationGate::default();
+    runtime
+        .reserve(owner("rust", 5), failed_gate.clone())
+        .unwrap();
+    let before = node_peer
+        .request("fixture/pins", json!({"activation":"1"}))
+        .await
+        .unwrap();
+    node_peer
+        .request("fixture/tamper-route", Value::Null)
+        .await
+        .unwrap();
+    let failure = deployment.offer_required("rust-failed").await;
+    assert_eq!(failure.err().unwrap().code, ErrorCode::CapabilityDenied);
+    eventually(async || !failed_gate.is_open()).await;
+    assert_eq!(
+        node_peer
+            .request("fixture/pins", json!({"activation":"1"}))
+            .await
+            .unwrap(),
+        before
+    );
+    assert!(consumer.gate().is_open());
+    assert!(extra_consumer.gate().is_open());
+    assert_eq!(
+        connection
+            .query(rpc::InterfaceConnectionMethod0Params {
+                sql: "after-route-rollback".into()
+            })
+            .await
+            .unwrap()[0]["owner"],
+        "node"
+    );
+    assert_eq!(
+        deployment
+            .reserve("rust-failed", owner("rust", 6))
+            .unwrap_err()
+            .code,
+        ErrorCode::ScopeClosed
+    );
+
+    // The final native commit fails after the first root has acquired its
+    // actual delivery pin. Reject every issued envelope, remove the earlier
+    // pin and abort the uncommitted stage; existing bindings remain live.
+    deployment
+        .reserve("rust-commit-failed", owner("rust", 6))
+        .unwrap();
+    let commit_failed = ActivationGate::default();
+    runtime
+        .reserve(owner("rust", 6), commit_failed.clone())
+        .unwrap();
+    node_peer
+        .request("fixture/fail-route-commit", Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(
+        deployment
+            .offer_required("rust-commit-failed")
+            .await
+            .err()
+            .unwrap()
+            .code,
+        ErrorCode::CapabilityDenied
+    );
+    eventually(async || !commit_failed.is_open()).await;
+    assert_eq!(
+        node_peer
+            .request("fixture/pins", json!({"activation":"1"}))
+            .await
+            .unwrap(),
+        before
+    );
+    assert!(consumer.gate().is_open());
+    assert!(extra_consumer.gate().is_open());
+
+    // A valid token cannot be substituted into another consumer's full view,
+    // even when owner, interface and exact bundle SHA are all identical.
+    let mut forged_view = db.client().proxy().delivery().unwrap();
+    forged_view.view.source = deployment.plan().instances()["rust-extra"].routes()["rpc"]
+        .source()
+        .into();
+    let source = runtime
+        .encode(
+            &consumer_owner,
+            &forged_view.view.bundle_sha256,
+            &bundles.method(&forged_view.view, "connect").unwrap().params,
+            Outbound::json(rpc::InterfaceDatabaseMethod0Params {
+                name: "source-substitution".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    let stage = source.stage;
+    assert_eq!(
+        host.handle(
+            &identity("rust"),
+            "object/call",
+            json!({"target":forged_view,"method":"connect","input":source})
+        )
+        .await
+        .unwrap_err()
+        .code,
+        ErrorCode::StaleObject
+    );
+    runtime
+        .handle(
+            "object/abort",
+            json!({"activation":consumer_owner,"stage":stage}),
+        )
+        .await
+        .unwrap();
+
     // Connection-bound sender checks reject a fabricated native identity before
     // allocating an execution pin, without closing healthy sibling members.
     let proof = connection.client().proxy().delivery().unwrap();
@@ -790,6 +1058,8 @@ async fn scenario() {
     // this same connection remains live until it is independently stopped.
     host.close_member(&owner("node", 1)).await.unwrap();
     assert!(!consumer.gate().is_open());
+    assert!(!extra_consumer.gate().is_open());
+    assert!(extra_original.effect(|| Effect::Done).is_err());
     let called = Arc::new(AtomicUsize::new(0));
     let entered = called.clone();
     assert!(original
@@ -800,6 +1070,7 @@ async fn scenario() {
         .is_err());
     assert_eq!(called.load(Ordering::SeqCst), 0);
     consumer.stop().await.unwrap();
+    extra_consumer.stop().await.unwrap();
     node_peer
         .request("fixture/stop", json!({"activation":"1"}))
         .await
@@ -819,6 +1090,13 @@ async fn scenario() {
             == false
     })
     .await;
+    assert_eq!(
+        node_peer
+            .request("fixture/status", Value::Null)
+            .await
+            .unwrap()["extraOpen"],
+        false
+    );
     runtime.close_member(&rust_provider);
     provider.stop().await.unwrap();
     // Runtime-wide receipt evidence remains valid after all members close.
@@ -831,8 +1109,8 @@ async fn scenario() {
         .request("fixture/close", Value::Null)
         .await
         .unwrap();
-    assert_eq!(closed["cleanup"], 3);
-    assert_eq!(cleanup.load(Ordering::SeqCst), 2);
+    assert_eq!(closed["cleanup"], 4);
+    assert_eq!(cleanup.load(Ordering::SeqCst), 3);
     native_root.shutdown().await.unwrap();
     node_peer.close(ProtocolError::new(
         ErrorCode::Unavailable,
