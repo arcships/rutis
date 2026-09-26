@@ -4,6 +4,7 @@
 > 基准：main `ee63071`。需求：[代理 fiber #46](https://github.com/arcships/rutis/issues/46)、
 > [接口契约 #47](https://github.com/arcships/rutis/issues/47)、
 > [隔离与强制停止 #48](https://github.com/arcships/rutis/issues/48)。
+> 2026-09-26 修订：默认共享语言 runtime，插件 fiber 与进程分开管理；资源配额和具体限额后置。
 > 上线前置：[旧代注册隔离 #41](https://github.com/arcships/rutis/issues/41)。
 > 本文的“宿主”指 Rust 主进程，“插件进程”指受其管理的进程；不沿用旧桥中把 Node 对端称为 host 的命名。
 
@@ -11,7 +12,8 @@
 
 **协议插件是通过显式、可版本化的消息契约与 rutis 交互的进程外装配单元。**
 每个插件实例在宿主内有一个代理 fiber；其服务、依赖与资源归属进入同一 rutis 图。
-插件代码运行在独立进程，主进程不加载其 Rust dylib、不执行 Python/JS 代码。
+插件代码运行在主进程之外的语言 runtime 中；多个兼容插件默认共享一个 runtime 进程。
+主进程不加载其 Rust dylib、不执行 Python/JS 代码。
 语言 SDK 将本地异步服务映射为协议调用，宿主代理承担契约校验和生命周期配对。
 
 目标：
@@ -19,14 +21,14 @@
 1. TS、Python 和 Rust 插件可独立发布，保持已约定的契约即可使用，不绑定主进程的 rustc 或 SDK 二进制。
 2. 原生插件可以消费远端服务；协议插件可以消费明确授予的原生或其他协议插件服务。
 3. 依赖未就绪不运行插件业务；依赖丢失、断线、更新都沿 rutis 驱逐和重载语义收敛。
-4. 插件崩溃或不响应卸载时，宿主能撤销调用能力并终止其进程树；失败不扩散到其他插件进程。
+4. 插件失败时撤销其能力；runtime 崩溃或需要强制重启时撤销整组插件，明确连带驱逐和恢复语义。
 5. 请求、取消、超时、流式背压、错误和恢复策略有可测试的边界。
 
-v1 决策：**本机、受宿主管理、一进程一插件实例、JSON 契约、异步 RPC 与服务端流**。
-Linux 是首个验收平台；不具备所需进程树管理能力时明确拒绝启动，不悄悄降级。
+v1 决策：**本机、受宿主管理、同语言兼容插件共享 runtime、JSON 契约、异步 RPC 与服务端流**。
+Linux 是首个验收平台；语言版本或依赖环境不兼容时使用不同 runtime 组。
 TS 是第一条完整纵向实现；Python 与 Rust 使用同一协议和测试语料，按实施阶段补齐。
 
-不包含：网络远程插件、第三方自行连接的常驻 daemon、共享插件进程、任意 Rust trait 自动代理、
+不包含：网络远程插件、第三方自行连接的常驻 daemon、任意 Rust trait 自动代理、
 同步借用或共享内存跨界、客户端流/双向流、状态迁移、恰好一次业务执行、无中断替换、插件市场和签名信任体系。
 事件总线四种分发及 waterfall 不在 v1 线协议中；连续数据先用显式服务流表达，不能把未知事件模式降级为通知。
 
@@ -38,12 +40,13 @@ TS 是第一条完整纵向实现；Python 与 Rust 使用同一协议和测试�
 | 问题 | 本文裁决 | 原因及代价 |
 | --- | --- | --- |
 | 谁控制插件生命周期 | rutis 代理 fiber；远端只执行 start/stop | 不能让两端各自决定是否 Active |
-| 故障单位 | 一个实例的一代对应一个进程树 | 启动成本高于共享 Node 进程，但停止不波及无关实例 |
+| 运行单位 | 一个兼容环境对应一个语言 runtime 组，多插件共享进程 | 复用语言环境；进程级故障会波及组内所有插件 |
 | 契约来源 | 受限 JSON Schema 2020-12 + 方法描述符 | 延续 JSON 数据面，明确生成器支持范围 |
 | 版本兼容 | 精确版本 + 契约 bundle 哈希 | 不把 semver 字符串当成结构兼容证明 |
 | 服务键 | 宿主构造 `TypeKey<ProtocolService>` + 契约/路由限定名 | 远端不能伪造 Rust `TypeId`；未知接口仍可用通用调用面 |
-| 重连 | 销毁旧代，启动新进程、新连接、新 activation | 不恢复旧请求，不把旧 Arc 偷换到新 provider |
-| 强制停止 | 独立 supervisor 负责，不能排在 fiber 清理之后 | 本地消费者的清理也可能迟迟不结束 |
+| 重连 | runtime 新 epoch，组内插件分别创建新 activation | 不恢复旧请求，不把旧 Arc 偷换到新 provider |
+| 强制停止 | supervisor 终止整个 runtime 组，不能排在 fiber 清理之后 | 不声称能在共享解释器内强杀任意单个插件 |
+| 资源策略 | 本轮不规定内存/CPU/并发/速率配额及默认数值 | 先验证生命周期和真实开销，再单独设计治理策略 |
 | 底层桥复用 | 复用已验证的概念和测试；新建独立协议运行时 | 旧桥的无界任务、JSON 透传和取消处理不足以支持本契约 |
 
 [dylib SDK 设计](design-dylib-sdk-2026-09-24.md)用于可信一方插件在主进程共享 Rust 类型；
@@ -60,46 +63,66 @@ TS 是第一条完整纵向实现；Python 与 Rust 使用同一协议和测试�
 
 | 现有基础 | 本设计必须增加的内容 |
 | --- | --- |
-| [rpc.rs](../crates/rutis-cordis/src/rpc.rs)：帧、请求表、握手、超时、孤儿应答、`HostGone` | 激活代隔离、双向取消处理、有界调度、从入队开始的 deadline、连接终止与任务回收 |
+| [rpc.rs](../crates/rutis-cordis/src/rpc.rs)：帧、请求表、握手、超时、孤儿应答、`HostGone` | 激活代隔离、双向取消处理、共享连接的分发、从入队开始的 deadline、连接终止与任务回收 |
 | [proto.rs](../crates/rutis-cordis/src/proto.rs)：`HelloCaps`、`HelloVerify`、`PluginLedger` | 不执行代码的清单校验、契约哈希、宿主签发能力、实例与 activation 身份 |
-| [services.rs](../crates/rutis-cordis/src/services.rs)：`svc/call`、`svc/part` | 服务图中的远端 provider、逐方法校验、流 credit；现有 `CordisService` 只是 JSON 调用面 |
-| [tcp.rs](../crates/rutis-cordis/src/tcp.rs)：专用 loopback TCP、行帧 | v1 继承私有 socket、长度前缀、严格帧错误和完整资源配额 |
+| [services.rs](../crates/rutis-cordis/src/services.rs)：`svc/call`、`svc/part` | 服务图中的远端 provider、逐方法校验、流式背压；现有 `CordisService` 只是 JSON 调用面 |
+| [tcp.rs](../crates/rutis-cordis/src/tcp.rs)：专用 loopback TCP、行帧 | v1 继承私有 socket、长度前缀、严格帧错误；按 runtime 组复用连接 |
 | [plugin.rs](../crates/rutis/src/plugin.rs)：工厂、静态 `injects` | 纯构造 `ProxyFactory`、预先冻结的依赖映射 |
 | [fiber.rs](../crates/rutis/src/fiber.rs)：装载回滚、串行重启、update、watch | supervisor 与这些 API 的配对，不新增一套内核状态机 |
 | [ctx.rs](../crates/rutis/src/ctx.rs)：`require_as`、`provide_as_with_check`、effect、refresh | 按 activation 撤销的代理；#41 的代绑定 Ctx 是前置条件 |
 
 具体限制：现有 `Bridge::request` 在发送完成后才开始等待超时；入站 request/notify 会各自 spawn；
-`ServiceDispatch` 没有 credit 窗口。本文运行时不得直接包一层这些 API 就宣称满足 §九、§十的 deadline 和背压。
+`ServiceDispatch` 没有消费驱动的背压。新 runtime 不能直接包一层这些 API 就宣称满足取消、deadline 和慢消费者语义。
 
-## 四、组件与所有权
+## 四、共享语言 runtime 与所有权
 
 拟新增 `rutis-protocol` crate，依赖 rutis、tokio、序列化/校验库，不依赖 dsh，也不依赖 `rutis-sdk`。
-crate 初版内部按职责分模块，避免在协议尚未验证时先拆出多个稳定公共 crate。
+语言侧提供 Node/TS、Python、Rust runner，负责在一个进程中装载和管理多个插件实例。
 
 ```mermaid
 flowchart LR
-    N[原生消费者] --> C[生成的客户端 / ProtocolService]
-    C --> P[代理 fiber]
-    P --> R[会话与契约校验]
-    R <-->|私有 IPC| W[TS / Python / Rust 插件进程]
-    W -->|获授的依赖调用| R
-    R --> A[原生服务适配 fiber 或另一代理服务]
-    S[Supervisor] -->|启动 / 撤销 / 杀进程树 / 回收| W
-    S -->|受控 restart / 诊断| P
+    H[Rust 主进程 / rutis] --> A[插件 A 代理 fiber]
+    H --> B[插件 B 代理 fiber]
+    H --> C[插件 C 代理 fiber]
+    A <-->|同一连接分发| N[Node runtime 组 / A 与 B]
+    B <-->|同一连接分发| N
+    C <-->|另一连接| P[Python runtime 组 / C]
+    S[Supervisor] -->|进程生死与组恢复| N
+    S -->|进程生死与组恢复| P
 ```
 
-| 组件 | 持有的资源与职责 |
-| --- | --- |
-| `ContractCatalog` | 宿主批准的契约 bundle、预编译校验器、生成器版本；离线准备 |
-| `PreparedPlugin` | 不可变包路径、清单摘要、已校验配置、部署路由；不持有运行进程 |
-| `ProxyFactory` | 插件逻辑身份、固定 `injects`/exports 签名；validate/build 仅做纯检查与构造 |
-| 每代 `Activation` | activation id、撤销状态、捕获的取消 token、能力表、请求/流、私有连接 |
-| `Supervisor` | 每实例进程槽位、OS 进程树句柄、退出记录、重试定时器；独立于 fiber 清理等待 |
-| 语言 runner | 完成握手后才执行插件业务 start，分发调用和 stop；不得自行重新装载下一代 |
-| `ProtocolService` | 某一代、某一契约的可撤销调用面；旧引用永远不指向新代 |
+### 4.1 共享粒度
 
-supervisor 属于宿主根资源，所有代理销毁后才能关闭。子进程退出监视、日志排空与停止定时器运行在独立监督执行资源上，
-不能依赖插件业务 future 让出宿主的同一个执行线程。主进程自身崩溃后的清理由部署服务管理器覆盖，不伪称进程内任务仍能运行。
+**语言提供 runtime，部署选择 runtime 组。** 默认把语言、解释器版本、runner 协议版本、依赖环境和信任边界兼容的插件放在同组。
+不是全宿主强制只能有一个 Python 或 Node 进程。依赖冲突、不同解释器版本或需要独立故障范围时显式分组；
+需要单插件隔离时创建只有该插件的组，生命周期协议不变。
+
+同一进程可复用解释器启动、堆及模块初始化，通常有更低的重复开销；不预先承诺内存节省比例。
+模块能否共享还取决于解析路径和版本：Node 按解析文件缓存模块，Python 按 `sys.modules` 缓存，
+见 [Node 模块文档](https://nodejs.org/api/modules.html)和 [Python 导入文档](https://docs.python.org/3/reference/import.html)。
+Python 首版每组使用一个已锁定的依赖环境；冲突的依赖不能靠多个插件目录或修改 `sys.path` 假装隔离，应拆组。
+Node 允许包级依赖，但同名不等于共享一份模块；改变进程全局配置的插件也应单独分组。
+
+### 4.2 两层生命周期
+
+| 组件 | 所有权与职责 |
+| --- | --- |
+| `ContractCatalog` | 宿主批准的契约、离线校验器、生成器版本 |
+| `PreparedPlugin` | 不可变包路径、配置、静态路由和选定 runtime 组；不启动业务 |
+| `ProxyFactory` | 每个插件实例一个，保留固定 injects/exports 和工厂纯构造约定 |
+| `RuntimeGroup` | 兼容环境、进程、连接、runtime epoch、组内成员、共享模块缓存 |
+| 每代 `Activation` | 某插件一次装配的身份、撤销状态、依赖能力、请求/流与任务清理 |
+| `Supervisor` | 管理 runtime 进程的启动、退出、组恢复；不替代逐插件 fiber 的生命周期 |
+| `ProtocolService` | 某一插件代的可撤销服务引用，旧引用不重新绑定 |
+
+宿主维护每组的 `RuntimeReady` 门控服务，所有成员代理的静态 injects 都包含这个服务及自己的业务依赖。
+runtime 的启动由组注册/监督层触发，**不能等某个代理 apply 才启动**，否则 apply 等 Ready、Ready 等 apply 会死锁。
+Ready 只表示进程已握手、可接受插件装载，不要求所有成员业务启动。业务依赖有向边仍由 rutis 排序；
+同组 A 依赖 B 时 B 可先装配，不设“所有插件都 start 完成才发布任何服务”的组屏障。
+
+runtime 在仍有已登记成员时可保持存活，即使这些插件暂时 Pending；最后一个成员被移除后可关闭空组。
+逐插件 dispose 不关闭其他成员的 runtime。supervisor 属于根资源，关闭时先禁止新装载并撤销各组，
+再 join 进程和核心清理。停止监督不能排在某个插件/消费者的清理 future 后面。
 
 ## 五、包、部署配置与静态声明
 
@@ -122,7 +145,7 @@ version = "1.2.0"
 protocol_family = "rutis-plugin"
 protocol_version = 1
 entry = "dist/main.mjs"
-runtime = "node"                    # 宿主映射到批准的解释器；不是 shell 命令
+runtime = "node"                    # 语言 runtime 要求；宿主选择兼容组，不是 shell 命令
 
 [[provides]]
 name = "weather"
@@ -145,8 +168,9 @@ sha256 = "<契约 bundle 的 64 位十六进制摘要>"
 ### 5.2 宿主部署描述
 
 宿主另行指定 `instance = "weather-east"`、包位置、配置、requires 到服务路由的映射、exports 的发布路由、
-环境变量、工作目录、资源上限与恢复策略。插件仅声明需要什么，不能决定宿主授权什么。
-同一个包可装多个实例；每实例独立 fiber、进程树和限额。
+runtime 组、插件配置与恢复策略。解释器、进程环境变量、工作目录属于 runtime 组配置，不能由某插件装载时任意修改。
+插件仅声明需要什么，不能决定宿主授权什么。同一个包可装多个实例；每实例独立 fiber 和 activation，默认可共用 runtime。
+本轮不新增资源上限配置项。资源配额、调度公平性和自动分组依据留待实测后的独立设计。
 
 `prepare()` 只读取文件、验证哈希、编译允许的 schema、校验配置和路由；**不启动插件以探测依赖**。
 所有 `requires` 在 spawn 前变成静态 `TypeKey`，与 D32f 一致。缺失契约、重复别名、契约冲突在 prepare 阶段拒绝。
@@ -239,7 +263,7 @@ CI 重新生成并检查零差异；共享合法/非法语料在三种语言中�
 
 ### 7.1 统一调用面
 
-宿主中的通用服务对象为拟议 `ProtocolService`，提供有界的异步 `call` / `server_stream`。
+宿主中的通用服务对象为拟议 `ProtocolService`，提供异步 `call` / `server_stream`。
 生成的 `WeatherClient` 只是其强类型包装，不改变服务的内核身份。
 服务键由宿主的路由编码器确定：`TypeKey::keyed_dynamic::<ProtocolService>(route_key)`。
 `route_key` 对 `(contract id, exact version, hash, binding name)` 做无歧义长度编码，不能随意字符串拼接造成碰撞。
@@ -279,176 +303,174 @@ let value = weather.get(Get { city: "Shanghai".into() }, call_options).await?;
 远端只能使用这些句柄和对应契约中的方法。句柄不编码内部 TypeKey，也不接受任意 `scopeId` 路由。
 请求的 connection、activation、方向、capability、方法均由宿主校验；未知能力拒绝并计数。
 
-这是协议入口的授权边界，不是同用户恶意代码的 OS 权限隔离。
+同组插件即使消费彼此服务，v1 也经宿主路由与能力检查，不自行绕过依赖图直接传函数引用。
+这是协议入口的授权边界，不是同进程或同用户恶意代码的安全隔离；共享 runtime 的插件必须互相信任。
 requires 的能力在 Starting 阶段可用于插件初始化；它们绑定已就绪的依赖，Stopping 后全部撤销，stop 不能再调用业务服务。
 需要外部清理 I/O 的插件自行完成；不能在卸载时重新申请宿主能力以延长资源寿命。
 
-## 八、生命周期与代隔离
+## 八、插件生命周期与 runtime 组生命周期
 
-### 8.1 三种身份
+### 8.1 身份
 
 | 身份 | 生命周期 | 用途 |
 | --- | --- | --- |
-| package id + instance name | 部署实例 | 人读身份和同名仲裁，不直接授权 |
-| 内核 PluginId / generation | rutis fiber / 装载代 | 本地诊断与核心清理归属 |
-| activation id | 每次实际 apply 新建的随机 128-bit id | 每个进程、连接、能力和请求的撤销边界 |
+| package id + instance name | 部署实例 | 人读身份和同名仲裁 |
+| 内核 PluginId / generation | fiber / 装载代 | 本地资源归属和诊断 |
+| runtime id + epoch | 组 / 每次进程启动 | 连接和进程恢复边界 |
+| activation id | 每插件每次实际 apply | 服务、请求、任务和能力撤销边界 |
 
-activation id 由宿主签发，不复用；不能从可复用 PID、插件自报 id 或请求序号推导。
-它与内核 generation 记录关联，但不把远端给出的数字当成 Ctx 的代号。
-#41 防止宿主中的旧任务注册到新代；线协议的 activation 检查防止迟到帧命中新代。两者不能互相替代。
+runtime epoch 和 activation id 由宿主生成，不使用 PID 或远端自报身份代替。
+帧必须对应当前连接的 epoch 和目标/来源插件的 activation；组内不能只靠请求 id 或方法名分发。
+#41 拒绝旧代 Ctx 注册；runtime 层拒绝旧 epoch/activation 消息，二者不能互相替代。
 
-### 8.2 状态映射
+### 8.2 逐插件装载
 
-远端状态单独放进协议诊断，不能向内核写一个不存在的状态。
+1. prepare 离线验证包、配置、契约和 runtime 组兼容性；validate/build 不创建进程或执行插件代码。
+2. 注册代理 fiber，静态 injects = RuntimeReady + 业务 requires。监督层独立启动组并完成 runtime hello。
+3. Ready 和业务依赖满足后，apply 捕获本代取消 token 与依赖绑定，创建 activation，先登记失败回滚清理所有权。
+4. 宿主发 `plugin/start`，带插件实例、包描述、契约、配置、能力和新 activation。runner 先验证，再装载业务入口。
+5. 初始化期间可调用已授予的 requires；不得调用尚未发布的 provides。start 等待不能阻塞连接的消息分发。
+6. runner 返回装配完成；宿主登记本插件的全部服务，检查代仍有效，再让 apply 完成。Loading 时服务不向消费者开放。
+7. 部分失败只回滚此 activation 的服务和任务；runner 能证明清理完成时，其他成员继续运行。
 
-| 场景 | 内核可观察状态 | 协议状态与动作 |
-| --- | --- | --- |
-| 依赖缺失 | Pending | Dormant，无进程 |
-| apply 启动/握手/start | Loading | Starting |
-| 服务装配成功 | Active | Ready |
-| 初始化失败 | Unloading → Failed | Faulted，回滚并回收进程 |
-| Active 进程退出/断线 | 先可能仍 Active，随后重启清理 | 立即 Unavailable，闸门关闭，不等待内核状态发布 |
-| 依赖驱逐或 restart | Unloading → Pending → Loading（依赖就绪时） | Stopping → Reaped → 新 Starting |
-| 显式 dispose/shutdown | Unloading → Disposed | Stopping → Reaped；禁止自动恢复 |
-| 杀进程后仍无法确认退出 | 内核仍按真实清理进展显示 | Quarantined，禁止再次 spawn |
+apply 中等待远端的操作都响应本代取消和调用方指定的 deadline。远端代码运行以后，失败可能留下任务，
+不能仅删除 activation 表项就宣称已回滚；未能确认清理的实例禁止再次装载，见下一节。
 
-Failed 是装载失败状态，Active 进程崩溃不会自动让内核变成 Failed；supervisor 必须显式触发收敛。
-本设计不新增 `FiberView::fail()`，不在后台直接篡改内核状态。
+### 8.3 逐插件卸载
 
-### 8.3 装载顺序
+本代失活时关闭调用闸门，撤销能力、通知依赖重查并结算本代请求；旧 Arc 不会转向新的 activation。
+发送 `plugin/stop`，runner 只清理这个插件的任务、处理器、订阅及应用资源。
+stop 的完成应答必须在 runner 已结束其登记任务后发出；“收到 stop”不是完成。
+Closing 仍接受 stop 应答和终止控制，不接受新业务调用。正常卸载完成后释放该插件代，runtime 继续服务其他成员。
 
-1. `prepare` 和 factory validate/build 完成纯校验；dry-run 不创建进程、套接字或监听任务。
-2. 依赖满足，apply 获得本代 Ctx，立即捕获 cancellation token，向 supervisor 申请实例的唯一进程槽。
-3. 捕获 requires 绑定；supervisor 建立 activation 与清理所有权；**先登记失败路径可回收的资源，再启动子进程**。
-   申请/登记与 spawn 的并发取消必须由同一槽位协议处理，不能留下“进程已启动但还没有清理 owner”的窗口。
-4. 连接握手完成，校验远端包摘要、插件身份、requires/provides 与契约集；不匹配直接终止该进程。
-5. 再检查捕获的依赖及本代取消状态，签发能力，发送 `plugin/start`，传递配置与句柄。
-6. 远端验证配置、装配处理器，返回 start 成功；无服务可用之前不接受宿主业务调用。
-7. 宿主登记全部服务与 effect，最后再次检查 cancellation/连接状态和 activation 闸门，apply 返回成功。
-   如果此时断线，check 为 false，消费者不能因短暂 Active 获得可用服务；supervisor 随即安排重启。
+取消 token 或 supervisor 收到停止意图时就发起上述流程，不等待 effect LIFO 排到它。
+本地消费者若卡在清理中，进程监督仍能推进；fiber/root 的清理可能继续等待，诊断如实区分。
+不能在共享解释器里安全强杀一个任意插件任务。stop 超出调用方的等待期限后将该实例标为 StopUnconfirmed，
+保持能力撤销并禁止新代；管理接口返回受影响 runtime 组和成员列表。
+是否强制重启整组由宿主恢复策略或显式管理操作决定，v1 不因一个普通 RPC 超时就自动杀整组。
 
-apply 的所有异步等待都 select 本代取消与所属阶段的 deadline；恢复退避先于 spawn、可取消且不计入 10s startup。
-旧槽位回收受 stop/reap deadline 约束；startup 从新进程启动开始覆盖连接、hello、start 和服务登记，不能分步重置。
-它持有的回收 guard 与 supervisor 共享同一完成状态；失败、取消、panic 和正常 effect 清理都 join 同一次停止。
-不能让一次 drop 仅停止等待却丢失子进程句柄。
+### 8.4 runtime 崩溃与组恢复
 
-### 8.4 卸载、故障与恢复
+一个进程退出、连接失效或被强制停止，意味着该 runtime epoch 下的**所有** activation 不再可用：
 
-停止的线性化点是 activation 从 Open 变为 Closing：此后不准入新业务调用，能力撤销，所有导出 check 变 false。
-宿主通知 `ctx.refresh()` 使依赖图重查，排空本代请求/流为明确错误；迟到结果只计数，不复活能力。
-Closing 仍允许本代 stop 应答和停止所需的控制消息，不能把业务撤销检查误用于 stop 回包而使所有卸载必然超时。
+1. supervisor 先设置组状态为 Recovering/Unavailable，关闭所有成员闸门、取消各成员本代 token，并将 RuntimeReady 置为不可用、触发 refresh。
+2. 结算这一 epoch 的全部请求和流，撤销各成员服务；rutis 驱逐组内成员以及依赖它们的其他消费者。
+3. 监督层独立终止/回收旧 runtime，不能等待本地消费者清理完成才启动进程停止操作。
+4. 等所有旧成员代完成清理且旧进程确认回收，再创建新进程和新 epoch，完成 hello 后恢复 RuntimeReady。
+5. 各代理沿自身业务依赖重新装配；同组、跨组消费者仍按依赖顺序恢复，不恢复旧请求和旧堆状态。
 
-supervisor 同时观察进程退出、协议断线及捕获的取消 token。**token 取消后即开始进程停止计时，不等 effect LIFO 清理轮到它。**
-原因是移除服务会等待消费者卸载，本地消费者可能卡在自己的清理里。
-即使进程已被杀掉，fiber 或 root 的清理仍可能等待原生消费者；诊断分别展示这两件事，沿用
-[卸载截止时间](core-shutdown-and-disposal-deadline.md)的“停止等待不代表停止任务”约定。
+Ready 门控恢复前必须有一次“旧代全部清理完成”的屏障，防止短暂失效后被核心等值合并，导致旧代未换而复用新进程。
+屏障包含断线时处于 Loading、Active 或正在 stop 的成员；Pending 且从未创建 activation 的成员无需等待远端 stop。
+连接已经失效时，清理 guard 使用组退出/回收结果完成远端清理，不能等待一个已不可能收到的 plugin/stop 应答。
+若成员的本地消费者一直不退出，组可以完成进程回收但不得宣称恢复成功；Ready 保持关闭并展示阻塞者。
 
-unexpected exit/断线：立即关闭闸门，然后为当前实例安排一次受控 `view.restart()`。
-下一次 apply 在 supervisor 槽位上等待旧树确认回收和恢复退避；不能先启动新进程再清理旧进程。
-初始化失败的重试从 Failed 显式调用 restart。缺依赖时保持 Pending，由核心在依赖恢复后装载。
-所有重试请求按实例串行、可取消，并核对期望 activation；旧代 fault 通知不能重启一个已经健康的新代。
+### 8.5 核心状态与管理并发
 
-v1 不向用户暴露可独立修改的原始管理 view；提供 `ManagedPlugin` 的 update/restart/dispose，普通 watch/诊断可读。
-管理器串行化手动命令与重试，dispose/shutdown 同步置终态意图并取消重试计时器，然后调用核心关闭。
-不得持管理锁跨 await restart/apply；关闭意图的发布与本代取消不排在正在等待的 restart 之后，
-否则 apply 等取消、dispose 等管理队列会互相等待。每代 apply 入口都重新检查 terminal/Suspended/Quarantined 槽位状态，
-核心的依赖 refresh 即使重试 Failed 也不能绕过暂停或进程回收约束。
-祖先取消到来时，不由 supervisor 猜测恢复：结束本代，下一代是否装载交回核心依赖门控。
+| 场景 | 核心状态与协议状态 |
+| --- | --- |
+| runtime 或业务依赖未就绪 | Pending；不创建插件 activation |
+| plugin/start 中 | Loading / Starting |
+| 服务装配完成 | Active / Running |
+| 插件装配失败且已回滚 | Failed；不必重启整个 runtime |
+| 组断线 | 闸门立即关闭，随后成员清理；不能直接把 Active 改写成 Failed |
+| stop 未确认 | 协议 StopUnconfirmed；核心仍显示真实清理进度或清理错误 |
+| 显式 dispose | 禁止该实例自动重试，最终 Disposed；其他成员不变 |
+| 旧进程未确认回收 | 组 Quarantined，禁止新 epoch |
 
-默认恢复：仅异常退出、连接丢失、启动超时自动重试，指数退避 250ms 起、上限 30s、±20% 抖动，
-滚动 60s 最多 5 次，连续健康 60s 重置退避。协议违规、契约不符、配置错误不自动重试。
-预算耗尽或永久错误时槽位进入 Suspended；如果旧代仍 Active，安排一次仅用于清理收敛的 restart，
-其后 apply 在启动任何进程之前返回暂停原因。已有启动失败则保留 Failed，不反复 restart 制造错误风暴。
-手动 resume 清除暂停后再 restart；不通过无限尝试掩盖不兼容。
+`ManagedPlugin` 管理单插件 update/restart/dispose；`ManagedRuntime` 管理组重启和组诊断。
+管理器不持锁跨 await 核心转换；dispose/shutdown 的终态意图及取消不排在正在等待的 restart 后面。
+重试必须核对 runtime epoch、activation 和宿主的期望装载状态；已经 dispose 的成员不能因组恢复再次出现。
+组恢复期间禁止开启新的 activation，新注册/更新的期望配置在恢复后使用。
+普通插件错误默认保留 Failed，由显式重试处理；实例管理记录保留失败原因，后续 apply 入口拒绝
+被核心 refresh 隐式重试，直到显式重试/有效更新清除该记录。组故障导致的临时失活则在组恢复流程中解除。
+组自动恢复可由宿主启用，本轮不规定次数、退避和预算数值。
+永久契约错误不得无条件重启。所有 apply 入口都检查组恢复/隔离和实例终态，防止核心 refresh 绕过这些约束。
 
-### 8.5 更新
+### 8.6 配置更新与代码更新
 
-`ManagedPlugin::update` 先 prepare 新包，再执行 `FiberView::update`。
-插件 id、固定 requires 的映射、provides 路由及契约身份、factory 显示名必须与 spawn 时一致；
-检查同时放入 `validate_config` 和 `build`，不能仅靠外层 API。
-仅配置或实现版本变化时可换代：旧进程回收 → 新包启动 → 消费者重载，有明确服务空窗。
-远端握手/装配失败发生在旧代卸载之后，**不承诺自动回滚或不中断**；保留旧包供用户显式更新回去。
-声明或契约变化需 dispose 后重新 spawn，并更新部署图；不复用旧 injects 装配新声明。
+配置变化仍通过 `FiberView::update`：纯 dry-run → 停止旧 activation → 同 runtime 中重新装配新 activation。
+插件 id、requires 映射、provides 路由与契约、factory 名称、runtime 组必须与创建时一致；检查在 validate_config/build 内。
+声明或 runtime 组变化需要 dispose 后重新 spawn，不沿用旧 injects。
+
+**代码包或 runtime 依赖环境更新，v1 重启整个 runtime 组。** 新包先离线校验，保持旧进程运行直到管理操作提交；
+随后对全组执行 §8.4，更新后的目标插件及其他仍被期望装载的成员依赖门控重装。失败不自动回滚，保留旧包供显式恢复。
+不能把删除一条模块缓存记录当成干净卸载；旧引用、全局状态和语言模块加载器都可能保留旧代码。
+Node ESM 有独立模块缓存，Python 删除 `sys.modules` 条目也不销毁其他持有的模块引用，见
+[Node ESM 文档](https://nodejs.org/api/esm.html)和 [Python 导入文档](https://docs.python.org/3/reference/import.html)。
+这样先保证代码更新语义可理解，不在首版承诺共享进程内的任意代码热替换。需要缩小更新影响范围时拆 runtime 组。
 
 ## 九、线协议与调用语义
 
-### 9.1 传输与握手
+### 9.1 传输与两层握手
 
-Linux v1 使用宿主创建的私有 Unix stream socket pair，将一端经约定 fd 交给 runner；无公开监听端口。
-非通信 fd 按 close-on-exec 规则处理；stdout/stderr 只用于日志，持续排空且有速率/保留上限。
-EOF、截断帧、非 UTF-8、重复 JSON 字段、超限或非法控制信封均终止连接并记录原因。
+Linux 首版由宿主为每个 runtime 创建私有 Unix stream socket pair，约定 fd 交给 runner；stdout/stderr 保留给日志。
+每组一条连接，多插件消息按 activation 分发；不为每个插件重复建立解释器和连接。
+帧为 u32 网络字节序长度 + UTF-8 JSON。解析须检查长度、JSON 结构和身份；EOF、截断、非法控制帧终止连接。
+具体帧大小、解析深度和队列容量由实现验证决定，不在本文固定默认值；这不表示实现可以无检查地按外部长度分配。
 
-帧为 `u32` 网络字节序长度 + 对应长度的 UTF-8 JSON；长度不含前缀。
-在分配 body 前检查上限，解析时限制深度/节点数；拒绝尾随数据。读取一个半帧也有累计 deadline。
-不沿用旧 `TcpWire` 的错误帧跳过策略。内存 Wire 只能用于状态机单测，进程验收必须经过真实传输。
-
-首帧由宿主发 `hello` 请求，包含 family/version、宿主签发 activation、期望 plugin/instance/package digest、
-契约身份列表和宿主限额。runner 返回自己的编译/打包描述与支持限额；宿主取双方上限较小值，
-校验一致后发 `plugin/start`。hello 之前及 start 之前，除相应控制应答外不接受业务帧。
-runner 应延迟业务入口到 start；恶意进程当然可以提前运行自身代码，因此包身份验证不是执行前的安全隔离措施。
-
-协商失败的可读错误保存在宿主日志；对端可读时回错误，然后关闭。v1 不做同连接换协议或二次 hello。
-
-握手完成但尚未发 start 时没有业务能力；start 已发但未应答时，只允许插件使用已授予的 requires 调用依赖，
-不允许宿主调用尚未装配完成的 provides。start 请求的等待不能占住接收泵或依赖调用的执行槽。
-Ready 才开放双向业务；Closing 只处理 stop、取消和已准入调用的终止控制。
+第一层 `runtime/hello` 校验协议 family/version、runtime id/epoch、语言环境与 runner 能力。
+第二层每次 `plugin/start` 校验对应插件的包身份、契约、配置和能力；一个插件不兼容不应让其他兼容插件握手失效。
+没有完成 hello 不能装插件；没有进入 start 不能发该插件业务消息。
+Starting 允许该插件使用已授予的 requires；成功装配后才允许调用 provides。
+Stopping 允许完成应答及取消，不准入该插件的新业务调用；其他 Running 插件正常通信。
+同连接不二次 hello，重连意味着新 runtime epoch。runtime/hello 和进程管理消息没有 plugin activation，
+其余消息必须携带成员身份，不能让“缺失 activation”成为访问全部成员的通配符。
 
 ### 9.2 信封
 
-业务请求示例（activation 和 capability 为示意值，实际由宿主分配）：
+业务请求示例（身份和 capability 为示意值，实际由宿主分配）：
 
 ```json
 {
-  "type": "req", "id": "h:42", "activation": "a1",
+  "type": "req", "id": "h:42", "runtime_epoch": "r1",
+  "plugin_instance": "weather-east", "activation": "a1",
   "method": "svc/call",
   "params": {"capability": "weather-export", "method": "get", "args": {"city": "Shanghai"}},
   "timeout_ms": 30000
 }
 ```
 
-`res` 原样带 id/activation，`ok: true` 时恰有 `result`，`ok: false` 时恰有 `error`。
-`ntf` 没有自己的请求 id，但带 activation 和目标 `call_id`（适用时）。
-请求 id 使用 `h:<十进制计数>` / `p:<十进制计数>` 表示发起方；单 activation 不复用，溢出关闭并重新建代；hello/start/stop/ping 也使用同一方向计数器。
+`res` 原样带 id/runtime_epoch/成员身份（如适用），`ok: true` 时恰有 `result`，`ok: false` 时恰有 `error`。
+`ntf` 没有自己的请求 id，但带 runtime_epoch、成员身份和目标 `call_id`（如适用）。
+请求 id 使用 `h:<十进制计数>` / `p:<十进制计数>` 表示发起方；同一 runtime epoch 内按方向分配且不复用，所有成员及控制消息共用计数器。
 所有字段都是协议 schema 的一部分，禁止用 JSON number 承载可能超出 JS 安全范围的计数。
 
-| 消息 | 方向 | 成功/终止语义 |
+| 消息 | 方向 | 语义 |
 | --- | --- | --- |
-| `hello` | 宿主 → runner | 版本、身份、契约、限额校验；初始化会话 |
-| `plugin/start` | 宿主 → runner | 配置、能力与导出句柄；应答表示业务处理器装配完成 |
-| `plugin/stop` | 宿主 → runner | 不再接收业务，清理并应答后退出；应答不能代替 OS 退出确认 |
-| `svc/call` | 双向 | 单值结果，或 §十的流式协议直到最终 res |
-| `call/cancel` | 请求发起方 → 执行方 | 以 call_id 取消；通知幂等，不要求 ack |
-| `stream/item` / `stream/credit` | 执行方 → 发起方 / 反向 | 有界流与额度归还 |
-| `ping` | 宿主 → runner | 控制面活性；不证明业务处理器没有卡死 |
+| `runtime/hello` | 宿主 → runner | 组、epoch、语言环境和协议握手 |
+| `plugin/start` | 宿主 → runner | 校验并装配一个 activation，不影响其他成员 |
+| `plugin/stop` | 宿主 → runner | 清理一个 activation；完成应答证明登记任务已退出，进程保持运行 |
+| `runtime/stop` | 宿主 → runner | 结束整组；应答不能代替进程退出确认 |
+| `svc/call` | 双向 | 获授服务的单值结果或服务端流 |
+| `call/cancel` | 发起方 → 执行方 | 请求取消，不等于任务已结束 |
+| `call/finished` | 执行方 → 发起方 | 对已取消调用给出登记任务退出的完成确认 |
+| 流控制消息 | 双向 | 消费需求、项目和结束，见 §十；帧形状待纵向验证 |
 
-plugin/start/stop/hello 保留控制槽和固定 schema，插件不能反向调用这些宿主管理方法。
-未知请求方法返回 `MethodNotFound`；未知控制通知、重复在飞 id 或非法状态迁移视为协议错误，关闭会话。
-允许在规定大小内携带显式 trace id；不沿用旧桥的 `sessionId`/`turnId` 作为授权标识。
+runtime 管理方法仅由宿主调用；成员不得以自己的能力操作整个组。
+未知方法、重复在飞 id、身份不匹配有明确错误，不能将一成员的正常业务错误直接升级成整条连接断开。
+无法可靠解析/归属的控制帧或连接损坏才按组故障处理。
 
 ### 9.3 执行、deadline 与取消
 
-每个方向预留固定业务配额（默认宿主发起 32、插件发起 32），双方以相同规则记账，避免争用一个无法原子分配的跨进程计数器。
-准入使用有界 try-acquire，满额立即 `ResourceExhausted`，不让嵌套调用占着外层槽位无限等待新槽位。
-读泵、控制调度与业务执行分离；业务递归/逻辑依赖环仍受 deadline 约束，协议不保证任意应用调用图无死锁。
-SDK 在 handler 中派生的下游调用继承取消范围及不大于上游的剩余 deadline，不能取消外层却遗留无界子调用。
+每个调用绑定 `(runtime epoch, plugin activation, call id)`，终态只交付一次。
+调用 deadline 从本地 API 接收起覆盖排队、写入、执行和流读取；过线只传剩余时长，不依赖跨进程墙钟一致。
+具体默认超时、并发数和调度策略暂不设计。业务执行不能占住接收泵，等待某插件结果不能阻塞其他成员的控制消息。
+写到半帧后失败须关闭连接，不能继续复用已损坏的字节流；这会影响整组，应在诊断中明确。
 
-每次调用经历 `Queued → Sent → Completed | Cancelled | TimedOut | Unavailable`，终态只能提交一次。
-本地 deadline 从 API 接收调用、申请队列名额时开始，包含排队、编码、写入、执行及全部流读取。
-发出时把剩余时长放到 `timeout_ms`；执行方再受其本地上限约束，不比较跨进程墙钟。
-远端向宿主发请求时，宿主从帧准入起计时。写入卡住、部分帧写入超时必须关闭连接，不能接着发送下一帧破坏边界。
+取消先结算调用方等待、撤销后续结果交付；Queued 且尚未发送的请求从发送队列移除。
+已发送的请求传 cancel，并保留“用户等待结束，但执行方退出尚未确认”的状态。
+runner 在 handler 及其登记子任务清理完成后返回 `call/finished`；它不是“已收到 cancel”的 ack。
+若正常终态应答先于取消完成，则可作为执行结束依据；取消消息迟到后仍须幂等回应已完成，避免无意义等待。
+宿主跟踪未确认状态，不把其完成信号一律当孤儿丢弃。具体终态记录回收策略在实现中验证，不恢复业务等待。
 
-本地取消、超时或丢弃调用 future/流：先原子结算本地等待、移除在飞记录、关闭本地数据队列，再尽力发送 cancel。
-取消通知走有界控制队列；无法在控制写入 deadline 内送达时关闭连接，不能为传 cancel 无限等待。
-执行方把 cancellation token 交给异步 handler，停止继续产出并清理任务；token 取消不是业务已回滚的证明。
+没有完成确认只能说调用已取消等待，不能说远端任务已停止。共享 runtime 中不因单次取消超时自动杀组；
+持续不协作可标记插件 StopUnconfirmed，交由 §8.3 的组恢复策略处理。
+宿主原生 handler 同样只能协作取消，实际未退出的任务仍归属原代，不能因删除请求表就失去清理记录。
+派生下游调用继承取消范围和剩余 deadline，不能通过中转让取消链断开。
 
-对非协作远端任务，收到取消后经过 1s 仍未结束则终止整个插件 activation，影响同插件的其他调用但不影响其他进程。
-对宿主内原生 handler，只能协作取消；无法安全杀主进程中的任意任务。
-未退出的本地 handler 继续占用原槽位，达到配额后拒绝新请求，不能释放计数后无界 spawn；此差异进入诊断。
-这些槽位还计入宿主级/本地 provider 级预算，跨 activation 继续计费，不能通过重连或换代清空计数绕过限制。
-
-不自动重试业务请求。连接丢失/超时可能发生在副作用已完成但结果未送达之后，返回错误带 `execution: unknown`。
-调用方只有在业务契约定义了幂等键和去重持久化时才能自行重试；不宣称跨重连 exactly-once。
-有在飞请求 id 的重复帧属于协议违规；已经结束的迟到 res/item 计入孤儿计数并丢弃，超过速率限额关闭连接。
+不自动重试业务调用；超时或断线可能发生在副作用完成之后，错误须表达执行结果未知。
+需要业务重试时由契约定义幂等键和持久化去重，不承诺跨重连 exactly-once。
+旧 epoch/activation 的消息不能影响新代；正常竞态产生的迟到应答、取消完成通知必须有幂等处理，不能误伤其他成员。
 
 ### 9.4 错误模型
 
@@ -457,108 +479,63 @@ SDK 在 handler 中派生的下游调用继承取消范围及不大于上游的�
 
 | 类别 | 例子 | 处理 |
 | --- | --- | --- |
-| 调用方数据错误 | InvalidParams、MethodNotFound、CapabilityDenied | 调用失败，未执行 handler；累计违规限流 |
+| 调用方数据错误 | InvalidParams、MethodNotFound、CapabilityDenied | 调用失败，未执行 handler；记录错误与调用归属 |
 | 宿主出站数据错误 | LocalContractViolation | 不发送；记录本地适配器缺陷 |
-| 对端返回违约 | InvalidResult、InvalidStreamItem | 当前调用失败，关闭 activation 并禁止自动重试 |
+| 对端返回违约 | InvalidResult、InvalidStreamItem | 当前调用失败，隔离相应 activation；其他成员不因可归属的业务违约被杀 |
 | 生命周期/传输 | Cancelled、DeadlineExceeded、Unavailable、StaleActivation | 明确结算，不自动重放 |
-| 资源约束 | ResourceExhausted | 准入前拒绝；不得先分配无限任务再检查 |
 | 管理错误 | ContractMismatch、StartupTimeout、StopTimeout、ReapFailed | 进入监督诊断及相应失败/隔离状态 |
 
-## 十、流式背压与资源上限
+## 十、流式语义与后置的资源设计
 
-v1 只有 unary 和 server_stream。流的调用方在 `svc/call` 中给出初始 item/byte credit；
-执行方用同一个 call_id 发送 `stream/item {seq, value}`，最终发送唯一 res，成功 result 为 `{items: N}`，失败为错误。
-首个 seq 为 0，严格递增；成功结束的 N 必须等于已接收 item 数。没有 item 的流允许 N=0。
-应用业务的流中错误以最终 error 表达，之后禁止 item；业务若需“带错误的数据项”，应将其写进 item schema。
+本轮保留 unary 和 server_stream 的行为定义，不设计 CPU/内存/pids 配额、每插件并发额度、速率限制、
+日志容量、默认超时表、双重 credit 算法或自动调度/分组策略。原稿的具体数值表和 cgroup 资源要求撤回。
+实现后先测共享 runtime 的基础开销和真实调用负载，再决定哪些限制值得成为公共配置。
 
-额度同时计项目数与字节数（完整编码 item 帧的 body 字节，不含长度前缀）；两者都足够才能发送。
-接收方只在消费/释放队列项后归还对应 `stream/credit`，不得因从 socket 读入内存就立即归还。
-当前可用 credit 不能超过协商窗口；负数、溢出和超额归还关闭连接。累计消费量可以超过窗口，但只能回补实际消费的额度。
-credit 携带已消费的累计 seq/items/bytes；发送方按与上次已确认值的差额补充额度，
-并核对不超过已发送前缀。相同累计值作为幂等重复忽略，回退或超前值拒绝；不得凭任意增量扩充窗口。
+仍需明确以下协议语义，否则语言 SDK 无法互通：
 
-额度耗尽暂停 poll 远端异步迭代器；最多保留一个已取出、受 max-item 限制的待发项并计入预算。
-单项超过 negotiated max-item 直接终止调用；不能靠拆分一项绕过 schema 与大小约束。
-结束帧、cancel、stop 不消耗数据 credit；它们仍受独立控制队列、帧大小和写入 deadline 约束。
-最终 res 不能越过同一调用已入队的 item；发送器在不同流间公平调度，在单流内保持顺序。
-接收方保存终态并先交付已缓冲项，再向用户报告流结束/业务错误；deadline、取消或 activation 撤销则立即丢弃缓冲并失败。
-收到最终 res 不等于用户已消费队列，剩余缓冲仍占内存/流配额直到消费或 drop；终态后不再给该流发送 credit。
+- 流属于某个调用及其 activation，项目按顺序交付，最终成功或错误只出现一次；空流合法。
+- 消费者不读取时，生产侧不能无限推进并把结果全堆在宿主；保留消费驱动的背压。
+- 第一轮纵向原型优先验证逐次拉取/消费应答，再决定是否需要窗口批量化；不提前冻结 credit/字节预算协议。
+- 取消或 drop 关闭流、传播取消并等待独立的执行完成确认；不能让未消费流失去资源归属。
+- 正常终态在已接收项目之后交付；取消、失活则停止继续交付旧代项目。
+- 终态后在途的拉取/消费确认允许幂等收尾，不能因双向传输竞态杀掉正常共享连接。
+- 若后续采用窗口协议，必须验证窗口可容纳合法项目或在准入时拒绝，不能让首项永远等不到额度。
 
-接收泵只做有限解析、验证和分发，不 await 业务 handler，也不等待某个慢流腾出空间。
-合规发送方因 credit 约束不会把已承诺窗口写爆；超出窗口的帧按协议错误断线。
-控制队列与数据队列分开并保留控制额度，任何一条连接上的大流不能无界阻塞取消。
-单一 IPC 仍有有限帧的传输阻塞，不能承诺零延迟控制；控制 deadline 到达则关闭连接并走进程终止。
+这是正确性和资源所有权要求，不是本轮的资源治理方案。帧检查、任务登记、发送队列和慢消费者的实现选择
+在纵向原型中验证；若实验表明必须增加协议字段，再以明确修订冻结，不能将未验证数值写成既定标准。
 
-默认值是实施起点，必须经基准验证；部署可降低，提升需要显式配置且仍不得无界：
+## 十一、runtime 停止与故障范围
 
-| 项目 | v1 默认上限/时限 |
-| --- | --- |
-| 单帧 body / 单 item | 1 MiB / 64 KiB |
-| JSON 深度 / 节点数 | 64 / 100,000 |
-| 每实例双向业务调用总在飞数 | 64（每方向 32、其中各最多 8 条流）；入队准入即计数 |
-| 每实例数据队列总预算 | 8 MiB，收发、已承诺接收窗口与待发项均占预算 |
-| 每流初始窗口 | 16 items 且 256 KiB；窗口须先从总预算预留 |
-| 控制帧 / 队列 | 每帧 16 KiB；每方向 32 帧，超限结束会话 |
-| 帧速率 | 每方向 1,000/s，burst 128；含控制帧及孤儿帧 |
-| 单半帧累计读取 / 控制写入 | 5s / 1s |
-| startup / 普通调用默认 / 调用最大 | 10s / 30s / 120s；流使用同一总 deadline |
-| 正常 stop 宽限 / 强杀后确认 | 5s / 2s |
-| 心跳 | 每 5s ping，10s 无有效应答视为失联 |
-| 日志 | 每实例 1 MiB 环形保留、64 KiB/s；超限丢弃并计数，继续排空 pipe |
+正常 `plugin/stop` 只影响一个插件；`runtime/stop`、进程崩溃、失联或强制终止影响整组。
+对组执行强制停止前，先撤销组内全部 activation 和 RuntimeReady，触发所有相关消费者驱逐。
+共享解释器中的死循环、进程全局崩溃或原生扩展错误可能阻塞整组；协议不能承诺只终止责任插件。
 
-帧限额不是整个进程内存上限：解析对象、校验缓存、请求元数据和任务另设数量/内存预算；
-prepare 默认每包至多 32 个契约、每契约 128 个方法、单 bundle 1 MiB，合计 8 MiB，超出显式拒绝。
-总预算不足时缩小新流窗口或拒绝请求，不能让 16 条流各自领取未预留的完整额度。
-宿主原生适配器与插件共享这些协议配额；OS 内存/CPU/pids 限制由部署策略另行配置。
+supervisor 管理进程退出与回收，独立于 fiber 清理等待：先请求 runtime 正常退出，无法完成时由宿主策略
+升级为终止进程及其受管后代。只有确认旧进程及受管后代退出，才允许新 epoch；无法确认则 Quarantined。
+同一个父进程内多个插件创建的子进程默认只能安全归属到 runtime 组；需要逐插件回收的后代必须经过 runner
+登记并由它在 stop 时清理，未完成则插件 stop 不能报告成功。
 
-## 十一、进程管理与停止保证
+本设计不把 cgroup v2 委派环境作为 v1 必备条件，也不提前选定通用资源治理后端。
+Linux 进程树管理、宿主退出后的回收以及其他平台能力在实现验证时选定；应明确可保证的后代范围，
+不能把仅 kill 主 PID 的实现宣称为完整进程树回收。独立部署若采用 cgroup/容器，是部署选项，不是协议要求。
+未通过平台回收验证前不标为该平台可用。
 
-### 11.1 Linux 首发后端
-
-选择 cgroup v2 的独立叶子子树作为一个 activation 的进程树容器；由宿主外部部署提供可管理的委派根。
-启动前检查创建、放入、终止和观察子树的能力；不可用返回 `IsolationUnavailable`，不退回只 kill 主 PID。
-实际进程在执行插件代码前进入该子树：使用受控启动 helper 的等待屏障或等价原子创建方式，
-宿主确认归属后才允许 exec 入口，避免插件在归属确认前 fork。
-
-停止流程：
-
-1. 撤销 activation 的能力与新调用；启动独立停止时钟。
-2. 连接可用时发 `plugin/stop`，允许在宽限内清理、应答并退出。断线/已崩溃则跳过协商。
-3. 宽限到期仍有进程，使用 `cgroup.kill` 终止整个子树。即使主进程已退出，仍要检查其后代。
-4. 等待直接子进程的退出回收，并确认 `cgroup.events` 的 populated 为 0；释放连接、任务及槽位后才能启动下一代。
-5. 2s 内仍不能确认（例如不可中断睡眠、权限变化），记录 `ReapFailed` 并隔离该实例，禁止自动重启。
-   后台继续观测/回收，但不能报告“全部停止”；恢复需确认旧树为空。
-   清理 effect 可返回 `ReapFailed` 让核心报告错误，进程句柄和隔离槽仍归 supervisor，不能随 effect 结束释放后允许新 spawn。
-
-cgroup 的继承、`cgroup.kill` 与 populated 语义依据 [Linux 内核文档](https://docs.kernel.org/admin-guide/cgroup-v2.html)。
-发出 kill 不等于任意内核状态的任务都立即消失，因此这里承诺准时撤销协议能力和升级停止手段，不承诺所有 OS 任务硬实时退出。
-对子孙僵尸的回收由部署服务管理器或专用 supervisor helper 的 subreaper 策略负责，不在进程中全局 `waitpid(-1)` 抢其他库的子进程。
-
-进程组 kill 不能完整覆盖主动 setsid 的后代，不作为同等级后端。无沙箱的同用户插件仍可能主动迁出可写 cgroup、
-请求外部服务代执行或操控其他进程；默认管理承诺针对未主动逃逸的插件，敌对代码须使用 §十二的沙箱部署。
-
-### 11.2 平台与共享进程
-
-Windows 后端规划为禁止 breakaway 的 Job Object，进程在恢复运行前入 Job；
-使用 Job 终止并确认活动进程归零，见 [Microsoft Job Objects 文档](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)。
-macOS 尚未选定满足同级树回收保证的后端。二者在平台验收通过前返回 unsupported，不把 Linux 结论外推。
-
-v1 清单/部署明确 `one_instance_per_process`；共享进程设置直接拒绝。
-未来若允许一进程多插件，进程崩溃/强杀必须撤销组内所有 activation、驱逐所有关联消费者，
-并独立定义组启动屏障与循环依赖；不能把共享进程当作隐藏优化。
-#48 的连带行为在 v1 通过“拒绝共享进程”和“杀一个实例不影响另一个实例”的测试覆盖。
+runtime 管理命令和诊断必须列出受影响成员。用户希望缩小崩溃/更新影响范围时分成多个 runtime 组，
+单成员组即可提供原设计的一插件一进程形态，无需再设计另一套协议。
 
 ## 十二、权限与三方 Rust
 
 协议能力表只允许所声明并获授的服务/方法；入站消息不能获得原始 Ctx、任意 TypeKey 或任意文件句柄。
 这是宿主代理的防护，不会限制插件自行访问系统。
 
-默认部署：同用户文件/网络权限，显式环境传递，日志脱敏；cgroup 负责进程管理及可选资源配额，**不是秘密隔离或完整沙箱**。
+默认部署：同用户文件/网络权限，显式环境传递，日志脱敏，**不是秘密隔离或完整沙箱**。
+同组插件共享进程地址空间、模块和全局状态；不能把 activation/capability 当成同组恶意代码之间的安全隔离。
 需要运行不可信作者代码时，由部署层提供受限 UID/容器/namespace/seccomp 或相应平台 sandbox，
-限制文件、网络、环境、进程控制和 cgroup 迁移。沙箱策略独立版本化并写入诊断，不能在缺失时仍标为 sandboxed。
+限制文件、网络、环境和进程控制。沙箱策略独立版本化并写入诊断，不能在缺失时仍标为 sandboxed。
 远程网络接入需要额外认证、加密和身份设计，不通过把私有 socket 换成监听 TCP 就开放。
 
-三方 Rust 首选独立可执行程序 + 协议 SDK。若必须分发 Rust dylib，加载器及其匹配 SDK 运行在独立插件进程里，
+Rust runtime 可用静态链接插件集合，或在独立 runtime 进程中加载与其 ABI 兼容的 dylib。
+三方 Rust 可部署为单成员 runtime 组；相互信任且使用同一兼容 SDK 的插件可共享 Rust runtime。若分发 Rust dylib，
 主进程仍只看消息；dylib 的 ABI/分配器兼容验证是该 runner 自己的责任，可复用一方 dylib 设计，
 不能因此要求 Rust 主进程链接三方库或共享其 vtable。
 
@@ -567,16 +544,19 @@ v1 清单/部署明确 `one_instance_per_process`；共享进程设置直接拒�
 以下为设计草图，尚不能编译；最终 API 以纵向测试约束，不在此 PR 发布接口。
 
 ```rust,ignore
-let supervisor = ProtocolSupervisor::new(process_backend, policy)?;
-let prepared = supervisor.prepare(package_dir, deployment, &catalog)?;
+let supervisor = ProtocolSupervisor::new(runtime_backends)?;
+let node = supervisor.runtime_group("node-default", node_environment)?;
+let prepared = supervisor.prepare(package_dir, deployment.with_runtime(node), &catalog)?;
 let plugin = supervisor.spawn(&ctx, prepared)?; // 注册代理 fiber；依赖未齐时 Pending
 let status = plugin.watch();                  // 内核快照 + 独立协议诊断
-plugin.update(prepared_v2).await?;             // 纯 dry-run 后按生命周期换代
-plugin.dispose().await?;                       // 禁止重试，join 清理与进程回收
+plugin.update_config(config_v2).await?;        // 同组内仅重装这一插件
+supervisor.replace_package(plugin.id(), prepared_v2).await?; // 代码更新会重启其 runtime 组
+plugin.dispose().await?;                       // 清理该插件；其他成员继续使用 runtime
 ```
 
-`prepare` 不执行用户代码；`spawn` 不绕过依赖门控直接启动进程。
-supervisor 的 shutdown 先关闭管理准入，撤销所有 activation，再并发监督每个进程停止，并 join 核心清理。
+`prepare` 不执行用户代码；`spawn` 登记插件成员和代理 fiber，可触发组监督层启动 runtime，
+但插件业务入口必须等 RuntimeReady 与其业务依赖就绪后才执行。
+supervisor 的 shutdown 先关闭管理准入，撤销所有 runtime 组和 activation，再监督各组进程停止，并 join 核心清理。
 其等待截止结果要同时报告仍未回收的进程和仍在清理的 fiber；不把两者合成一个含糊的 stopped 布尔值。
 
 SDK 要求：
@@ -584,83 +564,75 @@ SDK 要求：
 - TS：异步方法/AsyncIterable，AbortSignal 接取消；协议 fd 与 stdout 独立。
 - Python：async 方法/异步迭代器，任务取消与 finally 清理；不在事件循环线程执行阻塞业务。
 - Rust：异步方法/Stream 与 CancellationToken；无需链接主进程的 SDK dylib。
-- 三者都支持 start/stop、严格 schema、同一帧/错误/credit 规则；不自行重连或重放调用。
-- 插件 stop 处理器应协作清理；无论是否遵守，宿主仍执行进程级截止策略。
+- 三者都支持组内多插件 start/stop、严格 schema、相同帧/错误/流语义；不自行重连或重放调用。
+- 插件 stop 处理器应协作清理；未确认完成时按 StopUnconfirmed 处理，需要强停则操作整个 runtime 组。
 
 ## 十四、诊断与运维
 
-核心 `ctx.diagnostics()` 继续展示 fiber、声明、绑定、依赖和内核状态。
-新增 `supervisor.diagnostics()` 为每实例记录：包版本/摘要、契约身份、activation、关联 PluginId/generation、
-协议状态、PID/进程容器、退出码/信号、最近故障、重试计数/下次时间、停止阶段、是否确认回收、沙箱策略。
-快照不是跨核心/OS/协议的原子事务，带观测时间与 activation，不能按不同时刻的记录拼出错误因果。
+核心 diagnostics 展示每个代理 fiber 的声明、依赖、状态与绑定。
+supervisor 另展示 runtime 组、语言环境、进程身份、epoch、成员列表、各 activation、停止/恢复阶段及故障影响范围。
+插件错误和 runtime 进程错误分别记录；不能用“插件已停止”掩盖组内仍有未退出任务。
+快照带观测时间，不能把不同时间的核心/协议/OS 状态拼成原子结果。
 
-指标至少包括：入站/出站验证失败、CapabilityDenied、孤儿帧、当前请求/流与排队字节、credit 停顿、
-调用延迟、deadline、取消后未退出 handler、启动耗时、异常退出、强杀、ReapFailed、日志丢弃。
-错误记录带阶段、方法和 schema path；不默认记录 params/result、token 或用户秘密。
-
-提供按实例执行 status/restart/resume/dispose 的管理能力；命令入口由宿主决定，本文不假设新增全局 CLI。
-崩溃恢复是新代装配；业务若需恢复历史状态，使用显式持久化服务和幂等业务逻辑，不序列化旧进程堆。
+保留调用、schema 错误、迟到消息、取消完成与回收失败等排障记录；不默认记录业务参数、配置秘密。
+本轮不冻结监控指标体系和阈值。原型实测比较一插件一进程与共享 runtime 的启动耗时、RSS/PSS、
+重复依赖开销和故障恢复影响，为后续资源政策提供依据。
+管理入口区分单插件 restart/dispose 与 runtime 组 restart；组操作展示连带成员及消费者，不隐式假称单插件隔离。
 
 ## 十五、验收矩阵
 
-所有条目均为待执行；单测使用可控时钟/Barrier，端到端使用真实子进程。不能以 sleep 后“看起来结束”代替归属/退出断言。
+以下均待实现验证，使用可控时序与真实 runtime 进程；不以固定 sleep 代替清理、身份和退出断言。
 
-| 编号 | 场景 | 必须断言 | 对应需求 |
-| --- | --- | --- | --- |
-| T01 | TS 提供 weather，Rust 消费 | 原生消费者依赖代理服务，类型包装与结果正确 | #46 |
-| T02 | TS 依赖原生 log | 适配 fiber 入图，未就绪时 TS 业务不启动，恢复后装配 | #46 |
-| T03 | TS A 依赖协议 B | B 失活驱逐 A 及 Rust 消费者；B 恢复后自动重载 | #46 |
-| T04 | Pending 缺依赖/依赖循环 | 不启动进程，不绕过门控，诊断列出缺失边 | #46 |
-| T05 | 握手/配置/部分注册失败 | 不对外提供服务，清理已启动进程及半注册资源 | #46/#47 |
-| T06 | 远端 Active 崩溃、断线、心跳超时 | 闸门立即关闭，旧 Arc 不可用，消费者驱逐、新代重载 | #46 |
-| T07 | 更新实现/配置及改变声明 | dry-run 无进程副作用；合法更新换代；声明变更拒绝且原代不受影响 | #46 |
-| T08 | L1 式版本名相同但契约哈希不同 | 握手拒绝；不得靠 semver 放行 | #47 |
-| T09 | schema 合法/非法语料，双向参数/结果/item/错误 | Rust/TS/Python 一致；非法消息不触发 handler 或服务暴露 | #47 |
-| T10 | 取消、丢 future、超时与应答竞态 | 恰一次本地结算，无 pending 泄漏；迟到帧不串代 | #46 |
-| T11 | 旧 activation 的 res/item/cancel/重试任务迟到 | 不命中新调用/新代，不取消新进程；旧 Ctx 注册被 #41 拒绝 | #41/#46 |
-| T12 | 慢消费者、16 条并发流、零 credit、超大 item | 内存预算有界、停止 poll、其他流与控制面仍可推进 | #46 |
-| T13 | item 顺序、重复 credit、末帧竞态、流失败 | seq/额度/最终数量严格；终态后不交付 item | #46/#47 |
-| T14 | 子进程忽略 stop、忙循环、fork 后代/setsid | 宽限后树终止，确认回收；无关插件和主进程继续运行 | #48 |
-| T15 | 本地消费者清理卡住 | supervisor 仍按时杀远端；fiber 清理未结束如实呈现 | #48/#12 |
-| T16 | 模拟 kill/reap 失败、旧进程槽未释放 | Quarantined 禁止新代；不报告已停止，不重复 spawn | #48 |
-| T17 | retry 与 dispose/shutdown/update 同时发生 | 终态优先、重试取消，管理队列不死锁，不出现两代进程共存 | #46/#48 |
-| T18 | 同包两个实例，杀其中一个；配置共享进程 | 另一实例无关服务可用；共享进程配置在 prepare 拒绝 | #48 |
-| T19 | 帧长度边界、截断、坏 UTF-8、重复键、洪泛、阻塞写 | 解析前限额、严格拒绝、控制 deadline 生效、任务数量有界 | #47 |
-| T20 | 未声明能力/越作用域/已撤销能力 | 宿主 handler 不执行，诊断可区分拒绝原因 | #47/#48 |
-| T21 | 真实平台后端及能力缺失 | 归属先于插件代码执行；无委派能力明确失败；退出后无遗留活进程 | #48 |
-| T22 | 生成物再生成、跨语言互通 | 零 diff，同契约生成类型与 wire 一致，最低支持运行时通过 | #47 |
-| T23 | 重试耗尽/协议永久错误/手动 resume | 正确退避及 Failed/Suspended 诊断，不产生重启风暴 | #46 |
-| T24 | stdout/stderr 洪泛、零业务活性但 ping 正常 | 日志有界且不损坏帧；业务 deadline 仍终止卡死调用 | #46/#48 |
-
-基准记录机器、工具链、解释器、版本、限额与样本数；测 unary 1 KiB/64 KiB、并发 1/64、流 1 KiB/64 KiB item，
-给出校验开/关对照的吞吐、p50/p95/p99、CPU、RSS 与队列峰值。生产路径不得关闭校验；“关闭”仅作实验对照。
-基准目标首先是资源上界成立并找出瓶颈，不在无数据时承诺固定延迟；发布时附原始数据和可复现命令。
+| 编号 | 场景 | 必须断言 |
+| --- | --- | --- |
+| T01 | 两个 TS 插件选择同一 runtime 组 | 同一进程，两个独立 fiber/activation，服务与配置不混用 |
+| T02 | Python 与 Node 或不兼容环境 | 不同组；依赖环境冲突在 prepare 拒绝或明确分组 |
+| T03 | Rust 消费 TS 服务；TS 消费原生服务 | 显式适配、普通依赖门控、契约校验成立 |
+| T04 | 同组 A 依赖 B；跨组依赖 | B 可以先装配，无“全组同时 Ready”死锁；缺依赖的插件业务不启动 |
+| T05 | RuntimeReady 引导 | runtime 不依赖成员 apply 才启动；组恢复关闭/开启门控有效 |
+| T06 | 单插件配置更新、正常 dispose | 只换该 activation，其他同组成员继续运行 |
+| T07 | 单插件 start 失败 | 能回滚则不影响其他成员；清理未确认不得伪称成功 |
+| T08 | 组崩溃/断线/强制重启 | 全组旧能力失效，消费者驱逐，旧代清理屏障后才恢复 |
+| T09 | 旧 runtime epoch/activation 的迟到帧 | 不命中新成员/新请求，正常迟到控制消息幂等收尾 |
+| T10 | 代码包更新 | 显示并重启整组；旧模块/任务不作为新版本继续使用 |
+| T11 | 契约版本或哈希不符 | 拒绝该插件，不能靠 semver 或同名类型放行 |
+| T12 | 双向参数/结果/业务错误校验 | 非法消息不触发错误 handler；语言 SDK 语料一致 |
+| T13 | 取消与应答竞态、丢 future | 本地一次结算，完成确认仍被跟踪，不自动误杀共享进程 |
+| T14 | 慢消费者、空流、末项/结束/消费确认交错 | 消费驱动、不无限推进、顺序和终态正确，迟到确认不误伤整组 |
+| T15 | 单插件 stop 不响应 | StopUnconfirmed、禁止该实例新代；明确组强停的连带影响 |
+| T16 | 旧进程回收失败 | Quarantined，不启动新 epoch，不声称已经停止 |
+| T17 | 本地消费者清理卡住 | supervisor 能推进进程停止，但组恢复屏障不提前放行 |
+| T18 | dispose/update/新注册与组恢复并发 | 已 dispose 成员不复活，不出现新旧进程混用，无管理锁死锁 |
+| T19 | 帧损坏与成员业务违约 | 区分连接级和成员级错误，身份路由正确 |
+| T20 | 未授予/失活/越作用域能力 | 宿主不执行；同组正常调用不绕过服务图 |
+| T21 | runtime 及其登记子进程关闭 | 退出与后代回收有平台证据；能力缺失不虚报保证 |
+| T22 | Rust/TS/Python 类型再生成和互通 | 零生成差异，共享合法/非法语料通过 |
+| T23 | 旧 Ctx 与旧重试任务迟到 | #41 拒绝旧代注册，旧重试不能重启健康新组 |
+| T24 | 共享与独立进程对照实验 | 记录运行环境、插件数、依赖、启动/内存开销和更新/故障影响；不预设节省比例 |
 
 ## 十六、实施阶段与合入边界
 
 | 阶段 | 交付 | 完成条件 |
 | --- | --- | --- |
-| M0 核心前置与接口核对 | #41 代绑定 Ctx；确认取消、check/refresh、消费者驱逐与清理配对 | 旧代准入回归通过；不从此文档 PR 顺带改核心 |
-| M1 契约工具链 | bundle/control schema、受限子集、锁定校验器/生成器、Rust+TS 生成物 | T08/T09/T22 的 Rust/TS 语料；严格拒绝未支持 schema；记录性能基线 |
-| M2 进程与会话 | Linux supervisor、私有 Wire、有界 RPC、停止/回收/重试 | T10/T14–T19/T21/T23/T24，使用无业务的恶意/故障 fixture |
-| M3 服务图纵向 | ProxyFactory、能力表、原生适配、TS 示例、更新 | T01–T07/T11/T17/T20；真实 Rust↔TS 双向依赖链 |
-| M4 流与完整限额 | credit、队列预算、顺序、取消传播 | T12/T13，持续压力下内存和请求表不增长 |
-| M5 语言与发布 | Python SDK、独立 Rust runner、包工具、作者/运维指南 | 三语言 T09/T22；Linux 全矩阵及基准公开，v1 才可标可用 |
-| 后续平台 | Windows/macOS 后端或共享进程提案 | 独立设计与相应验收，不以编译通过代替进程树保证 |
+| M0 核心前置 | #41、RuntimeReady 门控与组恢复清理屏障核对 | 代隔离和核心取消语义成立，不在文档 PR 顺带改核心 |
+| M1 契约工具链 | schema 子集、描述符、Rust/TS 生成物、错误模型 | 离线校验及双语言语料一致 |
+| M2 共享 runtime 纵向 | 一个 Node 进程装两个插件，独立代理 fiber、依赖调用、单插件 stop | T01/T03–T07，先证明共享模型可用 |
+| M3 故障与更新 | runtime 退出、组恢复、StopUnconfirmed、代码包更新、代隔离 | 正常和失败路径不遗漏同组成员、不复活终态插件 |
+| M4 流与取消 | 消费驱动的流、调用完成确认、终态竞态处理 | T13/T14；根据原型冻结必要控制帧，不提前设计配额体系 |
+| M5 语言与平台 | Python、Rust runtime、平台进程回收、文档与对照测量 | T01–T24 有证据，明确支持平台与环境 |
+| 后续独立设计 | 配额、调度公平性、批量窗口、监控阈值、自动分组 | 基于 M5 数据与实际需求，不作为当前接口的既定规则 |
 
-`rutis-cordis` 保持原协议和测试。可在 M2 之后评估抽取共用的纯帧/请求管理模块，但必须分别运行旧桥和新协议测试；
-不把顺便重写旧桥作为本方案的前置。#46–#48 在相应实现与验收完成后再关闭，本设计 PR 仅使用 Refs。
-
-实施前必须验证的技术点：Linux 委派后端及宿主退出后的回收策略、无界任务改为有界后的双向调用死锁边界、
-schema 子集的三语言一致性、控制流在最大数据负载下的停止延迟、核心清理与 supervisor 槽位的交错。
-这些不影响本文已选定的协议与生命周期方向；若验证失败，须以明确修订更新设计，不能静默降低停止或资源上界保证。
+`rutis-cordis` 保留旧协议及回归测试。抽取通用机制可在纵向原型成立后评估，不先重写旧桥。
+#46–#48 的实现与验收完成后再关闭；设计 PR 只用 Refs。
+需要重点验证共享语言环境的依赖冲突、模块缓存和配置更新语义、组恢复屏障、跨组驱逐与未确认清理。
+验证失败时修订具体设计，不用“共享 runtime”掩盖无法完成的逐插件卸载。
 
 ## 十七、完成定义
 
-- [ ] #41 前置成立，代理只使用代绑定的 Ctx 与取消 token。
-- [ ] 契约、控制 schema、生成器与互通语料进入仓库，版本/哈希规则有拒绝测试。
-- [ ] 每个协议实例有独立代理 fiber，双向服务进入同一依赖图；T01–T24 全部有证据。
-- [ ] 真实 TS/Python/Rust 进程能被管理，旧引用/迟到帧/旧重试不能影响新代。
-- [ ] Linux 进程树回收、失败隔离、资源上限及清理卡住的边界被实际验证。
-- [ ] 默认不限权、支持平台、拒绝共享进程、无自动业务重放写入用户文档。
-- [ ] 记录基准、失败诊断示例和受支持运行时版本；旧 dsh 桥回归通过。
+- [ ] #41 前置成立，旧 Ctx/epoch/activation 不影响新代。
+- [ ] 同语言兼容插件默认共享 runtime，保留独立代理 fiber；不兼容环境能明确分组。
+- [ ] 单插件正常卸载/配置更新不杀同组成员；进程故障和代码更新明确作用于整组。
+- [ ] RuntimeReady 引导、旧代清理屏障、取消完成、迟到消息和并发管理均通过验证。
+- [ ] 契约生成物与互通语料进入仓库，T01–T24 有证据；旧 dsh 桥回归通过。
+- [ ] 平台回收与权限边界如实记录，不把共享 runtime 声称为插件间安全隔离。
+- [ ] 记录共享/独立 runtime 实测数据；本设计不冻结资源配额与具体数值策略。
