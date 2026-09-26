@@ -1,0 +1,51 @@
+{
+  "protocol_family": "rutis-cordis-objects",
+  "protocol_version": "0.experimental",
+  "framework_version": "0.3.0",
+  "environment_sha256": "a5c545655c225fe1678a6759a9bdce021248c4a5f9ce22c38d6416fa70d8823f",
+  "capabilities": [
+    "object.scope",
+    "callback.borrow"
+  ],
+  "factories": {
+    "provider": {
+      "config_sha256": "0db8a49515f2470e669257fdc32494dded2ed61a3a654c9c78a24780d0f3f6de",
+      "provides": {
+        "database": {
+          "interface": "Database",
+          "version": "1.0.0",
+          "bundle_sha256": "bd6a60c25d4bd27f52ba37893da07a6c18833171d0e31fa1746fc890ebc6ea38"
+        }
+      },
+      "requires": {}
+    },
+    "consumer": {
+      "config_sha256": "0db8a49515f2470e669257fdc32494dded2ed61a3a654c9c78a24780d0f3f6de",
+      "provides": {},
+      "requires": {
+        "database": {
+          "interface": "Database",
+          "version": "1.0.0",
+          "bundle_sha256": "bd6a60c25d4bd27f52ba37893da07a6c18833171d0e31fa1746fc890ebc6ea38"
+        }
+      }
+    },
+    "cycle": {
+      "config_sha256": "0db8a49515f2470e669257fdc32494dded2ed61a3a654c9c78a24780d0f3f6de",
+      "provides": {
+        "database": {
+          "interface": "Database",
+          "version": "1.0.0",
+          "bundle_sha256": "bd6a60c25d4bd27f52ba37893da07a6c18833171d0e31fa1746fc890ebc6ea38"
+        }
+      },
+      "requires": {
+        "database": {
+          "interface": "Database",
+          "version": "1.0.0",
+          "bundle_sha256": "bd6a60c25d4bd27f52ba37893da07a6c18833171d0e31fa1746fc890ebc6ea38"
+        }
+      }
+    }
+  }
+}

@@ -151,12 +151,13 @@ impl Plugin for ManagedPlugin {
 
 struct ManagedFactory<F> {
     factory: F,
+    name: String,
     gate: ActivationGate,
     injects: Vec<TypeKey>,
 }
 impl<F: PluginFactory<C>, C: Send + Sync + 'static> PluginFactory<C> for ManagedFactory<F> {
     fn name(&self) -> &str {
-        self.factory.name()
+        &self.name
     }
     fn injects(&self) -> &[TypeKey] {
         &self.injects
@@ -208,12 +209,16 @@ impl ManagedActivation {
         factory: impl PluginFactory<C>,
         config: C,
     ) -> Result<Self, CordisError> {
+        // Capture author metadata before registering the permit. A panic here
+        // cannot leave an orphaned permit or a partially mounted fiber.
+        let name = factory.name().to_owned();
         let mut injects = factory.injects().to_vec();
         Self::mount_native(parent, move |isolated, gate, key| {
             injects.push(key);
             isolated.plugin_with(
                 ManagedFactory {
                     factory,
+                    name,
                     gate,
                     injects,
                 },

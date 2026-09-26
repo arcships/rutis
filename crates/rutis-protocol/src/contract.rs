@@ -501,6 +501,9 @@ pub fn validate_json(schema: &Value, value: &Value) -> Result<()> {
     check_schema(schema, schema, &mut BTreeSet::new())?;
     validate_json_inner(schema, schema, value)
 }
+pub(crate) fn check_schema_for_prepare(schema: &Value) -> Result<()> {
+    check_schema(schema, schema, &mut BTreeSet::new())
+}
 
 fn safe_json(value: &Value) -> bool {
     match value {

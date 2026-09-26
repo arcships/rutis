@@ -1,8 +1,10 @@
 # 实验对象协议实现约定
 
 此目录与 `rutis-protocol` crate 实施 [#59 设计](../docs/design-protocol-plugins-2026-09-25.md)。
-当前 M1 与 M2 的传输验证在推进，尚未形成可部署的 Rust↔Cordis 协议插件系统。已有两端生成绑定、对象图、私有 socket 上的真实跨语言调用与回收 ACK；生产 runner、监督恢复和 broker 事件仍在开发。
+当前 M1 与 M2 的传输验证在推进，尚未形成可部署的 Rust↔Cordis 协议插件系统。已有两端生成绑定、对象图、私有 socket 上的真实跨语言调用与回收 ACK，以及只读 prepare 和 Rust 延迟 factory 注册；生产 runner、监督恢复和 broker 事件仍在开发。
 实施证据及完整验收范围见[验收记录](../docs/protocol-plugin-implementation.md)。旧 `rutis-cordis` 桥继续独立存在。
+
+包/部署 JSON 格式、原字节文件库存、精确路由、静态 ELF catalog 与只读 CLI 见[prepare 约定](package-format.md)。prepare 冻结计划；实际启动仍需固定 artifact 快照、RuntimeReady 与成员发布屏障。
 
 ## JSON 与描述符
 
@@ -90,7 +92,7 @@ TS 用冻结的生成 facade 保持对象身份，属性只读本地快照；未
 Rust `memory::Network` 是使用真实 broker 的内存传输测试入口，支持图交付、状态对象、owner pass-back、嵌套借用回调及 native endpoint effect。
 所有执行离开 broker 临界区后运行；owner-returned facade 也走 broker 调度。丢弃调用 waiter 只丢弃结果，owner handler 和登记子任务继续跟踪，晚到未消费图由 envelope 释放新增交付。
 Linux `tests/objects_ipc.rs` 启动独立 Node 进程，仅继承私有 Unix stream 的 fd 3。双方用同一原字节 bundle 的生成绑定，Rust 权威 broker 根据固定连接身份准入，运行双向 connect/query、同一对象重复返回、循环属性、owner pass-back、重入 callback 和登记子任务。参数 grant 在交给业务代码前确认；callback 的 native Ctx 来自其 creator。stdout 诊断保持独立。测试还覆盖借用到期、丢弃 Rust waiter 后的真实 Node 执行 pin，以及回收 ACK。
-这是真实对象调度的 conformance fixture，生产 runner 的多 bundle prepare/权限路由计划、RuntimeReady 发布屏障、旧插件迁移及 supervisor 尚未实现，不能据此部署该协议。
+这是真实对象调度的 conformance fixture。多 bundle prepare/权限路由计划已有独立准入测试；生产 runner 的实际路由绑定、RuntimeReady 发布屏障、旧插件迁移及 supervisor 尚未实现，不能据此部署该协议。
 
 ## 连续前缀回收的含义
 
