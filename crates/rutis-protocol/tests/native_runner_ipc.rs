@@ -85,17 +85,18 @@ impl InterfaceConnectionService for Connection {
         context: CallContext,
         params: InterfaceConnectionMethod0Params,
     ) -> RpcFuture<Vec<BTreeMap<String, Value>>> {
-        let key = TypeKey::of::<dyn InterfaceDatabaseService>();
+        assert_eq!(
+            context.native().unwrap().instance(),
+            self.creator.instance()
+        );
+        let key = TypeKey::of::<Database>();
         assert!(Arc::ptr_eq(
             &context
                 .native()
                 .unwrap()
-                .get_as::<dyn InterfaceDatabaseService>(key.clone())
+                .get_as::<Database>(key.clone())
                 .unwrap(),
-            &self
-                .creator
-                .get_as::<dyn InterfaceDatabaseService>(key)
-                .unwrap()
+            &self.creator.get_as::<Database>(key).unwrap()
         ));
         Box::pin(async move {
             Ok(vec![BTreeMap::from([
@@ -109,9 +110,13 @@ struct Database(Arc<Connection>);
 impl InterfaceDatabaseService for Database {
     fn connect(
         &self,
-        _: CallContext,
+        context: CallContext,
         _: InterfaceDatabaseMethod0Params,
     ) -> RpcFuture<Arc<dyn InterfaceConnectionService>> {
+        assert_eq!(
+            context.native().unwrap().instance(),
+            self.0.creator.instance()
+        );
         let connection: Arc<dyn InterfaceConnectionService> = self.0.clone();
         Box::pin(async move { Ok(connection) })
     }
@@ -140,6 +145,10 @@ struct Callback {
 }
 impl BorrowCallback0Service for Callback {
     fn call(&self, context: CallContext, text: String) -> RpcFuture<()> {
+        assert_eq!(
+            context.native().unwrap().instance(),
+            self.creator.instance()
+        );
         assert!(Arc::ptr_eq(
             &context
                 .native()
@@ -164,6 +173,70 @@ struct Native {
     label: String,
     cleanup: Option<Arc<std::sync::atomic::AtomicUsize>>,
     remove: Option<Arc<Mutex<Option<rutis::Disposer>>>>,
+}
+struct Provider {
+    parent: Ctx,
+    remove: Option<Arc<Mutex<Option<rutis::Disposer>>>>,
+}
+struct CallbackPlugin {
+    parent: Ctx,
+    database: InterfaceDatabaseClient,
+    connection: InterfaceConnectionClient,
+    calls: Arc<Mutex<Vec<String>>>,
+}
+impl Plugin for CallbackPlugin {
+    fn name(&self) -> &str {
+        "internal-callback-consumer"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            assert!(ctx.is_within(&self.parent));
+            assert_ne!(ctx.instance(), self.parent.instance());
+            let callback: Arc<dyn BorrowCallback0Service> = Arc::new(Callback {
+                creator: ctx.clone(),
+                connection: self.connection.clone(),
+                calls: self.calls.clone(),
+            });
+            self.database
+                .client()
+                .caller()
+                .bind_native(ctx, exportBorrowCallback0(callback.clone()))
+                .unwrap();
+            self.database.withCallback(callback).await.unwrap();
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Plugin for Provider {
+    fn name(&self) -> &str {
+        "internal-database-provider"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            assert!(ctx.is_within(&self.parent));
+            assert_ne!(ctx.instance(), self.parent.instance());
+            let session = Arc::new_cyclic(|session| Session {
+                agent: Arc::new(Agent {
+                    session: session.clone(),
+                }),
+            });
+            let database = Arc::new(Database(Arc::new(Connection {
+                creator: ctx.clone(),
+                session,
+            })));
+            let registration = ctx.provide_as(TypeKey::of::<Database>(), database)?;
+            if let Some(remove) = &self.remove {
+                *remove.lock().unwrap() = Some(registration);
+            }
+            Ok(Effect::Done)
+        })
+    }
 }
 impl Plugin for Native {
     fn name(&self) -> &str {
@@ -191,21 +264,13 @@ impl Plugin for Native {
                 }))
             })?;
             if self.role == "provider" && self.label != "missing" {
-                let session = Arc::new_cyclic(|session| Session {
-                    agent: Arc::new(Agent {
-                        session: session.clone(),
-                    }),
+                let child = ctx.plugin(Provider {
+                    parent: ctx.clone(),
+                    remove: self.remove.clone(),
                 });
-                let database: Arc<dyn InterfaceDatabaseService> =
-                    Arc::new(Database(Arc::new(Connection {
-                        creator: ctx.clone(),
-                        session,
-                    })));
-                let registration =
-                    ctx.provide_as(TypeKey::of::<dyn InterfaceDatabaseService>(), database)?;
-                if let Some(remove) = &self.remove {
-                    *remove.lock().unwrap() = Some(registration);
-                }
+                (&child)
+                    .await
+                    .map_err(|error| CordisError::PluginFailed(Box::new(error)))?;
             } else if self.role == "consumer" {
                 let database = ctx.require::<InterfaceDatabaseClient>()?;
                 let first = database
@@ -230,14 +295,15 @@ impl Plugin for Native {
                 ));
                 assert!(database.inspect(first.clone()).await.unwrap());
                 let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
-                database
-                    .withCallback(Arc::new(Callback {
-                        creator: ctx.clone(),
-                        connection: first.clone(),
-                        calls: calls.clone(),
-                    }))
+                let callbacks = ctx.plugin(CallbackPlugin {
+                    parent: ctx.clone(),
+                    database: database.as_ref().clone(),
+                    connection: first.clone(),
+                    calls: calls.clone(),
+                });
+                (&callbacks)
                     .await
-                    .unwrap();
+                    .map_err(|error| CordisError::PluginFailed(Box::new(error)))?;
                 assert_eq!(*calls.lock().unwrap(), ["root", "child"]);
                 let row = first
                     .query(InterfaceConnectionMethod0Params {
@@ -279,11 +345,11 @@ fn driver(root: Ctx) -> NativeDriver {
     for role in ["provider", "consumer"] {
         let mut port = NativePorts::default();
         if role == "provider" {
-            port.provide::<dyn InterfaceDatabaseService, InterfaceDatabaseClient>(
+            port.provide::<Database, InterfaceDatabaseClient>(
                 "rpc",
-                TypeKey::of::<dyn InterfaceDatabaseService>(),
+                TypeKey::of::<Database>(),
                 &bundles,
-                exportInterfaceDatabase,
+                |value| with_native(&value.0.creator, exportInterfaceDatabase(value.clone())),
             )
             .unwrap();
         } else {
@@ -546,7 +612,24 @@ impl Process {
                 Ok(())
             });
         }
-        let mut child = command.spawn().unwrap();
+        // Parallel snapshot writes may be inherited briefly by another fork
+        // before its CLOEXEC descriptors close. Linux refuses exec with
+        // ETXTBSY while any write descriptor still references that inode.
+        // Only that failed-exec error is retried; business never entered it.
+        let mut attempts = 0;
+        let mut child = loop {
+            match command.spawn() {
+                Ok(child) => break child,
+                Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && attempts < 8 => {
+                    std::thread::sleep(Duration::from_millis(1 << attempts));
+                    attempts += 1;
+                }
+                Err(error) => panic!(
+                    "frozen runner exec failed for {}: {error}",
+                    argv[0].display()
+                ),
+            }
+        };
         drop(child_socket);
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
         let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
@@ -1171,11 +1254,11 @@ async fn frozen_native_adapter_installs_real_keys_and_service_loss_closes_both_r
         );
         let mut wrong = NativePorts::default();
         wrong
-            .provide::<dyn InterfaceDatabaseService, InterfaceConnectionClient>(
+            .provide::<Database, InterfaceConnectionClient>(
                 "host-rpc",
-                TypeKey::of::<dyn InterfaceDatabaseService>(),
+                TypeKey::of::<Database>(),
                 &bundles,
-                exportInterfaceDatabase,
+                |value| with_native(&value.0.creator, exportInterfaceDatabase(value.clone())),
             )
             .unwrap();
         assert_eq!(
@@ -1190,11 +1273,11 @@ async fn frozen_native_adapter_installs_real_keys_and_service_loss_closes_both_r
         assert!(remove.lock().unwrap().is_none());
         let mut ports = NativePorts::default();
         ports
-            .provide::<dyn InterfaceDatabaseService, InterfaceDatabaseClient>(
+            .provide::<Database, InterfaceDatabaseClient>(
                 "host-rpc",
-                TypeKey::of::<dyn InterfaceDatabaseService>(),
+                TypeKey::of::<Database>(),
                 &bundles,
-                exportInterfaceDatabase,
+                |value| with_native(&value.0.creator, exportInterfaceDatabase(value.clone())),
             )
             .unwrap();
         let ports = Arc::new(ports);
@@ -1298,11 +1381,11 @@ async fn frozen_native_adapter_installs_real_keys_and_service_loss_closes_both_r
         let failed_cleanup = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut missing_ports = NativePorts::default();
         missing_ports
-            .provide::<dyn InterfaceDatabaseService, InterfaceDatabaseClient>(
+            .provide::<Database, InterfaceDatabaseClient>(
                 "host-missing",
-                TypeKey::of::<dyn InterfaceDatabaseService>(),
+                TypeKey::of::<Database>(),
                 &bundles,
-                exportInterfaceDatabase,
+                |value| with_native(&value.0.creator, exportInterfaceDatabase(value.clone())),
             )
             .unwrap();
         let missing = graph

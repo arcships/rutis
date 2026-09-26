@@ -73,5 +73,6 @@ Closing 且无构造/import；丢弃首个 stop waiter 后，重复 stop 仍 joi
 实际 native 清理计数与两个子进程正常退出，最后释放 snapshot。
 
 这些用例覆盖首代 instance 路由的 Host 发布与关闭；另一个 native adapter 用例
-验证实际原生 slot 安装。内部 child 对象的精确 creator Ctx、共享/单独完整拓扑、快照监督租约、更新
+验证实际原生 slot 安装。[内部 child 创建者 Ctx](native-context.md) 已有实际调度
+证据；单对象远端撤销、共享/单独完整拓扑、快照监督租约、更新
 恢复、Linux descendant reaping、broker 事件、真实旧桥迁移与完整 T24 仍需验收。

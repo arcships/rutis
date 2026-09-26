@@ -481,6 +481,9 @@ impl Drop for ExecutionLease {
     }
 }
 impl Caller for EndpointCaller {
+    fn bind_native(&self, ctx: &rutis::Ctx, value: Outbound) -> Result<()> {
+        crate::sdk::register_native(&self.0.exports, ctx, value)
+    }
     fn call(
         &self,
         target: ObjectProxy,
@@ -572,7 +575,13 @@ impl Caller for EndpointCaller {
                 &param_scopes,
             )?
             .consume(&contract.params, &param_scopes)?;
-            let context = CallContext::new(owner.caller(), owner.native.clone());
+            let context = CallContext::new(
+                owner.caller(),
+                owner
+                    .exports
+                    .execution_context(&key)?
+                    .or_else(|| owner.native.clone()),
+            );
             let (send, receive) = tokio::sync::oneshot::channel();
             let result_scopes = GraphScopes::in_scope(delivery.recipient.clone());
             let receive_scopes = result_scopes.clone();
@@ -586,6 +595,7 @@ impl Caller for EndpointCaller {
                 let children = context.finish().await;
                 let result = result
                     .and_then(|value| children.map(|_| value))
+                    .and_then(|value| context.outbound(value))
                     .and_then(|value| {
                         if send.is_closed() {
                             return Err(fail(ErrorCode::Cancelled, "result waiter dropped"));

@@ -382,7 +382,18 @@ impl Encoder<'_> {
             .map(|i| i.properties.clone())
             .unwrap_or_default();
         let mut fields = if let Some(native) = own {
-            native.snapshot()?
+            let fields = native.snapshot()?;
+            match self
+                .exporter
+                .exports
+                .native_context(self.references[index].source.object())
+            {
+                Some(ctx) => fields
+                    .into_iter()
+                    .map(|(name, value)| (name, crate::sdk::with_native(&ctx, value)))
+                    .collect(),
+                None => fields,
+            }
         } else {
             types
                 .keys()

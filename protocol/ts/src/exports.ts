@@ -1,7 +1,7 @@
 import { ProtocolError } from './error.ts'
 import { canonical } from './contract.ts'
 import { sequence, type Activation, type ObjectIdentity } from './imports.ts'
-import type { Context } from '@deepseek-ai/cordis'
+import { Context } from '@deepseek-ai/cordis'
 
 export type PinKey =
   | { type: 'staging'; id: string }
@@ -20,7 +20,9 @@ interface Entry {
   identity: ObjectIdentity; weak: WeakRef<object>; held?: object
   pins: number; disposed: boolean
   disposer?: (object: object) => Promise<void> | void
+  native?: NativeCreator
 }
+export interface NativeCreator { readonly context: Context; isOpen(): boolean }
 const fail = (code: 'ScopeClosed' | 'StaleObject' | 'CapabilityDenied' | 'InvalidParams', message: string): never => { throw new ProtocolError(code, 'export', message) }
 export class Exports {
   private staging = new ObjectIds()
@@ -35,7 +37,10 @@ export class Exports {
   private errors: unknown[] = []
   private waiters = new Set<() => void>()
   private owner: Activation
-  constructor(owner: Activation, private ids: ObjectIds, private admitted: () => boolean = () => true) { this.owner = Object.freeze(structuredClone(owner)) }
+  private native?: Context
+  constructor(owner: Activation, private ids: ObjectIds, private admitted: () => boolean = () => true, private nativeRoot?: Context) {
+    this.owner = Object.freeze(structuredClone(owner)); this.native = nativeRoot
+  }
   get activation(): Activation { return this.owner }
   requireOpen(): void {
     if (!this.admitted()) this.open = false
@@ -44,12 +49,26 @@ export class Exports {
 
   static managed(ctx: Context, owner: Activation, ids: ObjectIds, gate: () => boolean = () => true): Exports {
     const fiber = ctx.fiber
-    const exports = new Exports(owner, ids, () => fiber.uid !== null && gate())
+    const exports = new Exports(owner, ids, () => fiber.uid !== null && gate(), ctx)
     ctx.effect(() => () => { exports.close(); return exports.join() })
     return exports
   }
 
   register<T extends object>(object: T): ObjectIdentity { return this.add(object) }
+  /** Synchronous registration keeps the original context, without allocating
+   * another managed activation or taking ownership of the native child. */
+  inContext<T>(ctx: Context, register: () => T): T {
+    if (!Context.is(ctx) || !this.nativeRoot) fail('CapabilityDenied', 'export creator is outside its managed native subtree')
+    let fiber = ctx.fiber
+    const visited = new Set<object>()
+    while (fiber !== this.nativeRoot!.fiber) {
+      if (visited.has(fiber) || fiber.parent.fiber === fiber) fail('CapabilityDenied', 'export creator is outside its managed native subtree')
+      visited.add(fiber); fiber = fiber.parent.fiber
+    }
+    if (ctx.fiber.uid === null) fail('ScopeClosed', 'export creator is closed')
+    const previous = this.native; this.native = ctx
+    try { return register() } finally { this.native = previous }
+  }
   stage(identity: ObjectIdentity): PinKey {
     const key: PinKey = { type: 'staging', id: this.staging.allocate() }
     this.pin(identity, key); return key
@@ -61,12 +80,17 @@ export class Exports {
     this.requireOpen()
     const old = this.identities.get(object)
     if (old) {
+      if (old.native && !old.native.isOpen()) fail('ScopeClosed', 'export creator is closed')
       if (old.disposed) fail('StaleObject', 'exclusive object disposed')
       if (disposer) fail('InvalidParams', 'exclusive disposer is already registered')
       return old.identity
     }
     const identity = Object.freeze({ owner: this.owner, object: this.ids.allocate() })
-    const entry: Entry = { identity, weak: new WeakRef(object), held: disposer ? object : undefined, pins: 0, disposed: false, disposer }
+    let live = true
+    const context = this.native
+    const native = context ? { context, isOpen: () => live && context.fiber.uid !== null && (context.fiber.state === 1 || context.fiber.state === 2) } : undefined
+    if (native) native.context.effect(() => () => { live = false })
+    const entry: Entry = { identity, weak: new WeakRef(object), held: disposer ? object : undefined, pins: 0, disposed: false, disposer, native }
     this.identities.set(object, entry); this.entries.set(identity.object, entry)
     return identity
   }
@@ -74,6 +98,8 @@ export class Exports {
     this.requireOpen()
     const lease = canonical(key)
     if (this.released.has(lease) || this.isRetired(key)) fail('StaleObject', 'released pin cannot be reacquired')
+    const creator = this.entries.get(identity.object)?.native
+    if (creator && !creator.isOpen()) fail('ScopeClosed', 'export creator is closed')
     const old = this.leases.get(lease)
     if (old) {
       if (canonical(old.identity) !== canonical(identity)) fail('CapabilityDenied', 'pin key changed object')
@@ -91,6 +117,17 @@ export class Exports {
     const entry = this.leases.get(canonical(key))
     if (!entry?.held) return fail('StaleObject', 'execution already finished')
     return entry.held
+  }
+  nativeContext(identity: ObjectIdentity): Context | undefined {
+    return this.entries.get(identity.object)?.native?.context
+  }
+  executionContext(key: PinKey): NativeCreator | undefined {
+    if (key.type !== 'execution') fail('CapabilityDenied', 'execution pin required')
+    const entry = this.leases.get(canonical(key))
+    if (!entry) return fail('StaleObject', 'execution already finished')
+    const creator = entry.native
+    if (creator && !creator.isOpen()) fail('ScopeClosed', 'export creator is closed')
+    return creator
   }
   release(key: PinKey): void {
     const lease = canonical(key)

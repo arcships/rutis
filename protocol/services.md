@@ -97,6 +97,6 @@ Host broker；不能把这些测试计作私有 IPC 的完整命名服务发布�
 
 两端消费同一 `services-corpus.json` 的 12 个合法/非法服务表用例。
 既有 `objects_ipc` 继续提供真实私有 fd 的跨语言对象调用证据。
-`native_runner_ipc` 已验证首代 instance/native HostActive 发布与原生 Pending 业务图。
-internal child 对象精确 creator Ctx、完整拓扑、迁移/恢复和 T01–T24 全部运行时
+`native_runner_ipc` 已验证首代 instance/native HostActive 发布、原生 Pending 业务图
+和[内部 child 创建者 Ctx](native-context.md)。单对象远端撤销、完整拓扑、迁移/恢复和 T01–T24 全部运行时
 证据仍未完成，原设计范围保持不变。

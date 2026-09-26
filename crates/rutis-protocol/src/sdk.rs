@@ -66,13 +66,91 @@ impl Outbound {
     }
 }
 
+/// Attach the actual native creator to exported own objects and their snapshot
+/// graph. Foreign grants keep their original authority. Repeated registration
+/// of the same native object never changes its first creator context.
+pub fn with_native(ctx: &rutis::Ctx, value: Outbound) -> Outbound {
+    match value {
+        Outbound::Own(inner) => Outbound::Own(Arc::new(ContextExport {
+            ctx: ctx.clone(),
+            inner,
+        })),
+        Outbound::Record(fields) => Outbound::Record(
+            fields
+                .into_iter()
+                .map(|(name, value)| (name, with_native(ctx, value)))
+                .collect(),
+        ),
+        Outbound::List(values) => Outbound::List(
+            values
+                .into_iter()
+                .map(|value| with_native(ctx, value))
+                .collect(),
+        ),
+        Outbound::Optional(value) => {
+            Outbound::Optional(value.map(|value| Box::new(with_native(ctx, *value))))
+        }
+        value => value,
+    }
+}
+struct ContextExport {
+    ctx: rutis::Ctx,
+    inner: Arc<dyn NativeExport>,
+}
+impl NativeExport for ContextExport {
+    fn register(&self, exports: &Exports) -> Result<RegisteredExport> {
+        self.inner.register(&exports.in_context(&self.ctx)?)
+    }
+    fn snapshot(&self) -> Result<BTreeMap<String, Outbound>> {
+        // GraphExporter inherits the object's immutable first creator. A later
+        // wrapper must not change the creator of newly encountered properties.
+        self.inner.snapshot()
+    }
+}
+
 pub trait Caller: Send + Sync {
+    /// Associate local own objects (such as a generated borrow callback) with
+    /// their actual native creator before the generated client encodes them.
+    /// This creates no grants, pins or alternate dispatch path.
+    fn bind_native(&self, _ctx: &rutis::Ctx, _value: Outbound) -> Result<()> {
+        Err(ProtocolError::new(
+            ErrorCode::UnsupportedCapability,
+            "dispatch",
+            "caller has no managed native export table",
+        ))
+    }
     fn call(
         &self,
         target: ObjectProxy,
         method: String,
         params: Outbound,
     ) -> RpcFuture<DecodedValue>;
+}
+
+pub(crate) fn register_native(exports: &Exports, ctx: &rutis::Ctx, value: Outbound) -> Result<()> {
+    let exports = exports.in_context(ctx)?;
+    exports.require_open()?;
+    fn register(exports: &Exports, value: Outbound) -> Result<()> {
+        match value {
+            Outbound::Own(value) => {
+                value.register(exports)?;
+            }
+            Outbound::Record(fields) => {
+                for value in fields.into_values() {
+                    register(exports, value)?;
+                }
+            }
+            Outbound::List(values) => {
+                for value in values {
+                    register(exports, value)?;
+                }
+            }
+            Outbound::Optional(Some(value)) => register(exports, *value)?,
+            _ => {}
+        }
+        Ok(())
+    }
+    register(&exports, value)
 }
 
 #[derive(Clone)]
@@ -112,6 +190,17 @@ impl CallContext {
                 "native context unavailable",
             )
         })
+    }
+    pub(crate) fn outbound(&self, value: Outbound) -> Result<Outbound> {
+        match &self.native {
+            Some(ctx) if ctx.cancellation_token().is_cancelled() => Err(ProtocolError::new(
+                ErrorCode::ScopeClosed,
+                "dispatch",
+                "native creator closed before result encoding",
+            )),
+            Some(ctx) => Ok(with_native(ctx, value)),
+            None => Ok(value),
+        }
     }
     /// Registered work belongs to actual execution, even if its caller drops
     /// the waiter. Children may register descendants until execution converges.

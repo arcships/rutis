@@ -828,6 +828,17 @@ impl Ctx {
         false
     }
 
+    /// Whether this context belongs to the same native fiber as `owner` or one
+    /// of its descendants. Both fiber identities must still exist. This does
+    /// not grant service access or change either context's generation or scope.
+    pub fn is_within(&self, owner: &Ctx) -> bool {
+        owner
+            .0
+            .fiber
+            .upgrade()
+            .is_some_and(|fiber| self.in_subtree_of(&fiber))
+    }
+
     /// 值语义注册便捷入口(D13)。
     pub fn provide<T: Send + Sync + 'static>(&self, value: T) -> Result<Disposer, CordisError> {
         self.provide_as::<T>(TypeKey::of::<T>(), Arc::new(value))

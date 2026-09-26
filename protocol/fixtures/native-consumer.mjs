@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { Bundles, NativePorts } from './node_modules/@rutis/protocol/src/services.js'
-import { BUNDLE_SHA256, bindInterfaceDatabase } from './node_modules/@rutis/protocol/generated/rpc.js'
+import { BUNDLE_SHA256, bindInterfaceDatabase, exportBorrowCallback0 } from './node_modules/@rutis/protocol/generated/rpc.js'
+import { bindNative, handle } from './node_modules/@rutis/protocol/src/sdk.js'
 console.log(JSON.stringify({ loaded: 'node-consumer' }))
 const bundles = new Bundles([readFileSync(new URL('./rpc.json', import.meta.url))])
 export const protocolPorts = new NativePorts()
@@ -16,11 +17,17 @@ export default {
     assert.equal(first.session, first.session.agent.session)
     assert.equal(await database.inspect(first), true)
     const callbacks = []
-    await database.withCallback({ async call(context, text) {
-      assert.equal(context.native().get('nativeDatabase'), ctx.get('nativeDatabase'))
-      callbacks.push(text)
-      await first.query({ sql: text })
-      return null
+    await ctx.plugin({ async apply(child) {
+      assert.notEqual(child, ctx)
+      const callback = { async call(context, text) {
+        assert.equal(context.native(), child)
+        assert.equal(context.native().get('nativeDatabase'), child.get('nativeDatabase'))
+        callbacks.push(text)
+        await first.query({ sql: text })
+        return null
+      } }
+      bindNative(handle(database).caller, child, exportBorrowCallback0(callback))
+      await database.withCallback(callback)
     } })
     assert.deepEqual(callbacks, ['root', 'child'])
     console.log(JSON.stringify({ exercised: config.label, owner: (await first.query({ sql: 'ordinary' }))[0].owner, callbacks: callbacks.length }))

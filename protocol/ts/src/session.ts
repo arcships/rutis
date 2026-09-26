@@ -13,7 +13,7 @@ import { signatureCanonical } from './json.ts'
 import { ActivationGate } from './managed.ts'
 import { Runner, type CatalogService } from './lifecycle.ts'
 import type { Duplex } from 'node:stream'
-import { CallContext, type Caller, type Outbound } from './sdk.ts'
+import { CallContext, registerNative, type Caller, type Outbound } from './sdk.ts'
 import { Bundles, StagedServices, type ServiceTable } from './services.ts'
 
 export interface RuntimeIdentity { runtime: string; epoch: string }
@@ -218,7 +218,7 @@ export class RuntimeObjects {
   }
   caller(owner: Activation): Caller {
     this.member(owner)
-    return { call: async (target: ObjectProxy, method: string, params: Outbound) => {
+    return { bindNative: (ctx, value) => registerNative(this.table(owner), ctx, value), call: async (target: ObjectProxy, method: string, params: Outbound) => {
       const delivery = target.delivery()
       if (canonical(delivery.recipient.activation) !== canonical(owner)) fail('CapabilityDenied', 'client belongs to another native member')
       const contract = this.bundles.method(delivery.view, method)
@@ -287,8 +287,9 @@ export class RuntimeObjects {
         const contract = this.bundles.method(value.view as InterfaceView, value.method)
         const execution = canonical(value.key)
         if (value.key.type !== 'execution' || member.executing.has(execution)) fail('InvalidParams', 'duplicate or invalid native execution')
+        const creator = member.exports!.executionContext(value.key)
         member.executing.add(execution); member.running.add(execution)
-        const context = new CallContext(this.caller(member.owner), member.native)
+        const context = new CallContext(this.caller(member.owner), creator?.context ?? member.native, () => creator ? creator.isOpen() : member.gate.isOpen)
         let result: Outbound | undefined; let error: unknown; let failed = false
         try {
           const params = this.imports.receiveGraph(this.bundles.exact(value.view.bundle_sha256), contract.params, value.graph, value.scopes)
@@ -299,7 +300,7 @@ export class RuntimeObjects {
         member.running.delete(execution)
         if (this.closed || !member.gate.isOpen) { member.exports!.release(value.key); member.admitted.delete(execution); this.imports.closeScope(value.scopes.borrow) }
         if (failed) throw error instanceof ProtocolError ? new ProtocolError(error.code, error.stage, error.message, 'unknown') : new ProtocolError('Business', 'handler', String(error), 'unknown')
-        try { return this.encode(member.owner, value.view.bundle_sha256, contract.result, result!) }
+        try { return this.encode(member.owner, value.view.bundle_sha256, contract.result, context.outbound(result!)) }
         catch (error) { throw error instanceof ProtocolError ? new ProtocolError(error.code, error.stage, error.message, 'unknown') : new ProtocolError('Business', 'result', String(error), 'unknown') }
       }
       default: fail('UnsupportedCapability', 'unknown runtime object operation')

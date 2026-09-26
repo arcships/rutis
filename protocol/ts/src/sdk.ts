@@ -11,16 +11,61 @@ export type Outbound =
   | { kind: 'record'; fields: Record<string, Outbound> }
   | { kind: 'list'; items: Outbound[] }
   | { kind: 'optional'; value: Outbound | null }
-export interface Caller { call(target: ObjectProxy, method: string, params: Outbound): Promise<unknown> }
+export interface Caller {
+  call(target: ObjectProxy, method: string, params: Outbound): Promise<unknown>
+  bindNative?(ctx: Context, value: Outbound): void
+}
+/** Associate generated callback/object values before the client encodes them.
+ * Registration creates no grants or execution path around the broker. */
+export function bindNative(caller: Caller, ctx: Context, value: Outbound): void {
+  if (!caller.bindNative) throw new ProtocolError('UnsupportedCapability', 'dispatch', 'caller has no managed native export table')
+  caller.bindNative(ctx, value)
+}
+export function registerNative(exports: Exports, ctx: Context, value: Outbound): void {
+  exports.requireOpen()
+  exports.inContext(ctx, () => {
+    const register = (value: Outbound): void => {
+      switch (value.kind) {
+        case 'own': value.value.register(exports); break
+        case 'record': Object.values(value.fields).forEach(register); break
+        case 'list': value.items.forEach(register); break
+        case 'optional': if (value.value !== null) register(value.value); break
+      }
+    }
+    register(value)
+  })
+}
+/** Own graph nodes retain their first actual native creator. Foreign grants
+ * retain their original proof and are never rebound to this context. */
+export function withNative(ctx: Context, value: Outbound): Outbound {
+  switch (value.kind) {
+    case 'own': {
+      const inner = value.value
+      return { kind: 'own', value: {
+        register: exports => exports.inContext(ctx, () => inner.register(exports)),
+        snapshot: () => inner.snapshot(),
+      } }
+    }
+    case 'record': return { kind: 'record', fields: Object.fromEntries(Object.entries(value.fields).map(([name, value]) => [name, withNative(ctx, value)])) }
+    case 'list': return { kind: 'list', items: value.items.map(value => withNative(ctx, value)) }
+    case 'optional': return { kind: 'optional', value: value.value === null ? null : withNative(ctx, value.value) }
+    default: return value
+  }
+}
 export class CallContext {
   private children = new Set<Promise<void>>()
   private errors: unknown[] = []
   private rootFinished = false
   private closed = false
-  constructor(readonly caller: Caller, private context?: Context) {}
+  constructor(readonly caller: Caller, private context?: Context, private admitted: () => boolean = () => context?.fiber.uid !== null) {}
   native(): Context {
     if (!this.context) throw new ProtocolError('Unavailable', 'dispatch', 'native context unavailable')
     return this.context
+  }
+  outbound(value: Outbound): Outbound {
+    if (!this.context) return value
+    if (!this.admitted()) throw new ProtocolError('ScopeClosed', 'dispatch', 'native creator closed before result encoding')
+    return withNative(this.context, value)
   }
   spawn(work: () => Promise<void>): void {
     if (this.closed) throw new ProtocolError('ScopeClosed', 'dispatch', 'execution finished')

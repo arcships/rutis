@@ -3,6 +3,8 @@ import { test } from 'node:test'
 import { Exports, ObjectIds, type PinKey } from '../src/exports.ts'
 import { Context } from '@deepseek-ai/cordis'
 import { ManagedActivation } from '../src/managed.ts'
+import { CallContext, withNative, type Caller } from '../src/sdk.ts'
+import { exportBorrowCallback0 } from '../generated/rpc.ts'
 
 const owner = (activation: string) => ({ runtime: 'owner', epoch: '1', activation })
 const delivery = (id: string): PinKey => ({ type: 'delivery', recipient: owner('9'), id })
@@ -123,4 +125,46 @@ test('unpublished exclusive object is cleaned once on owner rollback', async () 
   assert.equal(table.pins(id), 0)
   table.close(); table.close(); await table.join()
   assert.equal(calls, 1)
+})
+
+test('native child creator is immutable across reexports and old objects stay closed', async () => {
+  const root = new Context()
+  let parent!: Context
+  let child!: Context
+  let disposeChild!: () => Promise<void>
+  const managed = new ManagedActivation(root, { async apply(ctx) {
+    parent = ctx
+    const fiber = ctx.plugin({ apply(ctx) { child = ctx } })
+    disposeChild = () => fiber.dispose()
+    await fiber
+  } }, {})
+  await managed.ready()
+  assert.notEqual(child, parent)
+  const table = Exports.managed(parent, owner('1'), new ObjectIds(), () => managed.isOpen)
+  const callback = { async call(context: CallContext, text: string) { assert.equal(context.native(), child); assert.equal(text, 'child'); return null } }
+  const output = withNative(child, exportBorrowCallback0(callback))
+  assert.equal(output.kind, 'own'); if (output.kind !== 'own') return
+  const native = output.value.register(table)
+  const other = withNative(parent, exportBorrowCallback0(callback))
+  assert.equal(other.kind, 'own'); if (other.kind !== 'own') return
+  assert.deepEqual(other.value.register(table).identity, native.identity)
+  const outside = withNative(root, exportBorrowCallback0(callback))
+  assert.equal(outside.kind, 'own'); if (outside.kind !== 'own') return
+  assert.throws(() => outside.value.register(table), (error: any) => error.code === 'CapabilityDenied')
+  const key = execution('1'); table.pin(native.identity, key)
+  const creator = table.executionContext(key)!
+  assert.equal(creator.context, child)
+  const caller: Caller = { async call() { throw new Error('unused') } }
+  const context = new CallContext(caller, creator.context, () => creator.isOpen())
+  assert.deepEqual(await native.dispatcher.dispatch(key, context, 'call', 'child'), { kind: 'value', value: null })
+  await context.finish()
+  const stopped = disposeChild()
+  assert.equal(managed.isOpen, true)
+  assert.throws(() => table.pin(native.identity, delivery('2')), (error: any) => error.code === 'ScopeClosed')
+  assert.throws(() => table.executionContext(key), (error: any) => error.code === 'ScopeClosed')
+  assert.throws(() => context.outbound({ kind: 'value', value: null }), (error: any) => error.code === 'ScopeClosed')
+  assert.throws(() => other.value.register(table), (error: any) => error.code === 'ScopeClosed')
+  assert.equal(table.executionObject(key), callback, 'existing execution retains the actual object through native close')
+  table.release(key); await stopped; await table.join()
+  await managed.stop(); await root.fiber.dispose()
 })

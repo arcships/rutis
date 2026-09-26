@@ -73,5 +73,6 @@ native adapter 选择。启动 apply 内执行 stateful query、循环对象和�
 装载，实际 Cordis 子进程使用 session fixture。该用例只支持冻结根装配；另一个
 `native_runner_ipc` 用例覆盖实际 frozen runner → RuntimeReady → HostProxy Active
 发布链，见 [Host 原生图](host.md)。事件能力在 metadata
-中通过完整 bundle 检查，但本用例没有 broker 事件，不计作 M4。内部 child 精确
-creator context、监督恢复、真实旧桥迁移和完整 T24 也仍待验收。
+中通过完整 bundle 检查，但本用例没有 broker 事件，不计作 M4。
+[内部 child 创建者上下文](native-context.md) 已有后续冻结 runner 证据；单对象
+远端撤销、监督恢复、真实旧桥迁移和完整 T24 仍待验收。

@@ -3,7 +3,7 @@ import { ProtocolError } from './error.ts'
 import { Exports, type PinKey } from './exports.ts'
 import { ObjectProxy, parseDelivery, type Activation, type Delivery, type InterfaceView, type ObjectIdentity } from './imports.ts'
 import { validateGraph, type GraphScopes, type WireGraph } from './graph.ts'
-import type { Dispatcher, Outbound } from './sdk.ts'
+import { withNative, type Dispatcher, type Outbound } from './sdk.ts'
 
 export type DraftSource = { kind: 'own'; object: ObjectIdentity; view: InterfaceView } | { kind: 'foreign'; delivery: Delivery }
 export interface DraftReference { source: DraftSource; ownership: 'scope' | 'borrow'; properties: Record<string, WireValue> }
@@ -119,8 +119,9 @@ export class GraphExporter {
       references.push({ source, ownership, properties })
       const propertyTypes = this.admitted.bundle.interfaces[iface]?.properties ?? {}
       const fields = value.kind === 'own' ? value.value.snapshot() : Object.fromEntries(Object.entries(propertyTypes).map(([name, type]) => [name, outbound(value.value.property(name), type)]))
+      const creator = value.kind === 'own' ? this.exports.nativeContext(sourceObject(source)) : undefined
       keys(fields, Object.keys(propertyTypes))
-      for (const [name, type] of Object.entries(propertyTypes)) properties[name] = visit(type, fields[name], ownership)
+      for (const [name, type] of Object.entries(propertyTypes)) properties[name] = visit(type, creator ? withNative(creator, fields[name]) : fields[name], ownership)
       return { kind: 'ref', index }
     }
     try {

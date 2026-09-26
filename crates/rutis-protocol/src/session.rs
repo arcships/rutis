@@ -880,8 +880,11 @@ impl RuntimeObjects {
                     ));
                 }
                 let native = member
-                    .native
-                    .clone()
+                    .exports
+                    .as_ref()
+                    .ok_or_else(|| fail(ErrorCode::Unavailable, "native exports unavailable"))?
+                    .execution_context(&request.key)?
+                    .or_else(|| member.native.clone())
                     .ok_or_else(|| fail(ErrorCode::Unavailable, "native context unavailable"))?;
                 let contract = self.bundles.method(&request.view, &request.method)?;
                 let bundle = self.bundles.exact(&request.view.bundle_sha256)?;
@@ -936,13 +939,13 @@ impl RuntimeObjects {
                             runtime.imports.close_scope(&request.scopes.borrow);
                         }
                     }
-                    let output =
-                        result
-                            .and_then(|value| children.map(|_| value))
-                            .map_err(|mut error| {
-                                error.execution = Execution::Unknown;
-                                error
-                            })?;
+                    let output = result
+                        .and_then(|value| children.map(|_| value))
+                        .and_then(|value| context.outbound(value))
+                        .map_err(|mut error| {
+                            error.execution = Execution::Unknown;
+                            error
+                        })?;
                     Ok(wire(
                         runtime
                             .encode(
@@ -1038,6 +1041,9 @@ impl Drop for Received {
     }
 }
 impl Caller for RuntimeCaller {
+    fn bind_native(&self, ctx: &rutis::Ctx, value: Outbound) -> Result<()> {
+        crate::sdk::register_native(&self.runtime.exports(&self.activation)?, ctx, value)
+    }
     fn call(
         &self,
         target: ObjectProxy,

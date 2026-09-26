@@ -74,6 +74,7 @@ pub enum PinKey {
 
 struct Entry {
     address: usize,
+    native: Option<rutis::Ctx>,
     sources: BTreeMap<TypeId, Box<dyn WeakSource>>,
     held: Option<Object>,
     pins: usize,
@@ -102,7 +103,12 @@ pub struct Exports {
     owner: Activation,
     ids: ObjectIds,
     inner: Arc<Inner>,
-    gate: Option<ActivationGate>,
+    native: Option<Arc<NativeContext>>,
+}
+struct NativeContext {
+    gate: ActivationGate,
+    root: rutis::Ctx,
+    creator: rutis::Ctx,
 }
 
 fn error(code: ErrorCode, message: &str) -> ProtocolError {
@@ -132,13 +138,13 @@ impl Exports {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
     pub(crate) fn gate(&self) -> Option<ActivationGate> {
-        self.gate.clone()
+        self.native.as_ref().map(|native| native.gate.clone())
     }
     pub fn new(owner: Activation, ids: ObjectIds) -> Self {
         Self {
             owner,
             ids,
-            gate: None,
+            native: None,
             inner: Arc::new(Inner {
                 staging: ObjectIds::default(),
                 state: Mutex::new(State {
@@ -167,7 +173,11 @@ impl Exports {
         gate: ActivationGate,
     ) -> std::result::Result<Self, rutis::CordisError> {
         let mut exports = Self::new(owner, ids);
-        exports.gate = Some(gate.clone());
+        exports.native = Some(Arc::new(NativeContext {
+            gate: gate.clone(),
+            root: ctx.clone(),
+            creator: ctx.clone(),
+        }));
         let cleanup = exports.clone();
         let token = ctx.cancellation_token();
         let handle = ctx.handle().clone();
@@ -196,7 +206,37 @@ impl Exports {
     }
 
     fn admission_open(&self, state: &State) -> bool {
-        state.open && self.gate.as_ref().is_none_or(ActivationGate::is_open)
+        state.open
+            && self
+                .native
+                .as_ref()
+                .is_none_or(|native| native.gate.is_open())
+    }
+
+    /// Keep the same object table and activation, while assigning first-time
+    /// registrations to this original native child context. Existing object
+    /// identities retain their first creator, including its cancelled token.
+    pub(crate) fn in_context(&self, ctx: &rutis::Ctx) -> Result<Self> {
+        let native = self
+            .native
+            .as_ref()
+            .filter(|native| ctx.is_within(&native.root))
+            .ok_or_else(|| {
+                error(
+                    ErrorCode::CapabilityDenied,
+                    "export creator is outside its managed native subtree",
+                )
+            })?;
+        if ctx.cancellation_token().is_cancelled() {
+            return Err(error(ErrorCode::ScopeClosed, "export creator is closed"));
+        }
+        let mut table = self.clone();
+        table.native = Some(Arc::new(NativeContext {
+            gate: native.gate.clone(),
+            root: native.root.clone(),
+            creator: ctx.clone(),
+        }));
+        Ok(table)
     }
 
     pub fn register<T: Any + Send + Sync>(&self, object: &Arc<T>) -> Result<ObjectIdentity> {
@@ -296,6 +336,13 @@ impl Exports {
                 .values()
                 .any(|source| source.strong_count() != 0)
             {
+                if entry
+                    .native
+                    .as_ref()
+                    .is_some_and(|ctx| ctx.cancellation_token().is_cancelled())
+                {
+                    return Err(error(ErrorCode::ScopeClosed, "export creator is closed"));
+                }
                 if entry.disposed {
                     return Err(error(ErrorCode::StaleObject, "exclusive object disposed"));
                 }
@@ -320,6 +367,7 @@ impl Exports {
             identity.clone(),
             Entry {
                 address,
+                native: self.native.as_ref().map(|native| native.creator.clone()),
                 sources: BTreeMap::from([(source_id, source)]),
                 // Exclusive registration already transfers resource ownership.
                 // Hold it provisionally until the first pin, or owner rollback.
@@ -344,6 +392,14 @@ impl Exports {
                 ErrorCode::StaleObject,
                 "released pin cannot be reacquired",
             ));
+        }
+        if state
+            .entries
+            .get(identity)
+            .and_then(|entry| entry.native.as_ref())
+            .is_some_and(|ctx| ctx.cancellation_token().is_cancelled())
+        {
+            return Err(error(ErrorCode::ScopeClosed, "export creator is closed"));
         }
         if let Some(old) = state.pins.get(&key) {
             return if old == identity {
@@ -418,6 +474,35 @@ impl Exports {
                     "object does not have this native export adapter",
                 )
             })
+    }
+
+    pub(crate) fn native_context(&self, identity: &ObjectIdentity) -> Option<rutis::Ctx> {
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .entries
+            .get(identity)
+            .and_then(|entry| entry.native.clone())
+    }
+
+    pub(crate) fn execution_context(&self, key: &PinKey) -> Result<Option<rutis::Ctx>> {
+        if !matches!(key, PinKey::Execution { .. }) {
+            return Err(error(ErrorCode::CapabilityDenied, "execution pin required"));
+        }
+        let state = self.inner.state.lock().unwrap();
+        let identity = state
+            .pins
+            .get(key)
+            .ok_or_else(|| error(ErrorCode::StaleObject, "execution already finished"))?;
+        let native = state.entries[identity].native.clone();
+        if native
+            .as_ref()
+            .is_some_and(|ctx| ctx.cancellation_token().is_cancelled())
+        {
+            return Err(error(ErrorCode::ScopeClosed, "export creator is closed"));
+        }
+        Ok(native)
     }
 
     /// Identity comparison does not expose a raw business pointer or grant any

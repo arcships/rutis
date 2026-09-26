@@ -116,6 +116,7 @@ fn native(
     }
 }
 fn assert_creator(context: &CallContext, creator: &Ctx) {
+    assert_eq!(context.native().unwrap().instance(), creator.instance());
     let key = TypeKey::of::<dyn InterfaceDatabaseService>();
     assert!(Arc::ptr_eq(
         &context
@@ -125,6 +126,136 @@ fn assert_creator(context: &CallContext, creator: &Ctx) {
             .unwrap(),
         &creator.get_as::<dyn InterfaceDatabaseService>(key).unwrap()
     ));
+}
+
+#[tokio::test]
+async fn child_owned_objects_dispatch_in_their_original_context_and_cannot_rebind_after_stop() {
+    let root = Ctx::root().unwrap();
+    let child = Arc::new(Mutex::new(None));
+    let creator = Arc::new(Mutex::new(None));
+    let saved_child = child.clone();
+    let saved_creator = creator.clone();
+    let plugin = native(move |ctx| {
+        let saved_child = saved_child.clone();
+        let saved_creator = saved_creator.clone();
+        Box::pin(async move {
+            let parent = ctx.clone();
+            let view = ctx.plugin(native(move |ctx| {
+                assert!(ctx.is_within(&parent));
+                assert_ne!(ctx.instance(), parent.instance());
+                *saved_creator.lock().unwrap() = Some(ctx.clone());
+                Box::pin(async move {
+                    let service: Arc<dyn InterfaceDatabaseService> = Arc::new(Database {
+                        connection: Arc::new(Connection {
+                            session: session(),
+                            queries: AtomicUsize::new(0),
+                            creator: ctx.clone(),
+                        }),
+                    });
+                    ctx.provide_as(TypeKey::of::<dyn InterfaceDatabaseService>(), service)?;
+                    Ok(Effect::Done)
+                })
+            }));
+            (&view)
+                .await
+                .map_err(|error| CordisError::PluginFailed(Box::new(error)))?;
+            *saved_child.lock().unwrap() = Some(view);
+            Ok(Effect::Done)
+        })
+    });
+    let managed = ManagedActivation::mount(&root, plugin).unwrap();
+    managed.view().await.unwrap();
+    let parent = managed.native_context().unwrap();
+    let creator = creator.lock().unwrap().clone().unwrap();
+    assert!(!parent.is_within(&creator));
+    let value = creator
+        .get_as::<dyn InterfaceDatabaseService>(TypeKey::of::<dyn InterfaceDatabaseService>())
+        .unwrap();
+    let bundle = AdmittedBundle::parse(BUNDLE).unwrap();
+    let network = Network::new(bundle);
+    let exports = Exports::managed(
+        &parent,
+        owner("provider", 1),
+        ObjectIds::default(),
+        managed.gate(),
+    )
+    .unwrap();
+    let provider = network
+        .endpoint_with_exports(owner("provider", 1), exports, Some(parent.clone()))
+        .unwrap();
+    let consumer = network
+        .endpoint(owner("consumer", 1), ObjectIds::default(), None)
+        .unwrap();
+    assert_eq!(
+        consumer
+            .import::<InterfaceDatabaseClient>(
+                &provider,
+                with_native(&root, exportInterfaceDatabase(value.clone()))
+            )
+            .err()
+            .unwrap()
+            .code,
+        ErrorCode::CapabilityDenied
+    );
+    let client = consumer
+        .import::<InterfaceDatabaseClient>(
+            &provider,
+            with_native(&creator, exportInterfaceDatabase(value.clone())),
+        )
+        .unwrap();
+    let connection = client
+        .connect(InterfaceDatabaseMethod0Params {
+            name: "child".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        connection
+            .query(InterfaceConnectionMethod0Params {
+                sql: "child-context".into()
+            })
+            .await
+            .unwrap()[0]["count"],
+        1
+    );
+    assert!(client.inspect(connection.clone()).await.unwrap());
+    assert!(same_wrapper(
+        &connection.session().unwrap(),
+        &connection
+            .session()
+            .unwrap()
+            .agent()
+            .unwrap()
+            .session()
+            .unwrap()
+    ));
+    let view = child.lock().unwrap().take().unwrap();
+    let stopped = view.shutdown();
+    assert!(creator.cancellation_token().is_cancelled());
+    assert_eq!(managed.view().state().state, FiberState::Active);
+    assert_eq!(
+        connection
+            .query(InterfaceConnectionMethod0Params {
+                sql: "old-child".into()
+            })
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::ScopeClosed
+    );
+    assert_eq!(
+        consumer
+            .import::<InterfaceDatabaseClient>(&provider, exportInterfaceDatabase(value))
+            .err()
+            .unwrap()
+            .code,
+        ErrorCode::ScopeClosed
+    );
+    stopped.await.unwrap();
+    consumer.close();
+    provider.close();
+    managed.stop().await.unwrap();
+    root.shutdown().await.unwrap();
 }
 
 struct Session {
