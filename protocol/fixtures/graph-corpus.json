@@ -1,0 +1,3224 @@
+[
+  {
+    "name": "cycle",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "scope"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": null
+  },
+  {
+    "name": "JSON ids stay data",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "type": "object"
+      }
+    },
+    "graph": {
+      "root": {
+        "kind": "value",
+        "value": {
+          "object": "local data",
+          "owner": "not a grant"
+        }
+      },
+      "references": []
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": null
+  },
+  {
+    "name": "nested optional record list refs",
+    "type": {
+      "kind": "record",
+      "fields": {
+        "items": {
+          "kind": "list",
+          "item": {
+            "kind": "optional",
+            "item": {
+              "kind": "object",
+              "interface": "Session",
+              "ownership": "scope"
+            }
+          }
+        },
+        "note": {
+          "kind": "value",
+          "schema": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "graph": {
+      "root": {
+        "kind": "record",
+        "fields": {
+          "items": {
+            "kind": "list",
+            "items": [
+              {
+                "kind": "optional",
+                "value": {
+                  "kind": "ref",
+                  "index": 0
+                }
+              },
+              {
+                "kind": "optional",
+                "value": null
+              },
+              {
+                "kind": "optional",
+                "value": {
+                  "kind": "ref",
+                  "index": 0
+                }
+              }
+            ]
+          },
+          "note": {
+            "kind": "value",
+            "value": "local data"
+          }
+        }
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": null
+  },
+  {
+    "name": "borrow relationships inherit loan scope",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "borrow"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "2"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "2"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": null
+  },
+  {
+    "name": "borrow callback reference",
+    "type": {
+      "kind": "callback",
+      "ownership": "borrow",
+      "params": {
+        "kind": "value",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "result": {
+        "kind": "value",
+        "schema": {
+          "type": "null"
+        }
+      }
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "3"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "2"
+            },
+            "view": {
+              "interface": "$callback",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {}
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": null
+  },
+  {
+    "name": "same identity with independent durable and borrow grants",
+    "type": {
+      "kind": "record",
+      "fields": {
+        "durable": {
+          "kind": "object",
+          "interface": "Session",
+          "ownership": "scope"
+        },
+        "temporary": {
+          "kind": "object",
+          "interface": "Session",
+          "ownership": "borrow"
+        }
+      }
+    },
+    "graph": {
+      "root": {
+        "kind": "record",
+        "fields": {
+          "durable": {
+            "kind": "ref",
+            "index": 0
+          },
+          "temporary": {
+            "kind": "ref",
+            "index": 2
+          }
+        }
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "3",
+            "token": "fixture-3",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "2"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 3
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "4",
+            "token": "fixture-4",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "2"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 2
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": null
+  },
+  {
+    "name": "missing declared snapshot",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "scope"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {}
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "undeclared snapshot property",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "scope"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            },
+            "getAgent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "reflection snapshot property",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "scope"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "__proto__": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "wrong relationship interface",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "scope"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "relationship reference out of range",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "scope"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 9
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "wrong bundle hash",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "scope"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "InterfaceMismatch"
+  },
+  {
+    "name": "unknown snapshot interface",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "scope"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Missing",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "InterfaceMismatch"
+  },
+  {
+    "name": "unknown root wire member",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "scope"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0,
+        "extra": true
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "negative reference index",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "scope"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": -1
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "fraction reference index",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "scope"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0.5
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "unknown top graph member",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "scope"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ],
+      "extra": true
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "unknown reference member",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "scope"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          },
+          "extra": true
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "numeric delivery id",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "scope"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": 1,
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "duplicate delivery record changes object",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "scope"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "CapabilityDenied"
+  },
+  {
+    "name": "root scope escape",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "scope"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "2"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "CapabilityDenied"
+  },
+  {
+    "name": "snapshot scope escape",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "scope"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "2"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "CapabilityDenied"
+  },
+  {
+    "name": "borrow scope escape",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "borrow"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "2"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "CapabilityDenied"
+  },
+  {
+    "name": "borrow child scope escape",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "borrow"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "2"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "CapabilityDenied"
+  },
+  {
+    "name": "missing valid borrow grant",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "borrow"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "3"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "2"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "CapabilityDenied"
+  },
+  {
+    "name": "unconsumed graph table",
+    "type": {
+      "kind": "value",
+      "schema": {
+        "type": "null"
+      }
+    },
+    "graph": {
+      "root": {
+        "kind": "value",
+        "value": null
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "conflicting immutable snapshots in one graph",
+    "type": {
+      "kind": "list",
+      "item": {
+        "kind": "object",
+        "interface": "Session",
+        "ownership": "scope"
+      }
+    },
+    "graph": {
+      "root": {
+        "kind": "list",
+        "items": [
+          {
+            "kind": "ref",
+            "index": 0
+          },
+          {
+            "kind": "ref",
+            "index": 2
+          }
+        ]
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "3",
+            "token": "fixture-3",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 3
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "4",
+            "token": "fixture-4",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "99"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 2
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "one table item cannot cross ownership scopes",
+    "type": {
+      "kind": "record",
+      "fields": {
+        "durable": {
+          "kind": "object",
+          "interface": "Session",
+          "ownership": "scope"
+        },
+        "temporary": {
+          "kind": "object",
+          "interface": "Session",
+          "ownership": "borrow"
+        }
+      }
+    },
+    "graph": {
+      "root": {
+        "kind": "record",
+        "fields": {
+          "durable": {
+            "kind": "ref",
+            "index": 0
+          },
+          "temporary": {
+            "kind": "ref",
+            "index": 0
+          }
+        }
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "CapabilityDenied"
+  },
+  {
+    "name": "receiving scopes belong to different activations",
+    "type": {
+      "kind": "object",
+      "interface": "Session",
+      "ownership": "scope"
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "1"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Session",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 1
+            }
+          }
+        },
+        {
+          "delivery": {
+            "id": "2",
+            "token": "fixture-2",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "2"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "Agent",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "session": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "2"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "CapabilityDenied"
+  },
+  {
+    "name": "callback cannot have properties",
+    "type": {
+      "kind": "callback",
+      "ownership": "borrow",
+      "params": {
+        "kind": "value",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "result": {
+        "kind": "value",
+        "schema": {
+          "type": "null"
+        }
+      }
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "3"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "2"
+            },
+            "view": {
+              "interface": "$callback",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {
+            "agent": {
+              "kind": "ref",
+              "index": 0
+            }
+          }
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "callback lifetime cannot be durable scope",
+    "type": {
+      "kind": "callback",
+      "ownership": "borrow",
+      "params": {
+        "kind": "value",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "result": {
+        "kind": "value",
+        "schema": {
+          "type": "null"
+        }
+      }
+    },
+    "graph": {
+      "root": {
+        "kind": "ref",
+        "index": 0
+      },
+      "references": [
+        {
+          "delivery": {
+            "id": "1",
+            "token": "fixture-1",
+            "object": {
+              "owner": {
+                "runtime": "rust",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "object": "3"
+            },
+            "recipient": {
+              "activation": {
+                "runtime": "node",
+                "epoch": "1",
+                "activation": "1"
+              },
+              "scope": "1"
+            },
+            "view": {
+              "interface": "$callback",
+              "bundle_sha256": "$bundle",
+              "source": "dep/database"
+            }
+          },
+          "properties": {}
+        }
+      ]
+    },
+    "scopes": {
+      "scope": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "1"
+      },
+      "borrow": {
+        "activation": {
+          "runtime": "node",
+          "epoch": "1",
+          "activation": "1"
+        },
+        "scope": "2"
+      }
+    },
+    "error": "CapabilityDenied"
+  }
+]

@@ -1,4 +1,5 @@
-import { canonical, keys, ProtocolError } from './contract.ts'
+import { canonical, keys, ProtocolError, type Bundle, type TypeExpr } from './contract.ts'
+import { validateGraph, linkKey, type WireGraph, type GraphScopes, type SnapshotValue } from './graph.ts'
 
 export interface Activation { runtime: string; epoch: string; activation: string }
 export interface Scope { activation: Activation; scope: string }
@@ -32,13 +33,13 @@ export function parseDelivery(value: unknown): Delivery {
 }
 
 interface Seen { delivery: Delivery; terminal: boolean }
-const wrappers = new WeakMap<ObjectProxy, { active: boolean; tokens: Set<string> }>()
+const wrappers = new WeakMap<ObjectProxy, { active: boolean; tokens: Set<string>; snapshot?: Record<string, SnapshotValue> }>()
 /** Runtime-level serial critical section is the Node event loop, with no await
  * between checking a wrapper and attaching/removing its delivery tokens. */
 export class Imports {
   private scopes = new Map<string, { scope: Scope; parent?: string }>()
   private latest = new Map<string, bigint>()
-  private cache = new Map<string, WeakRef<ObjectProxy>>()
+  private cache = new Map<string, ObjectProxy>()
   private seen = new Map<string, Seen>()
   private retired = 0n
   private controls: ImportControl[] = []
@@ -58,26 +59,52 @@ export class Imports {
 
   receiveBatch(inputs: Delivery[]): ObjectProxy[] {
     let deliveries: Delivery[]
+    try { deliveries = inputs.map(parseDelivery); this.checkBatch(deliveries) }
+    catch (error) { this.reject(inputs); throw error }
+    return this.attach(deliveries)
+  }
+
+  receiveGraph(admitted: { bundle: Bundle; sha256: string }, type: TypeExpr, graph: WireGraph, scopes: GraphScopes): unknown {
     try {
-      deliveries = inputs.map(parseDelivery)
-      const batch = new Map<string, Delivery>()
-      for (const delivery of deliveries) {
-        if (BigInt(delivery.id) <= this.retired) fail('StaleObject', 'delivery is below retirement watermark')
-        if (!this.scopes.has(canonical(delivery.recipient))) fail('ScopeClosed', 'delivery scope closed')
-        const seen = this.seen.get(delivery.id)
-        if (seen && canonical(seen.delivery) !== canonical(delivery)) fail('CapabilityDenied', 'delivery id changed identity')
-        if (seen?.terminal) fail('StaleObject', 'released delivery cannot revive a wrapper')
-        const old = batch.get(delivery.id)
-        if (old && canonical(old) !== canonical(delivery)) fail('CapabilityDenied', 'conflicting delivery records in one graph')
-        batch.set(delivery.id, delivery)
+      const validated = validateGraph(admitted, type, graph, scopes)
+      if (!this.scopes.has(canonical(scopes.scope)) || !this.scopes.has(canonical(scopes.borrow))) fail('ScopeClosed', 'graph receiving scope closed')
+      this.checkBatch(validated.deliveries)
+      for (let i = 0; i < validated.deliveries.length; i++) {
+        const delivery = validated.deliveries[i]
+        const current = this.cache.get(canonical([delivery.recipient, delivery.object, delivery.view]))
+        const snapshot = current && wrappers.get(current)!.snapshot
+        if (snapshot && canonical(snapshot) !== canonical(validated.properties[i])) fail('InvalidParams', 'immutable snapshot changed for a live object view')
       }
-    } catch (error) { this.reject(inputs); throw error }
+      const proxies = this.attach(validated.deliveries)
+      // All wrappers exist before any relationship can be read by author code.
+      for (let i = 0; i < proxies.length; i++) wrappers.get(proxies[i])!.snapshot ??= validated.properties[i]
+      return this.materialize(validated.root, false)
+    } catch (error) {
+      this.reject(Array.isArray(graph?.references) ? graph.references.map(r => r?.delivery) : [])
+      throw error
+    }
+  }
+
+  private checkBatch(deliveries: Delivery[]): void {
+    const batch = new Map<string, Delivery>()
+    for (const delivery of deliveries) {
+      if (BigInt(delivery.id) <= this.retired) fail('StaleObject', 'delivery is below retirement watermark')
+      if (!this.scopes.has(canonical(delivery.recipient))) fail('ScopeClosed', 'delivery scope closed')
+      const seen = this.seen.get(delivery.id)
+      if (seen && canonical(seen.delivery) !== canonical(delivery)) fail('CapabilityDenied', 'delivery id changed identity')
+      if (seen?.terminal) fail('StaleObject', 'released delivery cannot revive a wrapper')
+      const old = batch.get(delivery.id)
+      if (old && canonical(old) !== canonical(delivery)) fail('CapabilityDenied', 'conflicting delivery records in one graph')
+      batch.set(delivery.id, delivery)
+    }
+  }
+  private attach(deliveries: Delivery[]): ObjectProxy[] {
     return deliveries.map(delivery => {
       const key = canonical([delivery.recipient, delivery.object, delivery.view])
-      let proxy = this.cache.get(key)?.deref()
+      let proxy = this.cache.get(key)
       if (!proxy?.active) proxy = new ObjectProxy(this, delivery.object, delivery.view, delivery.recipient)
       wrappers.get(proxy)!.tokens.add(delivery.id)
-      this.cache.set(key, new WeakRef(proxy))
+      this.cache.set(key, proxy)
       this.seen.set(delivery.id, { delivery, terminal: false })
       this.controls.push({ type: 'accept', id: delivery.id, token: delivery.token })
       return proxy
@@ -102,11 +129,7 @@ export class Imports {
       for (const [key, value] of this.scopes) if (value.parent && closed.has(value.parent)) closed.add(key)
     }
     for (const key of closed) this.scopes.delete(key)
-    for (const [key, ref] of this.cache) {
-      const proxy = ref.deref()
-      if (proxy && closed.has(canonical(proxy.scope))) { proxy.release(); this.cache.delete(key) }
-      else if (!proxy) this.cache.delete(key)
-    }
+    for (const proxy of this.cache.values()) if (closed.has(canonical(proxy.scope))) this.release(proxy)
     for (const [id, seen] of this.seen) if (closed.has(canonical(seen.delivery.recipient))) this.releaseToken(id)
   }
 
@@ -118,8 +141,48 @@ export class Imports {
     const entries = [...this.seen].filter(([id]) => BigInt(id) > this.retired && BigInt(id) <= prefix)
     if (BigInt(entries.length) !== prefix - this.retired || entries.some(([, seen]) => !seen.terminal)) fail('InvalidParams', 'prefix has gaps or live tokens')
     for (const [id] of entries) this.seen.delete(id)
-    for (const [key, ref] of this.cache) if (!ref.deref()?.active) this.cache.delete(key)
+    for (const [key, proxy] of this.cache) if (!proxy.active) this.cache.delete(key)
     this.retired = prefix
+  }
+
+  retainedObjects(): number { return this.cache.size }
+  property(proxy: ObjectProxy, name: string): unknown {
+    this.delivery(proxy)
+    const snapshot = wrappers.get(proxy)!.snapshot
+    if (!snapshot) throw new ProtocolError('Unavailable', 'graph', 'object snapshot has not been materialized')
+    if (!Object.hasOwn(snapshot, name)) fail('CapabilityDenied', 'property is not declared')
+    return this.materialize(snapshot[name], true)
+  }
+  private materialize(value: SnapshotValue, immutable: boolean): unknown {
+    switch (value.kind) {
+      case 'value': {
+        const result = structuredClone(value.value)
+        return immutable ? freezeJson(result) : result
+      }
+      case 'link': {
+        const proxy = this.cache.get(linkKey(value.link))
+        if (!proxy?.active) fail('ScopeClosed', 'snapshot relationship has no live grant')
+        return proxy
+      }
+      case 'record': {
+        const result = Object.fromEntries(Object.entries(value.fields).map(([name, field]) => [name, this.materialize(field, immutable)]))
+        return immutable ? Object.freeze(result) : result
+      }
+      case 'list': {
+        const result = value.items.map(item => this.materialize(item, immutable))
+        return immutable ? Object.freeze(result) : result
+      }
+      case 'optional': return value.value ? this.materialize(value.value, immutable) : null
+    }
+  }
+  release(proxy: ObjectProxy): void {
+    const state = wrappers.get(proxy)!
+    if (!state.active) return
+    state.active = false
+    for (const id of state.tokens) this.releaseToken(id)
+    state.tokens.clear()
+    const key = canonical([proxy.scope, proxy.identity, proxy.view])
+    if (this.cache.get(key) === proxy) this.cache.delete(key)
   }
 
   takeControls(): ImportControl[] { const controls = this.controls; this.controls = []; return controls }
@@ -145,11 +208,11 @@ export class ObjectProxy {
   get active(): boolean { return wrappers.get(this)!.active }
   sameObject(other: ObjectProxy): boolean { return canonical(this.identity) === canonical(other.identity) }
   delivery(): Delivery { return this.imports.delivery(this) }
-  release(): void {
-    const state = wrappers.get(this)!
-    if (!state.active) return
-    state.active = false
-    for (const id of state.tokens) this.imports.releaseToken(id)
-    state.tokens.clear()
-  }
+  property(name: string): unknown { return this.imports.property(this, name) }
+  release(): void { this.imports.release(this) }
+}
+
+function freezeJson(value: any): unknown {
+  if (value && typeof value === 'object') { for (const field of Object.values(value)) freezeJson(field); Object.freeze(value) }
+  return value
 }

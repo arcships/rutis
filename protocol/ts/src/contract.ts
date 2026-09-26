@@ -90,7 +90,14 @@ function bundleStructure(bundle: any): void {
   }
 }
 
-export function admit(bytes: Uint8Array): { bundle: Bundle; sha256: string } {
+export interface AdmittedBundle { readonly bundle: Bundle; readonly sha256: string }
+function freezeTree(value: unknown): void {
+  if (value && typeof value === 'object') {
+    for (const child of Object.values(value)) freezeTree(child)
+    Object.freeze(value)
+  }
+}
+export function admit(bytes: Uint8Array): AdmittedBundle {
   const bundle: any = decodeJson(bytes)
   bundleStructure(bundle)
   keys(bundle, ['id', 'version', 'interfaces'], ['events', 'required_capabilities'])
@@ -133,7 +140,8 @@ export function admit(bytes: Uint8Array): { bundle: Bundle; sha256: string } {
     checkType(event.params, bundle, true)
     checkType(event.result, bundle, true)
   }
-  return { bundle: bundle as unknown as Bundle, sha256: createHash('sha256').update(bytes).digest('hex') }
+  freezeTree(bundle)
+  return Object.freeze({ bundle: bundle as unknown as Bundle, sha256: createHash('sha256').update(bytes).digest('hex') })
 }
 
 function containsCallback(type: TypeExpr): boolean {

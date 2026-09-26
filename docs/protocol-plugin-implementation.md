@@ -47,7 +47,7 @@ CI 增加锁定依赖的 TS 检查；Rust crate 纳入现有 workspace 测试。
 
 | 阶段 | 状态 | 尚需取得的证据 |
 | --- | --- | --- |
-| M1 | 开发中 | 严格描述符、两端真实对象导出表及原生清理、整批导入、broker 交付和执行 pin 已落地；仍需生成绑定、对象图物化、实际 dispatch/borrow 执行及控制帧后冻结 |
+| M1 | 开发中 | 严格描述符、两端真实对象导出表及原生清理、整批导入、broker 交付和执行 pin 已落地；对象图物化已落地；仍需生成绑定、实际 dispatch/borrow 执行及控制帧后冻结 |
 | M2 | 待完成 | 真实 Rust↔TS 进程和 native 插件、对象往返、borrow 回调、真实旧桥插件迁移、T24 测量 |
 | M3 | 待完成 | 调用取消/完成、更新/失败回滚、组恢复屏障、Linux 进程和受管后代回收 |
 | M4 | 待完成 | broker 权威事件列表、parallel/serial、scope、ready、once 与扩展拒绝 |
@@ -57,7 +57,7 @@ CI 增加锁定依赖的 TS 检查；Rust crate 纳入现有 workspace 测试。
 
 ## M1 已实现的基础与剩余门槛
 
-`rutis-protocol::{contract,identity,broker,imports,exports,json}` 与对应 TS 模块：
+`rutis-protocol::{contract,identity,broker,imports,exports,graph,json}` 与对应 TS 模块：
 
 - 完整 bundle 原始字节 SHA-256、精确版本、可达接口检查；scope/borrow、record/list/optional 的独立 tagged value；回调按完整签名哈希匹配。
 - 不支持的 delegate、持久回调、waterfall、stream 在描述符准入时拒绝。JSON 数据中类似对象 id 的字段不会被当成引用。
@@ -69,15 +69,18 @@ CI 增加锁定依赖的 TS 检查；Rust crate 纳入现有 workspace 测试。
 - owner 表按真实 Arc/JS 身份建 weak 映射，delivery/execution 独立强持有；独占 disposer 执行一次并等待，失败可观察，shared 对象保留本地所有权。runtime epoch 的 id 分配跨 activation 共用；broker 重复登记不可扩大视图。
 - 表接入真实 native ctx effect；失效的 gate/uid 同步拒绝新 pin，卸载等待执行和慢 disposer。整批导入先校验再附加；失败只释放新增交付，保留以前的成功别名。
 
-可执行证据：Rust contracts 5、exports 7、objects 10、managed 11 项；TS contracts 5、exports 8、imports 5、managed 8 项。共享语料包含 JSON 35、描述符 50、wire value 32、回调签名 9 个用例，覆盖合法/非法输入、边界、Unicode/数字语义和不支持扩展。Rust 使用两个真实线程同时交付/释放；两端另验证原生失效时的执行 pin 和慢对象清理。
-这些测试证明账本、真实对象持有、原生清理和编码规则，尚未证明真实远程对象返回、回调 handler、循环图物化、生成接口或 IPC。当前约定见 [protocol README](../protocol/README.md)，水位控制帧顺序已写明，尚未接入实际消息。
+- 对象图按完整表校验后两遍建代理和关系；每个表项必须可达，属性关系继承包含它的 scope。循环边只保存身份，不互持 Arc。非法新快照只拒绝新增交付；旧包装保持有效。显式释放子包装后导航失败，新交付建立新包装，旧别名永不复活。
+- 已准入描述符不可修改，原始摘要和验证的 schema 保持绑定；Rust 同一真实 Arc 的不同 trait 视图保持同一身份，执行适配器不要求业务 trait 继承 Any。
 
-本阶段工作区回归：`cargo test --workspace` 399 passed / 0 failed / 2 ignored，未设置 Node 跳过变量，旧桥真实 Node TCP e2e 通过。两个 ignored 是依赖外部 min-cordis/dsh 检出的 host e2e 与需要真实模型后端的 agent e2e，不能计入通过。`cargo check --workspace --all-targets`、全仓 fmt、协议 crate clippy `-D warnings`、TS check/test 及旧 host 的断连测试通过；没有执行外部 min-cordis/dsh 整体迁移验收。
+可执行证据：Rust contracts 5、exports 9、graphs 5、objects 10、managed 11 项；TS contracts 5、exports 8、graphs 5、imports 5、managed 8 项。共享语料包含 JSON 35、描述符 50、wire value 32、回调签名 9、对象图 31 个用例，覆盖合法/非法输入、边界、Unicode/数字语义和不支持扩展。Rust 使用两个真实线程同时交付/释放；两端另验证原生失效时的执行 pin 和慢对象清理。
+这些测试证明账本、真实对象持有、原生清理和编码规则，还覆盖循环图物化、快照一致性与图关闭；尚未证明真实远程对象返回、回调 handler、生成接口或 IPC。当前约定见 [protocol README](../protocol/README.md)，水位控制帧顺序已写明，尚未接入实际消息。
+
+本阶段工作区回归：`cargo test --workspace` 406 passed / 0 failed / 2 ignored，未设置 Node 跳过变量，旧桥真实 Node TCP e2e 通过。两个 ignored 是依赖外部 min-cordis/dsh 检出的 host e2e 与需要真实模型后端的 agent e2e，不能计入通过。`cargo check --workspace --all-targets`、全仓 fmt、协议 crate clippy `-D warnings`、TS check/test 及旧 host 的断连测试通过；没有执行外部 min-cordis/dsh 整体迁移验收。
 
 M1 后续必须补齐以下内容，之后才能称为 M1 完成或冻结该实验协议：
 
 1. 描述符生成 Rust/TS 的客户端与导出适配，作者调用对象方法而无需操作 id/token。
-2. 将已实现的真对象导出表接入实际 dispatch/编码/结果交付；完整对象图先建代理再连接不可变关系，验证快照一致性和循环图回收。
+2. 将已实现的真对象导出表接入实际 dispatch/编码/结果交付；对象图物化已有内存证据，仍需实际调用链中的资源与 disposer 收敛证据。
 3. borrow 回调执行范围及登记子任务，包含嵌套重入；owner 回传建立受门控 facade，保持统一入站调度。
 4. 将已实现的严格解码与共享非法描述符语料接入帧/握手，完成边界互通与新增消息格式的一致拒绝。
 5. 将双端回收水位 ACK 接入真实控制帧；闭合 runtime epoch 的记录回收与迟到消息测试。当前 broker/imports 的前缀规则已有内存测试，握手仍待接入。

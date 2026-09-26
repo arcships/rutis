@@ -3,6 +3,7 @@ pub mod broker;
 pub mod contract;
 pub mod error;
 pub mod exports;
+pub mod graph;
 pub mod identity;
 pub mod imports;
 pub mod json;

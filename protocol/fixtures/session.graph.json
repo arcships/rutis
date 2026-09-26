@@ -1,0 +1,74 @@
+{
+  "root": {
+    "kind": "ref",
+    "index": 0
+  },
+  "references": [
+    {
+      "delivery": {
+        "id": "1",
+        "token": "fixture-1",
+        "object": {
+          "owner": {
+            "runtime": "rust",
+            "epoch": "1",
+            "activation": "1"
+          },
+          "object": "1"
+        },
+        "recipient": {
+          "activation": {
+            "runtime": "node",
+            "epoch": "1",
+            "activation": "1"
+          },
+          "scope": "1"
+        },
+        "view": {
+          "interface": "Session",
+          "bundle_sha256": "$bundle",
+          "source": "dep/database"
+        }
+      },
+      "properties": {
+        "agent": {
+          "kind": "ref",
+          "index": 1
+        }
+      }
+    },
+    {
+      "delivery": {
+        "id": "2",
+        "token": "fixture-2",
+        "object": {
+          "owner": {
+            "runtime": "rust",
+            "epoch": "1",
+            "activation": "1"
+          },
+          "object": "2"
+        },
+        "recipient": {
+          "activation": {
+            "runtime": "node",
+            "epoch": "1",
+            "activation": "1"
+          },
+          "scope": "1"
+        },
+        "view": {
+          "interface": "Agent",
+          "bundle_sha256": "$bundle",
+          "source": "dep/database"
+        }
+      },
+      "properties": {
+        "session": {
+          "kind": "ref",
+          "index": 0
+        }
+      }
+    }
+  ]
+}

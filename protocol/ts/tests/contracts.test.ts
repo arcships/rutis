@@ -45,6 +45,11 @@ test('object graph descriptor admits cyclic interface relationships and binds ra
   const admitted = admit(bundleBytes)
   assert.equal(Object.keys(admitted.bundle.interfaces).length, 4)
   assert.notEqual(admitted.sha256, admit(Buffer.concat([bundleBytes, Buffer.from(' ')])).sha256)
+  assert.throws(() => { admitted.bundle.interfaces.Database.methods.connect.params.kind = 'record' }, TypeError)
+  assert.throws(() => { (admitted as any).sha256 = 'changed' }, TypeError)
+  const params = admitted.bundle.interfaces.Database.methods.connect.params
+  assert.equal(params.kind, 'value')
+  if (params.kind === 'value') assert.ok(Object.isFrozen(params.schema))
 })
 test('unsupported extensions and recursive/external schemas are rejected before plugin code', () => {
   const mutations = [

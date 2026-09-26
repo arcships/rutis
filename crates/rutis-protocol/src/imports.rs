@@ -1,6 +1,8 @@
 //! A single runtime import ledger serializes receive/release/scope-close. Proxy
 //! identity is cached independently of delivery ids; released wrappers stay dead.
+use crate::contract::{AdmittedBundle, TypeExpr};
 use crate::error::{ErrorCode, ProtocolError, Result};
+use crate::graph::{self, DecodedValue, GraphScopes, SnapshotValue, WireGraph};
 use crate::identity::{Delivery, InterfaceView, ObjectIdentity, Scope, Sequence};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,13 +33,14 @@ struct Wrapper {
     scope: Scope,
     tokens: BTreeSet<Sequence>,
     active: bool,
+    snapshot: Option<BTreeMap<String, SnapshotValue>>,
 }
 type CacheKey = (Scope, ObjectIdentity, InterfaceView);
 
 #[derive(Default)]
 struct State {
     scopes: BTreeMap<Scope, Option<Scope>>,
-    cache: BTreeMap<CacheKey, Weak<Mutex<Wrapper>>>,
+    cache: BTreeMap<CacheKey, Arc<Mutex<Wrapper>>>,
     seen: BTreeMap<Sequence, Seen>,
     retired: u64,
     controls: Vec<ImportControl>,
@@ -94,64 +97,76 @@ impl Imports {
     /// only releases its new deliveries; previously returned aliases stay live.
     pub fn receive_batch(&self, deliveries: Vec<Delivery>) -> Result<Vec<ObjectProxy>> {
         let mut state = self.0.lock().unwrap();
-        let checked = (|| {
-            let mut batch = BTreeMap::new();
-            for delivery in &deliveries {
-                check_delivery(&state, delivery)?;
-                if batch
-                    .insert(delivery.id, delivery)
-                    .is_some_and(|old| old != delivery)
-                {
-                    return Err(error(
-                        ErrorCode::CapabilityDenied,
-                        "conflicting delivery records in one graph",
-                    ));
-                }
-            }
-            Ok(())
-        })();
-        if let Err(error) = checked {
+        if let Err(error) = check_batch(&state, &deliveries) {
             reject_deliveries(&mut state, &deliveries);
             return Err(error);
         }
-        Ok(deliveries
-            .into_iter()
-            .map(|delivery| {
+        Ok(attach_batch(
+            &mut state,
+            deliveries,
+            Arc::downgrade(&self.0),
+        ))
+    }
+
+    /// First create every wrapper, then connect immutable identity links. No
+    /// wrapper owns another wrapper, so graph cycles do not create Arc cycles.
+    pub fn receive_graph(
+        &self,
+        bundle: &AdmittedBundle,
+        expr: &TypeExpr,
+        graph: WireGraph,
+        scopes: &GraphScopes,
+    ) -> Result<DecodedValue> {
+        let deliveries: Vec<_> = graph
+            .references
+            .iter()
+            .map(|r| r.delivery.clone())
+            .collect();
+        let validated = match graph::validate(bundle, expr, &graph, scopes) {
+            Ok(graph) => graph,
+            Err(error) => {
+                self.reject(&deliveries);
+                return Err(error);
+            }
+        };
+        let mut state = self.0.lock().unwrap();
+        let admitted = (|| {
+            if !state.scopes.contains_key(&scopes.scope)
+                || !state.scopes.contains_key(&scopes.borrow)
+            {
+                return Err(error(
+                    ErrorCode::ScopeClosed,
+                    "graph receiving scope closed",
+                ));
+            }
+            check_batch(&state, &deliveries)?;
+            for (delivery, fields) in deliveries.iter().zip(&validated.properties) {
                 let key = (
                     delivery.recipient.clone(),
                     delivery.object.clone(),
                     delivery.view.clone(),
                 );
-                let wrapper = state
-                    .cache
-                    .get(&key)
-                    .and_then(Weak::upgrade)
-                    .filter(|w| w.lock().unwrap().active)
-                    .unwrap_or_else(|| {
-                        Arc::new(Mutex::new(Wrapper {
-                            object: delivery.object.clone(),
-                            view: delivery.view.clone(),
-                            scope: delivery.recipient.clone(),
-                            tokens: BTreeSet::new(),
-                            active: true,
-                        }))
-                    });
-                wrapper.lock().unwrap().tokens.insert(delivery.id);
-                state.cache.insert(key, Arc::downgrade(&wrapper));
-                state.controls.push(ImportControl::Accept {
-                    id: delivery.id,
-                    token: delivery.token.clone(),
-                });
-                state.seen.entry(delivery.id).or_insert(Seen {
-                    delivery,
-                    terminal: false,
-                });
-                ObjectProxy {
-                    wrapper,
-                    imports: Arc::downgrade(&self.0),
+                if let Some(wrapper) = state.cache.get(&key) {
+                    let wrapper = wrapper.lock().unwrap();
+                    if wrapper.snapshot.as_ref().is_some_and(|old| old != fields) {
+                        return Err(error(
+                            ErrorCode::InvalidParams,
+                            "immutable snapshot changed for a live object view",
+                        ));
+                    }
                 }
-            })
-            .collect())
+            }
+            Ok(())
+        })();
+        if let Err(error) = admitted {
+            reject_deliveries(&mut state, &deliveries);
+            return Err(error);
+        }
+        let proxies = attach_batch(&mut state, deliveries, Arc::downgrade(&self.0));
+        for (proxy, fields) in proxies.iter().zip(validated.properties) {
+            proxy.wrapper.lock().unwrap().snapshot.get_or_insert(fields);
+        }
+        materialize(&state, &validated.root, Arc::downgrade(&self.0))
     }
 
     /// Typed graph validation, cancelled results and unconsumed event payloads
@@ -180,7 +195,7 @@ impl Imports {
             .cache
             .iter()
             .filter(|((scope, _, _), _)| closed.contains(scope))
-            .filter_map(|(_, w)| w.upgrade())
+            .map(|(_, w)| w.clone())
             .collect();
         for wrapper in wrappers {
             release_wrapper(&mut state, &wrapper);
@@ -225,18 +240,158 @@ impl Imports {
             ));
         }
         state.seen.retain(|id, _| id.0 > through.0);
-        state.cache.retain(|_, wrapper| {
-            wrapper
-                .upgrade()
-                .is_some_and(|wrapper| wrapper.lock().unwrap().active)
-        });
+        state
+            .cache
+            .retain(|_, wrapper| wrapper.lock().unwrap().active);
         state.retired = through.0;
         Ok(())
+    }
+
+    pub fn retained_objects(&self) -> usize {
+        self.0.lock().unwrap().cache.len()
+    }
+
+    /// A structurally invalid payload can contain a valid broker manifest.
+    /// Reject those handoffs before returning its decoding error. Invalid
+    /// JSON/UTF-8 or an unreadable manifest requires transport epoch closure.
+    pub fn receive_graph_value(
+        &self,
+        bundle: &AdmittedBundle,
+        expr: &TypeExpr,
+        value: serde_json::Value,
+        scopes: &GraphScopes,
+    ) -> Result<DecodedValue> {
+        let deliveries: Vec<_> = value
+            .get("references")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|reference| reference.get("delivery"))
+            .filter_map(|delivery| serde_json::from_value::<Delivery>(delivery.clone()).ok())
+            .collect();
+        match serde_json::from_value(value) {
+            Ok(graph) => self.receive_graph(bundle, expr, graph, scopes),
+            Err(error) => {
+                self.reject(&deliveries);
+                Err(ProtocolError::new(
+                    ErrorCode::InvalidParams,
+                    "graph",
+                    error.to_string(),
+                ))
+            }
+        }
     }
 
     pub fn take_controls(&self) -> Vec<ImportControl> {
         std::mem::take(&mut self.0.lock().unwrap().controls)
     }
+}
+
+fn check_batch(state: &State, deliveries: &[Delivery]) -> Result<()> {
+    let mut batch = BTreeMap::new();
+    for delivery in deliveries {
+        check_delivery(state, delivery)?;
+        if batch
+            .insert(delivery.id, delivery)
+            .is_some_and(|old| old != delivery)
+        {
+            return Err(error(
+                ErrorCode::CapabilityDenied,
+                "conflicting delivery records in one graph",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn attach_batch(
+    state: &mut State,
+    deliveries: Vec<Delivery>,
+    imports: Weak<Mutex<State>>,
+) -> Vec<ObjectProxy> {
+    deliveries
+        .into_iter()
+        .map(|delivery| {
+            let key = (
+                delivery.recipient.clone(),
+                delivery.object.clone(),
+                delivery.view.clone(),
+            );
+            let wrapper = state
+                .cache
+                .get(&key)
+                .filter(|w| w.lock().unwrap().active)
+                .cloned()
+                .unwrap_or_else(|| {
+                    Arc::new(Mutex::new(Wrapper {
+                        object: delivery.object.clone(),
+                        view: delivery.view.clone(),
+                        scope: delivery.recipient.clone(),
+                        tokens: BTreeSet::new(),
+                        active: true,
+                        snapshot: None,
+                    }))
+                });
+            wrapper.lock().unwrap().tokens.insert(delivery.id);
+            state.cache.insert(key, wrapper.clone());
+            state.controls.push(ImportControl::Accept {
+                id: delivery.id,
+                token: delivery.token.clone(),
+            });
+            state.seen.entry(delivery.id).or_insert(Seen {
+                delivery,
+                terminal: false,
+            });
+            ObjectProxy {
+                wrapper,
+                imports: imports.clone(),
+            }
+        })
+        .collect()
+}
+
+fn materialize(
+    state: &State,
+    value: &SnapshotValue,
+    imports: Weak<Mutex<State>>,
+) -> Result<DecodedValue> {
+    Ok(match value {
+        SnapshotValue::Value(value) => DecodedValue::Value(value.clone()),
+        SnapshotValue::Link(link) => {
+            let wrapper = state
+                .cache
+                .get(&link.key())
+                .filter(|w| w.lock().unwrap().active)
+                .ok_or_else(|| {
+                    error(
+                        ErrorCode::ScopeClosed,
+                        "snapshot relationship has no live grant",
+                    )
+                })?;
+            DecodedValue::Object(ObjectProxy {
+                wrapper: wrapper.clone(),
+                imports,
+            })
+        }
+        SnapshotValue::Record(fields) => DecodedValue::Record(
+            fields
+                .iter()
+                .map(|(k, v)| Ok((k.clone(), materialize(state, v, imports.clone())?)))
+                .collect::<Result<_>>()?,
+        ),
+        SnapshotValue::List(items) => DecodedValue::List(
+            items
+                .iter()
+                .map(|v| materialize(state, v, imports.clone()))
+                .collect::<Result<_>>()?,
+        ),
+        SnapshotValue::Optional(value) => DecodedValue::Optional(
+            value
+                .as_ref()
+                .map(|v| materialize(state, v, imports).map(Box::new))
+                .transpose()?,
+        ),
+    })
 }
 
 fn check_delivery(state: &State, delivery: &Delivery) -> Result<()> {
@@ -294,14 +449,26 @@ fn release_token(state: &mut State, id: Sequence) {
     }
 }
 
-fn release_wrapper(state: &mut State, wrapper: &Arc<Mutex<Wrapper>>) {
-    let mut wrapper = wrapper.lock().unwrap();
+fn release_wrapper(state: &mut State, wrapper_arc: &Arc<Mutex<Wrapper>>) {
+    let mut wrapper = wrapper_arc.lock().unwrap();
     if !wrapper.active {
         return;
     }
     wrapper.active = false;
     for id in std::mem::take(&mut wrapper.tokens) {
         release_token(state, id);
+    }
+    let key = (
+        wrapper.scope.clone(),
+        wrapper.object.clone(),
+        wrapper.view.clone(),
+    );
+    if state
+        .cache
+        .get(&key)
+        .is_some_and(|current| Arc::ptr_eq(current, wrapper_arc))
+    {
+        state.cache.remove(&key);
     }
 }
 
@@ -337,6 +504,36 @@ impl ObjectProxy {
             .first()
             .ok_or_else(|| error(ErrorCode::StaleObject, "proxy has no delivery token"))?;
         Ok(state.seen.get(id).unwrap().delivery.clone())
+    }
+
+    /// Only declared, fully materialized immutable properties are readable.
+    /// An identity link resolves the current live wrapper in this same scope;
+    /// explicit release never resurrects a previously returned child alias.
+    pub fn property(&self, name: &str) -> Result<DecodedValue> {
+        let imports = self
+            .imports
+            .upgrade()
+            .ok_or_else(|| error(ErrorCode::ScopeClosed, "runtime import ledger dropped"))?;
+        let state = imports.lock().unwrap();
+        let snapshot = {
+            let wrapper = self.wrapper.lock().unwrap();
+            if !wrapper.active || !state.scopes.contains_key(&wrapper.scope) {
+                return Err(error(ErrorCode::ScopeClosed, "proxy wrapper released"));
+            }
+            wrapper
+                .snapshot
+                .as_ref()
+                .ok_or_else(|| {
+                    error(
+                        ErrorCode::Unavailable,
+                        "object snapshot has not been materialized",
+                    )
+                })?
+                .get(name)
+                .cloned()
+                .ok_or_else(|| error(ErrorCode::CapabilityDenied, "property is not declared"))?
+        };
+        materialize(&state, &snapshot, Arc::downgrade(&imports))
     }
 
     pub fn release(&self) {

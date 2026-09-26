@@ -17,6 +17,32 @@ type Object = Arc<dyn Any + Send + Sync>;
 type CleanupFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 type Disposer = Box<dyn FnOnce(Object) -> CleanupFuture + Send>;
 
+trait WeakSource: Send + Sync {
+    fn upgrade(&self) -> Option<Object>;
+    fn strong_count(&self) -> usize;
+}
+struct AnySource(Weak<dyn Any + Send + Sync>);
+impl WeakSource for AnySource {
+    fn upgrade(&self) -> Option<Object> {
+        self.0.upgrade()
+    }
+    fn strong_count(&self) -> usize {
+        self.0.strong_count()
+    }
+}
+struct TraitObject<T: ?Sized>(Arc<T>);
+struct TraitSource<T: ?Sized>(Weak<T>);
+impl<T: ?Sized + Send + Sync + 'static> WeakSource for TraitSource<T> {
+    fn upgrade(&self) -> Option<Object> {
+        self.0
+            .upgrade()
+            .map(|object| Arc::new(TraitObject(object)) as Object)
+    }
+    fn strong_count(&self) -> usize {
+        self.0.strong_count()
+    }
+}
+
 /// One allocator belongs to the entire runtime epoch, across all activations.
 #[derive(Clone, Default)]
 pub struct ObjectIds(Arc<AtomicU64>);
@@ -44,8 +70,8 @@ pub enum PinKey {
 }
 
 struct Entry {
-    address: (usize, TypeId),
-    weak: Weak<dyn Any + Send + Sync>,
+    address: usize,
+    sources: BTreeMap<TypeId, Box<dyn WeakSource>>,
     held: Option<Object>,
     pins: usize,
     disposed: bool,
@@ -54,7 +80,7 @@ struct Entry {
 struct State {
     open: bool,
     entries: BTreeMap<ObjectIdentity, Entry>,
-    addresses: BTreeMap<(usize, TypeId), ObjectIdentity>,
+    addresses: BTreeMap<usize, ObjectIdentity>,
     pins: BTreeMap<PinKey, ObjectIdentity>,
     released: BTreeSet<PinKey>,
     retired: BTreeMap<(String, Sequence), Sequence>,
@@ -168,11 +194,64 @@ impl Exports {
         self.register_inner(object.clone(), Some(disposer))
     }
 
+    pub fn register_trait<T: ?Sized + Send + Sync + 'static>(
+        &self,
+        object: &Arc<T>,
+    ) -> Result<ObjectIdentity> {
+        self.register_trait_inner(object, None)
+    }
+
+    pub fn register_trait_exclusive<T, F, Fut>(
+        &self,
+        object: &Arc<T>,
+        disposer: F,
+    ) -> Result<ObjectIdentity>
+    where
+        T: ?Sized + Send + Sync + 'static,
+        F: FnOnce(Arc<T>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        let disposer: Disposer = Box::new(move |object| {
+            let holder = object
+                .downcast::<TraitObject<T>>()
+                .expect("registered trait object type");
+            Box::pin(disposer(holder.0.clone()))
+        });
+        self.register_trait_inner(object, Some(disposer))
+    }
+
+    fn register_trait_inner<T: ?Sized + Send + Sync + 'static>(
+        &self,
+        object: &Arc<T>,
+        disposer: Option<Disposer>,
+    ) -> Result<ObjectIdentity> {
+        self.register_source(
+            Arc::as_ptr(object) as *const () as usize,
+            TypeId::of::<TraitObject<T>>(),
+            Box::new(TraitSource(Arc::downgrade(object))),
+            Arc::new(TraitObject(object.clone())),
+            disposer,
+        )
+    }
+
     fn register_inner(&self, object: Object, disposer: Option<Disposer>) -> Result<ObjectIdentity> {
-        let address = (
+        self.register_source(
             Arc::as_ptr(&object) as *const () as usize,
             object.as_ref().type_id(),
-        );
+            Box::new(AnySource(Arc::downgrade(&object))),
+            object,
+            disposer,
+        )
+    }
+
+    fn register_source(
+        &self,
+        address: usize,
+        source_id: TypeId,
+        source: Box<dyn WeakSource>,
+        object: Object,
+        disposer: Option<Disposer>,
+    ) -> Result<ObjectIdentity> {
         // Closure captures may have user Drop implementations. Declare this
         // before the lock so every early return also drops it after unlocking.
         let mut discarded = None;
@@ -181,8 +260,13 @@ impl Exports {
             return Err(error(ErrorCode::ScopeClosed, "owner activation closed"));
         }
         if let Some(identity) = state.addresses.get(&address) {
-            let entry = &state.entries[identity];
-            if entry.weak.strong_count() != 0 {
+            let identity = identity.clone();
+            let entry = state.entries.get_mut(&identity).unwrap();
+            if entry
+                .sources
+                .values()
+                .any(|source| source.strong_count() != 0)
+            {
                 if entry.disposed {
                     return Err(error(ErrorCode::StaleObject, "exclusive object disposed"));
                 }
@@ -192,9 +276,9 @@ impl Exports {
                         "exclusive registration must use its existing identity",
                     ));
                 }
-                return Ok(identity.clone());
+                entry.sources.entry(source_id).or_insert(source);
+                return Ok(identity);
             }
-            let identity = identity.clone();
             state.addresses.remove(&address);
             discarded = state.entries.remove(&identity);
         }
@@ -207,7 +291,7 @@ impl Exports {
             identity.clone(),
             Entry {
                 address,
-                weak: Arc::downgrade(&object),
+                sources: BTreeMap::from([(source_id, source)]),
                 // Exclusive registration already transfers resource ownership.
                 // Hold it provisionally until the first pin, or owner rollback.
                 held: disposer.as_ref().map(|_| object.clone()),
@@ -249,7 +333,7 @@ impl Exports {
         let object = entry
             .held
             .clone()
-            .or_else(|| entry.weak.upgrade())
+            .or_else(|| entry.sources.values().find_map(|source| source.upgrade()))
             .ok_or_else(|| error(ErrorCode::StaleObject, "local object already dropped"))?;
         entry.held = Some(object);
         entry.pins += 1;
@@ -260,6 +344,33 @@ impl Exports {
     /// Called only by an authenticated owner dispatch after obtaining an
     /// execution pin. Passback author APIs expose a gated facade, never this.
     pub fn execution_object<T: Any + Send + Sync>(&self, key: &PinKey) -> Result<Arc<T>> {
+        self.execution_source(key, TypeId::of::<T>())?
+            .downcast::<T>()
+            .map_err(|_| {
+                error(
+                    ErrorCode::InterfaceMismatch,
+                    "export adapter object type mismatch",
+                )
+            })
+    }
+
+    pub fn execution_trait<T: ?Sized + Send + Sync + 'static>(
+        &self,
+        key: &PinKey,
+    ) -> Result<Arc<T>> {
+        let holder = self
+            .execution_source(key, TypeId::of::<TraitObject<T>>())?
+            .downcast::<TraitObject<T>>()
+            .map_err(|_| {
+                error(
+                    ErrorCode::InterfaceMismatch,
+                    "export adapter trait type mismatch",
+                )
+            })?;
+        Ok(holder.0.clone())
+    }
+
+    fn execution_source(&self, key: &PinKey, source: TypeId) -> Result<Object> {
         if !matches!(key, PinKey::Execution { .. }) {
             return Err(error(ErrorCode::CapabilityDenied, "execution pin required"));
         }
@@ -269,17 +380,27 @@ impl Exports {
             .get(key)
             .ok_or_else(|| error(ErrorCode::StaleObject, "execution already finished"))?;
         state.entries[identity]
-            .held
-            .as_ref()
-            .unwrap()
-            .clone()
-            .downcast::<T>()
-            .map_err(|_| {
+            .sources
+            .get(&source)
+            .and_then(|source| source.upgrade())
+            .ok_or_else(|| {
                 error(
                     ErrorCode::InterfaceMismatch,
-                    "export adapter object type mismatch",
+                    "object does not have this native export adapter",
                 )
             })
+    }
+
+    /// Identity comparison does not expose a raw business pointer or grant any
+    /// authority. Owner-returned method arguments remain broker-routed facades.
+    pub fn is_native<T: ?Sized>(&self, identity: &ObjectIdentity, object: &Arc<T>) -> bool {
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .addresses
+            .get(&(Arc::as_ptr(object) as *const () as usize))
+            == Some(identity)
     }
 
     pub fn release(&self, key: &PinKey) {
@@ -396,7 +517,9 @@ impl Exports {
         let dead: Vec<_> = state
             .entries
             .iter()
-            .filter(|(_, e)| e.pins == 0 && e.weak.strong_count() == 0)
+            .filter(|(_, e)| {
+                e.pins == 0 && e.sources.values().all(|source| source.strong_count() == 0)
+            })
             .map(|(id, e)| (id.clone(), e.address))
             .collect();
         let mut discarded = Vec::new();

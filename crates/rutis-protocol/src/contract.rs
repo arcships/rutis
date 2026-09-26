@@ -112,8 +112,8 @@ pub fn callback_key(expr: &TypeExpr) -> String {
 
 #[derive(Debug)]
 pub struct AdmittedBundle {
-    pub bundle: Bundle,
-    pub sha256: String,
+    pub(crate) bundle: Bundle,
+    pub(crate) sha256: String,
 }
 
 fn invalid(message: impl Into<String>) -> ProtocolError {
@@ -134,6 +134,14 @@ pub fn identifier(value: &str) -> bool {
 }
 
 impl AdmittedBundle {
+    pub fn bundle(&self) -> &Bundle {
+        &self.bundle
+    }
+
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let value = crate::json::decode(bytes)?;
         if let Some(capabilities) = value.get("required_capabilities").and_then(Value::as_array) {

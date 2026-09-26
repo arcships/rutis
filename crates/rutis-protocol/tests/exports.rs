@@ -251,3 +251,98 @@ async fn unpublished_exclusive_registration_is_owned_and_cleaned_on_rollback() {
     assert_eq!(disposed.load(Ordering::SeqCst), 1);
     assert!(weak.upgrade().is_none());
 }
+
+trait ReadCounter: Send + Sync {
+    fn read(&self) -> usize;
+}
+trait WriteCounter: Send + Sync {
+    fn write(&self, value: usize);
+}
+struct Counter {
+    value: AtomicUsize,
+    drops: Arc<AtomicUsize>,
+}
+impl ReadCounter for Counter {
+    fn read(&self) -> usize {
+        self.value.load(Ordering::SeqCst)
+    }
+}
+impl WriteCounter for Counter {
+    fn write(&self, value: usize) {
+        self.value.store(value, Ordering::SeqCst);
+    }
+}
+impl Drop for Counter {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn native_trait_facets_keep_one_real_arc_identity_and_all_dispatch_adapters() {
+    let exports = Exports::new(activation(1), ObjectIds::default());
+    let drops = Arc::new(AtomicUsize::new(0));
+    let original = Arc::new(Counter {
+        value: AtomicUsize::new(1),
+        drops: drops.clone(),
+    });
+    let weak = Arc::downgrade(&original);
+    let reader: Arc<dyn ReadCounter> = original.clone();
+    let writer: Arc<dyn WriteCounter> = original.clone();
+    let id = exports.register_trait(&reader).unwrap();
+    assert_eq!(id, exports.register_trait(&reader).unwrap());
+    assert_eq!(id, exports.register_trait(&writer).unwrap());
+    assert_eq!(id, exports.register(&original).unwrap());
+    assert!(exports.is_native(&id, &writer));
+    exports.pin(&id, delivery(1)).unwrap();
+    exports.pin(&id, execution(1)).unwrap();
+    drop(original);
+    drop(reader);
+    drop(writer);
+    exports
+        .execution_trait::<dyn WriteCounter>(&execution(1))
+        .unwrap()
+        .write(7);
+    assert_eq!(
+        exports
+            .execution_trait::<dyn ReadCounter>(&execution(1))
+            .unwrap()
+            .read(),
+        7
+    );
+    assert_eq!(
+        exports
+            .execution_object::<Counter>(&execution(1))
+            .unwrap()
+            .read(),
+        7
+    );
+    exports.release(&delivery(1));
+    assert!(weak.upgrade().is_some());
+    exports.release(&execution(1));
+    assert!(weak.upgrade().is_none());
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    exports.sweep();
+}
+
+#[tokio::test]
+async fn exclusive_trait_registration_owns_cleanup_without_requiring_any_on_business_traits() {
+    let exports = Exports::new(activation(1), ObjectIds::default());
+    let disposed = Arc::new(AtomicUsize::new(0));
+    let count = disposed.clone();
+    let object: Arc<dyn ReadCounter> = Arc::new(Counter {
+        value: AtomicUsize::new(3),
+        drops: Arc::default(),
+    });
+    let id = exports
+        .register_trait_exclusive(&object, move |source| async move {
+            assert_eq!(source.read(), 3);
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(exports.register_trait(&object).unwrap(), id);
+    exports.close();
+    exports.join().await.unwrap();
+    assert_eq!(disposed.load(Ordering::SeqCst), 1);
+}

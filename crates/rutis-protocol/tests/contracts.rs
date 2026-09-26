@@ -95,19 +95,19 @@ fn callback_signature_is_independent_of_number_spelling_and_unicode_key_order() 
 #[test]
 fn complete_object_graph_descriptor_and_exact_bundle_identity() {
     let admitted = AdmittedBundle::parse(BUNDLE).unwrap();
-    assert_eq!(admitted.bundle.interfaces.len(), 4);
+    assert_eq!(admitted.bundle().interfaces.len(), 4);
     admitted
-        .require_identity("1.0.0", &admitted.sha256)
+        .require_identity("1.0.0", admitted.sha256())
         .unwrap();
     assert!(admitted
-        .require_identity("1.0.1", &admitted.sha256)
+        .require_identity("1.0.1", admitted.sha256())
         .is_err());
     assert!(admitted.require_identity("1.0.0", &"0".repeat(64)).is_err());
     let mut changed = BUNDLE.to_vec();
     changed.push(b' ');
     assert_ne!(
-        admitted.sha256,
-        AdmittedBundle::parse(&changed).unwrap().sha256
+        admitted.sha256(),
+        AdmittedBundle::parse(&changed).unwrap().sha256()
     );
 }
 
