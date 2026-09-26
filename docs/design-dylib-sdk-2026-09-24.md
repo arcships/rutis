@@ -15,7 +15,7 @@
 
 **非目标**
 
-- 三方插件、不可信代码、崩溃隔离、强制停止:走协议插件(#46–#48)。
+- 三方插件、不可信代码、崩溃隔离、强制停止:走[协议插件](design-protocol-plugins-2026-09-25.md)(#46–#48)。
 - 卸载旧代码(dlclose):初版不做,见 §九。
 - 状态迁移(Erlang `code_change`):不做,换代 = 干净的卸载 + 重装配(与 [research-hot-reload](research-hot-reload-2026-08-17.md) 一致)。
 - 不同 rustc 版本之间的兼容(abi_stable 路线):不做;SDK 变动过频时再单独评估。
