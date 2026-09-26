@@ -979,6 +979,19 @@ impl PreparedDeployment {
             native_services: deployment.native_services,
         })
     }
+    pub fn native_key(&self, service: &str) -> Result<rutis::TypeKey> {
+        if !self.native_services.contains_key(service) {
+            return Err(invalid("unknown native adapter service"));
+        }
+        Ok(service_key(
+            &self.id,
+            Some(&Provider::Native {
+                service: service.into(),
+            }),
+            "",
+            "",
+        ))
+    }
     pub fn export_key(&self, instance: &str, service: &str) -> Result<rutis::TypeKey> {
         let owner = self
             .instances

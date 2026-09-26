@@ -31,6 +31,12 @@ fn dependencies(
     }
 }
 pub fn prepare() -> PreparedDeployment {
+    prepare_mode(false)
+}
+pub fn prepare_native() -> PreparedDeployment {
+    prepare_mode(true)
+}
+fn prepare_mode(native_routes: bool) -> PreparedDeployment {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let root = std::env::temp_dir().join(format!(
         "rutis-native-runners-{}-{}",
@@ -164,6 +170,17 @@ pub fn prepare() -> PreparedDeployment {
         for suffix in ["cancel", "late", "missing"] {
             let name = format!("{language}-{suffix}");
             deployment["instances"][&name] = json!({"package":format!("{language}-consumer"),"group":language,"config":{"label":name},"routes":if suffix == "missing" { json!({}) } else { json!({"rpc":{"kind":"instance","instance":format!("{other}-provider"),"service":"rpc"}}) },"exports":[],"events":{}});
+        }
+    }
+    if native_routes {
+        deployment["native_services"]["host-rpc"] = json!({
+            "interface":"Database", "version":"1.0.0", "bundle_sha256":digest(include_bytes!("../../../../protocol/fixtures/rpc.bundle.json"))
+        });
+        deployment["native_services"]["host-missing"] =
+            deployment["native_services"]["host-rpc"].clone();
+        for runtime in ["rust", "node"] {
+            deployment["instances"][format!("{runtime}-consumer")]["routes"]["rpc"] =
+                json!({"kind":"native", "service":"host-rpc"});
         }
     }
     PreparedDeployment::prepare(&root, &serde_json::to_vec(&deployment).unwrap()).unwrap()

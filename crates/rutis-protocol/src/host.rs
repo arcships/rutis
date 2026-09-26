@@ -23,6 +23,8 @@ use std::{
     },
 };
 use tokio::sync::watch;
+mod native_adapter;
+pub use native_adapter::HostNative;
 
 fn fail(code: ErrorCode, message: impl Into<String>) -> ProtocolError {
     ProtocolError::new(code, "host_proxy", message)
@@ -42,6 +44,7 @@ struct GraphState {
     next: BTreeMap<ObjectIdentity, u64>,
     next_local: u64,
     slots: BTreeMap<String, Weak<Control>>,
+    native_slots: BTreeMap<String, Weak<native_adapter::NativeControl>>,
 }
 /// Construct proxies before RuntimeReady. Native injection keeps missing routes
 /// Pending; no member start waits for the rest of its runtime group.
@@ -237,15 +240,7 @@ impl HostGraph {
                 epoch: runtime.epoch,
                 activation: Sequence(*next),
             };
-            state.next_local = state
-                .next_local
-                .checked_add(1)
-                .ok_or_else(|| fail(ErrorCode::Unavailable, "Host SDK sequence exhausted"))?;
-            let local = Activation {
-                runtime: self.local_identity.runtime.clone(),
-                epoch: self.local_identity.epoch,
-                activation: Sequence(state.next_local),
-            };
+            let local = self.next_local(&mut state)?;
             (remote, local)
         };
         self.objects.reserve(instance, remote.clone())?;
@@ -257,6 +252,17 @@ impl HostGraph {
         }
         Ok((remote, local))
     }
+    fn next_local(&self, state: &mut GraphState) -> Result<Activation> {
+        state.next_local = state
+            .next_local
+            .checked_add(1)
+            .ok_or_else(|| fail(ErrorCode::Unavailable, "Host SDK sequence exhausted"))?;
+        Ok(Activation {
+            runtime: self.local_identity.runtime.clone(),
+            epoch: self.local_identity.epoch,
+            activation: Sequence(state.next_local),
+        })
+    }
     /// Both intents start before any native drain await. Process supervision is
     /// independent and must retain its snapshot through reaping and this join.
     pub async fn shutdown(&self) -> Result<()> {
@@ -267,6 +273,19 @@ impl HostGraph {
             .slots
             .values()
             .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>();
+        let adapters = self
+            .state
+            .lock()
+            .unwrap()
+            .native_slots
+            .values()
+            .filter_map(Weak::upgrade)
+            .map(|control| (control.owner().clone(), control))
+            .collect::<BTreeMap<_, _>>();
+        let adapter_stops = adapters
+            .values()
+            .map(|control| control.begin_stop())
             .collect::<Vec<_>>();
         let stops = controls
             .iter()
@@ -289,6 +308,11 @@ impl HostGraph {
                 if let Err(error) = stop.await {
                     errors.push(native(error));
                 }
+            }
+        }
+        for stop in adapter_stops {
+            if let Err(error) = stop.await {
+                errors.push(error);
             }
         }
         if !errors.is_empty() {
@@ -391,14 +415,20 @@ impl Control {
             revocations.push(self.graph.objects.host().close_member(&remote));
         }
         if let Some(local) = local {
-            self.graph.local.close_member(&local);
             revocations.push(self.graph.objects.host().close_member(&local));
         }
         if let Some(ctx) = ctx {
             ctx.refresh();
         }
         let actor = self.graph.local.clone();
+        let local = self.state.lock().unwrap().local.clone();
         tokio::spawn(async move {
+            // A Host-native owner gate can revoke consumers from inside this
+            // SDK actor's metadata check. Gates and broker authority are already
+            // sealed; acquire the actor lock only after that callback returns.
+            if let Some(local) = local {
+                actor.close_member(&local);
+            }
             let mut errors = Vec::new();
             if let Err(error) = stopping.await {
                 errors.push(error);
@@ -542,11 +572,8 @@ impl Control {
         };
         self.graph.local.reserve(local.clone(), self.gate.clone())?;
         self.hook(&remote)?;
-        let owners = self
-            .state
-            .lock()
-            .unwrap()
-            .captures
+        let captures = self.state.lock().unwrap().captures.clone();
+        let owners = captures
             .iter()
             .map(|root| root.delivery().map(|proof| proof.object.owner))
             .collect::<Result<Vec<_>>>()?;
@@ -665,9 +692,9 @@ impl Control {
                 "activate ACK differs from paired member",
             ));
         }
-        // Serialize final publication with close intent. No await or user code
-        // runs under this metadata lock; a lost gate can never be reopened.
-        let _state = self.state.lock().unwrap();
+        // Pairing identities are immutable. Each broker/SDK publish rejects a
+        // closed member, and the final native availability also checks the
+        // one-shot gate. Do not hold the pairing lock across SDK gate callbacks.
         if !self.open() || member.view().state().state != FiberState::Active {
             return Err(fail(
                 ErrorCode::Unavailable,
@@ -678,6 +705,12 @@ impl Control {
         self.graph.local.publish(&local)?;
         self.graph.objects.host().publish(&local)?;
         self.available.store(true, Ordering::SeqCst);
+        if !self.open() {
+            return Err(fail(
+                ErrorCode::Unavailable,
+                "Host proxy closed during publication",
+            ));
+        }
         ctx.refresh();
         Ok(table)
     }

@@ -3,7 +3,8 @@
 Rust `host::{HostGraph,HostProxy}` 把同一个冻结计划的 instance 变为实际 rutis
 fiber。`HostGraph` 使用 `DeploymentObjects` 的权威 broker，并为 Host 自己建立
 一条真实私有帧连接和 `RuntimeObjects` SDK；原生 TypeKey 下保存真实 `ObjectProxy`。
-它实现首代成员的发布与关闭，尚不拥有 Linux 进程监督、快照租约或恢复换代。
+它实现首代成员的发布与关闭，并可挂载实际 [Host 原生适配器](native-adapters.md)；
+尚不拥有 Linux 进程监督、快照租约或恢复换代。
 
 ## 挂载与发布
 
@@ -71,6 +72,6 @@ Closing 且无构造/import；丢弃首个 stop waiter 后，重复 stop 仍 joi
 确认旧 Ctx 和 availability 不恢复；断连封闭 missing-route Pending 代理。用例核对
 实际 native 清理计数与两个子进程正常退出，最后释放 snapshot。
 
-这些用例覆盖首代 instance 路由的 Host 发布与关闭。native adapter 的自动原生 slot
-安装、内部 child 对象的精确 creator Ctx、共享/单独完整拓扑、快照监督租约、更新
+这些用例覆盖首代 instance 路由的 Host 发布与关闭；另一个 native adapter 用例
+验证实际原生 slot 安装。内部 child 对象的精确 creator Ctx、共享/单独完整拓扑、快照监督租约、更新
 恢复、Linux descendant reaping、broker 事件、真实旧桥迁移与完整 T24 仍需验收。

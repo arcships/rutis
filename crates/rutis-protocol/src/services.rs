@@ -265,6 +265,28 @@ impl NativePorts {
         }
         Ok(())
     }
+    /// Native Host adapters expose a nonempty subset of the frozen catalog;
+    /// their other local dependencies remain the real plugin's native injects.
+    pub(crate) fn check_native(
+        &self,
+        catalog: &BTreeMap<String, CatalogService>,
+    ) -> Result<Vec<String>> {
+        if self.exports.is_empty() || !self.imports.is_empty() {
+            return Err(fail(
+                ErrorCode::InvalidParams,
+                "native adapter requires export-only ports",
+            ));
+        }
+        for (name, port) in &self.exports {
+            if catalog.get(name) != Some(&port.contract) {
+                return Err(fail(
+                    ErrorCode::InterfaceMismatch,
+                    "native adapter differs from frozen catalog",
+                ));
+            }
+        }
+        Ok(self.exports.keys().cloned().collect())
+    }
     pub fn required_keys(&self) -> Vec<TypeKey> {
         self.imports.values().map(|p| p.key.clone()).collect()
     }

@@ -2,8 +2,9 @@
 
 Rust `services::{Bundles,NativePorts,ServiceTable,StagedServices}` 与 TS `services.ts`
 把精确 bundle、wire 服务名与本地原生服务键绑定。当前实现是生产装配所需的 SDK
-基础；默认生命周期 driver 与首代 [HostProxy 原生图](host.md) 已通过实际冻结
-子进程验证。监督恢复和完整迁移仍待验收，不能用这些 API 或单元测试宣布 M2 完成。
+基础；默认生命周期 driver、首代 [HostProxy 原生图](host.md) 与
+[Host native export adapter](native-adapters.md) 已通过实际冻结子进程验证。
+监督恢复和完整迁移仍待验收，不能用这些 API 或单元测试宣布 M2 完成。
 
 ## 本地绑定与装载
 
@@ -78,8 +79,9 @@ Host 必须在 owner 确认 pin 后才暴露 grants，失败时撤销 broker 的
 并使 recipient SDK 记录完整拒绝 envelope，保留连续 receipt 前缀。
 
 同一原生对象表、同一 bundle 的已登记 dispatchers 可以合并到调度端；合并不签发
-grants，也不能扩展 view。跨 bundle 的生产 dispatcher registry 和 prepared route
-source 的宿主授权绑定尚需接入，不能忽略 source 来绕过授权。
+grants，也不能扩展 view。默认 driver 与 Host SDK 的 dispatcher registry 已按精确
+bundle 保存服务表，prepared route source 经独立 stage 和 broker 授权绑定。首代
+Host 图的完整多 bundle 拓扑仍需验证，不能忽略 source 来绕过授权。
 
 ## 当前验证边界
 
@@ -94,6 +96,7 @@ TS `tests/services.test.ts` 使用发行 Cordis、真实 JS 对象和生成 adap
 Host broker；不能把这些测试计作私有 IPC 的完整命名服务发布验收。
 
 两端消费同一 `services-corpus.json` 的 12 个合法/非法服务表用例。
-既有 `objects_ipc` 继续提供真实私有 fd 的跨语言对象调用证据。完整 HostActive
-发布、原生 Pending 业务图、internal child 对象精确 creator Ctx、迁移/恢复和
-T01–T24 全部运行时证据仍未完成，原设计范围保持不变。
+既有 `objects_ipc` 继续提供真实私有 fd 的跨语言对象调用证据。
+`native_runner_ipc` 已验证首代 instance/native HostActive 发布与原生 Pending 业务图。
+internal child 对象精确 creator Ctx、完整拓扑、迁移/恢复和 T01–T24 全部运行时
+证据仍未完成，原设计范围保持不变。

@@ -42,6 +42,7 @@ pub struct Endpoint {
     imports: Imports,
     native: Option<rutis::Ctx>,
     exporter: GraphExporter,
+    controls: Mutex<()>,
     scopes: AtomicU64,
     calls: AtomicU64,
 }
@@ -150,6 +151,7 @@ impl Network {
                 exports.clone(),
                 self.bundle.bundle().id.clone(),
             ),
+            controls: Mutex::new(()),
             scopes: AtomicU64::new(1),
             calls: AtomicU64::new(0),
         });
@@ -179,6 +181,10 @@ impl Network {
             .ok_or_else(|| fail(ErrorCode::StaleObject, "owner unavailable"))
     }
     fn flush(&self, recipient: &Endpoint) {
+        // Queue take and confirmation share one receiver-level barrier. Another
+        // thread can observe an empty queue after a prior flush took its Accept;
+        // it must still wait for that flush's broker and native pin updates.
+        let _controls = recipient.controls.lock().unwrap();
         for control in recipient.imports.take_controls() {
             match control {
                 ImportControl::Accept { id, token } => {

@@ -1,5 +1,5 @@
-//! Default service drivers in actual Rust/Node children, loaded from a frozen
-//! four-package plan. Host proxy publication and OS recovery remain separate.
+//! Default service drivers and Host instance/native publication in actual
+//! Rust/Node children loaded from a frozen plan. OS recovery remains separate.
 #![cfg(target_os = "linux")]
 #[path = "support/native_plan.rs"]
 mod native_plan;
@@ -162,6 +162,8 @@ struct Native {
     role: &'static str,
     keys: Vec<TypeKey>,
     label: String,
+    cleanup: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    remove: Option<Arc<Mutex<Option<rutis::Disposer>>>>,
 }
 impl Plugin for Native {
     fn name(&self) -> &str {
@@ -176,9 +178,14 @@ impl Plugin for Native {
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let label = self.label.clone();
+            let cleanup = self.cleanup.clone();
             ctx.effect(move || {
                 Effect::Disposer(Box::new(move || {
-                    CLEANED.fetch_add(1, Ordering::SeqCst);
+                    if let Some(cleanup) = cleanup {
+                        cleanup.fetch_add(1, Ordering::SeqCst);
+                    } else {
+                        CLEANED.fetch_add(1, Ordering::SeqCst);
+                    }
                     report(json!({"cleaned":label}));
                     Ok(())
                 }))
@@ -194,7 +201,11 @@ impl Plugin for Native {
                         creator: ctx.clone(),
                         session,
                     })));
-                ctx.provide_as(TypeKey::of::<dyn InterfaceDatabaseService>(), database)?;
+                let registration =
+                    ctx.provide_as(TypeKey::of::<dyn InterfaceDatabaseService>(), database)?;
+                if let Some(remove) = &self.remove {
+                    *remove.lock().unwrap() = Some(registration);
+                }
             } else if self.role == "consumer" {
                 let database = ctx.require::<InterfaceDatabaseClient>()?;
                 let first = database
@@ -255,6 +266,8 @@ impl PluginFactory<Value> for Factory {
             role: self.role,
             keys: self.keys.clone(),
             label: config["label"].as_str().unwrap().into(),
+            cleanup: None,
+            remove: None,
         }))
     }
 }
@@ -1118,6 +1131,260 @@ async fn native_host_graph_waits_for_activate_ack_refreshes_real_keys_and_closes
         drop(rust_provider);
         drop(rust_consumer);
         drop(node_provider);
+        drop(node_consumer);
+        drop(graph);
+        snapshot.cleanup().unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn frozen_native_adapter_installs_real_keys_and_service_loss_closes_both_runtime_consumers() {
+    use rutis::FiberState;
+    use rutis_protocol::{host::HostGraph, lifecycle::publish_ready};
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let plan = native_plan::prepare_native();
+        let snapshot = Snapshot::materialize(&plan).unwrap();
+        let objects = DeploymentObjects::new(plan.clone()).unwrap();
+        let host = objects.host();
+        let graph = HostGraph::new(objects, identity("host")).unwrap();
+        let root = Ctx::root().unwrap();
+        let bundles = Bundles::admit([RPC.to_vec()]).unwrap();
+        let ready_key = TypeKey::keyed::<String>("host-native-ready");
+        let cleaned = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let remove = Arc::new(Mutex::new(None));
+        let plugin = || Native {
+            role: "provider",
+            keys: vec![ready_key.clone()],
+            label: "host-native".into(),
+            cleanup: Some(cleaned.clone()),
+            remove: Some(remove.clone()),
+        };
+        assert_eq!(
+            graph
+                .mount_native(&root, Arc::new(NativePorts::default()), plugin())
+                .err()
+                .unwrap()
+                .code,
+            ErrorCode::InvalidParams
+        );
+        let mut wrong = NativePorts::default();
+        wrong
+            .provide::<dyn InterfaceDatabaseService, InterfaceConnectionClient>(
+                "host-rpc",
+                TypeKey::of::<dyn InterfaceDatabaseService>(),
+                &bundles,
+                exportInterfaceDatabase,
+            )
+            .unwrap();
+        assert_eq!(
+            graph
+                .mount_native(&root, Arc::new(wrong), plugin())
+                .err()
+                .unwrap()
+                .code,
+            ErrorCode::InterfaceMismatch
+        );
+        assert_eq!(cleaned.load(Ordering::SeqCst), 0);
+        assert!(remove.lock().unwrap().is_none());
+        let mut ports = NativePorts::default();
+        ports
+            .provide::<dyn InterfaceDatabaseService, InterfaceDatabaseClient>(
+                "host-rpc",
+                TypeKey::of::<dyn InterfaceDatabaseService>(),
+                &bundles,
+                exportInterfaceDatabase,
+            )
+            .unwrap();
+        let ports = Arc::new(ports);
+        let adapter = graph.mount_native(&root, ports.clone(), plugin()).unwrap();
+        assert_eq!(adapter.native().view().state().state, FiberState::Pending);
+        assert_eq!(
+            graph
+                .mount_native(&root, ports.clone(), plugin())
+                .err()
+                .unwrap()
+                .code,
+            ErrorCode::ScopeClosed
+        );
+        assert!(plan.native_key("unknown-native").is_err());
+        let key = plan.native_key("host-rpc").unwrap();
+        for instance in ["rust-consumer", "node-consumer"] {
+            assert_eq!(plan.instances()[instance].routes()["rpc"].key(), &key);
+        }
+        let mut rust = Process::launch(&host, "rust", &snapshot.groups()["rust"], Arc::default());
+        let mut node = Process::launch(&host, "node", &snapshot.groups()["node"], Arc::default());
+        let rust_launch = Hello::prepared(
+            &plan,
+            "rust",
+            &snapshot.groups()["rust"],
+            "rust".into(),
+            Sequence(1),
+        )
+        .unwrap();
+        let node_launch = Hello::prepared(
+            &plan,
+            "node",
+            &snapshot.groups()["node"],
+            "node".into(),
+            Sequence(1),
+        )
+        .unwrap();
+        let rust_provider = graph
+            .mount(&root, "rust-provider", rust_launch.identity.clone())
+            .unwrap();
+        let node_provider = graph
+            .mount(&root, "node-provider", node_launch.identity.clone())
+            .unwrap();
+        let rust_consumer = graph
+            .mount(&root, "rust-consumer", rust_launch.identity.clone())
+            .unwrap();
+        let node_consumer = graph
+            .mount(&root, "node-consumer", node_launch.identity.clone())
+            .unwrap();
+        hello(&rust.peer, &rust_launch).await.unwrap();
+        hello(&node.peer, &node_launch).await.unwrap();
+        let rust_ready = publish_ready(&root, rust_launch.identity, rust.peer.clone()).unwrap();
+        let node_ready = publish_ready(&root, node_launch.identity, node.peer.clone()).unwrap();
+        rust_provider.ready().await.unwrap();
+        node_provider.ready().await.unwrap();
+        rust.record("constructed", "provider").await;
+        node.record("loaded", "node-provider").await;
+        for consumer in [&rust_consumer, &node_consumer] {
+            assert_eq!(consumer.native().view().state().state, FiberState::Pending);
+            assert!(consumer.activation().is_none());
+        }
+        assert!(root
+            .get_as::<rutis_protocol::imports::ObjectProxy>(key.clone())
+            .is_none());
+        let native_ready = root
+            .provide_as(ready_key.clone(), Arc::new("ready".to_owned()))
+            .unwrap();
+        adapter.ready().await.unwrap();
+        rust_consumer.ready().await.unwrap();
+        node_consumer.ready().await.unwrap();
+        rust.record("constructed", "consumer").await;
+        rust.record("exercised", "rust-consumer").await;
+        node.record("loaded", "node-consumer").await;
+        node.record("exercised", "node-consumer").await;
+        let slot = root
+            .get_as::<rutis_protocol::imports::ObjectProxy>(key.clone())
+            .unwrap();
+        let rust_capture = rust_consumer.captured();
+        let node_capture = node_consumer.captured();
+        assert!(Arc::ptr_eq(&rust_capture[0], &slot));
+        assert!(Arc::ptr_eq(&node_capture[0], &slot));
+        assert_eq!(&slot.delivery().unwrap().object.owner, adapter.activation());
+        let database = adapter
+            .service::<InterfaceDatabaseClient>("host-rpc")
+            .unwrap();
+        let first = database
+            .connect(InterfaceDatabaseMethod0Params {
+                name: "host-sdk".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            first
+                .query(InterfaceConnectionMethod0Params {
+                    sql: "native-ctx".into()
+                })
+                .await
+                .unwrap()[0]["sql"],
+            "native-ctx"
+        );
+        assert!(database.inspect(first.clone()).await.unwrap());
+        let failed_cleanup = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut missing_ports = NativePorts::default();
+        missing_ports
+            .provide::<dyn InterfaceDatabaseService, InterfaceDatabaseClient>(
+                "host-missing",
+                TypeKey::of::<dyn InterfaceDatabaseService>(),
+                &bundles,
+                exportInterfaceDatabase,
+            )
+            .unwrap();
+        let missing = graph
+            .mount_native(
+                &root,
+                Arc::new(missing_ports),
+                Native {
+                    role: "provider",
+                    keys: vec![],
+                    label: "missing".into(),
+                    cleanup: Some(failed_cleanup.clone()),
+                    remove: None,
+                },
+            )
+            .unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(5), missing.ready())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unavailable);
+        assert_eq!(failed_cleanup.load(Ordering::SeqCst), 1);
+        assert_eq!(missing.native().view().state().state, FiberState::Disposed);
+        assert!(root
+            .get_as::<rutis_protocol::imports::ObjectProxy>(
+                plan.native_key("host-missing").unwrap()
+            )
+            .is_none());
+        assert!(adapter.is_available());
+        let old_native = adapter.native().native_context().unwrap();
+        let old_rust = rust_consumer.native().native_context().unwrap();
+        let old_node = node_consumer.native().native_context().unwrap();
+        let removing = remove.lock().unwrap().take().unwrap().dispose();
+        removing.await.unwrap();
+        assert!(
+            !adapter.is_available(),
+            "completed native removal closes publication at its admission check"
+        );
+        assert!(old_native
+            .effect(|| panic!("old native owner entered effect"))
+            .is_err());
+        // The native gate's weak hook seals Host authority and captured
+        // consumers synchronously; SDK scope draining is independent.
+        assert!(slot.delivery().is_err());
+        assert!(!rust_consumer.is_available());
+        assert!(!node_consumer.is_available());
+        assert!(old_rust
+            .effect(|| panic!("native-root loss admitted a Rust Host effect"))
+            .is_err());
+        assert!(old_node
+            .effect(|| panic!("native-root loss admitted a Node Host effect"))
+            .is_err());
+        adapter.stop().await.unwrap();
+        for (consumer, old) in [(&rust_consumer, old_rust), (&node_consumer, old_node)] {
+            assert!(!consumer.is_available());
+            assert!(old
+                .effect(|| panic!("native-route consumer entered effect"))
+                .is_err());
+            consumer.stop().await.unwrap();
+        }
+        assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+        assert!(first
+            .query(InterfaceConnectionMethod0Params { sql: "old".into() })
+            .await
+            .is_err());
+        assert!(root
+            .get_as::<rutis_protocol::imports::ObjectProxy>(key)
+            .is_none());
+        assert!(rust_provider.is_available());
+        assert!(node_provider.is_available());
+        assert!(graph.mount_native(&root, ports, plugin()).is_err());
+        graph.shutdown().await.unwrap();
+        root.shutdown().await.unwrap();
+        drop(native_ready);
+        drop(rust_ready);
+        drop(node_ready);
+        rust.finish().await;
+        node.finish().await;
+        drop(adapter);
+        drop(missing);
+        drop(rust_provider);
+        drop(node_provider);
+        drop(rust_consumer);
         drop(node_consumer);
         drop(graph);
         snapshot.cleanup().unwrap();

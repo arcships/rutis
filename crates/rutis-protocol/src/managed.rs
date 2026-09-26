@@ -17,6 +17,8 @@ struct GateState {
     closed: bool,
     tokens: Vec<CancellationToken>,
     native: Vec<Weak<FiberView>>,
+    hooks_fired: bool,
+    hooks: Vec<Weak<dyn Fn() + Send + Sync>>,
 }
 
 /// Admission for an activation and its necessary exports. Never reopened.
@@ -40,11 +42,31 @@ impl ActivationGate {
         !closed
     }
 
+    pub(crate) fn on_close(&self, hook: &Arc<dyn Fn() + Send + Sync>) {
+        let closed = {
+            let mut state = self.0.lock().unwrap();
+            state.hooks.retain(|hook| hook.strong_count() != 0);
+            state.hooks.push(Arc::downgrade(hook));
+            state.closed
+        };
+        if closed {
+            hook();
+        }
+    }
     pub fn close(&self) {
-        let (tokens, native) = {
+        let (tokens, native, hooks) = {
             let mut state = self.0.lock().unwrap();
             state.closed = true;
-            (state.tokens.clone(), state.native.clone())
+            let hooks = if state.hooks_fired {
+                Vec::new()
+            } else {
+                state.hooks_fired = true;
+                std::mem::take(&mut state.hooks)
+                    .into_iter()
+                    .filter_map(|hook| hook.upgrade())
+                    .collect()
+            };
+            (state.tokens.clone(), state.native.clone(), hooks)
         };
         // Signal existing execution before closing native registration below.
         for token in tokens {
@@ -57,6 +79,11 @@ impl ActivationGate {
         for view in native.into_iter().filter_map(|view| view.upgrade()) {
             view.seal_effects();
             drop(view.shutdown());
+        }
+        // SDK hooks seal Host authority synchronously. No gate or native root
+        // admission lock is held; they must not acquire the SDK actor's lock.
+        for hook in hooks {
+            hook();
         }
     }
 
@@ -280,6 +307,14 @@ impl ManagedActivation {
         plugin: impl Plugin,
         gate: ActivationGate,
     ) -> Result<Self, CordisError> {
+        Self::mount_enter(parent, plugin, gate, None)
+    }
+    pub(crate) fn mount_enter(
+        parent: &Ctx,
+        plugin: impl Plugin,
+        gate: ActivationGate,
+        enter: Option<NativeEnter>,
+    ) -> Result<Self, CordisError> {
         let mut injects = plugin.injects().to_vec();
         Self::mount_native(parent, gate, move |isolated, gate, key, context| {
             injects.push(key);
@@ -288,7 +323,7 @@ impl ManagedActivation {
                 gate,
                 injects,
                 context,
-                enter: None,
+                enter,
             })
         })
     }

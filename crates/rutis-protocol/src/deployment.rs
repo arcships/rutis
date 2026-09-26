@@ -22,11 +22,16 @@ struct Member {
     table: Option<ServiceTable>,
     issued: bool,
 }
+struct NativeMember {
+    activation: Activation,
+    table: ServiceTable,
+    mirrored: bool,
+}
 #[derive(Default)]
 struct State {
     members: BTreeMap<String, Member>,
     groups: BTreeMap<String, RuntimeIdentity>,
-    native: BTreeMap<String, (Activation, ServiceTable)>,
+    native: BTreeMap<String, NativeMember>,
 }
 /// Retains a single immutable deployment and one initial activation per member.
 /// Recovery replacement requires the later supervisor's cleanup/reaping proof;
@@ -90,13 +95,18 @@ impl DeploymentObjects {
                 )
             }
             Some(Provider::Native { service }) => {
-                let (owner, table) = state.native.get(service).ok_or_else(|| {
+                let member = state.native.get(service).ok_or_else(|| {
                     fail(
                         ErrorCode::Unavailable,
                         "captured native provider is not staged",
                     )
                 })?;
-                (owner, table, service, None)
+                (
+                    &member.activation,
+                    &member.table,
+                    service,
+                    member.mirrored.then(|| self.native_mirror_source(service)),
+                )
             }
             None => return Err(fail(ErrorCode::Unavailable, "required route is missing")),
         };
@@ -135,6 +145,53 @@ impl DeploymentObjects {
                 .as_bytes()
             )
         )
+    }
+    fn native_mirror_source(&self, service: &str) -> String {
+        format!(
+            "route.{}",
+            crate::prepare::digest(
+                crate::json::canonical(&serde_json::json!([
+                    "host-native-mirror",
+                    self.plan.sha256(),
+                    service
+                ]))
+                .as_bytes()
+            )
+        )
+    }
+    pub(crate) async fn mirror_native(
+        self: &Arc<Self>,
+        owner: &Activation,
+        names: &[String],
+        recipient: Activation,
+    ) -> Result<RootDelivery> {
+        let roots = {
+            let state = self.state.lock().unwrap();
+            names
+                .iter()
+                .map(|name| {
+                    let member = state
+                        .native
+                        .get(name)
+                        .ok_or_else(|| fail(ErrorCode::Unavailable, "native mirror not staged"))?;
+                    if &member.activation != owner || !member.mirrored {
+                        return Err(fail(
+                            ErrorCode::CapabilityDenied,
+                            "native mirror owner differs",
+                        ));
+                    }
+                    Ok(RoutedRoot {
+                        name: name.clone(),
+                        service: name.clone(),
+                        owner: owner.clone(),
+                        source: self.native_mirror_source(name),
+                        contract: self.plan.native_services()[name].clone(),
+                        original: member.table.services[name].graph.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        self.host.mirror_routes(roots, recipient).await
     }
     pub(crate) async fn mirror(
         self: &Arc<Self>,
@@ -241,6 +298,12 @@ impl DeploymentObjects {
     /// Explicit SDK registration of Host native adapters. Only services in the
     /// prepared native catalog are eligible; this is not a third-party proxy.
     pub fn stage_native(&self, table: ServiceTable) -> Result<()> {
+        self.stage_native_mode(table, false)
+    }
+    pub(crate) fn stage_native_mirrored(&self, table: ServiceTable) -> Result<()> {
+        self.stage_native_mode(table, true)
+    }
+    fn stage_native_mode(&self, table: ServiceTable, mirrored: bool) -> Result<()> {
         let mut contracts = BTreeMap::<String, CatalogService>::new();
         for name in table.services.keys() {
             contracts.insert(
@@ -267,9 +330,14 @@ impl DeploymentObjects {
             ));
         }
         for name in table.services.keys() {
-            state
-                .native
-                .insert(name.clone(), (table.activation.clone(), table.clone()));
+            state.native.insert(
+                name.clone(),
+                NativeMember {
+                    activation: table.activation.clone(),
+                    table: table.clone(),
+                    mirrored,
+                },
+            );
         }
         Ok(())
     }
@@ -331,10 +399,10 @@ impl DeploymentObjects {
                         (&member.activation, table, service)
                     }
                     Some(Provider::Native { service }) => {
-                        let (owner, table) = state.native.get(service).ok_or_else(|| {
+                        let member = state.native.get(service).ok_or_else(|| {
                             fail(ErrorCode::Unavailable, "native adapter not staged")
                         })?;
-                        (owner, table, service)
+                        (&member.activation, &member.table, service)
                     }
                     None => {
                         return Err(fail(

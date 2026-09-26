@@ -6,7 +6,7 @@
 
 Rust/Node 私有连接的 hello/start/activate/stop、native RuntimeReady 与发布门控见[生命周期控制](lifecycle.md)。通用 Node 入口使用冻结快照的启动 catalog 和 bundle 原字节；启用服务传输的默认驱动支持 object.scope/callback.borrow，事件能力在 hello 拒绝。
 
-命名原生端口、生成客户端注入、跨 bundle 整表 broker 事务和 owner pin 确认见[服务绑定](services.md)。[私有 session](session.md) 已接入权威 broker 和 named roots；[Host 原生图](host.md) 在实际冻结子进程中验证 RuntimeReady、原生 Active、activate ACK 与 availability/refresh 的发布顺序及同步关闭。
+命名原生端口、生成客户端注入、跨 bundle 整表 broker 事务和 owner pin 确认见[服务绑定](services.md)。[私有 session](session.md) 已接入权威 broker 和 named roots；[Host 原生图](host.md) 在实际冻结子进程中验证发布顺序及同步关闭，[原生适配器](native-adapters.md) 把 Host 实际插件接到 frozen native service keys。
 
 [冻结根交付](deployment.md) 从 prepared routes 捕获整张 required 表，复用 owner 保留清单，为多个消费者建立独立 source views，并跨 provider 原子签发；仍需接入完整 native Host 发布图。
 

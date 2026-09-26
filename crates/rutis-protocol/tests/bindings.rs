@@ -486,27 +486,32 @@ async fn closing_the_owner_rejects_a_late_value_only_result_without_aborting_exe
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_generated_calls_allocate_and_open_scopes_in_broker_order() {
     let setup = setup();
-    let barrier = Arc::new(tokio::sync::Barrier::new(17));
-    let mut tasks = Vec::new();
-    for _ in 0..16 {
-        let client = setup.client.clone();
-        let barrier = barrier.clone();
-        tasks.push(tokio::spawn(async move {
-            barrier.wait().await;
-            let connection = connect(&client).await;
-            connection
-                .query(InterfaceConnectionMethod0Params {
-                    sql: "concurrent".into(),
-                })
-                .await
-                .unwrap()
-        }));
+    for _ in 0..8 {
+        let barrier = Arc::new(tokio::sync::Barrier::new(17));
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let client = setup.client.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                let connection = connect(&client).await;
+                connection
+                    .query(InterfaceConnectionMethod0Params {
+                        sql: "concurrent".into(),
+                    })
+                    .await
+                    .unwrap()
+            }));
+        }
+        barrier.wait().await;
+        for task in tasks {
+            task.await.unwrap();
+        }
     }
-    barrier.wait().await;
-    for task in tasks {
-        task.await.unwrap();
-    }
-    assert_eq!(setup.database.connection.queries.load(Ordering::SeqCst), 16);
+    assert_eq!(
+        setup.database.connection.queries.load(Ordering::SeqCst),
+        128
+    );
     finish(setup).await;
 }
 

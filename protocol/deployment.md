@@ -24,8 +24,10 @@ Rust `deployment::DeploymentObjects` 持有完整 `PreparedDeployment`，从冻�
 
 native adapter 使用 `stage_native` 显式登记实际 own 根；每个名称必须在 frozen
 `native_services` 中且精确契约一致。登记不自动 reserve 或 publish owner，也不把
-已经导入的第三方 facade 当作 native-owned 对象。生成客户端的 native TypeKey /
-Cordis slot 安装与最终 Host 图仍由适配层完成。
+已经导入的第三方 facade 当作 native-owned 对象。高层
+`HostGraph.mount_native` 挂载实际插件、安装 frozen native key 的 ObjectProxy 并确认
+原生发布，见 [Host 原生适配器](native-adapters.md)。低层 stage_native 本身不提供
+这些装载或发布证据。
 
 ## 保留清单和权限视图
 
