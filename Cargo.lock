@@ -2847,6 +2847,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rutis-protocol"
+version = "0.1.0"
+dependencies = [
+ "rutis",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rutis-sdk"
 version = "0.1.0"
 dependencies = [

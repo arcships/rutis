@@ -17,6 +17,22 @@ permissions:
   contents: read
 
 jobs:
+  protocol-ts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: protocol/ts/package-lock.json
+      - name: locked Cordis adapter and protocol contracts
+        working-directory: protocol/ts
+        run: |
+          npm ci --ignore-scripts
+          npm run check
+          npm test
+
   test:
     runs-on: ubuntu-24.04
     steps:
