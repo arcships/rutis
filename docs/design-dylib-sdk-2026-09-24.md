@@ -114,7 +114,7 @@ SDK 的 `build.rs` 计算 `SDK_ID`:
 ```
 sha256(
   sdk 版本号, rustc -vV 全文, 目标三元组,
-  Cargo.lock 中 SDK 子依赖树(包名+版本+来源+checksum),
+  发布构建的 Cargo.lock 中 SDK 子依赖树(包名+版本+来源+checksum),
   启用的 features, profile 中影响 ABI 的项(panic、debug-assertions、overflow-checks;opt-level、debuginfo 不计),
   规范化后的 RUSTFLAGS(见下)
 )
@@ -126,6 +126,8 @@ sha256(
 两者不等即拒绝(宿主一侧见 §5.4,插件一侧见 §7.1)。原型实验 (a) 使用人工指定的身份被这一层拦下,
 不代表以上输入能识别任意源码变化:同版本的 SDK 或 path 依赖源码改变、其他输入不变时,L1 可以相同。
 L1 用于配置诊断;产物是否一致必须由 L2 确认,插件也必须内嵌 L2,不能只信任外部清单。
+发布脚本以 `RUTIS_SDK_LOCKFILE` 显式指定实际解析的锁文件;Cargo 不向依赖 build script 提供调用方工作区的锁文件路径。
+未指定时 SDK 仍可编译(例如已发布 crate 的普通下游构建),但 L1 不包含锁文件依赖树,不能用该产物冒充发布 SDK。
 
 **输入必须与机器无关。** `SDK_ID` 会被编译进 SDK,任何机器相关的输入都会同时改变 L1 和 L2 的结果,破坏可复现构建。
 例如两台机器分别用 `--remap-path-prefix=/build/a=/target` 和 `--remap-path-prefix=/build/b=/target`,原始 RUSTFLAGS
@@ -134,7 +136,7 @@ L1 用于配置诊断;产物是否一致必须由 L2 确认,插件也必须内�
 - 读取 `CARGO_ENCODED_RUSTFLAGS`,只保留影响代码生成或类型布局的项:`-C target-cpu`、`-C target-feature`、
   `-C panic`、`-C debug-assertions`、`-C overflow-checks`、`--cfg`、`-Z` 系列;排序后参与哈希。
 - 明确忽略:`--remap-path-prefix`、`-L`、`-l`、`-C link-arg(s)`、`-C linker`、`-C debuginfo`、`-C opt-level`、
-  `-C incremental`、`-C codegen-units` 等只影响路径、链接或优化而不影响布局的项。
+  `-C incremental`、`-C codegen-units` 等只影响路径、链接或优化的项,以及 `-D warnings`、`--cap-lints` 等 lint 控制项。
 - 遇到不在两张表中的项,`build.rs` 直接报错,要求先归类,避免新参数悄悄进入或漏出身份。
 - `build.rs` 为以上输入声明 `rerun-if-env-changed`。
 
@@ -199,8 +201,9 @@ CARGO_HOME、target 目录、用户名)尚未验证,见 §十一 V1;V1 必须用
 
 1. 启动器校验同一发布目录中的宿主、SDK 和 libstd,任一不匹配即退出,不执行宿主。
 2. 校验通过才执行宿主。发布目录必须可信且在校验到进程运行结束期间保持不可变;更新使用新的版本目录,
-   禁止原地覆盖。启动器固定宿主绝对路径并控制动态库搜索环境,清除 `LD_LIBRARY_PATH`、`LD_PRELOAD`、
-   `LD_AUDIT` 等覆盖项;打包检查确保宿主和 SDK 的动态依赖实际解析到已验证的 SDK/libstd,
+   禁止原地覆盖。启动器固定宿主绝对路径并控制动态库搜索环境,执行宿主时暂时清除 `LD_LIBRARY_PATH`、`LD_PRELOAD`、
+   `LD_AUDIT` 等覆盖项;宿主在启动运行时线程前恢复调用者原有的 `LD_*`,避免子进程继承发布目录搜索路径。
+   打包检查确保宿主和 SDK 的动态依赖实际解析到已验证的 SDK/libstd,
    不落到工作目录或其他安装版本。平台对应的加载路径约束必须分别验证(§十一)。
 3. 宿主在创建 root 和加载插件前,经 C ABI `rutis_sdk_boot_id(buf, cap)` 核对 L1,
    并从实际加载模块反查 SDK 文件核对 L2。这是启动后的交叉检查,不是启动期 ABI 安全边界。
@@ -260,7 +263,7 @@ lock_sha256 = "…"             # 插件 Cargo.lock 全文
    (`.init`/`.init_array`),没有这一步,一个 `library_sha256` 与文件一致、但 `sdk.id` 错标为当前 SDK 的包,
    会在运行期核对(第 5 步)之前执行初始化代码,违背 §一 目标 3 的“加载前拒绝”。
 3. **复制到内容寻址缓存**:`<cache>/<library_sha256>/lib<name>.so`,复制后重新计算哈希并比对。所有平台都这样做:
-   Windows 避免文件锁,Linux 避免原地覆盖已映射的 .so 导致 SIGBUS;同一哈希只复制一次。
+   Windows 避免文件锁,Linux 避免原地覆盖已映射的 .so 导致 SIGBUS;同一哈希已有有效缓存时复用,损坏时经临时文件原子替换。
 4. **加载库**:`dlopen(path, RTLD_NOW | RTLD_LOCAL)`。`RTLD_NOW` 让未解析符号在此刻失败而不是在调用时崩溃;
    `RTLD_LOCAL` 使同一插件的多个版本可以共存(原型实测 v1/v2 同名 crate 同时加载,互不串线)。此时第 2 步已
    确认二进制自述身份兼容,初始化代码的执行不再违背“加载前拒绝”。

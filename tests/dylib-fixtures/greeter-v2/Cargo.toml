@@ -12,6 +12,7 @@ doctest = false
 [features]
 export = []
 changed_identity = []
+fail_once = []
 
 [dependencies]
 rutis-sdk = { path = "../../../crates/rutis-sdk" }

@@ -234,6 +234,18 @@ impl Ctx {
         Ok(())
     }
 
+    /// Non-instance event dispatch is not a registration. Preserve its
+    /// historical observer behavior for an old context while its fiber is
+    /// active again; instance dispatch still uses registration_preflight.
+    pub(crate) fn dispatch_preflight(&self) -> Result<(), CordisError> {
+        self.registration_open()?;
+        let fiber = self.0.fiber.upgrade().ok_or(CordisError::InactiveEffect)?;
+        if matches!(fiber.state(), FiberState::Unloading | FiberState::Disposed) {
+            return Err(CordisError::InactiveEffect);
+        }
+        Ok(())
+    }
+
     pub fn handle(&self) -> &Handle {
         &self.0.shared.handle
     }

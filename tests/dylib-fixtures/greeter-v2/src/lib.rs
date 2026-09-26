@@ -46,9 +46,32 @@ impl Plugin for Greeter {
         })
     }
 }
-#[cfg(feature = "export")]
-#[cfg(not(feature = "changed_identity"))]
+#[cfg(all(
+    feature = "export",
+    not(any(feature = "changed_identity", feature = "fail_once"))
+))]
 rutis_sdk::export_plugin! { id: "greeter", factory: Factory }
 
-#[cfg(all(feature = "export", feature = "changed_identity"))]
+#[cfg(all(
+    feature = "export",
+    feature = "changed_identity",
+    not(feature = "fail_once")
+))]
 rutis_sdk::export_plugin! { id: "other-greeter", factory: Factory }
+
+#[cfg(all(
+    feature = "export",
+    feature = "fail_once",
+    not(feature = "changed_identity")
+))]
+rutis_sdk::export_plugin! { id: "greeter", factory: factory_once() }
+
+#[cfg(feature = "fail_once")]
+fn factory_once() -> Factory {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+    if ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 0 {
+        panic!("first factory entry attempt fails");
+    }
+    Factory
+}

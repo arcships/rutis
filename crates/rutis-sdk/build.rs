@@ -6,8 +6,13 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    let lock = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../Cargo.lock");
-    println!("cargo:rerun-if-changed={}", lock.display());
+    // Cargo does not expose the invoking workspace lockfile to a dependency's
+    // build script. Release tooling passes the actual resolver lock explicitly;
+    // ordinary downstream builds can still compile without one.
+    let lock = env::var_os("RUTIS_SDK_LOCKFILE").map(PathBuf::from);
+    if let Some(lock) = &lock {
+        println!("cargo:rerun-if-changed={}", lock.display());
+    }
     for key in [
         "CARGO_ENCODED_RUSTFLAGS",
         "RUSTFLAGS",
@@ -17,6 +22,7 @@ fn main() {
         "PROFILE",
         "TARGET",
         "RUSTC",
+        "RUTIS_SDK_LOCKFILE",
     ] {
         println!("cargo:rerun-if-env-changed={key}");
     }
@@ -37,7 +43,7 @@ fn main() {
         })
         .collect::<Vec<_>>();
     features.sort();
-    let packages = locked_sdk_tree(&lock);
+    let packages = lock.as_ref().map(locked_sdk_tree).unwrap_or_default();
     let mut digest = Sha256::new();
     for field in [
         env!("CARGO_PKG_VERSION").to_string(),
@@ -75,6 +81,40 @@ fn canonical_rustflags() -> Vec<String> {
     let mut i = 0;
     while i < args.len() {
         let arg = args[i];
+        if matches!(
+            arg,
+            "-A" | "-W"
+                | "-D"
+                | "-F"
+                | "--allow"
+                | "--warn"
+                | "--deny"
+                | "--forbid"
+                | "--cap-lints"
+                | "--force-warn"
+        ) {
+            i += 2;
+            assert!(i <= args.len(), "missing lint value for {arg}");
+            continue;
+        }
+        if [
+            "-A",
+            "-W",
+            "-D",
+            "-F",
+            "--allow=",
+            "--warn=",
+            "--deny=",
+            "--forbid=",
+            "--cap-lints=",
+            "--force-warn=",
+        ]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
+        {
+            i += 1;
+            continue;
+        }
         let (kind, value) = if matches!(
             arg,
             "-C" | "--cfg" | "-Z" | "-L" | "-l" | "--remap-path-prefix"

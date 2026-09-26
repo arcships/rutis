@@ -93,6 +93,7 @@ def build(manifest: Path, target_dir: Path, sdk_hash: str, flags: str, features:
     env = os.environ.copy()
     env["CARGO_TARGET_DIR"] = str(target_dir)
     env["RUSTFLAGS"] = flags
+    env["RUTIS_SDK_LOCKFILE"] = str(lock_path(manifest))
     env["RUTIS_SDK_ARTIFACT_SHA256"] = "0" * 64
     subprocess.run(command, env=env, check=True)
     sdk_file = target_dir / "release/librutis_sdk.so"

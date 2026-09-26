@@ -40,8 +40,82 @@ OPTIONS:
         --sdk-info        print dylib SDK build identity [dylib-plugins build only]
 ";
 
+#[cfg(feature = "dylib-plugins")]
+fn main() {
+    // The launcher clears LD_* while starting this host. Restore the caller's
+    // values before starting runtime threads so child commands inherit them.
+    restore_bundle_environment();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime")
+        .block_on(cli_main());
+}
+
+#[cfg(not(feature = "dylib-plugins"))]
 #[tokio::main]
 async fn main() {
+    cli_main().await;
+}
+
+#[cfg(feature = "dylib-plugins")]
+fn restore_bundle_environment() {
+    if std::env::var_os("RUTIS_DYLIB_LAUNCHER").is_none() {
+        return;
+    }
+    std::env::remove_var("RUTIS_DYLIB_LAUNCHER");
+    std::env::remove_var("LD_LIBRARY_PATH");
+    let originals = std::env::vars_os()
+        .filter_map(|(name, value)| {
+            name.to_str()
+                .and_then(|name| name.strip_prefix("RUTIS_ORIG_LD_"))
+                .map(|suffix| (name.clone(), format!("LD_{suffix}"), value))
+        })
+        .collect::<Vec<_>>();
+    for (saved_name, original_name, value) in originals {
+        std::env::set_var(original_name, value);
+        std::env::remove_var(saved_name);
+    }
+}
+
+#[cfg(all(test, feature = "dylib-plugins"))]
+mod bundle_env_tests {
+    use super::restore_bundle_environment;
+    use std::ffi::OsString;
+
+    fn put(name: &str, value: Option<OsString>) {
+        if let Some(value) = value {
+            std::env::set_var(name, value);
+        } else {
+            std::env::remove_var(name);
+        }
+    }
+
+    #[test]
+    fn child_environment_recovers_callers_ld_values() {
+        let names = [
+            "RUTIS_DYLIB_LAUNCHER",
+            "RUTIS_ORIG_LD_LIBRARY_PATH",
+            "RUTIS_ORIG_LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "LD_PRELOAD",
+        ];
+        let saved = names.map(|name| std::env::var_os(name));
+        std::env::set_var("RUTIS_DYLIB_LAUNCHER", "1");
+        std::env::set_var("RUTIS_ORIG_LD_LIBRARY_PATH", "/caller/libs");
+        std::env::set_var("RUTIS_ORIG_LD_PRELOAD", "/caller/preload.so");
+        std::env::set_var("LD_LIBRARY_PATH", "/verified/bundle");
+        restore_bundle_environment();
+        assert_eq!(std::env::var("LD_LIBRARY_PATH").unwrap(), "/caller/libs");
+        assert_eq!(std::env::var("LD_PRELOAD").unwrap(), "/caller/preload.so");
+        assert!(std::env::var_os("RUTIS_ORIG_LD_LIBRARY_PATH").is_none());
+        for (name, value) in names.into_iter().zip(saved) {
+            put(name, value);
+        }
+    }
+}
+
+async fn cli_main() {
     let mut provider = std::env::var("AIMUX_PROVIDER").unwrap_or_else(|_| "deepseek".into());
     let mut model = std::env::var("AIMUX_MODEL").unwrap_or_else(|_| "deepseek-chat".into());
     let mut scripted = false;

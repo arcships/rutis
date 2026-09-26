@@ -20,6 +20,7 @@ sha2 = "0.10"
 semver = "1"
 libc = "0.2"
 thiserror = { workspace = true }
+tempfile = "3"
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -5,6 +5,7 @@ repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_dir"
 target_dir="${CARGO_TARGET_DIR:-$repo_dir/target}"
 export CARGO_TARGET_DIR="$target_dir"
+export RUTIS_SDK_LOCKFILE="$repo_dir/Cargo.lock"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$repo_dir=/src --remap-path-prefix=$target_dir=/target --remap-path-prefix=$cargo_home=/cargo -C link-arg=-Wl,-rpath,\$ORIGIN"
 build_all() {
@@ -58,7 +59,21 @@ cargo xtask pack-plugin \
   --output "$base/changed-identity" \
   --prebuilt-library "$target_dir/release/librutis_greeter_fixture_v2.so"
 
-RUTIS_PLUGIN_DROP_MARKER="$base/plugin-drop-marker" "$host" "$base/v1" "$base/v2" "$base/changed-identity"
+# The first entry call fails; retry must reuse its mapped version slot.
+cargo build --release -p rutis-dylib -p rutis-greeter-fixture-v1 -p rutis-greeter-fixture-v2 \
+  --lib --examples --features rutis-greeter-fixture-v1/export,rutis-greeter-fixture-v2/export,rutis-greeter-fixture-v2/fail_once
+test "$(sha256sum "$target_dir/release/librutis_sdk.so" | cut -d ' ' -f 1)" = "$sdk_sha"
+cargo xtask pack-plugin \
+  --manifest-path "$repo_dir/tests/dylib-fixtures/greeter-v2/Cargo.toml" \
+  --sdk-manifest "$base/sdk.toml" \
+  --sdk-file "$target_dir/release/librutis_sdk.so" \
+  --output "$base/retry-entry" \
+  --prebuilt-library "$target_dir/release/librutis_greeter_fixture_v2.so"
+
+v1_hash="$(sha256sum "$base/v1/libgreeter.so" | cut -d ' ' -f 1)"
+mkdir -p "$base/cache/$v1_hash"
+printf truncated > "$base/cache/$v1_hash/libgreeter.so"
+RUTIS_PLUGIN_CACHE="$base/cache" RUTIS_PLUGIN_DROP_MARKER="$base/plugin-drop-marker" "$host" "$base/v1" "$base/v2" "$base/changed-identity" "$base/retry-entry"
 cp "$base/v1/plugin.toml" "$base/bad-boot/plugin.toml"
 bad_sha="$(sha256sum "$base/bad-boot/libgreeter.so" | cut -d ' ' -f 1)"
 sed -i "s/$(sha256sum "$base/v1/libgreeter.so" | cut -d ' ' -f 1)/$bad_sha/" "$base/bad-boot/plugin.toml"

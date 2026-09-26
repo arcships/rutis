@@ -6,6 +6,7 @@ repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_dir"
 target_dir="${CARGO_TARGET_DIR:-$repo_dir/target}"
 export CARGO_TARGET_DIR="$target_dir"
+export RUTIS_SDK_LOCKFILE="$repo_dir/Cargo.lock"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$repo_dir=/src --remap-path-prefix=$target_dir=/target --remap-path-prefix=$cargo_home=/cargo -C link-arg=-Wl,-rpath,\$ORIGIN"
 
