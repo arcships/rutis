@@ -79,6 +79,74 @@ impl Bundles {
         self.service(&contract)?;
         Ok(contract)
     }
+    pub fn exact(&self, sha256: &str) -> Result<Arc<AdmittedBundle>> {
+        self.0.get(sha256).cloned().ok_or_else(|| {
+            fail(
+                ErrorCode::InterfaceMismatch,
+                "object bundle was not admitted",
+            )
+        })
+    }
+    /// Resolve the full callback signature, also inside properties and events.
+    pub fn method(
+        &self,
+        view: &crate::identity::InterfaceView,
+        name: &str,
+    ) -> Result<crate::contract::Method> {
+        let bundle = self.exact(&view.bundle_sha256)?;
+        if let Some(method) = bundle
+            .bundle()
+            .interfaces
+            .get(&view.interface)
+            .and_then(|i| i.methods.get(name))
+        {
+            return Ok(method.clone());
+        }
+        fn scan(expr: &TypeExpr, interface: &str) -> Option<crate::contract::Method> {
+            match expr {
+                TypeExpr::Callback { params, result, .. } => {
+                    if crate::contract::callback_key(expr) == interface {
+                        Some(crate::contract::Method {
+                            params: *params.clone(),
+                            result: *result.clone(),
+                        })
+                    } else {
+                        scan(params, interface).or_else(|| scan(result, interface))
+                    }
+                }
+                TypeExpr::Record { fields } => fields.values().find_map(|e| scan(e, interface)),
+                TypeExpr::List { item } | TypeExpr::Optional { item } => scan(item, interface),
+                _ => None,
+            }
+        }
+        if name == "call" {
+            for interface in bundle.bundle().interfaces.values() {
+                for method in interface.methods.values() {
+                    if let Some(method) = scan(&method.params, &view.interface)
+                        .or_else(|| scan(&method.result, &view.interface))
+                    {
+                        return Ok(method);
+                    }
+                }
+                for expr in interface.properties.values() {
+                    if let Some(method) = scan(expr, &view.interface) {
+                        return Ok(method);
+                    }
+                }
+            }
+            for event in bundle.bundle().events.values() {
+                if let Some(method) = scan(&event.params, &view.interface)
+                    .or_else(|| scan(&event.result, &view.interface))
+                {
+                    return Ok(method);
+                }
+            }
+        }
+        Err(fail(
+            ErrorCode::CapabilityDenied,
+            "unknown exact interface selector",
+        ))
+    }
 }
 
 type Read = dyn Fn(&Ctx) -> Result<Outbound> + Send + Sync;
@@ -564,6 +632,9 @@ pub struct StagedServices {
 impl StagedServices {
     pub fn table(&self) -> &ServiceTable {
         &self.table
+    }
+    pub(crate) fn exports(&self) -> &Exports {
+        &self.exports
     }
     pub fn contracts(&self) -> &BTreeMap<String, CatalogService> {
         &self.contracts

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { Inject, type Context, type Plugin } from '@deepseek-ai/cordis'
-import { admit, canonical, identifier, keys, record, type AdmittedBundle, type TypeExpr } from './contract.ts'
+import { admit, callbackKey, canonical, identifier, keys, record, type AdmittedBundle, type Method, type TypeExpr } from './contract.ts'
 import { ProtocolError, type ErrorCode } from './error.ts'
 import { draftGraph, GraphExporter, sourceObject, sourceView, type DraftGraph, type StagedGraph } from './draft.ts'
 import { Exports, ObjectIds, type PinKey } from './exports.ts'
@@ -44,6 +44,31 @@ export class Bundles {
     const bundle = this.admitted.get(contract.bundle_sha256)
     if (!bundle || bundle.bundle.version !== contract.version || !Object.hasOwn(bundle.bundle.interfaces, contract.interface)) fail('InterfaceMismatch', 'named service contract differs from exact bundle')
     return bundle
+  }
+  exact(hash: string): AdmittedBundle {
+    const bundle = this.admitted.get(hash)
+    if (!bundle) fail('InterfaceMismatch', 'object bundle was not admitted')
+    return bundle
+  }
+  method(view: { interface: string; bundle_sha256: string }, name: string): Method {
+    const bundle = this.exact(view.bundle_sha256).bundle
+    const iface = Object.hasOwn(bundle.interfaces, view.interface) ? bundle.interfaces[view.interface] : undefined
+    if (iface && Object.hasOwn(iface.methods, name)) return iface.methods[name]
+    const scan = (type: TypeExpr): Method | undefined => {
+      switch (type.kind) {
+        case 'callback': return callbackKey(type) === view.interface ? { params: type.params, result: type.result } : scan(type.params) ?? scan(type.result)
+        case 'record': return Object.values(type.fields).map(scan).find(Boolean)
+        case 'list': case 'optional': return scan(type.item)
+      }
+    }
+    if (name === 'call') {
+      for (const iface of Object.values(bundle.interfaces)) {
+        for (const method of Object.values(iface.methods)) { const found = scan(method.params) ?? scan(method.result); if (found) return found }
+        for (const type of Object.values(iface.properties ?? {})) { const found = scan(type); if (found) return found }
+      }
+      for (const event of Object.values(bundle.events ?? {})) { const found = scan(event.params) ?? scan(event.result); if (found) return found }
+    }
+    fail('CapabilityDenied', 'unknown exact interface selector')
   }
 }
 export interface ServiceDraft { stage: string; graph: DraftGraph }
@@ -135,12 +160,13 @@ export class NativeServices<C = unknown> {
   private staged = false
   constructor(readonly native: ManagedActivation<C>, readonly owner: Activation, private ports: ReadonlyMap<string, ExportPort>, private imports: string[]) {}
   refreshImports(): void { this.native.refreshDependencies(this.imports) }
-  async stage(bundles: Bundles, ids: ObjectIds): Promise<StagedServices> {
+  async stage(bundles: Bundles, ids: ObjectIds, table?: Exports): Promise<StagedServices> {
     await this.native.ready()
     if (this.staged || !this.native.gate.isOpen) fail('Unavailable', 'native service table cannot be restaged')
     this.staged = true
     const ctx = this.native.nativeContext!
-    const exports = Exports.managed(ctx, this.owner, ids, () => this.native.gate.isOpen)
+    const exports = table ?? Exports.managed(ctx, this.owner, ids, () => this.native.gate.isOpen)
+    if (canonical(exports.activation) !== canonical(this.owner)) fail('CapabilityDenied', 'native table belongs to another member')
     const graphs = new Map<string, StagedGraph>()
     const exporters = new Map<string, GraphExporter>()
     const services: Record<string, ServiceDraft> = Object.create(null)

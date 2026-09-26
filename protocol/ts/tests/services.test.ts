@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
-import { admit } from '../src/contract.ts'
+import { admit, callbackKey, canonical } from '../src/contract.ts'
 import { GraphExporter, sourceObject, sourceView } from '../src/draft.ts'
 import { ObjectIds } from '../src/exports.ts'
 import { Imports, type Activation } from '../src/imports.ts'
@@ -224,4 +224,19 @@ test('empty native service handoff cannot confirm after its original owner close
   await member.native.stop()
   assert.throws(() => staged.commit({}, scopes(owner('host'))), (error: any) => error.code === 'ScopeClosed')
   await root.fiber.dispose()
+})
+
+test('exact method registry resolves nested callback signatures without prototype selectors', () => {
+  const raw = JSON.parse(rpcRaw.toString())
+  const callback = raw.interfaces.Database.methods.withCallback.params
+  const nested = { kind: 'callback', params: callback, result: { kind: 'value', schema: { type: 'null' } }, ownership: 'borrow' }
+  raw.id = 'lookup.bundle'
+  raw.interfaces.Database.methods.nested = { params: { kind: 'record', fields: { callbacks: { kind: 'list', item: { kind: 'optional', item: callback } } } }, result: { kind: 'value', schema: { type: 'null' } } }
+  raw.interfaces.Database.methods.nestedCallback = { params: nested, result: { kind: 'value', schema: { type: 'null' } } }
+  const bytes = Buffer.from(JSON.stringify(raw)); const admitted = admit(bytes); const registry = new Bundles([bytes])
+  const view = (interfaceName: string) => ({ interface: interfaceName, bundle_sha256: admitted.sha256, source: 'full-view-is-authorized-by-broker' })
+  for (const type of [callback, nested]) assert.equal(canonical(registry.method(view(callbackKey(type)), 'call')), canonical({ params: type.params, result: type.result }))
+  for (const method of ['toString', 'constructor', 'missing']) assert.throws(() => registry.method(view('Database'), method), (e: any) => e.code === 'CapabilityDenied')
+  assert.throws(() => registry.method(view('$callback:unprepared'), 'call'), (e: any) => e.code === 'CapabilityDenied')
+  assert.throws(() => registry.method({ ...view(callbackKey(callback)), bundle_sha256: '0'.repeat(64) }, 'call'), (e: any) => e.code === 'InterfaceMismatch')
 })

@@ -36,6 +36,7 @@ export class Exports {
   private waiters = new Set<() => void>()
   private owner: Activation
   constructor(owner: Activation, private ids: ObjectIds, private admitted: () => boolean = () => true) { this.owner = Object.freeze(structuredClone(owner)) }
+  get activation(): Activation { return this.owner }
   requireOpen(): void {
     if (!this.admitted()) this.open = false
     if (!this.open) fail('ScopeClosed', 'owner activation closed')

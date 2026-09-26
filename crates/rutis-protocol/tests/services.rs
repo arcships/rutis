@@ -762,3 +762,56 @@ async fn empty_service_tables_still_require_a_live_native_owner_and_broker_scope
     );
     root.shutdown().await.unwrap();
 }
+
+#[test]
+fn method_registry_resolves_nested_callbacks_by_exact_bundle() {
+    use rutis_protocol::{
+        contract::{callback_key, TypeExpr},
+        identity::InterfaceView,
+    };
+    let mut raw: serde_json::Value = serde_json::from_slice(RPC).unwrap();
+    let callback = raw["interfaces"]["Database"]["methods"]["withCallback"]["params"].clone();
+    let nested = serde_json::json!({"kind":"callback","params":callback,"result":{"kind":"value","schema":{"type":"null"}},"ownership":"borrow"});
+    raw["id"] = serde_json::json!("lookup.bundle");
+    raw["interfaces"]["Database"]["methods"]["nested"] = serde_json::json!({"params":{"kind":"record","fields":{"callbacks":{"kind":"list","item":{"kind":"optional","item":callback}}}},"result":{"kind":"value","schema":{"type":"null"}}});
+    raw["interfaces"]["Database"]["methods"]["nestedCallback"] =
+        serde_json::json!({"params":nested,"result":{"kind":"value","schema":{"type":"null"}}});
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    let admitted = AdmittedBundle::parse(&bytes).unwrap();
+    let registry = Bundles::admit([bytes]).unwrap();
+    let view = |interface: String| InterfaceView {
+        interface,
+        bundle_sha256: admitted.sha256().into(),
+        source: "full-view-is-authorized-by-broker".into(),
+    };
+    for callback in [callback, nested] {
+        let expr: TypeExpr = serde_json::from_value(callback.clone()).unwrap();
+        let method = registry.method(&view(callback_key(&expr)), "call").unwrap();
+        assert_eq!(
+            serde_json::to_value(method).unwrap(),
+            serde_json::json!({"params":callback["params"],"result":callback["result"]})
+        );
+    }
+    for name in ["toString", "constructor", "missing"] {
+        assert_eq!(
+            registry
+                .method(&view("Database".into()), name)
+                .unwrap_err()
+                .code,
+            ErrorCode::CapabilityDenied
+        );
+    }
+    assert_eq!(
+        registry
+            .method(&view("$callback:unprepared".into()), "call")
+            .unwrap_err()
+            .code,
+        ErrorCode::CapabilityDenied
+    );
+    let mut other = view("Database".into());
+    other.bundle_sha256 = "0".repeat(64);
+    assert_eq!(
+        registry.method(&other, "connect").unwrap_err().code,
+        ErrorCode::InterfaceMismatch
+    );
+}

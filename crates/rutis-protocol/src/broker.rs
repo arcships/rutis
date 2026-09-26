@@ -555,10 +555,26 @@ impl Broker {
         if !self.activations.contains(caller) {
             return Err(error(ErrorCode::ScopeClosed, "caller activation closed"));
         }
+        self.retire_epoch(
+            &caller.runtime,
+            caller.epoch,
+            delivered_through,
+            terminal_through,
+        )
+    }
+    /// The authenticated private connection may retire its epoch after every
+    /// member is closed. This is receipt evidence, never execution completion.
+    pub fn retire_epoch(
+        &mut self,
+        runtime: &str,
+        epoch: Sequence,
+        delivered_through: Sequence,
+        terminal_through: Sequence,
+    ) -> Result<()> {
         let target = self
             .recipients
-            .get_mut(&(caller.runtime.clone(), caller.epoch))
-            .unwrap();
+            .get_mut(&(runtime.to_owned(), epoch))
+            .ok_or_else(|| error(ErrorCode::ScopeClosed, "recipient epoch closed"))?;
         let through = terminal_through.0;
         if through < target.retired
             || through > delivered_through.0

@@ -18,5 +18,6 @@ pub mod prepare;
 pub mod runner_image;
 pub mod sdk;
 pub mod services;
+pub mod session;
 #[cfg(target_os = "linux")]
 pub mod snapshot;

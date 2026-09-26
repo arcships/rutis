@@ -48,7 +48,7 @@ CI 增加锁定依赖的 TS 检查；Rust crate 纳入现有 workspace 测试。
 | 阶段 | 状态 | 尚需取得的证据 |
 | --- | --- | --- |
 | M1 | 开发中 | 两端草稿编码、事务授权与生成 dispatch 已接入私有 socket；完整失败交错、独占资源跨语言清理、生产连接的控制流与复用评估仍需补齐 |
-| M2 | 开发中 | prepare、冻结快照及 Rust/Node 多成员控制入口已有证据；完整服务图与发布装配、快照监督租约、真实旧桥迁移和 T24 测量尚未完成 |
+| M2 | 开发中 | prepare、冻结快照及 Rust/Node 多成员控制入口已有证据；多成员 named DI 已复用私有 session；完整 HostProxy 服务图与发布装配、快照监督租约、真实旧桥迁移和 T24 测量尚未完成 |
 | M3 | 待完成 | 调用取消/完成、更新/失败回滚、组恢复屏障、Linux 进程和受管后代回收 |
 | M4 | 待完成 | broker 权威事件列表、parallel/serial、scope、ready、once 与扩展拒绝 |
 | M5 | 待完成 | T01–T24 逐项运行时证据、旧桥回归、迁移/回退指南、基础协议冻结 |
@@ -81,20 +81,20 @@ CI 增加锁定依赖的 TS 检查；Rust crate 纳入现有 workspace 测试。
 - 双端 `GraphExporter` 先暂存真实对象，完整验证草稿，再向 broker 请求授权。broker 整图事务拒绝伪造 owner/source/foreign proof，不留下交付 id 缺口；SDK commit 只确认对应的真实对象与视图。Rust snapshot panic 与两端验证失败释放 staging；原生闭锁后纯值结果也不能编码。同一 owner 的多个 bundle 编码器共用 staging 编号空间；Rust 内存链路复用同一编码器，owner pin 失败通过完整拒绝 manifest 记录接收前缀。
 - 双端帧接收泵支持重入和并发，拒绝重复/倒序请求 id；Rust 独立 writer 在等待者被丢弃时继续完成已排队帧，关闭时可打断阻塞写并释放 stream。TS 编码前拒绝 undefined、NaN、Date、稀疏数组和自定义原型，防止 stringify 改变数据含义。
 
-可执行证据：Rust bindings 8、contracts 5、drafts 5、exports 10、factories 6、frames 5、graphs 7、objects 13、managed 14、objects_ipc 1、prepare 21、lifecycle 12、services 6 项（合计 113，其中 lifecycle 一项是子进程入口）；TS bindings 7、contracts 5、drafts 4、exports 8、frames 5、graphs 5、imports 6、managed 8、lifecycle 9、services 9 项（合计 66）。共享语料包含 JSON 35、描述符 50、wire value 32、回调签名 9、对象图 31、帧 10、lifecycle hello 17、named services 12 个用例。Rust 使用两个真实线程同时交付/释放；两端另验证原生失效时的执行 pin 和慢对象清理。
+可执行证据：Rust bindings 8、contracts 5、drafts 5、exports 10、factories 6、frames 5、graphs 7、objects 13、managed 14、objects_ipc 1、prepare 21、lifecycle 12、services 7、session_ipc 2 项（合计 116，其中 lifecycle 一项是子进程入口）；TS bindings 7、contracts 5、drafts 4、exports 8、frames 5、graphs 5、imports 6、managed 8、lifecycle 9、services 10、session 1 项（合计 68）。共享语料包含 JSON 35、描述符 50、wire value 32、回调签名 9、对象图 31、帧 10、lifecycle hello 17、named services 12 个用例。Rust 使用两个真实线程同时交付/释放；两端另验证原生失效时的执行 pin 和慢对象清理。
 
 Linux `objects_ipc` 运行独立 Node 进程与真实 managed rutis/Cordis Ctx，使用继承的私有 Unix stream fd 3，stdout 诊断另行读取。Rust 权威 broker 从固定连接取得 Node activation，校验 family/version/raw SHA/capabilities；两端生成客户端实际 connect/query，保留同一状态对象和 session→agent→session 循环，owner pass-back 仍走 broker。两端借用 callback 重入第三层调用并等待登记子任务；保存的 callback 到期后拒绝调用。Node 在业务 dispatch 前通过控制帧确认参数 grant，避免回调/pass-back 读取尚未 accepted 的引用。丢弃 Rust waiter 后 Node 实际执行仍持有 execution pin，完成后才释放。
 
-同一私有 socket fixture 已完成 Node 接收 SDK 的前缀提议、broker 独立检查、owner 回收通知、ACK 后 SDK 清理；Rust 接收端也走同一 broker 和 Node owner 通知。活的首份 grant 阻止后续已释放 borrow 的回收，旧 id 的控制重传不能恢复授权，低于水位的接收和 pin 拒绝。当前约定见 [protocol README](../protocol/README.md)。这是 conformance fixture，不是可部署 runner；多 activation 连接的前缀、断连/取消/finished 交错与 supervisor 尚未验收。
+同一私有 socket fixture 已完成 Node 接收 SDK 的前缀提议、broker 独立检查、owner 回收通知、ACK 后 SDK 清理；Rust 接收端也走同一 broker 和 Node owner 通知。活的首份 grant 阻止后续已释放 borrow 的回收，旧 id 的控制重传不能恢复授权，低于水位的接收和 pin 拒绝。后续 `session_ipc` 又覆盖多个 activation 共用前缀和全部成员关闭后的 epoch 回收。当前约定见 [protocol README](../protocol/README.md)。这些是 conformance 证据；完整断连/取消/finished 故障交错与 supervisor 尚未验收。
 
-本阶段工作区回归：`cargo test --workspace` 480 passed / 0 failed / 2 ignored，新对象协议私有 Node socket、Rust 生命周期子进程、冻结目录的通用 Node runner 与旧桥真实 Node TCP e2e 均通过。两个 ignored 是依赖外部 min-cordis/dsh 检出的 host e2e 与需要真实模型后端的 agent e2e，不能计入通过。`cargo check --workspace --all-targets`、全仓 fmt、协议 crate clippy `-D warnings`、TS check/build/test 通过；没有执行外部 min-cordis/dsh 整体迁移验收。Linux Rust CI 安装锁定 Node/TS 依赖并运行该新互通测试，旧桥的跳过变量不跳过它。
+本阶段工作区回归：`cargo test --workspace` 483 passed / 0 failed / 2 ignored，新对象协议私有 Node socket、Rust 生命周期子进程、冻结目录的通用 Node runner 与旧桥真实 Node TCP e2e 均通过。两个 ignored 是依赖外部 min-cordis/dsh 检出的 host e2e 与需要真实模型后端的 agent e2e，不能计入通过。`cargo check --workspace --all-targets`、全仓 fmt、协议 crate clippy `-D warnings`、TS check/build/test 通过；没有执行外部 min-cordis/dsh 整体迁移验收。Linux Rust CI 安装锁定 Node/TS 依赖并运行该新互通测试，旧桥的跳过变量不跳过它。
 
 M1 后续必须补齐以下内容，之后才能称为 M1 完成或冻结该实验协议：
 
-1. 将已验证的两端草稿编码、broker 及 native dispatch 接入生产 runner；当前私有 fd 测试宿主/Node fixture 的固定单 bundle、单 member 初始化不能代替 prepare/生命周期协议。
+1. 将已有多 bundle、多 member 的私有 session 接入 frozen runner 与完整 HostProxy 图；真实 IPC 的 fixture 管理入口仍不能代替生产 prepare/生命周期装配。
 2. 补齐双端完整结果丢弃、scope 回收、独占资源 disposer、handler/子任务失败收敛及原生依赖失效交错；Rust 已有状态返回、owner facade、循环图与嵌套 borrow 内存证据，不能等同于跨语言验收。
 3. 将已有严格帧/握手检查及只读 prepare 接入生产连接状态机；两端生命周期控制已有证据，实际 native 路由绑定和完整 HostActive 装配仍待 M2。
-4. 补齐多 activation 连接的回收 ACK、epoch 记录回收、断连/迟到消息与取消/finished 交错；私有 fd 的正常终态回收证据不代替故障控制流和监督恢复。
+4. 补齐 epoch 记录回收、断连/迟到消息与取消/finished 交错；多 activation 的正常终态回收 ACK 已有真实 session 证据，但不代替故障控制流和监督恢复。
 5. 检查生成绑定在实际迁移插件中的可用性，完成成熟实现复用评估及完整 M1 门槛记录，之后再冻结实验协议。
 
 参考核对：[Cap’n Proto RPC](https://capnproto.org/rpc.html)及其[rpc.capnp](https://github.com/capnproto/capnproto/blob/master/c%2B%2B/src/capnp/rpc.capnp)把 capability、释放和路径顺序作为协议机制。当前用例对照这些时序，但不声称继承它的实现正确性。继续采用设计要求的单 broker 路径；成熟实现复用与生成接口/原生生命周期的集成成本评估尚未完成，pipelining/直连由 T24 测量后另议。
@@ -149,7 +149,7 @@ hook 在帧锁外执行，断连先撤销、后独立推进 cleanup。实际 Rus
 具体行为和边界见[生命周期控制](../protocol/lifecycle.md)。
 
 默认 native driver 尚未安装命名对象服务/事件 transport，因此 hello 会明确拒绝
-相关能力和服务声明；现有对象互通 fixture 与该控制流的集成仍未完成。
+相关能力和服务声明；已有 session 组合入口，默认 service-capable driver 与该控制流的完整装配仍未完成。
 完整宿主业务图、StopUnconfirmed 管理 API、配置更新和 supervisor 同样尚未验收。
 
 TS `lifecycle` 和编译后的通用 `node-runner` 接入同一控制形状，hello 保持模块惰性，
@@ -204,7 +204,7 @@ Loading 原始 Ctx 的 effect 拒绝需要下面记录的本仓库 rutis 公开�
 
 行为和调用顺序见[服务绑定](../protocol/services.md)。这仍是 SDK/事务基础证据：
 默认 driver 继续拒绝未安装的对象/事件 transport。prepare route source 的授权
-绑定、多 bundle dispatcher registry、私有连接上的命名服务交付、HostActive
+绑定、默认 driver 对多 bundle dispatcher registry 和私有命名服务交付的装配、HostActive
 完整业务图、internal child 对象精确 creator Ctx 以及迁移/恢复/T24 尚待完成。
 M0–M5 和 T01–T24 的最终验收范围保持不变，目标没有标为完成。
 
@@ -233,3 +233,42 @@ M0–M5 和 T01–T24 的最终验收范围保持不变，目标没有标为完�
 M0 Go 要求使用包含本扩展的源码构建，并锁定实际 runner image/code 摘要；不能仅
 凭 `rutis` 0.3.0 semver 推断未包含扩展的外部发行包满足此行为。正式版本发布和
 完整协议冻结仍由 M5 完成。Cordis 继续使用锁定发行包 4.0.1 的公开扩展点。
+
+
+## M1/M2 私有 session 与多成员 named DI
+
+对象传输从固定双端 fixture 提取为 Rust `HostObjects` 和两端 `RuntimeObjects`。
+Host 依继承连接校验 runtime/epoch，actor 共用 epoch-wide ObjectIds/Imports，
+保持独立 member native 表与原始 context。dispatcher registry 按精确 SHA 分别
+合并，保留完整 source view；回调按嵌套完整签名匹配，prototype selector 拒绝。
+生命周期组合入口把对象和控制消息放到同一泵，但默认 frozen driver 尚未安装
+完整 service-capable 装配，继续明确拒绝未实现的服务/事件能力。
+
+真实 Unix 私有流用例运行两个 Rust、两个发行 Cordis native member，双向注入
+两份精确 bundle 的生成客户端。业务在原始 apply 调用 stateful connect/query、
+重复对象和循环属性、owner passback，以及借用回调和登记后代。handler throw /
+Rust panic 后仍等待实际 child；丢弃 value 与 object-valued waiter 不释放运行中的
+执行 pin，结果 envelope 最终被拒收并进入连续回收前缀。源连接伪造被提前拒绝。
+
+两端控制队列共用串行 ACK 屏障，空队列 flush 必须等待已经发出的控制确认。
+真实 broker 延迟 Release ACK 的测试验证第二次 flush 不提前完成；Rust 丢弃
+第一位等待者后屏障仍有效。revoke/reject/end 也经过该屏障，不能取走另一调用的
+Accept 队列并让它提前把参数交给作者。
+
+完整服务交付拥有 RootDelivery receipt，owner pins 确认后仍须等待整表 Accept。
+丢弃 receipt 关闭预留消费者并拒收全部新根；额外第三个 Node provider 的两枚
+真实 native pins 降到零。该额外控制用例没有给预留 Rust 接收者构造业务成员。
+两端另验证已准入但未 execute 的 pin 在断连关闭时不阻塞 native drain；运行中的
+执行保留到实际完成。Host 丢失 owner ACK 不自动确认执行完成。
+
+移除 Rust 必要服务的实际 Disposer 触发 native 终态，并通过 closing 控制通知 Host
+撤销 Node 消费者，旧原始 Ctx 的 effect 被拒绝。closing 是意图，不是 stop ACK。
+连接 epoch 的回收在所有成员关闭后仍可进行，Host 检查前缀并通知所有 native
+owner；不为此伪造新业务 activation。用例核对所有 native 清理计数和 Node 退出。
+
+约定、顺序和边界见[私有 session](../protocol/session.md)。管理/装载入口仍是标注
+fixture，Rust runtime actor 在 Host 测试进程中，Node 使用实际子进程。尚不能把它
+作为 frozen plan → RuntimeReady → HostProxy Active → activate 的完整装配证据。
+prepared route source 与授权 view、独立包双语言共享/单独拓扑、内部 child 对象
+精确 creator context、StopUnconfirmed 与 reaping、事件、真实旧桥迁移和 T24
+继续保留在 M0–M5/T01–T24 最终验收中，目标未标为完成。
