@@ -2,6 +2,8 @@
 set -euo pipefail
 
 # Build a Linux rutis-cli bundle whose public entry point is the verifier.
+# Optional first argument selects a fresh output directory instead of the
+# default content-addressed directory under target. Existing bundles are never overwritten.
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_dir"
 target_dir="${CARGO_TARGET_DIR:-$repo_dir/target}"
@@ -38,7 +40,7 @@ export RUTIS_BUNDLE_STD_FILE="$std_name"
 export RUTIS_BUNDLE_STD_SHA256="$std_sha"
 cargo build --release -p rutis-dylib-launcher
 
-bundle="$target_dir/dylib-bundles/${host_sha:0:16}"
+bundle="${1:-$target_dir/dylib-bundles/${host_sha:0:16}}"
 if test -e "$bundle"; then
   echo "bundle already exists: $bundle" >&2
   exit 1
