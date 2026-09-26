@@ -2,7 +2,9 @@
 //! original package path. A supervisor retains the group lease until both
 //! process reaping and native consumer cleanup have completed.
 use crate::{
+    contract::{FAMILY, VERSION},
     error::{ErrorCode, ProtocolError, Result},
+    lifecycle::{member_contracts, NodeCatalog},
     prepare::{digest, FileKind, PluginEntry, PreparedDeployment, PreparedFile},
 };
 use std::{
@@ -82,6 +84,7 @@ pub struct SnapshotGroup {
     environment: PathBuf,
     executable: PathBuf,
     runner: Option<PathBuf>,
+    node_catalog: Option<PathBuf>,
     members: BTreeMap<String, SnapshotMember>,
     code_sha256: String,
 }
@@ -94,6 +97,11 @@ impl SnapshotGroup {
     }
     pub fn members(&self) -> &BTreeMap<String, SnapshotMember> {
         &self.members
+    }
+    /// Pass this extra argument when using the compiled SDK Node runner. It is
+    /// not appended to arbitrary author runners by the generic argv() method.
+    pub fn node_catalog(&self) -> Option<&Path> {
+        self.node_catalog.as_deref()
     }
     pub fn argv(&self) -> Vec<PathBuf> {
         let mut args = vec![self.executable.clone()];
@@ -216,6 +224,39 @@ impl Snapshot {
                 .runner
                 .as_ref()
                 .map(|path| first_root.join(path));
+            let node_catalog = if runner.is_some() {
+                let modules = members
+                    .iter()
+                    .map(|(name, member)| {
+                        let entry = member
+                            .entry()
+                            .expect("prepared Node entry")
+                            .to_str()
+                            .ok_or_else(|| unavailable("Node snapshot entry is not UTF-8"))?;
+                        Ok((
+                            entry.to_owned(),
+                            member_contracts(plan.instances()[name].package())?,
+                        ))
+                    })
+                    .collect::<Result<BTreeMap<_, _>>>()?;
+                let catalog = NodeCatalog {
+                    protocol_family: FAMILY.into(),
+                    protocol_version: VERSION.into(),
+                    framework_version: group.framework_version().into(),
+                    environment_sha256: group.environment_sha256().into(),
+                    code_sha256: group.code_sha256().into(),
+                    modules,
+                };
+                let path = root.join("node-catalog.json");
+                write(
+                    &path,
+                    &serde_json::to_vec(&catalog).map_err(|e| unavailable(e.to_string()))?,
+                    false,
+                )?;
+                Some(path)
+            } else {
+                None
+            };
             groups.insert(
                 name.clone(),
                 SnapshotGroup {
@@ -223,6 +264,7 @@ impl Snapshot {
                     environment,
                     executable,
                     runner,
+                    node_catalog,
                     members,
                     code_sha256: group.code_sha256().into(),
                 },

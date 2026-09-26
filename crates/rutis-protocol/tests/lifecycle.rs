@@ -18,6 +18,37 @@ use std::{
 };
 use tokio::sync::Notify;
 const SCHEMA: &str = include_str!("../../../protocol/fixtures/plugin.config.json");
+#[tokio::test]
+async fn shared_lifecycle_hello_corpus_matches_both_sdks() {
+    let corpus: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../protocol/fixtures/lifecycle-corpus.json"
+    ))
+    .unwrap();
+    for case in corpus {
+        let root = Ctx::root().unwrap();
+        let runner = Runner::new(NativeProbeDriver {
+            root: root.clone(),
+            observed: Arc::new(Observed::default()),
+            slow_cleanup: false,
+            bad_services: false,
+        });
+        let result = runner.handler()("runtime/hello".into(), case["hello"].clone()).await;
+        if case["error"].is_null() {
+            assert!(result.is_ok(), "{}: {result:?}", case["name"]);
+        } else {
+            assert_eq!(
+                serde_json::to_value(result.unwrap_err().code).unwrap(),
+                case["error"],
+                "{}",
+                case["name"]
+            );
+        }
+        for stopped in runner.close() {
+            stopped.await.unwrap();
+        }
+        root.shutdown().await.unwrap();
+    }
+}
 fn contract() -> FactoryCatalog {
     FactoryCatalog {
         config_sha256: digest(SCHEMA.as_bytes()),
@@ -65,6 +96,7 @@ fn id(n: u64) -> Activation {
 }
 #[derive(Default)]
 struct Observed {
+    mounts: Mutex<Vec<(String, Activation)>>,
     seen: Mutex<Vec<(String, Ctx)>>,
     cleaned: Mutex<Vec<String>>,
     entered: Notify,
@@ -124,9 +156,15 @@ impl Driver for NativeProbeDriver {
     }
     fn mount(
         &self,
-        member: Member,
+        request: MountRequest,
         admission: rutis_protocol::managed::ActivationGate,
     ) -> rutis_protocol::error::Result<Mounted> {
+        let member = request.member;
+        self.observed
+            .mounts
+            .lock()
+            .unwrap()
+            .push((request.instance, request.activation));
         let label = member.config["label"].as_str().unwrap().to_owned();
         let native = ManagedActivation::mount_gated(
             &self.root,
@@ -193,6 +231,11 @@ async fn runtime_ready_precedes_members_and_fast_member_publishes_while_sibling_
         .await
         .unwrap();
     assert_eq!(ready["services"], json!({}));
+    assert!(observed
+        .mounts
+        .lock()
+        .unwrap()
+        .contains(&("fast".into(), id(2))));
     assert!(runner.require_published(&id(2)).is_err());
     peer.request("plugin/activate", json!({"activation":id(2)}))
         .await
@@ -542,9 +585,10 @@ async fn stop_during_synchronous_construction_prevents_a_late_native_apply() {
         }
         fn mount(
             &self,
-            member: Member,
+            request: MountRequest,
             gate: rutis_protocol::managed::ActivationGate,
         ) -> rutis_protocol::error::Result<Mounted> {
+            let member = request.member;
             self.entered.notify_one();
             let (lock, cv) = &*self.finish;
             let mut done = lock.lock().unwrap();

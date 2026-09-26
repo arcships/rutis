@@ -49,6 +49,9 @@ export class Peer {
   private next = 0n
   private latestRequest = 0n
   private failed?: ProtocolError
+  private closeHooks = new Set<() => void>()
+  private resolveClosed!: () => void
+  readonly closed = new Promise<void>(resolve => { this.resolveClosed = resolve })
   constructor(private stream: Duplex, private handler: Handler) {
     stream.on('data', chunk => {
       try { this.decoder.push(chunk as Buffer, value => this.receive(value)) }
@@ -62,9 +65,19 @@ export class Peer {
     stream.on('close', () => this.close(failure('Unavailable', 'private stream closed')))
   }
   get isClosed(): boolean { return this.failed !== undefined }
+  /** Runtime ownership retains the returned remover until cleanup. Hooks run
+   * synchronously before pending waiters are rejected, outside stream writes. */
+  onClose(hook: () => void): () => void {
+    if (this.failed) hook()
+    else this.closeHooks.add(hook)
+    return () => { this.closeHooks.delete(hook) }
+  }
   close(error: ProtocolError): void {
     if (this.failed) return
     this.failed = error
+    const hooks = [...this.closeHooks]; this.closeHooks.clear()
+    for (const hook of hooks) { try { hook() } catch {} }
+    this.resolveClosed()
     for (const pending of this.pending.values()) pending.reject(new ProtocolError(error.code, error.stage, error.message, 'unknown'))
     this.pending.clear(); this.stream.destroy()
   }

@@ -52,6 +52,45 @@ pub struct Hello {
     pub identity: RuntimeIdentity,
     pub members: BTreeMap<String, Member>,
 }
+/// Pure Node launch metadata, generated from the prepared group into its
+/// private snapshot. Configuration travels only on the private hello frame.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeCatalog {
+    pub protocol_family: String,
+    pub protocol_version: String,
+    pub framework_version: String,
+    pub environment_sha256: String,
+    pub code_sha256: String,
+    pub modules: BTreeMap<String, FactoryCatalog>,
+}
+pub(crate) fn member_contracts(
+    package: &crate::prepare::PreparedPackage,
+) -> Result<FactoryCatalog> {
+    let services = |values: &BTreeMap<String, crate::prepare::PreparedService>| {
+        values
+            .iter()
+            .map(|(name, service)| {
+                (
+                    name.clone(),
+                    CatalogService {
+                        interface: service.interface.clone(),
+                        version: service.version.clone(),
+                        bundle_sha256: service.bundle_sha256.clone(),
+                    },
+                )
+            })
+            .collect()
+    };
+    Ok(FactoryCatalog {
+        config_sha256: package
+            .file(&package.manifest().config_schema)?
+            .sha256()
+            .into(),
+        provides: services(package.provides()),
+        requires: services(package.requires()),
+    })
+}
 impl Hello {
     #[cfg(target_os = "linux")]
     pub fn prepared(
@@ -89,21 +128,6 @@ impl Hello {
                         .into(),
                 },
             };
-            let contracts = |services: &BTreeMap<String, crate::prepare::PreparedService>| {
-                services
-                    .iter()
-                    .map(|(name, service)| {
-                        (
-                            name.clone(),
-                            CatalogService {
-                                interface: service.interface.clone(),
-                                version: service.version.clone(),
-                                bundle_sha256: service.bundle_sha256.clone(),
-                            },
-                        )
-                    })
-                    .collect()
-            };
             members.insert(
                 name.clone(),
                 Member {
@@ -116,14 +140,7 @@ impl Hello {
                             .to_vec(),
                     )
                     .map_err(|_| invalid("config schema is not UTF-8"))?,
-                    contracts: FactoryCatalog {
-                        config_sha256: package
-                            .file(&package.manifest().config_schema)?
-                            .sha256()
-                            .into(),
-                        provides: contracts(package.provides()),
-                        requires: contracts(package.requires()),
-                    },
+                    contracts: member_contracts(package)?,
                 },
             );
         }
@@ -161,6 +178,28 @@ impl Hello {
             return Err(invalid("invalid runtime/member identity"));
         }
         for member in self.members.values() {
+            match &member.entry {
+                Entry::Rust { factory } if identifier(factory) => {}
+                Entry::Node { entry } if std::path::Path::new(entry).is_absolute() => {}
+                _ => return Err(invalid("invalid member entry")),
+            }
+            if !crate::prepare::sha256_field(&member.contracts.config_sha256) {
+                return Err(invalid("invalid config schema digest"));
+            }
+            for (name, service) in member
+                .contracts
+                .provides
+                .iter()
+                .chain(&member.contracts.requires)
+            {
+                if !identifier(name)
+                    || !identifier(&service.interface)
+                    || !crate::prepare::version(&service.version)
+                    || !crate::prepare::sha256_field(&service.bundle_sha256)
+                {
+                    return Err(invalid("invalid named service contract"));
+                }
+            }
             if crate::prepare::digest(member.config_schema.as_bytes())
                 != member.contracts.config_sha256
             {
@@ -212,7 +251,14 @@ struct Select {
 /// must check `Runner::require_published` before admission.
 pub trait Driver: Send + Sync + 'static {
     fn admit(&self, hello: &Hello) -> Result<()>;
-    fn mount(&self, member: Member, admission: ActivationGate) -> Result<Mounted>;
+    fn mount(&self, request: MountRequest, admission: ActivationGate) -> Result<Mounted>;
+}
+/// Identity comes from reserved host intent, never from plugin configuration.
+/// Service adapters use it to bind native tables and object owner scopes.
+pub struct MountRequest {
+    pub instance: String,
+    pub activation: Activation,
+    pub member: Member,
 }
 pub type ServiceFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<BTreeMap<String, Value>>> + Send>>;
@@ -287,7 +333,11 @@ impl Runner {
                     }) as HandlerFuture
                 })
             }
-            _ => Err(invalid("unknown lifecycle method")),
+            _ => Err(ProtocolError::new(
+                ErrorCode::UnsupportedCapability,
+                "lifecycle",
+                "unknown lifecycle method",
+            )),
         };
         match result {
             Ok(future) => future,
@@ -407,10 +457,19 @@ impl Runner {
                 "stop preceded native mount",
             ));
         }
-        let admission = self.state.lock().unwrap().slots[&activation]
-            .admission
-            .clone();
-        let mounted = self.driver.mount(member.clone(), admission.clone())?;
+        let (admission, instance) = {
+            let state = self.state.lock().unwrap();
+            let slot = &state.slots[&activation];
+            (slot.admission.clone(), slot.status.instance.clone())
+        };
+        let mounted = self.driver.mount(
+            MountRequest {
+                instance,
+                activation: activation.clone(),
+                member: member.clone(),
+            },
+            admission.clone(),
+        )?;
         if !admission.same_activation(&mounted.native.gate()) {
             mounted.native.stop().await.map_err(cleanup_error)?;
             return Err(unavailable(
@@ -840,7 +899,8 @@ impl Driver for NativeDriver {
         }
         Ok(())
     }
-    fn mount(&self, member: Member, admission: ActivationGate) -> Result<Mounted> {
+    fn mount(&self, request: MountRequest, admission: ActivationGate) -> Result<Mounted> {
+        let member = request.member;
         let Entry::Rust { factory } = member.entry else {
             return Err(invalid("native member entry differs"));
         };

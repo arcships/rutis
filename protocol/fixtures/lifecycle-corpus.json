@@ -1,0 +1,545 @@
+[
+  {
+    "name": "valid-node-plan",
+    "hello": {
+      "protocol_family": "rutis-cordis-objects",
+      "protocol_version": "0.experimental",
+      "identity": {
+        "runtime": "group",
+        "epoch": "1",
+        "kind": "node-cordis",
+        "framework_version": "4.0.1",
+        "environment_sha256": "b77349bf1fa9b26d45d545d7d64dad96737e9cfbb3cbb5f5d10fb77b0fcc44ad",
+        "code_sha256": "5694d08a2e53ffcae0c3103e5ad6f6076abd960eb1f8a56577040bc1028f702b",
+        "capabilities": []
+      },
+      "members": {
+        "member": {
+          "entry": {
+            "kind": "node",
+            "entry": "/snapshot/plugin.mjs"
+          },
+          "config": {},
+          "config_schema": "{}\n",
+          "contracts": {
+            "config_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+            "provides": {},
+            "requires": {}
+          }
+        }
+      }
+    },
+    "error": null
+  },
+  {
+    "name": "wrong-family",
+    "hello": {
+      "protocol_family": "legacy-rutis-bridge",
+      "protocol_version": "0.experimental",
+      "identity": {
+        "runtime": "group",
+        "epoch": "1",
+        "kind": "node-cordis",
+        "framework_version": "4.0.1",
+        "environment_sha256": "b77349bf1fa9b26d45d545d7d64dad96737e9cfbb3cbb5f5d10fb77b0fcc44ad",
+        "code_sha256": "5694d08a2e53ffcae0c3103e5ad6f6076abd960eb1f8a56577040bc1028f702b",
+        "capabilities": []
+      },
+      "members": {
+        "member": {
+          "entry": {
+            "kind": "node",
+            "entry": "/snapshot/plugin.mjs"
+          },
+          "config": {},
+          "config_schema": "{}\n",
+          "contracts": {
+            "config_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+            "provides": {},
+            "requires": {}
+          }
+        }
+      }
+    },
+    "error": "InterfaceMismatch"
+  },
+  {
+    "name": "missing-member",
+    "hello": {
+      "protocol_family": "rutis-cordis-objects",
+      "protocol_version": "0.experimental",
+      "identity": {
+        "runtime": "group",
+        "epoch": "1",
+        "kind": "node-cordis",
+        "framework_version": "4.0.1",
+        "environment_sha256": "b77349bf1fa9b26d45d545d7d64dad96737e9cfbb3cbb5f5d10fb77b0fcc44ad",
+        "code_sha256": "5694d08a2e53ffcae0c3103e5ad6f6076abd960eb1f8a56577040bc1028f702b",
+        "capabilities": []
+      },
+      "members": {}
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "unknown-top-field",
+    "hello": {
+      "protocol_family": "rutis-cordis-objects",
+      "protocol_version": "0.experimental",
+      "identity": {
+        "runtime": "group",
+        "epoch": "1",
+        "kind": "node-cordis",
+        "framework_version": "4.0.1",
+        "environment_sha256": "b77349bf1fa9b26d45d545d7d64dad96737e9cfbb3cbb5f5d10fb77b0fcc44ad",
+        "code_sha256": "5694d08a2e53ffcae0c3103e5ad6f6076abd960eb1f8a56577040bc1028f702b",
+        "capabilities": []
+      },
+      "members": {
+        "member": {
+          "entry": {
+            "kind": "node",
+            "entry": "/snapshot/plugin.mjs"
+          },
+          "config": {},
+          "config_schema": "{}\n",
+          "contracts": {
+            "config_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+            "provides": {},
+            "requires": {}
+          }
+        }
+      },
+      "extra": true
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "noncanonical-epoch",
+    "hello": {
+      "protocol_family": "rutis-cordis-objects",
+      "protocol_version": "0.experimental",
+      "identity": {
+        "runtime": "group",
+        "epoch": "01",
+        "kind": "node-cordis",
+        "framework_version": "4.0.1",
+        "environment_sha256": "b77349bf1fa9b26d45d545d7d64dad96737e9cfbb3cbb5f5d10fb77b0fcc44ad",
+        "code_sha256": "5694d08a2e53ffcae0c3103e5ad6f6076abd960eb1f8a56577040bc1028f702b",
+        "capabilities": []
+      },
+      "members": {
+        "member": {
+          "entry": {
+            "kind": "node",
+            "entry": "/snapshot/plugin.mjs"
+          },
+          "config": {},
+          "config_schema": "{}\n",
+          "contracts": {
+            "config_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+            "provides": {},
+            "requires": {}
+          }
+        }
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "unsafe-epoch",
+    "hello": {
+      "protocol_family": "rutis-cordis-objects",
+      "protocol_version": "0.experimental",
+      "identity": {
+        "runtime": "group",
+        "epoch": "18446744073709551616",
+        "kind": "node-cordis",
+        "framework_version": "4.0.1",
+        "environment_sha256": "b77349bf1fa9b26d45d545d7d64dad96737e9cfbb3cbb5f5d10fb77b0fcc44ad",
+        "code_sha256": "5694d08a2e53ffcae0c3103e5ad6f6076abd960eb1f8a56577040bc1028f702b",
+        "capabilities": []
+      },
+      "members": {
+        "member": {
+          "entry": {
+            "kind": "node",
+            "entry": "/snapshot/plugin.mjs"
+          },
+          "config": {},
+          "config_schema": "{}\n",
+          "contracts": {
+            "config_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+            "provides": {},
+            "requires": {}
+          }
+        }
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "duplicate-capability",
+    "hello": {
+      "protocol_family": "rutis-cordis-objects",
+      "protocol_version": "0.experimental",
+      "identity": {
+        "runtime": "group",
+        "epoch": "1",
+        "kind": "node-cordis",
+        "framework_version": "4.0.1",
+        "environment_sha256": "b77349bf1fa9b26d45d545d7d64dad96737e9cfbb3cbb5f5d10fb77b0fcc44ad",
+        "code_sha256": "5694d08a2e53ffcae0c3103e5ad6f6076abd960eb1f8a56577040bc1028f702b",
+        "capabilities": [
+          "object.scope",
+          "object.scope"
+        ]
+      },
+      "members": {
+        "member": {
+          "entry": {
+            "kind": "node",
+            "entry": "/snapshot/plugin.mjs"
+          },
+          "config": {},
+          "config_schema": "{}\n",
+          "contracts": {
+            "config_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+            "provides": {},
+            "requires": {}
+          }
+        }
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "unknown-capability",
+    "hello": {
+      "protocol_family": "rutis-cordis-objects",
+      "protocol_version": "0.experimental",
+      "identity": {
+        "runtime": "group",
+        "epoch": "1",
+        "kind": "node-cordis",
+        "framework_version": "4.0.1",
+        "environment_sha256": "b77349bf1fa9b26d45d545d7d64dad96737e9cfbb3cbb5f5d10fb77b0fcc44ad",
+        "code_sha256": "5694d08a2e53ffcae0c3103e5ad6f6076abd960eb1f8a56577040bc1028f702b",
+        "capabilities": [
+          "object.delegate"
+        ]
+      },
+      "members": {
+        "member": {
+          "entry": {
+            "kind": "node",
+            "entry": "/snapshot/plugin.mjs"
+          },
+          "config": {},
+          "config_schema": "{}\n",
+          "contracts": {
+            "config_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+            "provides": {},
+            "requires": {}
+          }
+        }
+      }
+    },
+    "error": "UnsupportedCapability"
+  },
+  {
+    "name": "non-array-capabilities",
+    "hello": {
+      "protocol_family": "rutis-cordis-objects",
+      "protocol_version": "0.experimental",
+      "identity": {
+        "runtime": "group",
+        "epoch": "1",
+        "kind": "node-cordis",
+        "framework_version": "4.0.1",
+        "environment_sha256": "b77349bf1fa9b26d45d545d7d64dad96737e9cfbb3cbb5f5d10fb77b0fcc44ad",
+        "code_sha256": "5694d08a2e53ffcae0c3103e5ad6f6076abd960eb1f8a56577040bc1028f702b",
+        "capabilities": {}
+      },
+      "members": {
+        "member": {
+          "entry": {
+            "kind": "node",
+            "entry": "/snapshot/plugin.mjs"
+          },
+          "config": {},
+          "config_schema": "{}\n",
+          "contracts": {
+            "config_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+            "provides": {},
+            "requires": {}
+          }
+        }
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "relative-node-entry",
+    "hello": {
+      "protocol_family": "rutis-cordis-objects",
+      "protocol_version": "0.experimental",
+      "identity": {
+        "runtime": "group",
+        "epoch": "1",
+        "kind": "node-cordis",
+        "framework_version": "4.0.1",
+        "environment_sha256": "b77349bf1fa9b26d45d545d7d64dad96737e9cfbb3cbb5f5d10fb77b0fcc44ad",
+        "code_sha256": "5694d08a2e53ffcae0c3103e5ad6f6076abd960eb1f8a56577040bc1028f702b",
+        "capabilities": []
+      },
+      "members": {
+        "member": {
+          "entry": {
+            "kind": "node",
+            "entry": "plugin.mjs"
+          },
+          "config": {},
+          "config_schema": "{}\n",
+          "contracts": {
+            "config_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+            "provides": {},
+            "requires": {}
+          }
+        }
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "bad-service-contract",
+    "hello": {
+      "protocol_family": "rutis-cordis-objects",
+      "protocol_version": "0.experimental",
+      "identity": {
+        "runtime": "group",
+        "epoch": "1",
+        "kind": "node-cordis",
+        "framework_version": "4.0.1",
+        "environment_sha256": "b77349bf1fa9b26d45d545d7d64dad96737e9cfbb3cbb5f5d10fb77b0fcc44ad",
+        "code_sha256": "5694d08a2e53ffcae0c3103e5ad6f6076abd960eb1f8a56577040bc1028f702b",
+        "capabilities": []
+      },
+      "members": {
+        "member": {
+          "entry": {
+            "kind": "node",
+            "entry": "/snapshot/plugin.mjs"
+          },
+          "config": {},
+          "config_schema": "{}\n",
+          "contracts": {
+            "config_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+            "provides": {
+              "database": {
+                "interface": "Database",
+                "version": "latest",
+                "bundle_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+              }
+            },
+            "requires": {}
+          }
+        }
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "schema-bytes-changed",
+    "hello": {
+      "protocol_family": "rutis-cordis-objects",
+      "protocol_version": "0.experimental",
+      "identity": {
+        "runtime": "group",
+        "epoch": "1",
+        "kind": "node-cordis",
+        "framework_version": "4.0.1",
+        "environment_sha256": "b77349bf1fa9b26d45d545d7d64dad96737e9cfbb3cbb5f5d10fb77b0fcc44ad",
+        "code_sha256": "5694d08a2e53ffcae0c3103e5ad6f6076abd960eb1f8a56577040bc1028f702b",
+        "capabilities": []
+      },
+      "members": {
+        "member": {
+          "entry": {
+            "kind": "node",
+            "entry": "/snapshot/plugin.mjs"
+          },
+          "config": {},
+          "config_schema": "{} ",
+          "contracts": {
+            "config_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+            "provides": {},
+            "requires": {}
+          }
+        }
+      }
+    },
+    "error": "InterfaceMismatch"
+  },
+  {
+    "name": "schema-digest-malformed",
+    "hello": {
+      "protocol_family": "rutis-cordis-objects",
+      "protocol_version": "0.experimental",
+      "identity": {
+        "runtime": "group",
+        "epoch": "1",
+        "kind": "node-cordis",
+        "framework_version": "4.0.1",
+        "environment_sha256": "b77349bf1fa9b26d45d545d7d64dad96737e9cfbb3cbb5f5d10fb77b0fcc44ad",
+        "code_sha256": "5694d08a2e53ffcae0c3103e5ad6f6076abd960eb1f8a56577040bc1028f702b",
+        "capabilities": []
+      },
+      "members": {
+        "member": {
+          "entry": {
+            "kind": "node",
+            "entry": "/snapshot/plugin.mjs"
+          },
+          "config": {},
+          "config_schema": "{}\n",
+          "contracts": {
+            "config_sha256": "bad",
+            "provides": {},
+            "requires": {}
+          }
+        }
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "raw-schema-required",
+    "hello": {
+      "protocol_family": "rutis-cordis-objects",
+      "protocol_version": "0.experimental",
+      "identity": {
+        "runtime": "group",
+        "epoch": "1",
+        "kind": "node-cordis",
+        "framework_version": "4.0.1",
+        "environment_sha256": "b77349bf1fa9b26d45d545d7d64dad96737e9cfbb3cbb5f5d10fb77b0fcc44ad",
+        "code_sha256": "5694d08a2e53ffcae0c3103e5ad6f6076abd960eb1f8a56577040bc1028f702b",
+        "capabilities": []
+      },
+      "members": {
+        "member": {
+          "entry": {
+            "kind": "node",
+            "entry": "/snapshot/plugin.mjs"
+          },
+          "config": {},
+          "config_schema": {},
+          "contracts": {
+            "config_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+            "provides": {},
+            "requires": {}
+          }
+        }
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "unknown-entry-field",
+    "hello": {
+      "protocol_family": "rutis-cordis-objects",
+      "protocol_version": "0.experimental",
+      "identity": {
+        "runtime": "group",
+        "epoch": "1",
+        "kind": "node-cordis",
+        "framework_version": "4.0.1",
+        "environment_sha256": "b77349bf1fa9b26d45d545d7d64dad96737e9cfbb3cbb5f5d10fb77b0fcc44ad",
+        "code_sha256": "5694d08a2e53ffcae0c3103e5ad6f6076abd960eb1f8a56577040bc1028f702b",
+        "capabilities": []
+      },
+      "members": {
+        "member": {
+          "entry": {
+            "kind": "node",
+            "entry": "/snapshot/plugin.mjs",
+            "factory": "f"
+          },
+          "config": {},
+          "config_schema": "{}\n",
+          "contracts": {
+            "config_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+            "provides": {},
+            "requires": {}
+          }
+        }
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "invalid-runtime-kind",
+    "hello": {
+      "protocol_family": "rutis-cordis-objects",
+      "protocol_version": "0.experimental",
+      "identity": {
+        "runtime": "group",
+        "epoch": "1",
+        "kind": "python",
+        "framework_version": "4.0.1",
+        "environment_sha256": "b77349bf1fa9b26d45d545d7d64dad96737e9cfbb3cbb5f5d10fb77b0fcc44ad",
+        "code_sha256": "5694d08a2e53ffcae0c3103e5ad6f6076abd960eb1f8a56577040bc1028f702b",
+        "capabilities": []
+      },
+      "members": {
+        "member": {
+          "entry": {
+            "kind": "node",
+            "entry": "/snapshot/plugin.mjs"
+          },
+          "config": {},
+          "config_schema": "{}\n",
+          "contracts": {
+            "config_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+            "provides": {},
+            "requires": {}
+          }
+        }
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "wrong-config-type",
+    "hello": {
+      "protocol_family": "rutis-cordis-objects",
+      "protocol_version": "0.experimental",
+      "identity": {
+        "runtime": "group",
+        "epoch": "1",
+        "kind": "node-cordis",
+        "framework_version": "4.0.1",
+        "environment_sha256": "b77349bf1fa9b26d45d545d7d64dad96737e9cfbb3cbb5f5d10fb77b0fcc44ad",
+        "code_sha256": "5694d08a2e53ffcae0c3103e5ad6f6076abd960eb1f8a56577040bc1028f702b",
+        "capabilities": []
+      },
+      "members": {
+        "member": {
+          "entry": {
+            "kind": "node",
+            "entry": "/snapshot/plugin.mjs"
+          },
+          "config": [],
+          "config_schema": "{\"type\":\"object\"}",
+          "contracts": {
+            "config_sha256": "a2c799262a3ce3c19ef5cdd983bf3d12b43ab3c426227091b909dcb7054738c0",
+            "provides": {},
+            "requires": {}
+          }
+        }
+      }
+    },
+    "error": "InvalidParams"
+  }
+]

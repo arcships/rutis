@@ -1,8 +1,9 @@
 # 实验 runtime 生命周期控制
 
-Rust `lifecycle::{Runner,NativeDriver,Hello,RuntimeReady}` 在真实 native fiber 外记录
-宿主意图，不实现第二套插件内核。当前控制入口已能在私有帧连接中工作；TS 对应控制
-入口、完整对象服务适配、宿主业务图装配与 supervisor 仍在开发，协议尚未冻结。
+Rust `lifecycle::{Runner,NativeDriver,Hello,RuntimeReady}` 与 TS
+`lifecycle::{Runner,NativeModuleDriver}` 在真实 native fiber 外记录宿主意图。
+两端控制入口已能在私有帧连接中工作；完整对象服务适配、宿主业务图装配与
+supervisor 仍在开发，协议尚未冻结。
 
 ## 引导
 
@@ -24,6 +25,14 @@ shutdown 预取消其 Ctx；单纯 `ctx.refresh()` 是异步重查，不能替�
 stream 必须来自宿主私有连接；不使用 stdout/stderr 承载协议。`serve` 在断连后等待
 成员清理，嵌入程序随后 shutdown 自己的 native root。当前通用 API 不负责创建或回收
 进程树，不能替代 Linux supervisor。
+
+Node 的通用入口由 `npm --prefix protocol/ts run build` 生成
+`dist/src/node-runner.js`。包的 runner 导入该入口，宿主在 `SnapshotGroup::argv()` 后
+添加 `node_catalog()` 路径，并继承私有 stream fd 3。这个只读 catalog 由 prepare
+快照生成，包含绝对 module entry 和契约、framework/environment/code 摘要，不含
+实例配置；配置只通过私有 hello 帧交付。不同实例可以共享一个 module entry。
+`NativeModuleDriver` 验证实际加载的 Cordis package 版本与锁定 adapter 一致，并
+核对启动 catalog 与 hello；只有 start 才动态导入业务模块。
 
 ## 成员控制
 
@@ -48,7 +57,9 @@ provides 精确一致，缺少或额外服务触发回滚。表项的对象图�
 验证还需要后续 broker 适配，当前 opaque table API 不构成这些属性的验收证据。
 
 start 在流的 admission 顺序中保留实例/代，真实构造和装载离开管理锁运行。driver
-必须把同一个 admission gate 交给 `mount_gated` 或 `mount_factory_gated`；runner
+取得 `MountRequest` 中由宿主保留的 instance/activation/member，不能从业务配置
+推断对象 owner。必须把同一个 admission gate 交给 Rust `mount_gated` /
+`mount_factory_gated` 或 TS `ManagedActivation`；runner
 拒绝返回另一个 gate 的 adapter。stop 即使发生在构造尚未返回时也关闭该 gate，
 阻止 native apply 迟到启动。services 的 staging future 在 native Active 后执行。
 
@@ -57,9 +68,15 @@ start 在流的 admission 顺序中保留实例/代，真实构造和装载离�
 原生 gate 失效会关闭协议入口并推进 stop，activate 不能重新打开旧代。断连的 close
 hook 同步撤销全部成员，再由独立任务清理；frame 锁不包住 native shutdown。
 
+Cordis 4.0.1 的 native unload 会通过 logger 报告 disposer 错误，却可能成功返回
+dispose 等待。TS adapter 使用公开 logger exporter 保留当前成员及其子树在关闭
+阶段的 error 诊断，使 stop 失败并保持 Closing，禁止替换。作者在关闭阶段主动
+记录 error 也保守地归为未确认清理；这个机制不修改 Cordis。管理 timeout 和操作员
+处理仍需后续 StopUnconfirmed API，当前失败或卡住不会自动放行。
+
 ## 当前能力边界与证据
 
-默认 `NativeDriver` 目前实现原生生命周期，不安装 object/event transport adapter，
+默认 Rust `NativeDriver` 与 TS `NativeModuleDriver` 目前实现原生生命周期，不安装 object/event transport adapter，
 因此在 hello 阶段拒绝相应 capability 和命名服务声明。它不能启动依赖这些能力的
 最终协议插件。已有对象协议 `objects_ipc` fixture 尚需接入这一控制流，不能通过
 宣称能力已实现来绕过这个限制。
@@ -71,5 +88,12 @@ hook 同步撤销全部成员，再由独立任务清理；frame 锁不包住 na
 验证 hello、两个不同 native Ctx、activate、独立 stop 和全组 stop，诊断仍走 stdout。
 其中 child-entry 测试是该进程入口，不单独计作运行时验收。
 
-这尚未证明同组业务依赖的完整启动图、named service 发布/对象调用、TS 生命周期、
+TS lifecycle 测试另外验证异步 module load/stop 交错、关闭阶段 child disposer 异常
+不会产生成功 ACK，以及冻结声明和相同 hello 语料。共享 lifecycle corpus 有 17 个
+准入用例，两端校验错误类别。Rust prepare 测试从原包删除后的冻结路径启动实际
+Node executable、通用 SDK runner 与两个不同代码包，通过 fd 3 验证慢成员 Loading
+期间快成员发布、独立 native Ctx、stop、旧 Ctx 拒绝迟到 effect 和全组 cleanup。
+stdout 只承载诊断，fixture 的 stdin 仅控制慢 apply 何时返回。
+
+这尚未证明同组业务依赖的完整启动图、named service 发布/对象调用、
 StopUnconfirmed 管理等待、配置更新、故障/后代回收双屏障或真实旧插件迁移。

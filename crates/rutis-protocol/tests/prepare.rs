@@ -940,6 +940,233 @@ fn frozen_node_launch_uses_one_cordis_and_compiled_sdk_across_distinct_packages(
     snapshot.cleanup().unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frozen_node_runner_controls_two_native_members_over_private_fd() {
+    use rutis_protocol::{
+        frame::Peer,
+        identity::{Activation, Sequence},
+        lifecycle::{hello, Hello, NodeCatalog},
+        snapshot::Snapshot,
+    };
+    use std::{
+        os::fd::AsRawFd,
+        process::{Command, Stdio},
+        sync::Arc,
+        time::Duration,
+    };
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let mut f = Fixture::new();
+    let ts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../protocol/ts");
+    let compiled = f.root.join("compiled-sdk");
+    let build = Command::new("npm")
+        .arg("--prefix")
+        .arg(&ts)
+        .args(["run", "build", "--", "--outDir"])
+        .arg(&compiled)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let node = Command::new("node")
+        .args(["-p", "process.execPath"])
+        .output()
+        .unwrap();
+    assert!(node.status.success());
+    let node = PathBuf::from(String::from_utf8(node.stdout).unwrap().trim());
+    for name in ["slow", "fast"] {
+        f.package(name, "node-cordis", "consumer");
+        let package = f.path(name);
+        fs::copy(&node, package.join("runtime")).unwrap();
+        fs::write(
+            package.join("runner.mjs"),
+            "import './node_modules/@rutis/protocol/src/node-runner.js'\n",
+        )
+        .unwrap();
+        let mut source = include_bytes!("../../../protocol/fixtures/lifecycle-plugin.mjs").to_vec();
+        source.extend_from_slice(format!("\n// distinct code package: {name}\n").as_bytes());
+        fs::write(package.join("plugin.mjs"), source).unwrap();
+        fs::remove_file(package.join("bundle.json")).unwrap();
+        let mut manifest = f.manifest(name);
+        manifest["requires"] = json!({});
+        manifest["runtime"]["capabilities"] = json!([]);
+        manifest["files"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|file| file["path"] != "bundle.json");
+        for file in manifest["files"].as_array_mut().unwrap() {
+            file["sha256"] = json!(digest(
+                &fs::read(package.join(file["path"].as_str().unwrap())).unwrap()
+            ));
+        }
+        for dependency in [
+            "@deepseek-ai/cordis",
+            "@deepseek-ai/cosmokit",
+            "@standard-schema/spec",
+        ] {
+            copy_dependency_tree(
+                &ts.join("node_modules").join(dependency),
+                &package.join("node_modules").join(dependency),
+                &package,
+                &mut manifest,
+            );
+        }
+        let sdk = package.join("node_modules/@rutis/protocol");
+        copy_dependency_tree(&compiled, &sdk, &package, &mut manifest);
+        let package_json = br#"{"name":"@rutis/protocol","version":"0.1.0","type":"module"}"#;
+        fs::write(sdk.join("package.json"), package_json).unwrap();
+        let path = "node_modules/@rutis/protocol/package.json";
+        manifest["files"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"path":path,"kind":"dependency","sha256":digest(package_json)}));
+        manifest["runtime"]["environment"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(path));
+        f.write_manifest(name, &manifest);
+        f.instance(name, name, "shared", "node-cordis", &[]);
+    }
+    let plan = f.prepare().unwrap();
+    let snapshot = Snapshot::materialize(&plan).unwrap();
+    let group = snapshot.groups()["shared"].clone();
+    let catalog_path = group.node_catalog().unwrap();
+    let catalog: NodeCatalog = serde_json::from_slice(&fs::read(catalog_path).unwrap()).unwrap();
+    assert_eq!(catalog.modules.len(), 2);
+    assert_eq!(catalog.code_sha256, group.code_sha256());
+    assert_eq!(
+        fs::metadata(catalog_path).unwrap().permissions().mode() & 0o777,
+        0o444
+    );
+    assert!(!fs::read_to_string(catalog_path)
+        .unwrap()
+        .contains("\"label\""));
+    let launch = Hello::prepared(&plan, "shared", &group, "node".into(), Sequence(1)).unwrap();
+    fs::remove_dir_all(f.path("slow")).unwrap();
+    fs::remove_dir_all(f.path("fast")).unwrap();
+    let (host_socket, child_socket) = std::os::unix::net::UnixStream::pair().unwrap();
+    host_socket.set_nonblocking(true).unwrap();
+    let child_fd = child_socket.as_raw_fd();
+    let argv = group.argv();
+    let mut command = tokio::process::Command::new(&argv[0]);
+    command
+        .args(&argv[1..])
+        .arg(catalog_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup2(child_fd, 3) < 0 || libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
+    drop(child_socket);
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
+    let peer = Peer::start(
+        tokio::net::UnixStream::from_std(host_socket).unwrap(),
+        Arc::new(|_, _| {
+            Box::pin(async {
+                Err(rutis_protocol::error::ProtocolError::new(
+                    ErrorCode::UnsupportedCapability,
+                    "host",
+                    "no business transport in lifecycle test",
+                ))
+            })
+        }),
+    );
+    let activation = |n| Activation {
+        runtime: "node".into(),
+        epoch: Sequence(1),
+        activation: Sequence(n),
+    };
+    tokio::time::timeout(Duration::from_secs(15), async {
+        hello(&peer, &launch).await.unwrap();
+        let slow = peer
+            .start_request(
+                "plugin/start",
+                json!({"instance":"slow","activation":activation(1)}),
+            )
+            .unwrap();
+        let loaded: Value =
+            serde_json::from_str(&output.next_line().await.unwrap().unwrap()).unwrap();
+        assert!(loaded["loaded"].as_str().unwrap().contains("plugin.mjs"));
+        let slow_ctx: Value =
+            serde_json::from_str(&output.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(slow_ctx["apply"], "slow");
+        peer.request(
+            "plugin/start",
+            json!({"instance":"fast","activation":activation(2)}),
+        )
+        .await
+        .unwrap();
+        let loaded: Value =
+            serde_json::from_str(&output.next_line().await.unwrap().unwrap()).unwrap();
+        assert!(loaded["loaded"].is_string());
+        let fast_ctx: Value =
+            serde_json::from_str(&output.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(fast_ctx["apply"], "fast");
+        assert_ne!(slow_ctx["ctx"], fast_ctx["ctx"]);
+        let published = peer
+            .request("plugin/activate", json!({"activation":activation(2)}))
+            .await
+            .unwrap();
+        assert_eq!(published["phase"], "published");
+        let stopped = peer
+            .start_request("plugin/stop", json!({"activation":activation(1)}))
+            .unwrap();
+        let state = peer
+            .request("plugin/state", json!({"activation":activation(1)}))
+            .await
+            .unwrap();
+        assert_eq!(state["phase"], "closing");
+        input.write_all(b"finish loading\n").await.unwrap();
+        assert_eq!(slow.await.unwrap().unwrap_err().code, ErrorCode::Cancelled);
+        assert_eq!(stopped.await.unwrap().unwrap()["phase"], "stopped");
+        let state = peer
+            .request("plugin/state", json!({"activation":activation(2)}))
+            .await
+            .unwrap();
+        assert_eq!(state["phase"], "published");
+        peer.request("runtime/stop", json!({})).await.unwrap();
+        peer.close(rutis_protocol::error::ProtocolError::new(
+            ErrorCode::Unavailable,
+            "test",
+            "runtime stop confirmed",
+        ));
+        drop(input);
+        let mut records = vec![];
+        while let Some(line) = output.next_line().await.unwrap() {
+            records.push(serde_json::from_str::<Value>(&line).unwrap());
+        }
+        let result = child.wait_with_output().await.unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(records.iter().any(|record| record["late_rejected"] == true));
+        let mut cleaned: Vec<_> = records
+            .iter()
+            .filter_map(|record| record["cleaned"].as_str())
+            .collect();
+        cleaned.sort();
+        assert_eq!(cleaned, ["fast", "slow"]);
+    })
+    .await
+    .expect("frozen Node lifecycle process failed to confirm cleanup");
+    drop(group);
+    snapshot.cleanup().unwrap();
+}
+
 #[test]
 fn environment_identity_binds_symlink_targets_and_executable_flags() {
     use rutis_protocol::snapshot::Snapshot;
