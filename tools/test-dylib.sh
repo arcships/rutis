@@ -71,7 +71,7 @@ if test -e "$marker"; then
   echo "plugin initializer ran before embedded identity rejection" >&2
   exit 1
 fi
-if ! rg -q 'binary identity differs from manifest or host' "$base/rejected.stderr"; then
+if ! grep -Fq 'binary identity differs from manifest or host' "$base/rejected.stderr"; then
   cat "$base/rejected.stderr" >&2
   exit 1
 fi
@@ -82,7 +82,7 @@ if RUTIS_PLUGIN_INIT_MARKER="$base/l1-init-marker" "$host" --load-only "$base/ba
   echo "mismatched SDK ID was accepted" >&2
   exit 1
 fi
-if test -e "$base/l1-init-marker" || ! rg -q 'SDK mismatch' "$base/l1.stderr"; then
+if test -e "$base/l1-init-marker" || ! grep -Fq 'SDK mismatch' "$base/l1.stderr"; then
   cat "$base/l1.stderr" >&2
   exit 1
 fi

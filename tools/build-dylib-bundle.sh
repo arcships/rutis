@@ -56,16 +56,16 @@ anchor_features = ["dylib-plugins"]
 EOF
 
 # The launcher must not depend on either unchecked Rust dynamic library.
-if ldd "$bundle/rutis-cli" | rg -q 'librutis_sdk|libstd-'; then
+if ldd "$bundle/rutis-cli" | grep -Eq 'librutis_sdk|libstd-'; then
   echo "launcher dynamically links Rust SDK or libstd" >&2
   exit 1
 fi
 resolved="$(env -u LD_PRELOAD LD_LIBRARY_PATH="$bundle" ldd "$bundle/rutis-cli-host")"
-if ! printf '%s\n' "$resolved" | rg -q "librutis_sdk.so => $bundle/librutis_sdk.so"; then
+if ! printf '%s\n' "$resolved" | grep -Fq "librutis_sdk.so => $bundle/librutis_sdk.so"; then
   echo "host SDK dependency resolved outside the bundle" >&2
   exit 1
 fi
-if ! printf '%s\n' "$resolved" | rg -q "libstd-.* => $bundle/$std_name"; then
+if ! printf '%s\n' "$resolved" | grep -Fq "$std_name => $bundle/$std_name"; then
   echo "host libstd dependency resolved outside the bundle" >&2
   exit 1
 fi

@@ -21,7 +21,7 @@ if cargo check --release --locked --offline -p rutis-sdk --manifest-path "$base/
   echo "unclassified RUSTFLAGS argument was accepted" >&2
   exit 1
 fi
-if ! rg -q 'unclassified RUSTFLAGS argument: --cap-lints' "$base/unclassified.stderr"; then
+if ! grep -Fq 'unclassified RUSTFLAGS argument: --cap-lints' "$base/unclassified.stderr"; then
   cat "$base/unclassified.stderr" >&2
   exit 1
 fi

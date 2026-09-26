@@ -21,7 +21,7 @@ for name in rutis-cli-host librutis_sdk.so "$(find "$bundle" -maxdepth 1 -name '
     echo "launcher accepted modified $name" >&2
     exit 1
   fi
-  if test -s "$copy/stdout" || ! rg -q 'SHA-256 mismatch' "$copy/stderr"; then
+  if test -s "$copy/stdout" || ! grep -Fq 'SHA-256 mismatch' "$copy/stderr"; then
     echo "launcher ran host or reported the wrong rejection for $name" >&2
     exit 1
   fi
