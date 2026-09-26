@@ -17,6 +17,7 @@ pub mod managed;
 pub mod memory;
 pub mod prepare;
 pub mod runner_image;
+pub mod runtime;
 pub mod sdk;
 pub mod services;
 pub mod session;

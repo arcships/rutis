@@ -7,7 +7,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { Peer } from '../src/frame.ts'
 import { ProtocolError } from '../src/error.ts'
 import { ActivationGate, ManagedActivation } from '../src/managed.ts'
-import { CORDIS_VERSION, FAMILY, VERSION, NativeModuleDriver, Runner, parseHello, type Driver, type Hello, type MountRequest, type Mounted } from '../src/lifecycle.ts'
+import { CORDIS_VERSION, FAMILY, VERSION, NativeModuleDriver, Runner, parseHello, parseNodeCatalog, type Driver, type Hello, type MountRequest, type Mounted } from '../src/lifecycle.ts'
+import { Bundles, NativePorts } from '../src/services.ts'
 import type { Activation } from '../src/imports.ts'
 
 const digest = (value: string) => createHash('sha256').update(value).digest('hex')
@@ -70,7 +71,8 @@ function session(driver: Driver) {
   const a = new Wire(); const b = new Wire(); a.other = b; b.other = a
   const runner = new Runner(driver)
   const client = new Peer(a, async () => null)
-  const server = new Peer(b, runner.handle); runner.attach(server)
+  const server = new Peer(b, driver.objectSession?.handler(runner) ?? runner.handle)
+  driver.objectSession?.attach(server); runner.attach(server)
   return { runner, client, server }
 }
 const closed = () => new ProtocolError('Unavailable', 'test', 'closed')
@@ -123,12 +125,12 @@ test('stop joins cleanup independently of its waiter and replacement stays block
   } finally { driver.cleanup.resolve(); client.close(closed()); server.close(closed()); await runner.stopped(); await driver.root.fiber.dispose() }
 })
 
-test('stop during module loading prevents any late native apply', async () => {
+for (const configured of [false, true]) test(`stop during module loading prevents late native apply with service transport ${configured}`, async () => {
   const root = new Context(); const entered = deferred(); const imported = deferred(); let applies = 0; let imports = 0
   const driver = new NativeModuleDriver(root, digest('env'), digest('code'), [{
     entry: '/snapshot/plugin.mjs', contracts: declaration(),
     async load() { imports++; entered.resolve(); await imported.promise; return { default: { apply() { applies++ } } } },
-  }])
+  }], configured ? new Bundles([]) : undefined)
   const { runner, client, server } = session(driver)
   try {
     await client.request('runtime/hello', plan()); assert.equal(imports, 0)
@@ -143,6 +145,38 @@ test('stop during module loading prevents any late native apply', async () => {
     assert.equal(applies, 1)
     await client.request('runtime/stop', {})
   } finally { imported.resolve(); client.close(closed()); server.close(closed()); await runner.stopped(); await root.fiber.dispose() }
+})
+
+test('service driver rejects missing exact bundle and mismatched ports before native apply', async () => {
+  const raw = readFileSync(new URL('../../fixtures/rpc.bundle.json', import.meta.url))
+  const rpc = { interface: 'Database', version: '1.0.0', bundle_sha256: digest(raw.toString()) }
+  const root = new Context(); let imports = 0; let applies = 0
+  const contracts = { ...declaration(), provides: { rpc } }
+  const modules = [{ entry: '/snapshot/plugin.mjs', contracts, async load() { imports++; return { protocolPorts: new NativePorts(), default: { apply() { applies++ } } } } }]
+  const requested = plan(); requested.identity.capabilities = ['object.scope', 'callback.borrow']
+  for (const member of Object.values(requested.members)) member.contracts = contracts
+  const missing = new Runner(new NativeModuleDriver(root, digest('env'), digest('code'), modules, new Bundles([])))
+  await assert.rejects(missing.handle('runtime/hello', requested), code('InterfaceMismatch')); assert.equal(imports, 0)
+  await missing.stopped()
+  const driver = new NativeModuleDriver(root, digest('env'), digest('code'), modules, new Bundles([raw]))
+  const { runner, client, server } = session(driver)
+  try {
+    const events = structuredClone(requested); events.identity.capabilities.push('event.serial')
+    await assert.rejects(client.request('runtime/hello', events), code('UnsupportedCapability')); assert.equal(imports, 0)
+    await client.request('runtime/hello', requested); assert.equal(imports, 0)
+    await assert.rejects(client.request('plugin/start', { instance: 'fast', activation: id('1') }), code('InterfaceMismatch'))
+    assert.equal(imports, 1); assert.equal(applies, 0)
+    await client.request('runtime/stop', {})
+  } finally { client.close(closed()); server.close(closed()); await runner.stopped(); await root.fiber.dispose() }
+})
+
+test('frozen Node catalog retains exact raw bundle bytes and checks their digest before imports', () => {
+  const raw = readFileSync(new URL('../../fixtures/rpc.bundle.json', import.meta.url), 'utf8')
+  const catalog = { protocol_family: FAMILY, protocol_version: VERSION, framework_version: CORDIS_VERSION, environment_sha256: digest('env'), code_sha256: digest('code'), modules: { '/snapshot/plugin.mjs': declaration() }, bundles: { [digest(raw)]: raw } }
+  const parsed = parseNodeCatalog(catalog)
+  assert.equal(new Bundles(Object.values(parsed.bundles!).map(raw => Buffer.from(raw))).exact(digest(raw)).sha256, digest(raw))
+  catalog.bundles[digest(raw)] += '\n'
+  assert.throws(() => parseNodeCatalog(catalog), code('InterfaceMismatch'))
 })
 
 test('peer close synchronously closes native contexts before cleanup awaits', async () => {

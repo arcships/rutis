@@ -4,7 +4,7 @@ use crate::{
     contract::{check_schema_for_prepare, identifier, validate_json},
     error::{ErrorCode, ProtocolError, Result},
     json,
-    managed::{ActivationGate, ManagedActivation},
+    managed::{ActivationGate, ManagedActivation, NativeEnter},
     prepare::{digest, PluginEntry, PreparedInstance, RuntimeKind},
     runner_image::{FactoryCatalog, RunnerCatalog},
 };
@@ -16,7 +16,13 @@ use std::{
     panic::{catch_unwind, AssertUnwindSafe},
 };
 
-type Mount = dyn Fn(&Ctx, Value, ActivationGate, Option<&[rutis::TypeKey]>) -> Result<ManagedActivation>
+type Mount = dyn Fn(
+        &Ctx,
+        Value,
+        ActivationGate,
+        Option<&[rutis::TypeKey]>,
+        Option<NativeEnter>,
+    ) -> Result<ManagedActivation>
     + Send
     + Sync;
 
@@ -75,7 +81,7 @@ impl StaticFactory {
             name,
             catalog,
             config_schema,
-            mount: Box::new(move |ctx, value, gate, required| {
+            mount: Box::new(move |ctx, value, gate, required, enter| {
                 if !gate.is_open() {
                     return Err(ProtocolError::new(
                         ErrorCode::Unavailable,
@@ -106,7 +112,7 @@ impl StaticFactory {
                             ));
                         }
                     }
-                    ManagedActivation::mount_factory_gated(ctx, factory, config, gate)
+                    ManagedActivation::mount_factory_enter(ctx, factory, config, gate, enter)
                         .map_err(native_error)
                 }))
                 .unwrap_or_else(|_| {
@@ -192,7 +198,7 @@ impl StaticFactories {
             .get(factory)
             .ok_or_else(|| mismatch("factory is not in the linked registry"))?;
         validate_json(&entry.config_schema, &config)?;
-        (entry.mount)(parent, config, gate, None)
+        (entry.mount)(parent, config, gate, None, None)
     }
     /// Service mounting requires exact native injection keys as well as the
     /// pure wire catalog. Constructors still run only after host start.
@@ -204,12 +210,23 @@ impl StaticFactories {
         gate: ActivationGate,
         required: &[rutis::TypeKey],
     ) -> Result<ManagedActivation> {
+        self.mount_bound_enter(parent, factory, config, gate, required, None)
+    }
+    pub(crate) fn mount_bound_enter(
+        &self,
+        parent: &Ctx,
+        factory: &str,
+        config: Value,
+        gate: ActivationGate,
+        required: &[rutis::TypeKey],
+        enter: Option<NativeEnter>,
+    ) -> Result<ManagedActivation> {
         let entry = self
             .entries
             .get(factory)
             .ok_or_else(|| mismatch("factory is not linked"))?;
         validate_json(&entry.config_schema, &config)?;
-        (entry.mount)(parent, config, gate, Some(required))
+        (entry.mount)(parent, config, gate, Some(required), enter)
     }
 }
 

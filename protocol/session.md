@@ -4,8 +4,8 @@
 `frame::Peer` / `Peer`。Rust `HostObjects` 是授权方，两端 `RuntimeObjects` 只保存
 本进程的实际 native 表、暂存图与已接收代理；作者不分配 grant、object id 或 token。
 
-这是 M1/M2 的可复用传输层。默认 Rust/Node native driver 仍拒绝未安装的命名服务和
-事件能力；通用 frozen runner、完整 HostProxy 图、内部 child
+这是 M1/M2 的可复用传输层。默认 Rust/Node native driver 已接命名服务传输并拒绝
+事件能力；完整 HostProxy 图、内部 child
 精确 creator context、更新恢复、事件和完整 T24 尚未验收。
 
 ## 接入顺序
@@ -20,7 +20,7 @@ prepared source 的独立 stage；不改变原始 commit 对完整 view 的核�
 
 runtime driver 使用生命周期 `MountRequest` 的同一个 gate，在构造前 `reserve`。
 把整个 required 根表接收到本代 scope 1，等待 Accept ACK，再绑定生成客户端和
-登记 native providers。Rust 的 `RootDelivery.receive` 与 TS 的 `receiveServices`
+登记 native providers。Rust/TS actor 的 `receive_services` / `receiveServices`
 执行这条路径；所有绑定都归本代，Host 的原生键和 Rust TypeId 不进入 wire。
 
 实际 apply 首先用原始 Ctx/Context 创建 `Exports.managed` 并 `bind`，然后业务才
@@ -33,10 +33,11 @@ Host `offer_services` 等待 owner 整表 commit 及必要 foreign pins，返回
 `RootDelivery`。`receive` 接到本地 SDK；`send` 把完整 activation/contracts/graphs
 交给指定接收 handler。必须取得整表 Accept ACK 才完成交付，不能凭普通成功响应
 推断 receiver 已接受。丢弃 issuance waiter 或 receipt 会独立推进撤销和新根拒收，
-关闭预留消费者；这些后台兜底不是 native cleanup 或进程回收的成功确认。
+关闭预留消费者；`start(instance)` 向默认 driver 发送完整 required 表，也核对整表
+Accept。这些后台兜底不是 native cleanup 或进程回收的成功确认。
 
 `lifecycle_handler` / `lifecycleHandler` 与 `session::serve` / `serve` 可以把对象和
-生命周期组合到同一请求泵。service-capable driver 仍须完成 reserve/bind/整表暂存。
+生命周期组合到同一请求泵。默认 service-capable driver 完成 reserve/bind/整表暂存。
 activate 成功后才开放普通 object execute；stop 意图同步关闭对象成员，断连同时
 关闭全部成员。嵌入者仍持有 native root，等待 native cleanup 后独立监督进程。
 

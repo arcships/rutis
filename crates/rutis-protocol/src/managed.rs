@@ -195,6 +195,7 @@ struct ManagedPlugin {
     gate: ActivationGate,
     injects: Vec<TypeKey>,
     context: watch::Sender<Option<Ctx>>,
+    enter: Option<NativeEnter>,
 }
 
 impl Plugin for ManagedPlugin {
@@ -214,6 +215,9 @@ impl Plugin for ManagedPlugin {
         Box::pin(async move {
             self.gate.enter(ctx).await?;
             self.context.send_replace(Some(ctx.clone()));
+            if let Some(enter) = &self.enter {
+                enter(ctx)?;
+            }
             self.plugin.apply(ctx).await
         })
     }
@@ -225,6 +229,7 @@ struct ManagedFactory<F> {
     gate: ActivationGate,
     injects: Vec<TypeKey>,
     context: watch::Sender<Option<Ctx>>,
+    enter: Option<NativeEnter>,
 }
 impl<F: PluginFactory<C>, C: Send + Sync + 'static> PluginFactory<C> for ManagedFactory<F> {
     fn name(&self) -> &str {
@@ -247,6 +252,7 @@ impl<F: PluginFactory<C>, C: Send + Sync + 'static> PluginFactory<C> for Managed
             gate: self.gate.clone(),
             injects: self.injects.clone(),
             context: self.context.clone(),
+            enter: self.enter.clone(),
         }))
     }
 }
@@ -254,6 +260,7 @@ impl<F: PluginFactory<C>, C: Send + Sync + 'static> PluginFactory<C> for Managed
 /// An activation cannot be restarted. The host stops it and creates a new
 /// activation with freshly installed, isolated dependencies and a new plugin.
 type StopResult = Result<(), Arc<CordisError>>;
+pub(crate) type NativeEnter = Arc<dyn Fn(&Ctx) -> Result<(), CordisError> + Send + Sync>;
 
 pub struct ManagedActivation {
     view: Arc<FiberView>,
@@ -281,6 +288,7 @@ impl ManagedActivation {
                 gate,
                 injects,
                 context,
+                enter: None,
             })
         })
     }
@@ -298,6 +306,15 @@ impl ManagedActivation {
         config: C,
         gate: ActivationGate,
     ) -> Result<Self, CordisError> {
+        Self::mount_factory_enter(parent, factory, config, gate, None)
+    }
+    pub(crate) fn mount_factory_enter<C: Send + Sync + 'static>(
+        parent: &Ctx,
+        factory: impl PluginFactory<C>,
+        config: C,
+        gate: ActivationGate,
+        enter: Option<NativeEnter>,
+    ) -> Result<Self, CordisError> {
         // Capture author metadata before registering the permit. A panic here
         // cannot leave an orphaned permit or a partially mounted fiber.
         let name = factory.name().to_owned();
@@ -311,6 +328,7 @@ impl ManagedActivation {
                     gate,
                     injects,
                     context,
+                    enter,
                 },
                 config,
             )

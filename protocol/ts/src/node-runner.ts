@@ -6,11 +6,13 @@ import { Socket } from 'node:net'
 import { Context } from '@deepseek-ai/cordis'
 import { decodeJson } from './json.ts'
 import { NativeModuleDriver, nodeModule, parseNodeCatalog, serve } from './lifecycle.ts'
+import { Bundles } from './services.ts'
 
 if (process.argv.length !== 3 || !isAbsolute(process.argv[2])) throw new Error('expected an absolute frozen Node catalog path')
 const catalog = parseNodeCatalog(decodeJson(await readFile(process.argv[2])))
 const root = new Context()
 const driver = new NativeModuleDriver(root, catalog.environment_sha256, catalog.code_sha256,
-  Object.entries(catalog.modules).map(([entry, contracts]) => nodeModule(entry, contracts)))
+  Object.entries(catalog.modules).map(([entry, contracts]) => nodeModule(entry, contracts)),
+  new Bundles(Object.values(catalog.bundles ?? {}).map(raw => Buffer.from(raw))))
 try { await serve(new Socket({ fd: 3, readable: true, writable: true }), driver) }
 finally { await root.fiber.dispose() }

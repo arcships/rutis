@@ -63,6 +63,8 @@ pub struct NodeCatalog {
     pub environment_sha256: String,
     pub code_sha256: String,
     pub modules: BTreeMap<String, FactoryCatalog>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bundles: BTreeMap<String, String>,
 }
 pub(crate) fn member_contracts(
     package: &crate::prepare::PreparedPackage,
@@ -238,6 +240,8 @@ pub struct Status {
 struct Start {
     instance: String,
     activation: Activation,
+    #[serde(default)]
+    required: BTreeMap<String, crate::graph::WireGraph>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -252,6 +256,16 @@ struct Select {
 pub trait Driver: Send + Sync + 'static {
     fn admit(&self, hello: &Hello) -> Result<()>;
     fn mount(&self, request: MountRequest, admission: ActivationGate) -> Result<Mounted>;
+    fn mount_async(
+        &self,
+        request: MountRequest,
+        admission: ActivationGate,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Mounted>> + Send + '_>> {
+        Box::pin(async move { self.mount(request, admission) })
+    }
+    fn object_session(&self) -> Option<Arc<crate::runtime::ObjectSession>> {
+        None
+    }
 }
 /// Identity comes from reserved host intent, never from plugin configuration.
 /// Service adapters use it to bind native tables and object owner scopes.
@@ -259,6 +273,7 @@ pub struct MountRequest {
     pub instance: String,
     pub activation: Activation,
     pub member: Member,
+    pub required: BTreeMap<String, crate::graph::WireGraph>,
 }
 pub type ServiceFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<BTreeMap<String, Value>>> + Send>>;
@@ -413,7 +428,10 @@ impl Runner {
         self.handle.spawn(async move {
             let executing = runner.clone();
             let selected = activation.clone();
-            let result = tokio::spawn(async move { executing.mount(selected, member).await })
+            let result =
+                tokio::spawn(
+                    async move { executing.mount(selected, member, request.required).await },
+                )
                 .await
                 .unwrap_or_else(|_| {
                     let mut error = ProtocolError::new(
@@ -449,7 +467,12 @@ impl Runner {
         });
         Ok(wait(rx))
     }
-    async fn mount(self: &Arc<Self>, activation: Activation, member: Member) -> Completion {
+    async fn mount(
+        self: &Arc<Self>,
+        activation: Activation,
+        member: Member,
+        required: BTreeMap<String, crate::graph::WireGraph>,
+    ) -> Completion {
         if self.state.lock().unwrap().slots[&activation].status.phase == Phase::Closing {
             return Err(ProtocolError::new(
                 ErrorCode::Cancelled,
@@ -462,14 +485,18 @@ impl Runner {
             let slot = &state.slots[&activation];
             (slot.admission.clone(), slot.status.instance.clone())
         };
-        let mounted = self.driver.mount(
-            MountRequest {
-                instance,
-                activation: activation.clone(),
-                member: member.clone(),
-            },
-            admission.clone(),
-        )?;
+        let mounted = self
+            .driver
+            .mount_async(
+                MountRequest {
+                    instance,
+                    activation: activation.clone(),
+                    member: member.clone(),
+                    required,
+                },
+                admission.clone(),
+            )
+            .await?;
         if !admission.same_activation(&mounted.native.gate()) {
             mounted.native.stop().await.map_err(cleanup_error)?;
             return Err(unavailable(
@@ -672,8 +699,16 @@ pub async fn serve<S>(stream: S, driver: impl Driver) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let session = driver.object_session();
     let runner = Runner::new(driver);
-    let peer = Peer::start(stream, runner.handler());
+    let handler = session.as_ref().map_or_else(
+        || runner.handler(),
+        |session| session.handler(runner.clone()),
+    );
+    let peer = Peer::start(stream, handler);
+    if let Some(session) = session {
+        session.attach(&peer)?;
+    }
     runner.attach(&peer)?;
     peer.closed().await;
     let mut failure = None;
@@ -846,16 +881,56 @@ pub fn ready_key(identity: &RuntimeIdentity) -> rutis::TypeKey {
     ])))
 }
 
-/// Statically linked native lifecycle driver. Protocol service codecs are a
-/// separate driver integration: this constructor refuses service declarations
-/// and capability claims it does not implement, before any factory executes.
+/// Statically linked native lifecycle driver. Service ports are pure metadata;
+/// constructors run only after required roots have received their Accept ACK.
 pub struct NativeDriver {
     parent: rutis::Ctx,
-    factories: crate::factories::StaticFactories,
+    factories: Arc<crate::factories::StaticFactories>,
+    transport: Option<NativeTransport>,
+}
+struct NativeTransport {
+    bundles: crate::services::Bundles,
+    ports: BTreeMap<String, Arc<crate::services::NativePorts>>,
+    session: Arc<crate::runtime::ObjectSession>,
 }
 impl NativeDriver {
     pub fn new(parent: rutis::Ctx, factories: crate::factories::StaticFactories) -> Self {
-        Self { parent, factories }
+        Self {
+            parent,
+            factories: Arc::new(factories),
+            transport: None,
+        }
+    }
+    pub fn with_services(
+        parent: rutis::Ctx,
+        factories: crate::factories::StaticFactories,
+        bundles: crate::services::Bundles,
+        ports: BTreeMap<String, Arc<crate::services::NativePorts>>,
+    ) -> Result<Self> {
+        if ports.keys().ne(factories.catalog().factories.keys()) {
+            return Err(ProtocolError::new(
+                ErrorCode::InterfaceMismatch,
+                "native_driver",
+                "complete factory port catalog differs",
+            ));
+        }
+        for (name, ports) in &ports {
+            let catalog = &factories.catalog().factories[name];
+            ports.check(catalog)?;
+            for contract in catalog.provides.values().chain(catalog.requires.values()) {
+                bundles.service(contract)?;
+            }
+        }
+        let session = crate::runtime::ObjectSession::new(bundles.clone());
+        Ok(Self {
+            parent,
+            factories: Arc::new(factories),
+            transport: Some(NativeTransport {
+                bundles,
+                ports,
+                session,
+            }),
+        })
     }
 }
 impl Driver for NativeDriver {
@@ -871,11 +946,14 @@ impl Driver for NativeDriver {
                 "native runner identity differs",
             ));
         }
-        if !hello.identity.capabilities.is_empty() {
+        if hello.identity.capabilities.iter().any(|capability| {
+            self.transport.is_none()
+                || !matches!(capability.as_str(), "object.scope" | "callback.borrow")
+        }) {
             return Err(ProtocolError::new(
                 ErrorCode::UnsupportedCapability,
                 "hello",
-                "native lifecycle driver needs an object/event transport adapter",
+                "native driver does not implement the requested capability",
             ));
         }
         for member in hello.members.values() {
@@ -889,7 +967,9 @@ impl Driver for NativeDriver {
                     "native factory contract differs",
                 ));
             }
-            if !member.contracts.provides.is_empty() || !member.contracts.requires.is_empty() {
+            if self.transport.is_none()
+                && (!member.contracts.provides.is_empty() || !member.contracts.requires.is_empty())
+            {
                 return Err(ProtocolError::new(
                     ErrorCode::UnsupportedCapability,
                     "hello",
@@ -897,9 +977,20 @@ impl Driver for NativeDriver {
                 ));
             }
         }
+        if let Some(transport) = &self.transport {
+            transport.session.admit(hello)?;
+        }
         Ok(())
     }
     fn mount(&self, request: MountRequest, admission: ActivationGate) -> Result<Mounted> {
+        if self.transport.is_some() {
+            return Err(unavailable(
+                "service driver requires asynchronous root admission",
+            ));
+        }
+        if !request.required.is_empty() {
+            return Err(invalid("service-less driver received required roots"));
+        }
         let member = request.member;
         let Entry::Rust { factory } = member.entry else {
             return Err(invalid("native member entry differs"));
@@ -909,6 +1000,106 @@ impl Driver for NativeDriver {
                 .factories
                 .mount_gated(&self.parent, &factory, member.config, admission)?,
             services: Box::pin(async { Ok(BTreeMap::new()) }),
+        })
+    }
+    fn object_session(&self) -> Option<Arc<crate::runtime::ObjectSession>> {
+        self.transport.as_ref().map(|t| t.session.clone())
+    }
+    fn mount_async(
+        &self,
+        request: MountRequest,
+        admission: ActivationGate,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Mounted>> + Send + '_>> {
+        Box::pin(async move {
+            let Some(transport) = &self.transport else {
+                return self.mount(request, admission);
+            };
+            let Entry::Rust { factory } = &request.member.entry else {
+                return Err(invalid("native member entry differs"));
+            };
+            let ports = transport
+                .ports
+                .get(factory)
+                .cloned()
+                .ok_or_else(|| invalid("native factory is not linked"))?;
+            let objects = transport.session.objects()?;
+            let owner = request.activation;
+            objects.reserve(owner.clone(), admission.clone())?;
+            let values = objects
+                .receive_services(&owner, &request.member.contracts.requires, request.required)
+                .await?;
+            let mut bindings = ports.scope(&self.parent, owner.clone(), admission.clone());
+            let mounted = (|| {
+                ports.install(&mut bindings, values, objects.caller(&owner))?;
+                let actor = objects.clone();
+                let bound_owner = owner.clone();
+                let gate = admission.clone();
+                let enter: crate::managed::NativeEnter = Arc::new(move |ctx| {
+                    let exports = crate::exports::Exports::managed(
+                        ctx,
+                        bound_owner.clone(),
+                        actor.ids(),
+                        gate.clone(),
+                    )?;
+                    actor
+                        .bind(&bound_owner, ctx.clone(), exports)
+                        .map_err(|error| rutis::CordisError::PluginFailed(Box::new(error)))
+                });
+                self.factories.mount_bound_enter(
+                    bindings.ctx(),
+                    factory,
+                    request.member.config,
+                    admission,
+                    &ports.required_keys(),
+                    Some(enter),
+                )
+            })();
+            let native = match mounted {
+                Ok(native) => native,
+                Err(error) => {
+                    objects.close_member(&owner);
+                    let rollback = bindings.rollback().await;
+                    let flush = objects.flush().await;
+                    rollback?;
+                    flush?;
+                    return Err(error);
+                }
+            };
+            if let Err(error) = bindings.adopt(&native) {
+                objects.close_member(&owner);
+                let stopped = native.stop().await.map_err(cleanup_error);
+                let rollback = bindings.rollback().await;
+                let flush = objects.flush().await;
+                stopped?;
+                rollback?;
+                flush?;
+                return Err(error);
+            }
+            let bundles = transport.bundles.clone();
+            Ok(Mounted {
+                native,
+                services: Box::pin(async move {
+                    // Read the complete table before waiting on guards: a missing
+                    // declared export must fail rather than leave a Pending child.
+                    let staged = ports.stage(&bindings, bundles, objects.exports(&owner)?)?;
+                    for guard in ports.guard_context(&bindings, &objects.native_context(&owner)?)? {
+                        (&guard).await.map_err(cleanup_error)?;
+                        if guard.state().state != rutis::FiberState::Active {
+                            return Err(unavailable("native export guard did not become Active"));
+                        }
+                    }
+                    let table = objects.stage_services(staged)?;
+                    table
+                        .services
+                        .into_iter()
+                        .map(|(name, draft)| {
+                            serde_json::to_value(draft)
+                                .map(|value| (name, value))
+                                .map_err(|error| invalid(error.to_string()))
+                        })
+                        .collect()
+                }),
+            })
         })
     }
 }

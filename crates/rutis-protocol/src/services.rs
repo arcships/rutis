@@ -399,13 +399,26 @@ impl NativePorts {
                 "native context has not entered apply",
             )
         })?;
+        self.guard_context(bindings, &ctx)
+    }
+    pub(crate) fn guard_context(
+        &self,
+        bindings: &NativeBindings,
+        ctx: &Ctx,
+    ) -> Result<Vec<rutis::FiberView>> {
+        if !bindings.gate.is_open() {
+            return Err(fail(
+                ErrorCode::ScopeClosed,
+                "native export guard owner closed",
+            ));
+        }
         // Guards are native children of the business member, so its shutdown
         // owns their cleanup. Mounting guards on the runtime root would leave
         // a Pending fiber behind for every stopped activation.
         Ok(self
             .exports
             .values()
-            .map(|p| bindings.gate.track_service(&ctx, p.key.clone()))
+            .map(|p| bindings.gate.track_service(ctx, p.key.clone()))
             .collect())
     }
 }

@@ -239,6 +239,22 @@ impl Snapshot {
                         ))
                     })
                     .collect::<Result<BTreeMap<_, _>>>()?;
+                let mut bundles = BTreeMap::new();
+                for member in group.members() {
+                    let package = plan.instances()[member].package();
+                    for file in &package.manifest().files {
+                        if file.kind != FileKind::Bundle {
+                            continue;
+                        }
+                        let raw = package.file(&file.path)?.bytes();
+                        bundles.insert(
+                            digest(raw),
+                            std::str::from_utf8(raw)
+                                .map_err(|e| unavailable(e.to_string()))?
+                                .to_owned(),
+                        );
+                    }
+                }
                 let catalog = NodeCatalog {
                     protocol_family: FAMILY.into(),
                     protocol_version: VERSION.into(),
@@ -246,6 +262,7 @@ impl Snapshot {
                     environment_sha256: group.environment_sha256().into(),
                     code_sha256: group.code_sha256().into(),
                     modules,
+                    bundles,
                 };
                 let path = root.join("node-catalog.json");
                 write(

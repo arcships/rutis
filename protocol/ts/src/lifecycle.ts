@@ -10,6 +10,10 @@ import { decodeJson } from './json.ts'
 import { Peer } from './frame.ts'
 import { sequence, type Activation } from './imports.ts'
 import { ActivationGate, ManagedActivation } from './managed.ts'
+import { Bundles, NativePorts } from './services.ts'
+import { ObjectSession } from './runtime.ts'
+import { Exports } from './exports.ts'
+import type { WireGraph } from './graph.ts'
 
 export const FAMILY = 'rutis-cordis-objects'
 export const VERSION = '0.experimental'
@@ -32,8 +36,9 @@ export interface Hello {
 export type Phase = 'starting' | 'staged' | 'published' | 'closing' | 'stopped' | 'failed'
 export interface Status { instance: string; activation: Activation; phase: Phase }
 export interface Mounted { native: ManagedActivation<any>; services(): Promise<Record<string, unknown>> }
-export interface MountRequest { instance: string; activation: Activation; member: Member }
+export interface MountRequest { instance: string; activation: Activation; member: Member; required: Record<string, WireGraph> }
 export interface Driver {
+  readonly objectSession?: ObjectSession
   /** Declaration checks only: no module import, factory construction or apply. */
   admit(plan: Readonly<Hello>): void
   mount(request: MountRequest, admission: ActivationGate): Mounted | Promise<Mounted>
@@ -155,7 +160,8 @@ export class Runner {
     return { protocol_family: FAMILY, protocol_version: VERSION, identity: plan.identity }
   }
   private start(params: unknown): Promise<unknown> {
-    keys(params, ['instance', 'activation'])
+    validateJson({}, params)
+    keys(params, ['instance', 'activation'], ['required'])
     if (typeof params.instance !== 'string' || !identifier(params.instance)) invalid('invalid member name')
     const id = activation(params.activation)
     const plan = this.plan
@@ -166,6 +172,7 @@ export class Runner {
     if (this.slots.has(key)) unavailable('activation identity cannot be reused')
     const current = this.current.get(params.instance)
     if (current && (BigInt(id.activation) <= BigInt(current.status.activation.activation) || current.status.phase !== 'stopped')) unavailable('previous activation has not stopped or new id is stale')
+    const required = structuredClone(params.required === undefined ? {} : params.required) as Record<string, WireGraph>
     const slot: Slot = {
       status: { instance: params.instance, activation: id, phase: 'starting' },
       admission: new ActivationGate(), completion: deferred(),
@@ -173,14 +180,14 @@ export class Runner {
     this.slots.set(key, slot); this.current.set(params.instance, slot)
     // Reserve before even invoking an async module loader. Stop can revoke the
     // admission object during that loader and prevent the eventual native apply.
-    void Promise.resolve().then(() => this.mount(slot, structuredClone(plan.members[params.instance]))).then(slot.completion.resolve, slot.completion.reject)
+    void Promise.resolve().then(() => this.mount(slot, structuredClone(plan.members[params.instance]), required)).then(slot.completion.resolve, slot.completion.reject)
     return slot.completion.promise
   }
-  private async mount(slot: Slot, member: Member): Promise<unknown> {
+  private async mount(slot: Slot, member: Member, required: Record<string, WireGraph>): Promise<unknown> {
     const expectedServices = Object.keys(member.contracts.provides).sort()
     try {
       if (!slot.admission.isOpen) throw failure('Cancelled', 'activation stopped before construction')
-      const mounted = await this.driver.mount({ instance: slot.status.instance, activation: slot.status.activation, member }, slot.admission)
+      const mounted = await this.driver.mount({ instance: slot.status.instance, activation: slot.status.activation, member, required }, slot.admission)
       slot.native = mounted.native
       if (mounted.native.gate !== slot.admission) {
         await mounted.native.stop()
@@ -267,18 +274,20 @@ export interface NodeModule {
   entry: string; contracts: Contracts
   /** Retained without invocation until start. Default loader uses the frozen
    * absolute snapshot entry, never a path supplied by business code. */
-  load(): Promise<{ default: Plugin.Object<any> }>
+  load(): Promise<{ default: Plugin.Object<any>; protocolPorts?: NativePorts }>
 }
 export function nodeModule(entry: string, declaration: Contracts): NodeModule {
   if (!isAbsolute(entry)) invalid('Node module must use an absolute snapshot entry')
   contracts(declaration)
   return { entry, contracts: freeze(structuredClone(declaration)), load: () => import(pathToFileURL(entry).href) }
 }
-/** Default native driver refuses object/event claims until their adapter is
- * installed. A successful hello does not import any business module. */
+/** Optional service transport accepts roots before module import. Successful
+ * hello checks pure declarations and never imports business code. */
 export class NativeModuleDriver implements Driver {
   private modules = new Map<string, NodeModule>()
-  constructor(private parent: Context, private environmentSha256: string, private codeSha256: string, modules: Iterable<NodeModule>) {
+  readonly objectSession?: ObjectSession
+  constructor(private parent: Context, private environmentSha256: string, private codeSha256: string, modules: Iterable<NodeModule>, private bundles?: Bundles) {
+    if (bundles) this.objectSession = new ObjectSession(bundles)
     if (!sha(environmentSha256) || !sha(codeSha256)) invalid('invalid code/environment digest')
     const framework = decodeJson(readFileSync(new URL(import.meta.resolve('@deepseek-ai/cordis/package.json'))))
     keys(framework, Object.keys(framework ?? {}))
@@ -291,36 +300,68 @@ export class NativeModuleDriver implements Driver {
   }
   admit(plan: Hello): void {
     if (plan.identity.kind !== 'node-cordis' || plan.identity.framework_version !== CORDIS_VERSION || plan.identity.environment_sha256 !== this.environmentSha256 || plan.identity.code_sha256 !== this.codeSha256) throw failure('InterfaceMismatch', 'native runner identity differs')
-    if (plan.identity.capabilities.length) throw failure('UnsupportedCapability', 'native lifecycle driver needs an object/event transport adapter')
+    if (plan.identity.capabilities.some(capability => !this.objectSession || !['object.scope', 'callback.borrow'].includes(capability))) throw failure('UnsupportedCapability', 'native driver does not implement requested capability')
     for (const member of Object.values(plan.members)) {
       const module = member.entry.kind === 'node' ? this.modules.get(member.entry.entry) : undefined
       if (!module || canonical(module.contracts) !== canonical(member.contracts)) throw failure('InterfaceMismatch', 'member differs from declared Node module')
-      if (Object.keys(member.contracts.provides).length || Object.keys(member.contracts.requires).length) throw failure('UnsupportedCapability', 'native lifecycle driver has no protocol service codecs')
+      if (!this.bundles && (Object.keys(member.contracts.provides).length || Object.keys(member.contracts.requires).length)) throw failure('UnsupportedCapability', 'native lifecycle driver has no protocol service codecs')
+      for (const contract of [...Object.values(member.contracts.provides), ...Object.values(member.contracts.requires)]) this.bundles!.service(contract)
     }
+    this.objectSession?.admit(plan)
   }
-  async mount({ member }: MountRequest, admission: ActivationGate): Promise<Mounted> {
+  async mount({ member, activation, required }: MountRequest, admission: ActivationGate): Promise<Mounted> {
     const module = member.entry.kind === 'node' ? this.modules.get(member.entry.entry) : undefined
     if (!module) unavailable('undeclared Node module')
-    const loaded = await module.load()
-    if (!admission.isOpen) throw failure('Cancelled', 'activation stopped during module import')
-    const plugin = loaded.default
-    if (!plugin || typeof plugin !== 'object' || typeof plugin.apply !== 'function') invalid('module default must be a native Cordis plugin object')
-    if (Object.keys(plugin.inject ?? {}).length) throw failure('InterfaceMismatch', 'module requests undeclared native dependencies')
-    const native = await ManagedActivation.mount(this.parent, plugin, member.config, {}, undefined, [], admission)
-    return { native, services: () => Promise.resolve({}) }
+    if (!this.objectSession && Object.keys(required).length) invalid('service-less driver received required roots')
+    const objects = this.objectSession?.objects()
+    objects?.reserve(activation, admission)
+    try {
+      const values = objects ? await objects.receiveServices(activation, member.contracts.requires, required) : {}
+      if (!admission.isOpen) throw failure('Cancelled', 'activation stopped before module import')
+      const loaded = await module.load()
+      if (!admission.isOpen) throw failure('Cancelled', 'activation stopped during module import')
+      const plugin = loaded.default
+      if (!plugin || typeof plugin !== 'object' || typeof plugin.apply !== 'function') invalid('module default must be a native Cordis plugin object')
+      if (objects) {
+        const ports = loaded.protocolPorts ?? new NativePorts()
+        if (!(ports instanceof NativePorts)) throw failure('InterfaceMismatch', 'module ports must use the canonical protocol SDK')
+        ports.check(member.contracts)
+        let table: Exports | undefined
+        const wrapped: Plugin.Object<any> = { ...plugin, apply(ctx, config) {
+          table = Exports.managed(ctx, activation, objects.ids, () => admission.isOpen)
+          objects.bind(activation, ctx, table)
+          return plugin.apply.call(plugin, ctx, config)
+        } }
+        const services = await ports.mount(this.parent, wrapped, member.config, activation, values, objects.caller(activation), admission)
+        return { native: services.native, services: async () => {
+          if (!table) unavailable('original native context has not entered apply')
+          return objects.stageServices(await services.stage(this.bundles!, objects.ids, table)).services
+        } }
+      }
+      if (Object.keys(plugin.inject ?? {}).length) throw failure('InterfaceMismatch', 'module requests undeclared native dependencies')
+      const native = await ManagedActivation.mount(this.parent, plugin, member.config, {}, undefined, [], admission)
+      return { native, services: () => Promise.resolve({}) }
+    } catch (error) {
+      if (objects) {
+        objects.closeMember(activation)
+        try { await objects.flush() } catch (cleanup) { throw new AggregateError([error, cleanup], 'native mount rollback failed') }
+      }
+      throw error
+    }
   }
 }
 
 export interface NodeCatalog {
   protocol_family: string; protocol_version: string; framework_version: string
   environment_sha256: string; code_sha256: string; modules: Record<string, Contracts>
+  bundles?: Record<string, string>
 }
 /** This launch file is materialized by Host from its frozen prepared group. It
  * has no instance configurations and is read before any business code import. */
 export function parseNodeCatalog(value: unknown): NodeCatalog {
   validateJson({}, value)
   const copy = decodeJson(Buffer.from(canonical(value)))
-  keys(copy, ['protocol_family', 'protocol_version', 'framework_version', 'environment_sha256', 'code_sha256', 'modules'])
+  keys(copy, ['protocol_family', 'protocol_version', 'framework_version', 'environment_sha256', 'code_sha256', 'modules'], ['bundles'])
   if (copy.protocol_family !== FAMILY || copy.protocol_version !== VERSION || copy.framework_version !== CORDIS_VERSION) throw failure('InterfaceMismatch', 'Node launch protocol/framework differs')
   if (!sha(copy.environment_sha256) || !sha(copy.code_sha256)) invalid('invalid Node launch digest')
   keys(copy.modules, Object.keys(copy.modules ?? {}))
@@ -329,6 +370,10 @@ export function parseNodeCatalog(value: unknown): NodeCatalog {
     if (!isAbsolute(entry)) invalid('Node launch entry must be an absolute snapshot path')
     contracts(declaration)
   }
+  if (copy.bundles !== undefined) {
+    keys(copy.bundles, Object.keys(copy.bundles ?? {}))
+    for (const [hash, raw] of Object.entries(copy.bundles)) if (!sha(hash) || typeof raw !== 'string' || digest(raw) !== hash) throw failure('InterfaceMismatch', 'frozen bundle raw digest differs')
+  }
   return freeze(copy as unknown as NodeCatalog)
 }
 
@@ -336,7 +381,8 @@ export function parseNodeCatalog(value: unknown): NodeCatalog {
  * close and process reaping; it is not itself an OS shutdown confirmation. */
 export async function serve(stream: Duplex, driver: Driver): Promise<void> {
   const runner = new Runner(driver)
-  const peer = new Peer(stream, runner.handle)
+  const peer = new Peer(stream, driver.objectSession?.handler(runner) ?? runner.handle)
+  driver.objectSession?.attach(peer)
   runner.attach(peer)
   await peer.closed
   await runner.stopped()

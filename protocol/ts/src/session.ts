@@ -195,10 +195,10 @@ export class RuntimeObjects {
    * provider or author constructor sees its generated facades. */
   async receiveServices(owner: Activation, contracts: Record<string, CatalogService>, graphs: Record<string, WireGraph>): Promise<Record<string, unknown>> {
     this.member(owner)
-    keys(graphs, Object.keys(contracts))
     const scopes = { scope: root(owner), borrow: root(owner) }
-    const deliveries = Object.values(graphs).flatMap(graph => Array.isArray(graph?.references) ? graph.references.flatMap(reference => { try { return [parseDelivery(reference.delivery)] } catch { return [] } }) : [])
+    const deliveries = Object.values(graphs ?? {}).flatMap(graph => Array.isArray(graph?.references) ? graph.references.flatMap(reference => { try { return [parseDelivery(reference.delivery)] } catch { return [] } }) : [])
     try {
+      keys(graphs, Object.keys(contracts))
       for (const [name, graph] of Object.entries(graphs)) validateGraph(this.bundles.service(contracts[name]), { kind: 'object', interface: contracts[name].interface, ownership: 'scope' }, graph, scopes)
       const values = Object.fromEntries(Object.entries(graphs).map(([name, graph]) => [name, this.imports.receiveGraph(this.bundles.service(contracts[name]), { kind: 'object', interface: contracts[name].interface, ownership: 'scope' }, graph, scopes)]))
       this.trackImports(owner, values); await this.flush(); return values

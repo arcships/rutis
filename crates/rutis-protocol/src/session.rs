@@ -362,6 +362,79 @@ impl RuntimeObjects {
         member.upstream = upstream;
         Ok(())
     }
+    pub async fn receive_services(
+        self: &Arc<Self>,
+        owner: &Activation,
+        contracts: &BTreeMap<String, CatalogService>,
+        graphs: BTreeMap<String, WireGraph>,
+    ) -> Result<BTreeMap<String, DecodedValue>> {
+        self.identity.require(owner)?;
+        let deliveries = graphs
+            .values()
+            .flat_map(|g| g.references.iter().map(|r| r.delivery.clone()))
+            .collect::<Vec<_>>();
+        let result = async {
+            if graphs.keys().ne(contracts.keys()) {
+                return Err(fail(
+                    ErrorCode::InterfaceMismatch,
+                    "complete required roots differ from declaration",
+                ));
+            }
+            let scopes = GraphScopes::in_scope(root(owner));
+            for (name, graph) in &graphs {
+                crate::graph::validate(
+                    self.bundles.service(&contracts[name])?.as_ref(),
+                    &crate::services::service_type(&contracts[name]),
+                    graph,
+                    &scopes,
+                )?;
+            }
+            let mut values = BTreeMap::new();
+            for (name, graph) in graphs {
+                values.insert(
+                    name.clone(),
+                    self.imports.receive_graph(
+                        self.bundles.service(&contracts[&name])?.as_ref(),
+                        &crate::services::service_type(&contracts[&name]),
+                        graph,
+                        &scopes,
+                    )?,
+                );
+            }
+            self.track_imports(owner, &values)?;
+            self.flush().await?;
+            Ok(values)
+        }
+        .await;
+        if result.is_err() {
+            self.close_member(owner);
+            self.imports.reject(&deliveries);
+            if let Err(cleanup) = self.flush().await {
+                return Err(fail(
+                    ErrorCode::Unavailable,
+                    format!(
+                        "required root rollback: {cleanup}; admission: {:?}",
+                        result.err()
+                    ),
+                ));
+            }
+        }
+        result
+    }
+    pub(crate) fn native_context(&self, owner: &Activation) -> Result<rutis::Ctx> {
+        self.state
+            .lock()
+            .unwrap()
+            .members
+            .get(owner)
+            .and_then(|m| m.native.clone())
+            .ok_or_else(|| {
+                fail(
+                    ErrorCode::Unavailable,
+                    "original native context is not bound",
+                )
+            })
+    }
     pub fn close_member(&self, activation: &Activation) {
         let mut state = self.state.lock().unwrap();
         if let Some(member) = state.members.get_mut(activation) {
@@ -898,7 +971,7 @@ impl RuntimeObjects {
             Ok(wire(Vec::<ImportControl>::new()))
         }))
     }
-    fn exports(&self, owner: &Activation) -> Result<Exports> {
+    pub(crate) fn exports(&self, owner: &Activation) -> Result<Exports> {
         self.state
             .lock()
             .unwrap()
@@ -1067,6 +1140,14 @@ impl RootDelivery {
     pub async fn send(mut self, method: &str) -> Result<Value> {
         let result = self.host.peer(&self.recipient)?.request(method, json!({
             "activation": self.recipient, "contracts": self.contracts, "graphs": self.graphs.as_ref().unwrap(),
+        })).await?;
+        self.accepted()?;
+        self.graphs.take();
+        Ok(result)
+    }
+    pub async fn start(mut self, instance: &str) -> Result<Value> {
+        let result = self.host.peer(&self.recipient)?.request("plugin/start", json!({
+            "instance": instance, "activation": self.recipient, "required": self.graphs.as_ref().unwrap(),
         })).await?;
         self.accepted()?;
         self.graphs.take();

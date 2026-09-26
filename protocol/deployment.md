@@ -2,7 +2,7 @@
 
 Rust `deployment::DeploymentObjects` 持有完整 `PreparedDeployment`，从冻结的 bundle
 原字节创建 `HostObjects`，选择每个消费者的完整 required 表。它是生产 Host 图的
-路由装配层；完整 HostProxy、默认 service-capable driver 与监督者仍待接入。
+路由装配层，已接默认 Rust/Node 服务 driver；完整 HostProxy 与监督者仍待接入。
 
 ## Host 顺序
 
@@ -17,7 +17,8 @@ Rust `deployment::DeploymentObjects` 持有完整 `PreparedDeployment`，从冻�
 4. 依赖可用时调用 `offer_required(consumer)`。缺少 route、尚未 staged 或尚未
    Published 的 provider 返回 Unavailable，不开始 issuance、不关闭消费者；完整
    Host native graph 应把这些业务依赖保持为 Pending。
-5. 成功返回的 `RootDelivery` 通过 `receive` 或 `send` 接到实际 SDK。整张表只能
+5. 成功返回的 `RootDelivery` 通过 `start(instance)` 接到默认 driver，也可通过
+   `receive` 或 `send` 接到自定义 SDK 装配。整张表只能
    签发一次，丢弃或失败后不能重新绑定这代。整表 Accept ACK 才允许业务构造。
 
 native adapter 使用 `stage_native` 显式登记实际 own 根；每个名称必须在 frozen

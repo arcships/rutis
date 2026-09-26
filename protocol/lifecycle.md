@@ -2,7 +2,7 @@
 
 Rust `lifecycle::{Runner,NativeDriver,Hello,RuntimeReady}` 与 TS
 `lifecycle::{Runner,NativeModuleDriver}` 在真实 native fiber 外记录宿主意图。
-两端控制入口已能在私有帧连接中工作；完整对象服务适配、宿主业务图装配与
+两端默认服务 driver 已能在私有帧连接中工作；完整宿主业务图装配与
 supervisor 仍在开发，协议尚未冻结。
 
 ## 引导
@@ -21,7 +21,9 @@ hello 完成后，宿主通过 `publish_ready` 提供原生 `RuntimeReady`，key
 `RuntimeReady::bind_consumer` 返回的租约：断连时同步关闭该代理的 gate，并调用 native
 shutdown 预取消其 Ctx；单纯 `ctx.refresh()` 是异步重查，不能替代这个失效屏障。
 
-嵌入 Rust runner 的入口调用 `serve(private_stream, NativeDriver::new(root, factories))`。
+嵌入 Rust runner 的服务入口调用
+`serve(private_stream, NativeDriver::with_services(root, factories, bundles, ports)?)`。
+`NativeDriver::new` 保留无服务控制模式，拒绝对象/事件 capability 与命名服务。
 stream 必须来自宿主私有连接；不使用 stdout/stderr 承载协议。`serve` 在断连后等待
 成员清理，嵌入程序随后 shutdown 自己的 native root。当前通用 API 不负责创建或回收
 进程树，不能替代 Linux supervisor。
@@ -29,17 +31,23 @@ stream 必须来自宿主私有连接；不使用 stdout/stderr 承载协议。`
 Node 的通用入口由 `npm --prefix protocol/ts run build` 生成
 `dist/src/node-runner.js`。包的 runner 导入该入口，宿主在 `SnapshotGroup::argv()` 后
 添加 `node_catalog()` 路径，并继承私有 stream fd 3。这个只读 catalog 由 prepare
-快照生成，包含绝对 module entry 和契约、framework/environment/code 摘要，不含
+快照生成，包含绝对 module entry 和契约、framework/environment/code 摘要及精确
+bundle 原字节字符串，不含
 实例配置；配置只通过私有 hello 帧交付。不同实例可以共享一个 module entry。
 `NativeModuleDriver` 验证实际加载的 Cordis package 版本与锁定 adapter 一致，并
 核对启动 catalog 与 hello；只有 start 才动态导入业务模块。
+
+服务模式使用 `ObjectSession` 在成功私有 hello 后绑定唯一 runtime/epoch，不能重绑；
+没有在 argv 或配置里伪造 activation。`serve` 自动把默认 driver 的对象和控制流接到
+同一泵。编译后的 Node runner 从 catalog 准入全部原始 bundle；业务模块用同一 SDK
+导出的 `protocolPorts: NativePorts` 声明本地键和生成适配器。无服务模块可省略它。
 
 ## 成员控制
 
 | 方法 | 入参 | 当前行为 |
 | --- | --- | --- |
 | `runtime/hello` | `Hello` | 无业务代码执行的声明准入，返回精确身份 ACK |
-| `plugin/start` | `{instance, activation}` | 选择冻结成员，运行原生装载，返回 `{activation, services}` |
+| `plugin/start` | `{instance, activation, required?}` | 接收完整 required 根表，选择冻结成员，运行原生装载，返回 `{activation, services}` |
 | `plugin/activate` | `{activation}` | 仅允许 Staged 且 native gate 仍打开的代发布 |
 | `plugin/state` | `{activation}` | 返回 instance、activation 与宿主意图 phase |
 | `plugin/stop` | `{activation}` | 同步撤销准入，独立推进并等待 native 清理 |
@@ -53,11 +61,11 @@ activation 使用现有十进制字符串编号。runtime/epoch 必须对应本�
 phase 为 Starting、Staged、Published、Closing、Stopped、Failed。原生装载完成不等于
 发布：宿主登记服务并确认代理 native Active 后才发 activate。对象和事件适配器必须
 在每次准入调用 `require_published`，同时检查 native gate。完整服务表的 key 必须与
-provides 精确一致，缺少或额外服务触发回滚。表项的对象图、接口、grant 和真实 pin
-验证还需要后续 broker 适配，当前 opaque table API 不构成这些属性的验收证据。
+provides 精确一致，缺少或额外服务触发回滚。默认服务 driver 的图、接口、grant 和
+真实 pin 已接 session/broker；自定义 Driver 的 opaque table 本身不构成这些证据。
 
 start 在流的 admission 顺序中保留实例/代，真实构造和装载离开管理锁运行。driver
-取得 `MountRequest` 中由宿主保留的 instance/activation/member，不能从业务配置
+取得 `MountRequest` 中由宿主保留的 instance/activation/member 和完整 required 表，不能从业务配置
 推断对象 owner。必须把同一个 admission gate 交给 Rust `mount_gated` /
 `mount_factory_gated` 或 TS `ManagedActivation`；runner
 拒绝返回另一个 gate 的 adapter。stop 即使发生在构造尚未返回时也关闭该 gate，
@@ -72,7 +80,7 @@ Rust gate 关闭同步调用公开 native shutdown，业务 Ctx 仅在 native vi
 交给 apply；仅取消 generation token 不足以阻止 `Ctx.effect`。stop handler 在
 返回尚未 poll 的确认 future 前已经关闭 native 登记。import providers 纳入相同
 stop 任务，全部 removal 先启动再等待，迟到采用须显式回滚。整表服务 SDK 的
-装载/暂存顺序见[服务绑定](services.md)，当前 opaque 控制表仍未使用它。
+装载/暂存顺序见[服务绑定](services.md)，默认 driver 已使用它。
 
 Cordis 4.0.1 的 native unload 会通过 logger 报告 disposer 错误，却可能成功返回
 dispose 等待。TS adapter 使用公开 logger exporter 保留当前成员及其子树在关闭
@@ -82,10 +90,19 @@ dispose 等待。TS adapter 使用公开 logger exporter 保留当前成员及�
 
 ## 当前能力边界与证据
 
-默认 Rust `NativeDriver` 与 TS `NativeModuleDriver` 目前实现原生生命周期，不安装 object/event transport adapter，
-因此在 hello 阶段拒绝相应 capability 和命名服务声明。它不能启动依赖这些能力的
-最终协议插件。已有对象协议 `objects_ipc` fixture 尚需接入这一控制流，不能通过
-宣称能力已实现来绕过这个限制。
+Rust `NativeDriver::with_services` 与配置 Bundles 的 TS `NativeModuleDriver` 支持
+object.scope/callback.borrow；事件能力在 hello 拒绝。它们先 reserve 同代 gate，
+校验完整 required 表并等待 Accept ACK，才安装生成客户端及运行构造/module loader。
+真实 native apply 在业务前绑定同一 Exports 与原始 Ctx，支持启动调用中的回调重入。
+native Active 后收集完整 provides，必要 export guards 成为本代 native 子树；随后
+start 才返回 staged。缺少声明的 Rust export 直接失败并 join cleanup，不留下等待
+缺服务的 Pending guard。activate ACK 才开放普通远端 execute。
+
+`native_runner_ipc` 从四个独立包的冻结字节启动真实 Rust 子进程与编译后的 Node
+runner，在原包删除后运行双向 DI、状态对象、循环属性、owner passback、两层回调。
+真实 Host 延迟两端 Accept ACK，验证构造/import 未开始；期间 stop 阻止迟到业务。
+每个实际 runtime 正常退出，native cleanup 都被核对。该用例直接操作控制层，仍不
+构成 RuntimeReady → HostProxy Active → availability/refresh 的完整 Host 图证据。
 
 `tests/lifecycle.rs` 使用真实 rutis Ctx、effect 与 native fiber 验证独立 RuntimeReady、
 一个成员 Loading 时另一个发布、构造/stop 交错、发布前拒绝、失效后旧 Ctx 闭锁、

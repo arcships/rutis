@@ -2,14 +2,15 @@
 
 Rust `services::{Bundles,NativePorts,ServiceTable,StagedServices}` 与 TS `services.ts`
 把精确 bundle、wire 服务名与本地原生服务键绑定。当前实现是生产装配所需的 SDK
-基础；默认生命周期 driver 尚未安装对象传输，HostProxy 业务图和私有连接上的命名
-服务交付仍待接入，不能用这些 API 或单元测试宣布 M2 完成。
+基础；默认生命周期 driver 已安装对象传输并通过实际冻结子进程验证，HostProxy
+业务图仍待接入，不能用这些 API 或单元测试宣布 M2 完成。
 
 ## 本地绑定与装载
 
 `Bundles` 从完整原字节准入，拒绝同 id/version 不同 SHA 的两份 bundle。端口声明
 必须绑定已准入 SHA、精确版本和已有 interface；本地 Rust TypeKey/TS 原生服务名
-不进入 wire。`NativePorts.check` 在 factory/module 构造前核对完整 provides/requires。
+不进入 wire。`NativePorts.check` 在 Rust factory 构造前核对完整 provides/requires；
+Node 从授权的模块读取 `protocolPorts`，在 native plugin mount/apply 前核对。
 同一组端口不得重复本地键，避免两个 wire 服务抢占同一个 native slot。
 
 Rust 的 provide 使用生成客户端作为契约类型见证，读取真实 `Arc<T>` 并调用生成
@@ -32,7 +33,7 @@ TS `NativePorts.mount` 检查全部生成 facade 及 inject 声明后，使用�
 `ManagedActivation` 安装隔离依赖。保留 native inject 的 intercept 配置，生成
 facade 兼容公开 `Service.tracker` 探测。依赖 provider 使用 Cordis availability
 check；SDK 收到 import 撤销后调用 `refreshImports`，通过原生 notify 闭锁旧代。
-imports 的根 scope 同时必须绑定本代 gate。这些调用顺序仍需生产控制 handler 接入。
+imports 的根 scope 同时必须绑定本代 gate。默认 driver 已接这些调用顺序。
 该 mount 是异步确认入口：部分 provider/hook 注册失败时先等待已登记资源回滚，
 再返回错误；native driver 同样使用 `ManagedActivation.mount`。直接同步构造失败
 会携带 `NativeMountError.cleanup`，嵌入者必须等待该任务；回滚失败保留原始异常
