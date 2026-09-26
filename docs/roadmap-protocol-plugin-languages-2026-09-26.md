@@ -13,7 +13,7 @@
 
 | 批次 | 语言/运行环境 | 执行形态 | 主要目标与进入条件 |
 | --- | --- | --- | --- |
-| L0 首版优先 | Rust / rutis、TS / Cordis | 原生框架托管插件，共享或单成员 runner；Rust 首版静态组合 | M0–M5 同时验证双向对象、回调、事件与清理；两者缺一不可 |
+| L0 首版优先 | Rust / rutis、TS / Cordis | 原生框架托管插件，共享或单成员 runner；Rust 首版静态组合 | M0 Go/No-go；M1–M5 验证 scope 对象、borrow 回调、parallel/serial 与清理；Rust/TS 缺一不可 |
 | L1 通用语言 | Python、Go | 原生语言上下文与对象代理；Go 单成员或静态组合 runner | Rust/TS 对象模型成立后接入，同一对象/授权/生命周期语料，逐语言测量 |
 | L1 系统自动化 | Shell（先 Bash/Linux） | 共享协议 runner，管理每插件或每次调用的子 shell/命令 | 优先覆盖已有脚本、文件/进程/系统工具；不要求作者手写协议循环 |
 | L1 系统自动化 | PowerShell（先 PowerShell 7） | 一个 runner 进程内，每个 activation 有专属 Runspace | 复用 PowerShell 引擎与程序集，保留插件会话；按已通过的 OS 逐个平台发布 |
@@ -85,7 +85,7 @@ factory/契约清单绑定 runner 哈希，缺失成员拒绝；代码更新重�
 ## 三、 扩展能力与验收
 
 runner 在 runtime/hello 声明对象引用、回调、事件模式、流及反向调用等已实现能力；插件清单及可达接口共同决定所需能力。
-Rust/TS 首版必须满足核心完整验收，不能用能力子集绕过对象目标。后续脚本适配可以先仅支持值 unary，仍须生命周期、契约验证、取消/退出确认和错误路由。
+Rust/TS 首版必须满足核心基础验收 T01–T24；delegate、持久回调、waterfall、流按核心 X01–X04 独立验收，不能用能力子集绕过基础对象目标。后续脚本适配可以先仅支持值 unary，仍须生命周期、契约验证、取消/退出确认和错误路由。
 缺少对象引用就拒绝包含对象的接口，缺少 callback/events/stream 则分别拒绝；缺少反向调用就拒绝 requires。
 不得将不支持的对象降为快照、回调降为函数名或事件降为通知。没有静态类型的语言提供验证包装和对象 helper。
 
