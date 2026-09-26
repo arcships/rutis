@@ -163,12 +163,20 @@ pub struct Deployment {
 #[derive(Clone)]
 pub struct PreparedFile {
     path: PathBuf,
+    canonical_name: String,
+    executable: bool,
     sha256: String,
     bytes: Arc<[u8]>,
 }
 impl PreparedFile {
     pub fn path(&self) -> &Path {
         &self.path
+    }
+    pub fn canonical_name(&self) -> &str {
+        &self.canonical_name
+    }
+    pub fn is_executable(&self) -> bool {
+        self.executable
     }
     pub fn sha256(&self) -> &str {
         &self.sha256
@@ -203,11 +211,15 @@ pub struct PreparedPackage {
     provides: BTreeMap<String, PreparedService>,
     requires: BTreeMap<String, PreparedService>,
     environment_sha256: String,
+    snapshot_sha256: String,
     catalog: Option<RunnerCatalog>,
 }
 impl PreparedPackage {
     pub fn manifest(&self) -> &PackageManifest {
         &self.manifest
+    }
+    pub fn manifest_bytes(&self) -> &[u8] {
+        &self.manifest_bytes
     }
     pub fn root(&self) -> &Path {
         &self.root
@@ -231,6 +243,9 @@ impl PreparedPackage {
     pub fn environment_sha256(&self) -> &str {
         &self.environment_sha256
     }
+    pub fn snapshot_sha256(&self) -> &str {
+        &self.snapshot_sha256
+    }
     pub fn catalog(&self) -> Option<&RunnerCatalog> {
         self.catalog.as_ref()
     }
@@ -248,7 +263,10 @@ impl PreparedPackage {
         }
         for (name, expected) in &self.files {
             let actual = read_file(&self.root, name)?;
-            if actual.path != expected.path || actual.sha256 != expected.sha256 {
+            if actual.path != expected.path
+                || actual.sha256 != expected.sha256
+                || actual.executable != expected.executable
+            {
                 return Err(mismatch(format!("immutable package file changed: {name}")));
             }
         }
@@ -345,18 +363,8 @@ impl PreparedPackage {
         if executable.bytes.get(..4) != Some(b"\x7fELF") {
             return Err(invalid("runtime executable must be a Linux ELF image"));
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if fs::metadata(&executable.path)
-                .map_err(|e| unavailable(e.to_string()))?
-                .permissions()
-                .mode()
-                & 0o111
-                == 0
-            {
-                return Err(invalid("runtime image is not executable"));
-            }
+        if !executable.executable {
+            return Err(invalid("runtime image is not executable"));
         }
         unique_strings(&manifest.runtime.environment, "runtime environment", |s| {
             relative(s).is_ok()
@@ -386,13 +394,24 @@ impl PreparedPackage {
             .runtime
             .environment
             .iter()
-            .map(|name| Ok((name.clone(), required(name)?.sha256.clone())))
+            .map(|name| {
+                let file = required(name)?;
+                Ok((
+                    name.clone(),
+                    serde_json::json!({"sha256":file.sha256,"executable":file.executable}),
+                ))
+            })
             .collect::<Result<_>>()?;
+        let mut aliases = BTreeMap::new();
+        for name in &manifest.runtime.environment {
+            let canonical = &required(name)?.canonical_name;
+            if canonical != name {
+                role(canonical, FileKind::Dependency)?;
+                aliases.insert(name, canonical);
+            }
+        }
         let environment_sha256 = digest(
-            json::canonical(
-                &serde_json::to_value(environment).map_err(|e| invalid(e.to_string()))?,
-            )
-            .as_bytes(),
+            json::canonical(&serde_json::json!({"files":environment,"aliases":aliases})).as_bytes(),
         );
         let config_file = required(&manifest.config_schema)?;
         role(&manifest.config_schema, FileKind::ConfigSchema)?;
@@ -552,6 +571,15 @@ impl PreparedPackage {
             }
             _ => return Err(invalid("plugin entry does not match runtime")),
         };
+        let metadata: BTreeMap<_, _> = files.iter().map(|(name, file)| (name, serde_json::json!({
+            "sha256":file.sha256,"canonical_name":file.canonical_name,"executable":file.executable
+        }))).collect();
+        let snapshot_sha256 = digest(
+            json::canonical(&serde_json::json!({
+                "manifest_sha256":digest(&bytes), "files":metadata
+            }))
+            .as_bytes(),
+        );
         Ok(Arc::new(Self {
             root,
             manifest,
@@ -562,6 +590,7 @@ impl PreparedPackage {
             provides,
             requires,
             environment_sha256,
+            snapshot_sha256,
             catalog,
         }))
     }
@@ -930,7 +959,7 @@ impl PreparedDeployment {
             let images: BTreeMap<_, _> = group
                 .members
                 .iter()
-                .map(|member| (member, digest(&instances[member].package.manifest_bytes)))
+                .map(|member| (member, instances[member].package.snapshot_sha256()))
                 .collect();
             group.code_sha256 = digest(
                 json::canonical(&serde_json::to_value(images).map_err(|e| invalid(e.to_string()))?)
@@ -1127,15 +1156,27 @@ fn confined(root: &Path, name: &str) -> Result<PathBuf> {
 }
 fn read_file(root: &Path, name: &str) -> Result<PreparedFile> {
     let path = confined(root, name)?;
-    if !fs::metadata(&path)
-        .map_err(|e| unavailable(e.to_string()))?
-        .is_file()
-    {
+    let metadata = fs::metadata(&path).map_err(|e| unavailable(e.to_string()))?;
+    if !metadata.is_file() {
         return Err(invalid("artifact must be a regular file"));
     }
+    #[cfg(unix)]
+    let executable = {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    };
+    #[cfg(not(unix))]
+    let executable = false;
     let bytes = fs::read(&path).map_err(|e| unavailable(e.to_string()))?;
     Ok(PreparedFile {
+        canonical_name: path
+            .strip_prefix(root)
+            .expect("artifact is confined")
+            .to_str()
+            .ok_or_else(|| invalid("canonical artifact path is not UTF-8"))?
+            .replace(std::path::MAIN_SEPARATOR, "/"),
         path,
+        executable,
         sha256: digest(&bytes),
         bytes: bytes.into(),
     })

@@ -62,7 +62,9 @@ CLI 输出部署原字节摘要、组的 trust/capabilities 与 image/environmen
 bail/emit 和 waterfall 等未启用扩展在 prepare 阶段拒绝。
 
 `environment` 非空且必须精确覆盖所有 `dependency` 角色文件。环境摘要是
-`digest(json::canonical({path: raw_sha256, ...}))`，因此摘要同时绑定路径与内容。
+`digest(json::canonical({files: {path: {sha256, executable}, ...}, aliases: {alias: canonical_path, ...}}))`，
+同时绑定路径、内容、可执行标志及内部链接关系。dependency 的内部链接目标也必须
+是 dependency，避免共享环境暗中引用成员私有代码。
 Node 包必须纳入完整运行依赖文件，单列一个 lockfile 不能替代实际依赖库存。
 
 Node 清单改用 `kind: "node-cordis"` 和实际 Cordis 精确版本，并声明
@@ -133,9 +135,28 @@ effect 与清理由 rutis native fiber 执行。失效后不能自动重入旧 a
 ## 冻结与后续启动
 
 配置、manifest 原字节、artifact 字节、bundle 和路由在 prepare 后保持不变。
-`verify_unchanged()` 会重读版本目录，拒绝 manifest、库存、路径或文件摘要变化。
-检查之后再执行原磁盘路径仍有检查与执行之间的间隔；supervisor 必须从已验证的
-不可变字节建立并固定启动快照，Node 共享成员还必须使用同一依赖模块实例。
-当前 `argv()` 只返回原始程序和 Node runner 的参数前缀，不执行 shell，不保证该
-启动快照已经落实。生产多成员 runner、RuntimeReady/发布屏障、监督恢复与真实旧插件
-迁移仍在开发，当前 CLI 的计划不能直接作为完成部署的证据。
+`verify_unchanged()` 会重读版本目录，拒绝 manifest、库存、路径、可执行标志或摘要
+变化。包的 snapshot SHA 与组的 code SHA 同时绑定原 manifest 和全部文件的摘要、
+canonical path、可执行标志；仅改配置值不会改变组 code SHA。
+
+Linux `Snapshot::materialize(&plan)` 只使用已冻结字节建立私有 0700 目录，从不重读
+原包。文件归一化为 0444/0555；保留执行标志和内部链接。相同 artifact 内容以
+hardlink 复用。每组建立一份 dependency tree，各包的 dependency 链接指向该组的
+canonical tree，保持实际 Cordis/SDK 模块身份。相同包快照的多个实例共享代码目录，
+配置仍各自独立。链接不会指回原包；原包删除后，已准入快照仍可使用。
+
+生产启动必须使用 `SnapshotGroup::argv()` 的快照路径，而不是
+`PreparedGroup::argv()` 的原路径。group/member clone 持有快照租约；
+`Snapshot::cleanup()` 拒绝删除仍被租用的树。supervisor 必须直到进程与后代回收和
+native consumer cleanup 都完成后才释放租约。目录权限与只读文件不是同 uid 插件的
+OS 沙箱，也不代替真实监督恢复。
+
+TS SDK 的 `npm --prefix protocol/ts run build` 生成 `dist/src` 和 `dist/generated` 的
+JavaScript/声明文件，并把 `.ts` 相对导入改为 `.js`。这些输出可进入包的 dependency
+库存。当前包构建仍需部署者纳入完整依赖，不自动生成生产插件部署。
+
+快照 conformance 测试从删除原目录后的冻结文件启动实际 Node executable、Cordis
+4.0.1 与编译后的本仓库 SDK，确认两个不同代码包共享同一框架类、内部 alias 保持
+身份，并分别装载和清理 native 实例。它是固定启动 fixture，未实现 private IPC
+生命周期。生产多成员 runner、RuntimeReady/发布屏障、监督恢复与真实旧插件迁移仍
+在开发，当前 CLI 的计划不能直接作为完成部署的证据。

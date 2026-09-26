@@ -28,6 +28,36 @@ impl Drop for Fixture {
 fn service() -> Value {
     json!({"interface":"Database", "version":"1.0.0", "bundle":"bundle.json"})
 }
+
+fn copy_dependency_tree(
+    source: &std::path::Path,
+    target: &std::path::Path,
+    package: &std::path::Path,
+    manifest: &mut Value,
+) {
+    fs::create_dir_all(target).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let target = target.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dependency_tree(&entry.path(), &target, package, manifest);
+        } else {
+            let bytes = fs::read(entry.path()).unwrap();
+            fs::write(&target, &bytes).unwrap();
+            fs::set_permissions(&target, fs::metadata(entry.path()).unwrap().permissions())
+                .unwrap();
+            let path = target.strip_prefix(package).unwrap().to_str().unwrap();
+            manifest["files"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"path":path,"kind":"dependency","sha256":digest(&bytes)}));
+            manifest["runtime"]["environment"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!(path));
+        }
+    }
+}
 impl Fixture {
     fn new() -> Self {
         assert!(RunnerCatalog::parse(runner_catalog_bytes()).is_ok());
@@ -688,4 +718,281 @@ fn elf_overflows_and_duplicate_catalog_sections_fail_before_execution() {
         .unwrap()
         .message
         .contains("ambiguous"));
+}
+
+#[test]
+fn snapshot_uses_frozen_bytes_and_keeps_paths_alive_until_all_leases_are_released() {
+    use rutis_protocol::snapshot::Snapshot;
+    let f = two_languages();
+    let plan = f.prepare().unwrap();
+    let expected_manifest = plan.instances()["rust"].package().manifest_bytes().to_vec();
+    fs::remove_dir_all(f.path("rust-provider")).unwrap();
+    fs::remove_dir_all(f.path("node-consumer")).unwrap();
+    assert!(plan.verify_unchanged().is_err());
+    let snapshot = Snapshot::materialize(&plan).unwrap();
+    let root = snapshot.root().to_owned();
+    assert_eq!(
+        fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    for (name, group) in snapshot.groups() {
+        let args = group.argv();
+        assert!(args[0].starts_with(&root));
+        assert_eq!(
+            digest(&fs::read(&args[0]).unwrap()),
+            plan.groups()[name].executable().sha256()
+        );
+        assert_eq!(
+            fs::metadata(&args[0]).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        for member in group.members().values() {
+            let dependency = fs::canonicalize(member.root().join("dependency.lock")).unwrap();
+            assert_eq!(dependency, group.environment().join("dependency.lock"));
+            assert!(dependency.starts_with(&root));
+        }
+    }
+    assert_eq!(
+        fs::read(
+            snapshot.groups()["native"].members()["rust"]
+                .root()
+                .join(MANIFEST)
+        )
+        .unwrap(),
+        expected_manifest
+    );
+    let group = snapshot.groups()["native"].clone();
+    let member = group.members()["rust"].clone();
+    assert_eq!(
+        snapshot.cleanup().err().unwrap().code,
+        ErrorCode::Unavailable
+    );
+    assert!(root.exists());
+    drop(group);
+    assert!(
+        root.exists(),
+        "a member lease also retains its dependency tree"
+    );
+    drop(member);
+    assert!(!root.exists());
+    let snapshot = Snapshot::materialize(&plan).unwrap();
+    let root = snapshot.root().to_owned();
+    snapshot.cleanup().unwrap();
+    assert!(!root.exists());
+}
+
+#[test]
+fn frozen_node_launch_uses_one_cordis_and_compiled_sdk_across_distinct_packages() {
+    use rutis_protocol::snapshot::Snapshot;
+    use std::process::Command;
+    let mut f = Fixture::new();
+    let ts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../protocol/ts");
+    let compiled = f.root.join("compiled-sdk");
+    let build = Command::new("npm")
+        .arg("--prefix")
+        .arg(&ts)
+        .args(["run", "build", "--", "--outDir"])
+        .arg(&compiled)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let node = Command::new("node")
+        .args(["-p", "process.execPath"])
+        .output()
+        .unwrap();
+    assert!(node.status.success());
+    let node = PathBuf::from(String::from_utf8(node.stdout).unwrap().trim());
+    for name in ["first", "second"] {
+        f.package(name, "node-cordis", "consumer");
+        let package = f.path(name);
+        fs::copy(&node, package.join("runtime")).unwrap();
+        fs::write(
+            package.join("runner.mjs"),
+            include_bytes!("../../../protocol/fixtures/snapshot-runner.mjs"),
+        )
+        .unwrap();
+        fs::write(
+            package.join("plugin.mjs"),
+            include_bytes!("../../../protocol/fixtures/snapshot-plugin.mjs"),
+        )
+        .unwrap();
+        let mut manifest = f.manifest(name);
+        manifest["requires"] = json!({});
+        for file in manifest["files"].as_array_mut().unwrap() {
+            let bytes = fs::read(package.join(file["path"].as_str().unwrap())).unwrap();
+            file["sha256"] = json!(digest(&bytes));
+        }
+        for dependency in [
+            "@deepseek-ai/cordis",
+            "@deepseek-ai/cosmokit",
+            "@standard-schema/spec",
+        ] {
+            copy_dependency_tree(
+                &ts.join("node_modules").join(dependency),
+                &package.join("node_modules").join(dependency),
+                &package,
+                &mut manifest,
+            );
+        }
+        let sdk = package.join("node_modules/@rutis/protocol");
+        copy_dependency_tree(&compiled, &sdk, &package, &mut manifest);
+        let alias = "node_modules/@rutis/protocol/src/alias.js";
+        symlink("managed.js", package.join(alias)).unwrap();
+        manifest["files"].as_array_mut().unwrap().push(json!({"path":alias,"kind":"dependency","sha256":digest(&fs::read(sdk.join("src/managed.js")).unwrap())}));
+        manifest["runtime"]["environment"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(alias));
+        let package_json = br#"{"name":"@rutis/protocol","version":"0.1.0","type":"module","exports":{"./managed":"./src/managed.js","./managedAlias":"./src/alias.js"}}"#;
+        fs::write(sdk.join("package.json"), package_json).unwrap();
+        let path = "node_modules/@rutis/protocol/package.json";
+        manifest["files"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"path":path,"kind":"dependency","sha256":digest(package_json)}));
+        manifest["runtime"]["environment"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(path));
+        f.write_manifest(name, &manifest);
+        f.instance(name, name, "shared", "node-cordis", &[]);
+    }
+    f.instance("alias", "first", "shared", "node-cordis", &[]);
+    let plan = f.prepare().unwrap();
+    fs::remove_dir_all(f.path("first")).unwrap();
+    fs::remove_dir_all(f.path("second")).unwrap();
+    assert!(plan.verify_unchanged().is_err());
+    let snapshot = Snapshot::materialize(&plan).unwrap();
+    let group = &snapshot.groups()["shared"];
+    assert_eq!(
+        group.members()["first"].root(),
+        group.members()["alias"].root(),
+        "one code package is not re-imported for each instance"
+    );
+    assert_ne!(
+        group.members()["first"].root(),
+        group.members()["second"].root()
+    );
+    let a = fs::canonicalize(
+        group.members()["first"]
+            .root()
+            .join("node_modules/@rutis/protocol/src/managed.js"),
+    )
+    .unwrap();
+    let b = fs::canonicalize(
+        group.members()["second"]
+            .root()
+            .join("node_modules/@rutis/protocol/src/managed.js"),
+    )
+    .unwrap();
+    assert_eq!(a, b);
+    let argv = group.argv();
+    let output = Command::new(&argv[0])
+        .args(&argv[1..])
+        .arg(group.members()["first"].entry().unwrap())
+        .arg(group.members()["second"].entry().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"canonical_dependencies":true,"isolated_instances":2,"cleaned":["a","b"]})
+    );
+    snapshot.cleanup().unwrap();
+}
+
+#[test]
+fn environment_identity_binds_symlink_targets_and_executable_flags() {
+    use rutis_protocol::snapshot::Snapshot;
+    let mut f = Fixture::new();
+    let helper = b"export const token = {}";
+    for name in ["first", "second"] {
+        f.package(name, "node-cordis", "consumer");
+        let root = f.path(name);
+        let mut manifest = f.manifest(name);
+        for path in ["helper.mjs", "other.mjs"] {
+            fs::write(root.join(path), helper).unwrap();
+            fs::set_permissions(root.join(path), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        symlink(
+            if name == "first" {
+                "helper.mjs"
+            } else {
+                "other.mjs"
+            },
+            root.join("alias.mjs"),
+        )
+        .unwrap();
+        for path in ["helper.mjs", "other.mjs", "alias.mjs"] {
+            manifest["files"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"path":path,"kind":"dependency","sha256":digest(helper)}));
+            manifest["runtime"]["environment"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!(path));
+        }
+        // An executable alias to a code-role artifact must retain its target's
+        // executable flag in the copied tree.
+        fs::rename(root.join("runtime"), root.join("runtime.real")).unwrap();
+        symlink("runtime.real", root.join("runtime")).unwrap();
+        manifest["files"].as_array_mut().unwrap().push(json!({"path":"runtime.real","kind":"code","sha256":digest(&fs::read(root.join("runtime.real")).unwrap())}));
+        f.write_manifest(name, &manifest);
+        f.instance(name, name, "shared", "node-cordis", &[]);
+    }
+    assert_eq!(
+        f.prepare().err().unwrap().code,
+        ErrorCode::InterfaceMismatch,
+        "equal bytes do not erase dependency alias topology"
+    );
+    fs::remove_file(f.path("second").join("alias.mjs")).unwrap();
+    symlink("helper.mjs", f.path("second").join("alias.mjs")).unwrap();
+    let first = f.prepare().unwrap();
+    fs::set_permissions(
+        f.path("second").join("helper.mjs"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    assert!(first.verify_unchanged().is_err());
+    assert_eq!(
+        f.prepare().err().unwrap().code,
+        ErrorCode::InterfaceMismatch,
+        "dependency execution permissions are part of the environment"
+    );
+    fs::set_permissions(
+        f.path("second").join("helper.mjs"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let plan = f.prepare().unwrap();
+    let snapshot = Snapshot::materialize(&plan).unwrap();
+    let group = &snapshot.groups()["shared"];
+    assert_eq!(
+        fs::canonicalize(group.environment().join("alias.mjs")).unwrap(),
+        group.environment().join("helper.mjs")
+    );
+    assert_eq!(
+        fs::metadata(group.environment().join("helper.mjs"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o555
+    );
+    assert_eq!(
+        fs::metadata(&group.argv()[0]).unwrap().permissions().mode() & 0o777,
+        0o555
+    );
+    snapshot.cleanup().unwrap();
 }

@@ -48,7 +48,7 @@ CI 增加锁定依赖的 TS 检查；Rust crate 纳入现有 workspace 测试。
 | 阶段 | 状态 | 尚需取得的证据 |
 | --- | --- | --- |
 | M1 | 开发中 | 两端草稿编码、事务授权与生成 dispatch 已接入私有 socket；完整失败交错、独占资源跨语言清理、生产连接的控制流与复用评估仍需补齐 |
-| M2 | 开发中 | 私有 fd 互通、只读 prepare 和 Rust 静态 factory 注册已有证据；实际多成员 runner、RuntimeReady/发布屏障、固定启动快照、真实旧桥迁移和 T24 测量尚未完成 |
+| M2 | 开发中 | 私有 fd 互通、prepare、静态 factory 与冻结快照已有证据；实际多成员 runner、RuntimeReady/发布屏障、快照监督租约、真实旧桥迁移和 T24 测量尚未完成 |
 | M3 | 待完成 | 调用取消/完成、更新/失败回滚、组恢复屏障、Linux 进程和受管后代回收 |
 | M4 | 待完成 | broker 权威事件列表、parallel/serial、scope、ready、once 与扩展拒绝 |
 | M5 | 待完成 | T01–T24 逐项运行时证据、旧桥回归、迁移/回退指南、基础协议冻结 |
@@ -81,13 +81,13 @@ CI 增加锁定依赖的 TS 检查；Rust crate 纳入现有 workspace 测试。
 - 双端 `GraphExporter` 先暂存真实对象，完整验证草稿，再向 broker 请求授权。broker 整图事务拒绝伪造 owner/source/foreign proof，不留下交付 id 缺口；SDK commit 只确认对应的真实对象与视图。Rust snapshot panic 与两端验证失败释放 staging；原生闭锁后纯值结果也不能编码。同一 owner 的多个 bundle 编码器共用 staging 编号空间；Rust 内存链路复用同一编码器，owner pin 失败通过完整拒绝 manifest 记录接收前缀。
 - 双端帧接收泵支持重入和并发，拒绝重复/倒序请求 id；Rust 独立 writer 在等待者被丢弃时继续完成已排队帧，关闭时可打断阻塞写并释放 stream。TS 编码前拒绝 undefined、NaN、Date、稀疏数组和自定义原型，防止 stringify 改变数据含义。
 
-可执行证据：Rust bindings 8、contracts 5、drafts 5、exports 10、factories 6、frames 5、graphs 7、objects 13、managed 11、objects_ipc 1、prepare 17 项（合计 88）；TS bindings 7、contracts 5、drafts 4、exports 8、frames 5、graphs 5、imports 6、managed 8 项（合计 48）。共享语料包含 JSON 35、描述符 50、wire value 32、回调签名 9、对象图 31、帧 10 个用例。Rust 使用两个真实线程同时交付/释放；两端另验证原生失效时的执行 pin 和慢对象清理。
+可执行证据：Rust bindings 8、contracts 5、drafts 5、exports 10、factories 6、frames 5、graphs 7、objects 13、managed 11、objects_ipc 1、prepare 20 项（合计 91）；TS bindings 7、contracts 5、drafts 4、exports 8、frames 5、graphs 5、imports 6、managed 8 项（合计 48）。共享语料包含 JSON 35、描述符 50、wire value 32、回调签名 9、对象图 31、帧 10 个用例。Rust 使用两个真实线程同时交付/释放；两端另验证原生失效时的执行 pin 和慢对象清理。
 
 Linux `objects_ipc` 运行独立 Node 进程与真实 managed rutis/Cordis Ctx，使用继承的私有 Unix stream fd 3，stdout 诊断另行读取。Rust 权威 broker 从固定连接取得 Node activation，校验 family/version/raw SHA/capabilities；两端生成客户端实际 connect/query，保留同一状态对象和 session→agent→session 循环，owner pass-back 仍走 broker。两端借用 callback 重入第三层调用并等待登记子任务；保存的 callback 到期后拒绝调用。Node 在业务 dispatch 前通过控制帧确认参数 grant，避免回调/pass-back 读取尚未 accepted 的引用。丢弃 Rust waiter 后 Node 实际执行仍持有 execution pin，完成后才释放。
 
 同一私有 socket fixture 已完成 Node 接收 SDK 的前缀提议、broker 独立检查、owner 回收通知、ACK 后 SDK 清理；Rust 接收端也走同一 broker 和 Node owner 通知。活的首份 grant 阻止后续已释放 borrow 的回收，旧 id 的控制重传不能恢复授权，低于水位的接收和 pin 拒绝。当前约定见 [protocol README](../protocol/README.md)。这是 conformance fixture，不是可部署 runner；多 activation 连接的前缀、断连/取消/finished 交错与 supervisor 尚未验收。
 
-本阶段工作区回归：`cargo test --workspace` 454 passed / 0 failed / 2 ignored，新对象协议私有 Node socket 与旧桥真实 Node TCP e2e 均通过。两个 ignored 是依赖外部 min-cordis/dsh 检出的 host e2e 与需要真实模型后端的 agent e2e，不能计入通过。`cargo check --workspace --all-targets`、全仓 fmt、协议 crate clippy `-D warnings`、TS check/test 通过；没有执行外部 min-cordis/dsh 整体迁移验收。Linux Rust CI 安装锁定 Node/TS 依赖并运行该新互通测试，旧桥的跳过变量不跳过它。
+本阶段工作区回归：`cargo test --workspace` 457 passed / 0 failed / 2 ignored，新对象协议私有 Node socket 与旧桥真实 Node TCP e2e 均通过。两个 ignored 是依赖外部 min-cordis/dsh 检出的 host e2e 与需要真实模型后端的 agent e2e，不能计入通过。`cargo check --workspace --all-targets`、全仓 fmt、协议 crate clippy `-D warnings`、TS check/build/test 通过；没有执行外部 min-cordis/dsh 整体迁移验收。Linux Rust CI 安装锁定 Node/TS 依赖并运行该新互通测试，旧桥的跳过变量不跳过它。
 
 M1 后续必须补齐以下内容，之后才能称为 M1 完成或冻结该实验协议：
 
@@ -113,7 +113,7 @@ Rust runner 的 `.rutis.protocol.catalog` 从实际 ELF section 读取，没有�
 schema、原生类型及 native config 校验，再挂载真实 ManagedActivation；原生失效不能
 重启旧代。注册期捕获 factory 元数据先于 permit，panic 不留下部分挂载。
 
-prepare 17 项覆盖实际 test ELF、Node 模块不执行、配置冻结、完整文件库存、路径与
+prepare 前 17 项覆盖实际 test ELF、Node 模块不执行、配置冻结、完整文件库存、路径与
 symlink、共享组兼容、原字节 route mismatch、required cycle、event 权限与 CLI 不泄露
 配置，以及冻结计划到真实 native mount 的边界。factories 6 项验证延迟构造、两个独立
 原生配置/服务范围、native Pending 与旧代失效、schema/类型/config 拒绝、catalog
@@ -123,7 +123,19 @@ symlink、共享组兼容、原字节 route mismatch、required cycle、event �
 嵌入元数据。
 
 具体包与部署格式和 CLI 见 [prepare 约定](../protocol/package-format.md)。
-`verify_unchanged()` 能检查磁盘包变化，启动时仍需 supervisor 从冻结字节固定快照，
-关闭检查与执行之间的间隔，并保证 Node 共享依赖模块实例。逻辑 event scope 准入、
+`verify_unchanged()` 能检查磁盘包变化。Linux `snapshot::Snapshot` 从冻结字节建立私有
+启动树，保留内部 alias 和执行标志；环境摘要同时绑定这些元数据。相同包快照只保留
+一个代码目录；各组的 dependency canonical tree 供成员共用，避免复制 Cordis/SDK
+导致框架类型和模块缓存分裂。组和成员租约持有整个树，显式 cleanup 拒绝删除仍被
+租用的路径。监督者与进程/consumer 双屏障的实际接入仍待 M3，不能用租约 API 代替。
+
+快照测试从原包删除后的冻结路径启动实际 Node executable，加载实际 Cordis 4.0.1
+和经 `tsconfig.build.json` 编译的 SDK。两个不同代码包和 SDK alias 保持同一框架类，
+各自装载 native Ctx、配置和 isolated service；关闭其一不会关闭另一个。另验证原
+manifest 字节、私有目录、执行文件/依赖 helper 权限、group/member 租约与 cleanup、
+依赖 alias/执行标志不同时的 shared-group 拒绝。它是固定启动 conformance fixture，
+不是多 member private IPC 生命周期验收。
+
+逻辑 event scope 准入、
 native adapter 元数据、原生 mount 都不等于完整 runtime 绑定。生产 RuntimeReady、
 导出暂存/HostActive ACK、多成员连接控制、真实旧插件迁移与 T24 仍未验收。

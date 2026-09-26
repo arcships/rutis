@@ -2,7 +2,7 @@
   "protocol_family": "rutis-cordis-objects",
   "protocol_version": "0.experimental",
   "framework_version": "0.3.0",
-  "environment_sha256": "a5c545655c225fe1678a6759a9bdce021248c4a5f9ce22c38d6416fa70d8823f",
+  "environment_sha256": "67c62ab5de2ec90453752b3744cf235c721db4e69b618262bd681c81b67eb5a9",
   "capabilities": [
     "object.scope",
     "callback.borrow"
