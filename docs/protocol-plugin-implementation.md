@@ -47,7 +47,7 @@ CI 增加锁定依赖的 TS 检查；Rust crate 纳入现有 workspace 测试。
 
 | 阶段 | 状态 | 尚需取得的证据 |
 | --- | --- | --- |
-| M1 | 开发中 | 严格描述符、两端真实对象导出表及原生清理、整批导入、broker 交付和执行 pin 已落地；对象图物化已落地；仍需生成绑定、实际 dispatch/borrow 执行及控制帧后冻结 |
+| M1 | 开发中 | 严格描述符、两端真实对象导出表及原生清理、整批导入、broker 交付和执行 pin 已落地；对象图、生成绑定与 Rust 实际 dispatch/borrow 内存链路已落地；仍需两端完整调度互通与控制帧后冻结 |
 | M2 | 待完成 | 真实 Rust↔TS 进程和 native 插件、对象往返、borrow 回调、真实旧桥插件迁移、T24 测量 |
 | M3 | 待完成 | 调用取消/完成、更新/失败回滚、组恢复屏障、Linux 进程和受管后代回收 |
 | M4 | 待完成 | broker 权威事件列表、parallel/serial、scope、ready、once 与扩展拒绝 |
@@ -57,7 +57,7 @@ CI 增加锁定依赖的 TS 检查；Rust crate 纳入现有 workspace 测试。
 
 ## M1 已实现的基础与剩余门槛
 
-`rutis-protocol::{contract,identity,broker,imports,exports,graph,json}` 与对应 TS 模块：
+`rutis-protocol::{contract,identity,broker,imports,exports,graph,json,codegen,sdk,memory}` 与对应 TS 模块：
 
 - 完整 bundle 原始字节 SHA-256、精确版本、可达接口检查；scope/borrow、record/list/optional 的独立 tagged value；回调按完整签名哈希匹配。
 - 不支持的 delegate、持久回调、waterfall、stream 在描述符准入时拒绝。JSON 数据中类似对象 id 的字段不会被当成引用。
@@ -66,23 +66,29 @@ CI 增加锁定依赖的 TS 检查；Rust crate 纳入现有 workspace 测试。
 - 子 scope 递归关闭；delivery pin 与 execution pin 分离，等待者释放不能提前释放仍执行的引用；旧 call/activation/scope/epoch 标识不复用。
 - 回收必须是已接收、终态的连续前缀；缺口或活 token 阻止回收。低于已确认水位的迟到交付拒绝，迟到控制帧幂等，不按时钟推断。
 - 双端严格解码 UTF-8/JSON，拒绝重复字段（含转义重名）、BOM、孤立 surrogate、非有限/不安全整数；16 MiB 字节与 64 层子值深度是解码器边界。回调签名采用一致的 UTF-8/IEEE-754 编码，避免 JSON 打印和 UTF-16 排序差异。
-- owner 表按真实 Arc/JS 身份建 weak 映射，delivery/execution 独立强持有；独占 disposer 执行一次并等待，失败可观察，shared 对象保留本地所有权。runtime epoch 的 id 分配跨 activation 共用；broker 重复登记不可扩大视图。
+- owner 表按真实 Arc/JS 身份建 weak 映射，delivery/execution 独立强持有；独占 disposer 执行一次并等待，失败可观察，shared 对象保留本地所有权。runtime epoch 的 id 分配跨 activation 共用；broker 重复登记不可修改现有视图；宿主可添加独立视图，旧 grant 的 whitelist 不改变。
 - 表接入真实 native ctx effect；失效的 gate/uid 同步拒绝新 pin，卸载等待执行和慢 disposer。整批导入先校验再附加；失败只释放新增交付，保留以前的成功别名。
 
 - 对象图按完整表校验后两遍建代理和关系；每个表项必须可达，属性关系继承包含它的 scope。循环边只保存身份，不互持 Arc。非法新快照只拒绝新增交付；旧包装保持有效。显式释放子包装后导航失败，新交付建立新包装，旧别名永不复活。
 - 已准入描述符不可修改，原始摘要和验证的 schema 保持绑定；Rust 同一真实 Arc 的不同 trait 视图保持同一身份，执行适配器不要求业务 trait 继承 Any。
 
-可执行证据：Rust contracts 5、exports 9、graphs 5、objects 10、managed 11 项；TS contracts 5、exports 8、graphs 5、imports 5、managed 8 项。共享语料包含 JSON 35、描述符 50、wire value 32、回调签名 9、对象图 31 个用例，覆盖合法/非法输入、边界、Unicode/数字语义和不支持扩展。Rust 使用两个真实线程同时交付/释放；两端另验证原生失效时的执行 pin 和慢对象清理。
-这些测试证明账本、真实对象持有、原生清理和编码规则，还覆盖循环图物化、快照一致性与图关闭；尚未证明真实远程对象返回、回调 handler、生成接口或 IPC。当前约定见 [protocol README](../protocol/README.md)，水位控制帧顺序已写明，尚未接入实际消息。
+- 已生成 Rust 客户端/业务 trait 和 TS 客户端/业务接口及两端原生导出适配器；两个固定原字节 bundle 编译并核对生成文件，覆盖 DTO、字符串 enum、判别 union、嵌套 record/list/optional、callback 和对象字段。Rust number 使用有限的 `serde_json::Number`；可选 DTO 字段保留缺失与显式 null 的区别。生成顺序不受 workspace 的 serde_json `preserve_order` 特性影响。
+- Rust `memory::Network` 接入同一 broker、真实导出表、完整图编码和接收准入。生成客户端运行 stateful connect/query、owner pass-back facade、循环 agent/session 导航及 A→B→A 借用回调。回传必须证明原 accepted grant；第三方转发拒绝，旧引用保持有效。
+- handler 不在 broker 锁内运行；丢弃等待者不丢弃 owner 执行任务。登记子任务可继续登记后代，全部完成后再闭合借用 scope 和释放执行 pin；旧 callback 包装拒绝新调用。四个真实线程上的并发调用在 broker 内分配 call/scope 编号，避免分配与准入乱序。
+- Rust 生成调度已接入实际 managed rutis 插件的原始 Ctx 与注入服务，native effect 关闭 endpoint 并等待 exports。TS 生成适配器也用锁定 Cordis 原生 Ctx 验证注入与失效准入，但该测试是适配器单元测试，没有替代 Rust 权威 broker 的 TS 互通证据。
+- import scope 继承原生 gate，缓存属性同步检查 gate，终态不重开。owner 撤销包括尚未接收的迟到 handoff；关闭 owner 后的纯值迟到结果也拒绝，已执行的 handler 仍完成。关闭图后即使作者继续保存旧代理，真实 Arc 对象图也不被保留。
 
-本阶段工作区回归：`cargo test --workspace` 406 passed / 0 failed / 2 ignored，未设置 Node 跳过变量，旧桥真实 Node TCP e2e 通过。两个 ignored 是依赖外部 min-cordis/dsh 检出的 host e2e 与需要真实模型后端的 agent e2e，不能计入通过。`cargo check --workspace --all-targets`、全仓 fmt、协议 crate clippy `-D warnings`、TS check/test 及旧 host 的断连测试通过；没有执行外部 min-cordis/dsh 整体迁移验收。
+可执行证据：Rust bindings 8、contracts 5、exports 9、graphs 7、objects 12、managed 11 项（合计 52）；TS bindings 7、contracts 5、exports 8、graphs 5、imports 5、managed 8 项（合计 38）。共享语料包含 JSON 35、描述符 50、wire value 32、回调签名 9、对象图 31 个用例，覆盖合法/非法输入、边界、Unicode/数字语义和不支持扩展。Rust 使用两个真实线程同时交付/释放；两端另验证原生失效时的执行 pin 和慢对象清理。
+这些测试证明账本、真实对象持有、原生清理和编码规则，还覆盖循环图物化、快照一致性与图关闭；Rust 内存链路已覆盖真实状态对象返回、生成接口、回调 handler 和登记子任务；尚未证明跨语言 dispatch 或 IPC。当前约定见 [protocol README](../protocol/README.md)，水位控制帧顺序已写明，尚未接入实际消息。
+
+本阶段工作区回归：`cargo test --workspace` 418 passed / 0 failed / 2 ignored，未设置 Node 跳过变量，旧桥真实 Node TCP e2e 通过。两个 ignored 是依赖外部 min-cordis/dsh 检出的 host e2e 与需要真实模型后端的 agent e2e，不能计入通过。`cargo check --workspace --all-targets`、全仓 fmt、协议 crate clippy `-D warnings`、TS check/test 及旧 host 的断连测试通过；没有执行外部 min-cordis/dsh 整体迁移验收。
 
 M1 后续必须补齐以下内容，之后才能称为 M1 完成或冻结该实验协议：
 
-1. 描述符生成 Rust/TS 的客户端与导出适配，作者调用对象方法而无需操作 id/token。
-2. 将已实现的真对象导出表接入实际 dispatch/编码/结果交付；对象图物化已有内存证据，仍需实际调用链中的资源与 disposer 收敛证据。
-3. borrow 回调执行范围及登记子任务，包含嵌套重入；owner 回传建立受门控 facade，保持统一入站调度。
-4. 将已实现的严格解码与共享非法描述符语料接入帧/握手，完成边界互通与新增消息格式的一致拒绝。
-5. 将双端回收水位 ACK 接入真实控制帧；闭合 runtime epoch 的记录回收与迟到消息测试。当前 broker/imports 的前缀规则已有内存测试，握手仍待接入。
+1. 完成 TS 对象图编码、真实调用与 Rust broker 互通；把两端已生成绑定及原生适配接入同一实际调用链。当前 TS binding 测试不包含实际 broker 或 transport。
+2. 补齐双端完整结果丢弃、scope 回收、独占资源 disposer、handler/子任务失败收敛及原生依赖失效交错；Rust 已有状态返回、owner facade、循环图与嵌套 borrow 内存证据，不能等同于跨语言验收。
+3. 将严格解码和非法语料接入帧/握手，形成受认证的入站调度与控制消息；当前 memory helper 使用一个 admitted bundle，宿主 prepare 的多 bundle/路由/权限计划仍待 M2。
+4. 将回收水位 ACK 与 epoch 记录回收接入真实控制帧，重跑迟到消息和取消/finished 交错；当前直接调用账本 API 的证据不能代替协议控制流。
+5. 检查生成绑定在实际迁移插件中的可用性，完成成熟实现复用评估及完整 M1 门槛记录，之后再冻结实验协议。
 
 参考核对：[Cap’n Proto RPC](https://capnproto.org/rpc.html)及其[rpc.capnp](https://github.com/capnproto/capnproto/blob/master/c%2B%2B/src/capnp/rpc.capnp)把 capability、释放和路径顺序作为协议机制。当前用例对照这些时序，但不声称继承它的实现正确性。继续采用设计要求的单 broker 路径；成熟实现复用与生成接口/原生生命周期的集成成本评估尚未完成，pipelining/直连由 T24 测量后另议。

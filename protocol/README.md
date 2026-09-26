@@ -1,7 +1,7 @@
 # 实验对象协议实现约定
 
 此目录与 `rutis-protocol` crate 实施 [#59 设计](../docs/design-protocol-plugins-2026-09-25.md)。
-当前处于 M1，尚未形成可部署的 Rust↔Cordis 协议插件系统。生成绑定、实际调用、IPC、监督恢复和 broker 事件仍在开发。
+当前处于 M1，尚未形成可部署的 Rust↔Cordis 协议插件系统。已有生成绑定、对象图和 Rust 内存调度；跨语言实际调用、IPC、监督恢复和 broker 事件仍在开发。
 实施证据及完整验收范围见[验收记录](../docs/protocol-plugin-implementation.md)。旧 `rutis-cordis` 桥继续独立存在。
 
 ## JSON 与描述符
@@ -43,7 +43,7 @@ owner SDK 的导出表为真实 Arc / JS 对象分配稳定身份；相同字段
 同一个 runtime epoch 的全部 activation 共用 object id 分配器；id 不复用。
 不同 native 插件装载和发布的完成顺序可以不同；broker 检查编号唯一性，不要求对象登记按分配顺序到达。
 本地对象仍存活时，shared 对象在无 pin 的间隔后再次导出保持身份。
-broker 接受 owner 分配的身份，重复登记只能保持相同接口视图，不得换对象或扩大方法。
+broker 接受 owner 分配的身份，重复登记保持现有接口视图，不能换对象或扩大现有视图的方法。宿主准入计划可为同一身份增加独立视图，先前 grant 的 whitelist 保持不变。
 
 临时 staging pin 覆盖导出交付提交前的间隔；每份 delivery 和实际 execution 独立持有真实对象。
 释放 delivery 或取消用户等待不能释放 execution pin。
@@ -60,7 +60,32 @@ native 卸载关闭准入、撤销 delivery/staging pin，等待仍执行的对�
 导入表 `receive_batch` 先检查整份引用清单，再在一个临界区附加 token。
 类型/图验证失败使用 `reject`，只拒绝这次新增的交付；以前已经成功交给作者的 token 和别名保持有效。
 同 delivery id 的重传不增加 pin；相互矛盾的记录拒绝。新交付不能复活已经 release 的旧包装。
-对象图先校验整个引用表，再建齐代理和不可变身份关系；每个引用必须可达，快照关系继承父引用的 scope，借用关系不能延长子对象寿命。关系边不持有代理，scope 关闭清空包装缓存。显式释放子包装后，导航该关系失败；新交付可建立新的子包装，已释放别名仍关闭。相同活视图的快照变化拒绝。生成接口与实际调用链仍需实现。
+对象图先校验整个引用表，再建齐代理和不可变身份关系；每个引用必须可达，快照关系继承父引用的 scope，借用关系不能延长子对象寿命。关系边不持有代理，scope 关闭清空包装缓存。显式释放子包装后，导航该关系失败；新交付可建立新的子包装，已释放别名仍关闭。相同活视图的快照变化拒绝。生成接口与 Rust 内存调用链已有测试；两端互通仍待实现。scope 继承 native gate，失效后缓存属性与方法同样拒绝；owner 撤销记录还拒绝尚未接收的旧 handoff。
+
+## 生成绑定与内存调度
+
+生成器先准入完整原字节 bundle，输出包含该 SHA-256 的 Rust/TS 源码：
+
+```sh
+cargo run -p rutis-protocol --bin rutis-protocol-bindgen -- \
+  protocol/fixtures/database.bundle.json \
+  protocol/generated/database.rs protocol/ts/generated/database.ts
+cargo run -p rutis-protocol --bin rutis-protocol-bindgen -- \
+  protocol/fixtures/binding-types.bundle.json \
+  protocol/generated/binding-types.rs protocol/ts/generated/binding-types.ts
+```
+
+TS 输出默认相对导入 `../src` 的 SDK；当前目录结构是实验包布局，并未发布稳定的安装接口。
+字段排序由生成器固定，不能依赖 serde_json 的 feature 联合结果。两份产物在 Rust/TS 编译，并由 workspace 测试核对重生成结果。
+Rust 生成 `InterfaceDatabaseService`、`InterfaceDatabaseClient` 等类型：业务实现返回真实 `Arc<dyn …Service>`，调用者得到门控客户端；参数和 JSON 数据 DTO 由 SDK 编码。
+可选 DTO 字段用 `OptionalField::Missing/Present` 保留缺失与 null 的区别，字符串 enum/判别 union 生成 Rust enum，开放 JSON 数据保持 Value/map。
+TS 用冻结的生成 facade 保持对象身份，属性只读本地快照；未知选择器拒绝。业务 `then` 通过 `then$` 暴露，避免 Promise 自动调用它。Caller 属于原生 activation，运行器应为该 activation 保持稳定实例。
+两端导出适配器只读取声明的 selector 和属性，不枚举业务对象或原型；dispatch 必须取得该实际对象的 execution pin。
+`CallContext` 保存原始 native Ctx/Context，并提供登记子任务的 API；子任务及后代完成前，借用 scope 不能闭合。
+
+Rust `memory::Network` 是使用真实 broker 的内存传输测试入口，支持图交付、状态对象、owner pass-back、嵌套借用回调及 native endpoint effect。
+所有执行离开 broker 临界区后运行；owner-returned facade 也走 broker 调度。丢弃调用 waiter 只丢弃结果，owner handler 和登记子任务继续跟踪，晚到未消费图由 envelope 释放新增交付。
+这不是生产 runner：多 bundle 的 prepare/权限路由计划、TS 图编码和完整调度、受认证 IPC、控制帧及 supervisor 尚未接入。
 
 ## 连续前缀回收的含义
 

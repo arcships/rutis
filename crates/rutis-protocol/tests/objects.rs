@@ -132,6 +132,103 @@ fn failed_graph_releases_only_new_deliveries_and_batch_is_atomic() {
 }
 
 #[test]
+fn adding_an_independent_view_never_changes_an_existing_grant_whitelist() {
+    let mut s = Setup::new();
+    let old = s.offer(None, "route-a");
+    s.imports.receive(old.clone()).unwrap();
+    s.flush();
+    let new_view = view("route-c");
+    s.broker
+        .register_export_view(
+            &s.owner,
+            s.object.clone(),
+            new_view.clone(),
+            BTreeSet::from(["close".into()]),
+        )
+        .unwrap();
+    assert_eq!(
+        s.broker
+            .begin_call(&s.scope, Sequence(1), &old, "close", &s.owner)
+            .unwrap_err()
+            .code,
+        ErrorCode::CapabilityDenied
+    );
+    assert_eq!(
+        s.broker
+            .register_export_view(
+                &s.owner,
+                s.object.clone(),
+                new_view.clone(),
+                BTreeSet::from(["query".into(), "close".into()])
+            )
+            .unwrap_err()
+            .code,
+        ErrorCode::InterfaceMismatch
+    );
+    let fresh = s
+        .broker
+        .offer(&s.owner, &s.object, &s.scope, &new_view)
+        .unwrap();
+    s.imports.receive(fresh.clone()).unwrap();
+    s.flush();
+    s.broker
+        .begin_call(&s.scope, Sequence(2), &fresh, "close", &s.owner)
+        .unwrap();
+    s.broker
+        .finish_call(&s.owner, &s.caller, Sequence(2))
+        .unwrap();
+    s.broker
+        .begin_call(&s.scope, Sequence(3), &old, "query", &s.owner)
+        .unwrap();
+    s.broker
+        .finish_call(&s.owner, &s.caller, Sequence(3))
+        .unwrap();
+}
+
+#[test]
+fn owner_passback_proves_the_original_grant_and_gets_an_independent_delivery() {
+    let mut s = Setup::new();
+    let owner_scope = scope(&s.owner, 1);
+    s.broker.open_scope(owner_scope.clone(), None).unwrap();
+    let old = s.offer(None, "route-a");
+    assert_eq!(
+        s.broker
+            .pass_back(&s.scope, &old, &owner_scope)
+            .unwrap_err()
+            .code,
+        ErrorCode::StaleObject
+    );
+    s.imports.receive(old.clone()).unwrap();
+    s.flush();
+    let forged = Delivery {
+        token: "forged".into(),
+        ..old.clone()
+    };
+    assert_eq!(
+        s.broker
+            .pass_back(&s.scope, &forged, &owner_scope)
+            .unwrap_err()
+            .code,
+        ErrorCode::CapabilityDenied
+    );
+    let returned = s.broker.pass_back(&s.scope, &old, &owner_scope).unwrap();
+    assert_ne!(returned.token, old.token);
+    assert_eq!(returned.object, old.object);
+    s.broker
+        .accept(&s.owner, returned.id, &returned.token)
+        .unwrap();
+    s.broker
+        .begin_call(&owner_scope, Sequence(1), &returned, "query", &s.owner)
+        .unwrap();
+    s.broker.close_scope(&owner_scope);
+    assert_eq!(s.broker.pins(&s.object), (1, 1));
+    s.broker
+        .finish_call(&s.owner, &s.owner, Sequence(1))
+        .unwrap();
+    assert_eq!(s.broker.pins(&s.object), (1, 0));
+}
+
+#[test]
 fn owner_supplied_export_identity_is_stable_and_epoch_wide_ids_are_unique() {
     let mut broker = Broker::default();
     let one = activation("rust");

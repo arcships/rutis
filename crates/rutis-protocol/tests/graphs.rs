@@ -68,6 +68,58 @@ fn renew(graph: &mut WireGraph, start: u64) {
 }
 
 #[test]
+fn native_gate_invalidation_synchronously_closes_cached_properties_and_child_scopes() {
+    let bundle = bundle();
+    let scopes = scopes();
+    let imports = imports(&scopes);
+    let gate = rutis_protocol::managed::ActivationGate::default();
+    imports.bind_scope(&scopes.scope, gate.clone()).unwrap();
+    let mut graph = cycle(&bundle);
+    for reference in &mut graph.references {
+        reference.delivery.recipient = scopes.borrow.clone();
+    }
+    let borrowed = GraphScopes::in_scope(scopes.borrow.clone());
+    let proxy = imports
+        .receive_graph(&bundle, session_expr(&bundle), graph, &borrowed)
+        .unwrap()
+        .into_object()
+        .unwrap();
+    assert!(proxy.property("agent").is_ok());
+    gate.close();
+    assert_eq!(
+        proxy.property("agent").err().unwrap().code,
+        rutis_protocol::error::ErrorCode::ScopeClosed
+    );
+    assert_eq!(
+        proxy.delivery().err().unwrap().code,
+        rutis_protocol::error::ErrorCode::ScopeClosed
+    );
+    assert!(imports
+        .bind_scope(
+            &scopes.scope,
+            rutis_protocol::managed::ActivationGate::default()
+        )
+        .is_err());
+    imports.close_scope(&scopes.scope);
+    assert_eq!(imports.retained_objects(), 0);
+}
+
+#[test]
+fn revoked_owner_cannot_receive_a_late_graph_even_when_it_has_no_cached_wrappers() {
+    let bundle = bundle();
+    let scopes = scopes();
+    let imports = imports(&scopes);
+    let graph = cycle(&bundle);
+    imports.revoke_owner(&graph.references[0].delivery.object.owner);
+    let result = imports.receive_graph(&bundle, session_expr(&bundle), graph, &scopes);
+    assert_eq!(
+        result.err().unwrap().code,
+        rutis_protocol::error::ErrorCode::StaleObject
+    );
+    assert_eq!(imports.retained_objects(), 0);
+}
+
+#[test]
 fn t22_shared_graph_contract_and_ownership_corpus() {
     let bundle = bundle();
     let cases: Value = serde_json::from_slice(include_bytes!(

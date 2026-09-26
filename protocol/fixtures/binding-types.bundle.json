@@ -1,0 +1,230 @@
+{
+  "id": "test.shapes",
+  "version": "1.0.0",
+  "interfaces": {
+    "Values": {
+      "methods": {
+        "compose": {
+          "params": {
+            "kind": "record",
+            "fields": {
+              "items": {
+                "kind": "list",
+                "item": {
+                  "kind": "object",
+                  "interface": "Resource",
+                  "ownership": "scope"
+                }
+              },
+              "callback": {
+                "kind": "optional",
+                "item": {
+                  "kind": "callback",
+                  "params": {
+                    "kind": "optional",
+                    "item": {
+                      "kind": "list",
+                      "item": {
+                        "kind": "value",
+                        "schema": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "result": {
+                    "kind": "value",
+                    "schema": {
+                      "type": "null"
+                    }
+                  },
+                  "ownership": "borrow"
+                }
+              },
+              "type": {
+                "kind": "value",
+                "schema": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "result": {
+            "kind": "optional",
+            "item": {
+              "kind": "list",
+              "item": {
+                "kind": "object",
+                "interface": "Resource",
+                "ownership": "scope"
+              }
+            }
+          }
+        },
+        "dto": {
+          "params": {
+            "kind": "value",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "nullable": {
+                  "type": "null"
+                },
+                "choice": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "tag": {
+                          "type": "string",
+                          "const": "first"
+                        },
+                        "text": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "tag",
+                        "text"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "tag": {
+                          "type": "string",
+                          "const": "second"
+                        },
+                        "count": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "tag",
+                        "count"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "labels": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "red",
+                      "green"
+                    ],
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "choice",
+                "labels"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "result": {
+            "kind": "value",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "nullable": {
+                  "type": "null"
+                },
+                "choice": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "tag": {
+                          "type": "string",
+                          "const": "first"
+                        },
+                        "text": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "tag",
+                        "text"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "tag": {
+                          "type": "string",
+                          "const": "second"
+                        },
+                        "count": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "tag",
+                        "count"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "labels": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "red",
+                      "green"
+                    ],
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "choice",
+                "labels"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "then": {
+          "params": {
+            "kind": "value",
+            "schema": {
+              "type": "string"
+            }
+          },
+          "result": {
+            "kind": "value",
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "properties": {}
+    },
+    "Resource": {
+      "methods": {
+        "client": {
+          "params": {
+            "kind": "object",
+            "interface": "Resource",
+            "ownership": "scope"
+          },
+          "result": {
+            "kind": "value",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        }
+      },
+      "properties": {}
+    }
+  }
+}

@@ -38,11 +38,34 @@ const wrappers = new WeakMap<ObjectProxy, { active: boolean; tokens: Set<string>
  * between checking a wrapper and attaching/removing its delivery tokens. */
 export class Imports {
   private scopes = new Map<string, { scope: Scope; parent?: string }>()
+  private gates = new Map<string, { admitted: () => boolean; closed: boolean }>()
+  private closedOwners = new Set<string>()
   private latest = new Map<string, bigint>()
   private cache = new Map<string, ObjectProxy>()
   private seen = new Map<string, Seen>()
   private retired = 0n
   private controls: ImportControl[] = []
+
+  bindScope(scope: Scope, admitted: () => boolean): void {
+    const key = canonical(scope)
+    if (!this.scopeOpen(scope)) fail('ScopeClosed', 'scope closed')
+    if (this.gates.has(key)) fail('InvalidParams', 'scope already bound')
+    this.gates.set(key, { admitted, closed: false })
+  }
+  private scopeOpen(scope: Scope): boolean {
+    let key: string | undefined = canonical(scope)
+    while (key !== undefined) {
+      const entry = this.scopes.get(key)
+      if (!entry) return false
+      const gate = this.gates.get(key)
+      if (gate) {
+        if (!gate.admitted()) gate.closed = true
+        if (gate.closed) return false
+      }
+      key = entry.parent
+    }
+    return true
+  }
 
   openScope(scope: Scope, parent?: Scope): void {
     const key = canonical(scope)
@@ -50,7 +73,7 @@ export class Imports {
     sequence(scope.scope); activation(scope.activation)
     if (this.scopes.has(key)) fail('InvalidParams', 'scope already open')
     if (BigInt(scope.scope) <= (this.latest.get(owner) ?? 0n)) fail('StaleObject', 'scope id cannot be reused')
-    if (parent && (!this.scopes.has(canonical(parent)) || canonical(parent.activation) !== owner)) fail('ScopeClosed', 'parent scope closed')
+    if (parent && (!this.scopeOpen(parent) || canonical(parent.activation) !== owner)) fail('ScopeClosed', 'parent scope closed')
     this.latest.set(owner, BigInt(scope.scope))
     this.scopes.set(key, { scope: structuredClone(scope), parent: parent && canonical(parent) })
   }
@@ -67,7 +90,7 @@ export class Imports {
   receiveGraph(admitted: { bundle: Bundle; sha256: string }, type: TypeExpr, graph: WireGraph, scopes: GraphScopes): unknown {
     try {
       const validated = validateGraph(admitted, type, graph, scopes)
-      if (!this.scopes.has(canonical(scopes.scope)) || !this.scopes.has(canonical(scopes.borrow))) fail('ScopeClosed', 'graph receiving scope closed')
+      if (!this.scopeOpen(scopes.scope) || !this.scopeOpen(scopes.borrow)) fail('ScopeClosed', 'graph receiving scope closed')
       this.checkBatch(validated.deliveries)
       for (let i = 0; i < validated.deliveries.length; i++) {
         const delivery = validated.deliveries[i]
@@ -88,8 +111,9 @@ export class Imports {
   private checkBatch(deliveries: Delivery[]): void {
     const batch = new Map<string, Delivery>()
     for (const delivery of deliveries) {
+      if (this.closedOwners.has(canonical(delivery.object.owner))) fail('StaleObject', 'owner activation closed')
       if (BigInt(delivery.id) <= this.retired) fail('StaleObject', 'delivery is below retirement watermark')
-      if (!this.scopes.has(canonical(delivery.recipient))) fail('ScopeClosed', 'delivery scope closed')
+      if (!this.scopeOpen(delivery.recipient)) fail('ScopeClosed', 'delivery scope closed')
       const seen = this.seen.get(delivery.id)
       if (seen && canonical(seen.delivery) !== canonical(delivery)) fail('CapabilityDenied', 'delivery id changed identity')
       if (seen?.terminal) fail('StaleObject', 'released delivery cannot revive a wrapper')
@@ -121,6 +145,10 @@ export class Imports {
     }
   }
 
+  revokeOwner(owner: Activation): void {
+    this.closedOwners.add(canonical(owner))
+    for (const proxy of this.cache.values()) if (canonical(proxy.identity.owner) === canonical(owner)) this.release(proxy)
+  }
   closeScope(scope: Scope): void {
     const closed = new Set([canonical(scope)])
     let count = -1
@@ -128,7 +156,7 @@ export class Imports {
       count = closed.size
       for (const [key, value] of this.scopes) if (value.parent && closed.has(value.parent)) closed.add(key)
     }
-    for (const key of closed) this.scopes.delete(key)
+    for (const key of closed) { this.scopes.delete(key); this.gates.delete(key) }
     for (const proxy of this.cache.values()) if (closed.has(canonical(proxy.scope))) this.release(proxy)
     for (const [id, seen] of this.seen) if (closed.has(canonical(seen.delivery.recipient))) this.releaseToken(id)
   }
@@ -191,7 +219,7 @@ export class Imports {
     if (seen && !seen.terminal) { seen.terminal = true; this.controls.push({ type: 'release', id, token: seen.delivery.token }) }
   }
   delivery(proxy: ObjectProxy): Delivery {
-    if (!proxy.active || !this.scopes.has(canonical(proxy.scope))) fail('ScopeClosed', 'proxy wrapper released')
+    if (!proxy.active || !this.scopeOpen(proxy.scope)) fail('ScopeClosed', 'proxy wrapper released')
     const token = wrappers.get(proxy)!.tokens.values().next().value
     if (token === undefined) fail('StaleObject', 'proxy has no delivery token')
     return this.seen.get(token!)!.delivery

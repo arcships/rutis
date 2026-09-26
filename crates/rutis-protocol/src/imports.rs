@@ -4,6 +4,7 @@ use crate::contract::{AdmittedBundle, TypeExpr};
 use crate::error::{ErrorCode, ProtocolError, Result};
 use crate::graph::{self, DecodedValue, GraphScopes, SnapshotValue, WireGraph};
 use crate::identity::{Delivery, InterfaceView, ObjectIdentity, Scope, Sequence};
+use crate::managed::ActivationGate;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, Weak};
@@ -40,6 +41,8 @@ type CacheKey = (Scope, ObjectIdentity, InterfaceView);
 #[derive(Default)]
 struct State {
     scopes: BTreeMap<Scope, Option<Scope>>,
+    gates: BTreeMap<Scope, ActivationGate>,
+    closed_owners: BTreeSet<crate::identity::Activation>,
     cache: BTreeMap<CacheKey, Arc<Mutex<Wrapper>>>,
     seen: BTreeMap<Sequence, Seen>,
     retired: u64,
@@ -63,6 +66,26 @@ fn error(code: ErrorCode, message: &str) -> ProtocolError {
 }
 
 impl Imports {
+    pub(crate) fn require_scope(&self, scope: &Scope) -> Result<()> {
+        if scope_open(&self.0.lock().unwrap(), scope) {
+            Ok(())
+        } else {
+            Err(error(ErrorCode::ScopeClosed, "native scope closed"))
+        }
+    }
+    /// Runner-owned native admission. A child scope inherits every ancestor's
+    /// gate, so cached properties cannot escape synchronous invalidation.
+    pub fn bind_scope(&self, scope: &Scope, gate: ActivationGate) -> Result<()> {
+        let mut state = self.0.lock().unwrap();
+        if !scope_open(&state, scope) {
+            return Err(error(ErrorCode::ScopeClosed, "scope closed"));
+        }
+        if state.gates.contains_key(scope) {
+            return Err(error(ErrorCode::InvalidParams, "scope already bound"));
+        }
+        state.gates.insert(scope.clone(), gate);
+        Ok(())
+    }
     pub fn open_scope(&self, scope: Scope, parent: Option<Scope>) -> Result<()> {
         let mut state = self.0.lock().unwrap();
         if state.scopes.contains_key(&scope) {
@@ -70,7 +93,7 @@ impl Imports {
         }
         if parent
             .as_ref()
-            .is_some_and(|p| p.activation != scope.activation || !state.scopes.contains_key(p))
+            .is_some_and(|p| p.activation != scope.activation || !scope_open(&state, p))
         {
             return Err(error(ErrorCode::ScopeClosed, "parent scope closed"));
         }
@@ -131,9 +154,7 @@ impl Imports {
         };
         let mut state = self.0.lock().unwrap();
         let admitted = (|| {
-            if !state.scopes.contains_key(&scopes.scope)
-                || !state.scopes.contains_key(&scopes.borrow)
-            {
+            if !scope_open(&state, &scopes.scope) || !scope_open(&state, &scopes.borrow) {
                 return Err(error(
                     ErrorCode::ScopeClosed,
                     "graph receiving scope closed",
@@ -176,6 +197,20 @@ impl Imports {
         reject_deliveries(&mut self.0.lock().unwrap(), deliveries);
     }
 
+    pub fn revoke_owner(&self, owner: &crate::identity::Activation) {
+        let mut state = self.0.lock().unwrap();
+        state.closed_owners.insert(owner.clone());
+        let wrappers: Vec<_> = state
+            .cache
+            .iter()
+            .filter(|((_, object, _), _)| &object.owner == owner)
+            .map(|(_, w)| w.clone())
+            .collect();
+        for wrapper in wrappers {
+            release_wrapper(&mut state, &wrapper);
+        }
+    }
+
     pub fn close_scope(&self, scope: &Scope) {
         let mut state = self.0.lock().unwrap();
         let mut closed = BTreeSet::from([scope.clone()]);
@@ -191,6 +226,7 @@ impl Imports {
             }
         }
         state.scopes.retain(|s, _| !closed.contains(s));
+        state.gates.retain(|s, _| !closed.contains(s));
         let wrappers: Vec<_> = state
             .cache
             .iter()
@@ -285,6 +321,20 @@ impl Imports {
     pub fn take_controls(&self) -> Vec<ImportControl> {
         std::mem::take(&mut self.0.lock().unwrap().controls)
     }
+}
+
+fn scope_open(state: &State, scope: &Scope) -> bool {
+    let mut current = Some(scope);
+    while let Some(scope) = current {
+        let Some(parent) = state.scopes.get(scope) else {
+            return false;
+        };
+        if state.gates.get(scope).is_some_and(|gate| !gate.is_open()) {
+            return false;
+        }
+        current = parent.as_ref();
+    }
+    true
 }
 
 fn check_batch(state: &State, deliveries: &[Delivery]) -> Result<()> {
@@ -395,13 +445,16 @@ fn materialize(
 }
 
 fn check_delivery(state: &State, delivery: &Delivery) -> Result<()> {
+    if state.closed_owners.contains(&delivery.object.owner) {
+        return Err(error(ErrorCode::StaleObject, "owner activation closed"));
+    }
     if delivery.id.0 <= state.retired {
         return Err(error(
             ErrorCode::StaleObject,
             "delivery is below the confirmed retirement watermark",
         ));
     }
-    if !state.scopes.contains_key(&delivery.recipient) {
+    if !scope_open(state, &delivery.recipient) {
         return Err(error(ErrorCode::ScopeClosed, "delivery scope closed"));
     }
     if let Some(seen) = state.seen.get(&delivery.id) {
@@ -496,7 +549,7 @@ impl ObjectProxy {
             .ok_or_else(|| error(ErrorCode::ScopeClosed, "runtime import ledger dropped"))?;
         let state = imports.lock().unwrap();
         let wrapper = self.wrapper.lock().unwrap();
-        if !wrapper.active || !state.scopes.contains_key(&wrapper.scope) {
+        if !wrapper.active || !scope_open(&state, &wrapper.scope) {
             return Err(error(ErrorCode::ScopeClosed, "proxy wrapper released"));
         }
         let id = wrapper
@@ -517,7 +570,7 @@ impl ObjectProxy {
         let state = imports.lock().unwrap();
         let snapshot = {
             let wrapper = self.wrapper.lock().unwrap();
-            if !wrapper.active || !state.scopes.contains_key(&wrapper.scope) {
+            if !wrapper.active || !scope_open(&state, &wrapper.scope) {
                 return Err(error(ErrorCode::ScopeClosed, "proxy wrapper released"));
             }
             wrapper

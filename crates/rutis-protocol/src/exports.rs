@@ -106,6 +106,12 @@ fn error(code: ErrorCode, message: &str) -> ProtocolError {
 }
 
 impl Exports {
+    pub fn owner(&self) -> &Activation {
+        &self.owner
+    }
+    pub(crate) fn gate(&self) -> Option<ActivationGate> {
+        self.gate.clone()
+    }
     pub fn new(owner: Activation, ids: ObjectIds) -> Self {
         Self {
             owner,

@@ -60,6 +60,13 @@ fn error(code: ErrorCode, message: &str) -> ProtocolError {
 }
 
 impl Broker {
+    pub fn require_scope(&self, scope: &Scope) -> Result<()> {
+        if self.scopes.contains_key(scope) {
+            Ok(())
+        } else {
+            Err(error(ErrorCode::ScopeClosed, "scope closed"))
+        }
+    }
     pub fn start_activation(&mut self, activation: Activation) -> Result<()> {
         if self
             .closed_epochs
@@ -220,6 +227,75 @@ impl Broker {
         Ok(())
     }
 
+    /// Prepared host routes may add another independent view of one physical
+    /// object. Existing grants retain their copied whitelist; a view's methods
+    /// can never change. This is not an author-facing grant operation.
+    pub fn register_export_view(
+        &mut self,
+        owner: &Activation,
+        identity: ObjectIdentity,
+        view: InterfaceView,
+        methods: BTreeSet<String>,
+    ) -> Result<()> {
+        if identity.owner != *owner || !self.activations.contains(owner) {
+            return Err(error(
+                ErrorCode::CapabilityDenied,
+                "export owner unavailable",
+            ));
+        }
+        if let Some(entry) = self.objects.get_mut(&identity) {
+            if let Some(old) = entry.views.get(&view) {
+                if old != &methods {
+                    return Err(error(
+                        ErrorCode::InterfaceMismatch,
+                        "existing view methods changed",
+                    ));
+                }
+            } else {
+                entry.views.insert(view, methods);
+            }
+            return Ok(());
+        }
+        self.register_export(owner, identity, BTreeMap::from([(view, methods)]))
+    }
+
+    /// Returning a foreign reference only to its actual owner. Authentication
+    /// comes from sender and the existing accepted grant, never JSON object ids.
+    pub fn pass_back(
+        &mut self,
+        sender: &Scope,
+        delivery: &Delivery,
+        recipient: &Scope,
+    ) -> Result<Delivery> {
+        if !self.scopes.contains_key(sender) || &delivery.recipient != sender {
+            return Err(error(
+                ErrorCode::ScopeClosed,
+                "pass-back sender scope closed",
+            ));
+        }
+        if delivery.object.owner != recipient.activation {
+            return Err(error(
+                ErrorCode::UnsupportedCapability,
+                "third-party delegation is not implemented",
+            ));
+        }
+        let Some(grant) = self.grant_mut(&sender.activation, delivery.id, &delivery.token)? else {
+            return Err(error(ErrorCode::StaleObject, "pass-back grant retired"));
+        };
+        if grant.state != DeliveryState::Accepted || grant.delivery != *delivery {
+            return Err(error(
+                ErrorCode::StaleObject,
+                "pass-back grant is not active",
+            ));
+        }
+        self.offer(
+            &delivery.object.owner,
+            &delivery.object,
+            recipient,
+            &delivery.view,
+        )
+    }
+
     /// This is only used for an owner-originated result/event or service
     /// installation. A recipient cannot grant somebody else's object.
     pub fn offer(
@@ -320,6 +396,17 @@ impl Broker {
             return Err(error(ErrorCode::ScopeClosed, "caller activation closed"));
         }
         Ok(Some(grant))
+    }
+
+    pub(crate) fn delivery_object(
+        &mut self,
+        caller: &Activation,
+        id: Sequence,
+        token: &str,
+    ) -> Result<Option<ObjectIdentity>> {
+        Ok(self
+            .grant_mut(caller, id, token)?
+            .map(|g| g.delivery.object.clone()))
     }
 
     pub fn accept(&mut self, caller: &Activation, id: Sequence, token: &str) -> Result<()> {
