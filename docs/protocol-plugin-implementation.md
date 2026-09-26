@@ -10,7 +10,7 @@ TS 独立包的 `package-lock.json` 绑定 npm tarball 与完整性摘要：
 `sha512-YBdskTU2Po1kru3GgcUWUbkTsPMA9LkSQDAY8rBkFJeajdgcQad3QPJZE26JyK99Xb6HaASvoXg2DSUTeN/0Nw==`。
 运行测试从该包的公开入口导入，没有用参考源码快照替代发行包。
 
-本阶段不需要修改 rutis/Cordis 或维护 Cordis fork。适配层由本仓库维护；锁版本更新必须重跑本阶段契约和后续互通测试。
+本阶段使用本仓库 rutis 的最小公开托管扩展 `FiberView.seal_effects`，不修改 Cordis 或维护 Cordis fork。适配层及 rutis 扩展由本仓库维护；锁版本更新必须重跑本阶段契约和后续互通测试。
 Rust 使用原生依赖谓词、代取消 token、Plugin/PluginFactory、子插件和 shutdown。
 每次 activation 独立创建 native fiber；取消后的 permit 不再打开。必要子服务创建声明该服务依赖的 native guard，发布前等待 guard Active；服务单独摘除也会预取消 guard。准入检查同步拒绝，受 effect 管理的观察任务通知失效并刷新依赖。
 TS 使用公开 `internal/plugin/status/service` 通知、`Context.isolate/provide` 与 `Fiber.dispose/await`。
@@ -40,7 +40,7 @@ npm --prefix protocol/ts run check
 npm --prefix protocol/ts test
 ```
 
-M0 门槛用例：Rust managed 10 项、TS managed 8 项通过；这些是 M0 原生框架机制证据，不是全协议验收。
+M0 门槛用例：Rust managed 14 项、TS managed 8 项通过；这些是 M0 原生框架机制证据，不是全协议验收。
 CI 增加锁定依赖的 TS 检查；Rust crate 纳入现有 workspace 测试。
 
 ## 后续阶段与最终验收
@@ -81,13 +81,13 @@ CI 增加锁定依赖的 TS 检查；Rust crate 纳入现有 workspace 测试。
 - 双端 `GraphExporter` 先暂存真实对象，完整验证草稿，再向 broker 请求授权。broker 整图事务拒绝伪造 owner/source/foreign proof，不留下交付 id 缺口；SDK commit 只确认对应的真实对象与视图。Rust snapshot panic 与两端验证失败释放 staging；原生闭锁后纯值结果也不能编码。同一 owner 的多个 bundle 编码器共用 staging 编号空间；Rust 内存链路复用同一编码器，owner pin 失败通过完整拒绝 manifest 记录接收前缀。
 - 双端帧接收泵支持重入和并发，拒绝重复/倒序请求 id；Rust 独立 writer 在等待者被丢弃时继续完成已排队帧，关闭时可打断阻塞写并释放 stream。TS 编码前拒绝 undefined、NaN、Date、稀疏数组和自定义原型，防止 stringify 改变数据含义。
 
-可执行证据：Rust bindings 8、contracts 5、drafts 5、exports 10、factories 6、frames 5、graphs 7、objects 13、managed 11、objects_ipc 1、prepare 21、lifecycle 11 项（合计 103，其中 lifecycle 一项是子进程入口）；TS bindings 7、contracts 5、drafts 4、exports 8、frames 5、graphs 5、imports 6、managed 8、lifecycle 9 项（合计 57）。共享语料包含 JSON 35、描述符 50、wire value 32、回调签名 9、对象图 31、帧 10、lifecycle hello 17 个用例。Rust 使用两个真实线程同时交付/释放；两端另验证原生失效时的执行 pin 和慢对象清理。
+可执行证据：Rust bindings 8、contracts 5、drafts 5、exports 10、factories 6、frames 5、graphs 7、objects 13、managed 14、objects_ipc 1、prepare 21、lifecycle 12、services 6 项（合计 113，其中 lifecycle 一项是子进程入口）；TS bindings 7、contracts 5、drafts 4、exports 8、frames 5、graphs 5、imports 6、managed 8、lifecycle 9、services 9 项（合计 66）。共享语料包含 JSON 35、描述符 50、wire value 32、回调签名 9、对象图 31、帧 10、lifecycle hello 17、named services 12 个用例。Rust 使用两个真实线程同时交付/释放；两端另验证原生失效时的执行 pin 和慢对象清理。
 
 Linux `objects_ipc` 运行独立 Node 进程与真实 managed rutis/Cordis Ctx，使用继承的私有 Unix stream fd 3，stdout 诊断另行读取。Rust 权威 broker 从固定连接取得 Node activation，校验 family/version/raw SHA/capabilities；两端生成客户端实际 connect/query，保留同一状态对象和 session→agent→session 循环，owner pass-back 仍走 broker。两端借用 callback 重入第三层调用并等待登记子任务；保存的 callback 到期后拒绝调用。Node 在业务 dispatch 前通过控制帧确认参数 grant，避免回调/pass-back 读取尚未 accepted 的引用。丢弃 Rust waiter 后 Node 实际执行仍持有 execution pin，完成后才释放。
 
 同一私有 socket fixture 已完成 Node 接收 SDK 的前缀提议、broker 独立检查、owner 回收通知、ACK 后 SDK 清理；Rust 接收端也走同一 broker 和 Node owner 通知。活的首份 grant 阻止后续已释放 borrow 的回收，旧 id 的控制重传不能恢复授权，低于水位的接收和 pin 拒绝。当前约定见 [protocol README](../protocol/README.md)。这是 conformance fixture，不是可部署 runner；多 activation 连接的前缀、断连/取消/finished 交错与 supervisor 尚未验收。
 
-本阶段工作区回归：`cargo test --workspace` 469 passed / 0 failed / 2 ignored，新对象协议私有 Node socket、Rust 生命周期子进程、冻结目录的通用 Node runner 与旧桥真实 Node TCP e2e 均通过。两个 ignored 是依赖外部 min-cordis/dsh 检出的 host e2e 与需要真实模型后端的 agent e2e，不能计入通过。`cargo check --workspace --all-targets`、全仓 fmt、协议 crate clippy `-D warnings`、TS check/build/test 通过；没有执行外部 min-cordis/dsh 整体迁移验收。Linux Rust CI 安装锁定 Node/TS 依赖并运行该新互通测试，旧桥的跳过变量不跳过它。
+本阶段工作区回归：`cargo test --workspace` 480 passed / 0 failed / 2 ignored，新对象协议私有 Node socket、Rust 生命周期子进程、冻结目录的通用 Node runner 与旧桥真实 Node TCP e2e 均通过。两个 ignored 是依赖外部 min-cordis/dsh 检出的 host e2e 与需要真实模型后端的 agent e2e，不能计入通过。`cargo check --workspace --all-targets`、全仓 fmt、协议 crate clippy `-D warnings`、TS check/build/test 通过；没有执行外部 min-cordis/dsh 整体迁移验收。Linux Rust CI 安装锁定 Node/TS 依赖并运行该新互通测试，旧桥的跳过变量不跳过它。
 
 M1 后续必须补齐以下内容，之后才能称为 M1 完成或冻结该实验协议：
 
@@ -169,3 +169,67 @@ child disposer 失败的实际测试验证 Closing 保留、全部清理尝试�
 
 逻辑 event scope 准入、native adapter 元数据、原生 mount 都不等于完整 runtime 绑定。生产 RuntimeReady、
 导出暂存/HostActive ACK、完整多成员服务连接、真实旧插件迁移与 T24 仍未验收。
+
+
+## M2 命名原生服务与整表提交基础
+
+两端新增 `services` SDK，绑定 wire 服务名、精确 raw bundle/版本/interface 与本地
+原生键。Rust 导出真实 Arc trait，导入生成客户端；TS 使用生成 export/facade 和
+发行 Cordis 的隔离 slot。所有 required 类型/owner/root-scope 检查先于 provider
+登记，native inject 必须与端口一致；Rust 捕获一次 factory 元数据后用于同一
+native graph，TS 保留 inject 的 intercept 配置。
+
+Rust 两个独立消费者在共享 root 的独立 native scopes 使用生成客户端，实际运行
+stateful connect/query、重复对象身份、循环属性与 owner passback。内存链路复用
+既有权威 broker、owner pins 和 decoder，没有手工拼对象根。TS 测试覆盖发行
+Cordis 的同名 facade 注入隔离、原始 apply context、必要子服务失效，以及部分
+provider 登记失败后异步 mount 等待回滚。Rust import provider disposers 纳入
+ManagedActivation 的独立 stop；迟到采用仍保留资源让调用者显式回滚。
+
+`ServiceTable` 必须是完整 provides 表，根为本代真实 own 对象，各服务有独立
+source 和 stage 身份。Rust `offer_table` 在同一事务中准入多 bundle；第二张图的
+伪造 foreign proof 被拒绝后，第一张图没有残留 views/grants 或交付编号缺口。
+owner 整表 commit 在第一个 pin 转换前核对所有原始 manifest；中途 pin 失败
+释放全表 staging/delivery pins 并永久关闭该 handoff。改变成功提交内容的重传
+拒绝。两端共用 12 个合法/非法服务表用例，实际发现并修正了 source 摘要编码差异。
+TS 的 pin/commit manifest 测试明确使用本地 fixture，不能当作 Host broker 或 IPC
+授权证明。
+
+原生闭锁测试证明仅取消 Rust generation token 不足以阻止 `Ctx.effect`；gate
+通过弱引用同步调用公开 native shutdown，业务 Ctx 在 view 绑定后才交给 apply。
+stop handler 的确认 future 尚未 poll 时，原始 Ctx 已拒绝 effect/provider/child。
+必要服务 guards 属于真实成员的 native 子树，避免 runtime root 每代残留 Pending
+插件。失效代终态为 Disposed，尚未进入的缺依赖代仍可 Pending 等待首次装载。
+Loading 原始 Ctx 的 effect 拒绝需要下面记录的本仓库 rutis 公开扩展；不维护 Cordis fork。
+
+行为和调用顺序见[服务绑定](../protocol/services.md)。这仍是 SDK/事务基础证据：
+默认 driver 继续拒绝未安装的对象/事件 transport。prepare route source 的授权
+绑定、多 bundle dispatcher registry、私有连接上的命名服务交付、HostActive
+完整业务图、internal child 对象精确 creator Ctx 以及迁移/恢复/T24 尚待完成。
+M0–M5 和 T01–T24 的最终验收范围保持不变，目标没有标为完成。
+
+
+## M0 补查：Loading 子树的公开 effect 闭锁扩展
+
+真实 Loading 测试发现：generation token 取消和公开 `FiberView.shutdown()` 已经
+关闭 provider/listener/child，但 `Ctx.effect` 在 Loading 保留子树 closing 豁免。
+原生回归 `shutdown_keeps_cleanup_from_loading_apply` 证明普通 shutdown 有意允许
+协作取消后的清理 effect 登记；直接移除豁免会破坏现有行为。原先的仅适配层 Go
+结论在这个交错上证据不足，本轮通过明确扩展点补齐。
+
+本仓库 rutis 新增公开 `FiberView.seal_effects()`，在 native admission 锁内永久
+关闭该 fiber 子树的新 effect factory，包括 Loading、原始 Ctx 及其 isolate。
+托管终态先 seal，再同步 shutdown；普通 shutdown 的协作清理语义保持原样。
+已经进入的 factory 及 apply 返回的 Effect 仍由既有 native drain 清理，没有
+替代 Ctx、第二套插件内核或 Cordis fork。调用者须持有 owning view 直到 shutdown
+确认，托管适配器通过现有 native view 和独立清理任务保证这一点。
+
+`generation_registration` 原生测试在真实 parent 的 Loading child 上验证继承
+闭锁：新 factory 不执行，provider/listener/child 拒绝，root 仍可登记 effect；
+解除 apply 后，既有和返回的两个 disposer 都被清理。原有普通 Loading shutdown
+清理测试及 protocol managed 的托管 Loading 闭锁测试同时保留并通过。
+
+维护责任在本仓库 rutis 原生生命周期模块；测试纳入常规 workspace/CI。
+M0 Go 要求使用包含本扩展的源码构建，并锁定实际 runner image/code 摘要；不能仅
+凭 `rutis` 0.3.0 semver 推断未包含扩展的外部发行包满足此行为。正式版本发布和
+完整协议冻结仍由 M5 完成。Cordis 继续使用锁定发行包 4.0.1 的公开扩展点。

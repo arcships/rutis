@@ -288,7 +288,7 @@ async fn native_dependencies_gate_build_and_replacement_never_reuses_an_activati
     assert!(!first.gate().is_open());
     root.provide(2_u8).unwrap();
     first.view().await.unwrap();
-    assert_eq!(first.view().state().state, FiberState::Pending);
+    assert_eq!(first.view().state().state, FiberState::Disposed);
     assert_eq!(probe.built.load(Ordering::Relaxed), 1);
     assert!(old.effect(|| Effect::Done).is_err());
     first.stop().await.unwrap();

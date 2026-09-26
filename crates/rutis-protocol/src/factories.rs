@@ -8,7 +8,7 @@ use crate::{
     prepare::{digest, PluginEntry, PreparedInstance, RuntimeKind},
     runner_image::{FactoryCatalog, RunnerCatalog},
 };
-use rutis::{Ctx, PluginFactory};
+use rutis::{CordisError, Ctx, Plugin, PluginFactory, TypeKey};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::{
@@ -16,7 +16,31 @@ use std::{
     panic::{catch_unwind, AssertUnwindSafe},
 };
 
-type Mount = dyn Fn(&Ctx, Value, ActivationGate) -> Result<ManagedActivation> + Send + Sync;
+type Mount = dyn Fn(&Ctx, Value, ActivationGate, Option<&[rutis::TypeKey]>) -> Result<ManagedActivation>
+    + Send
+    + Sync;
+
+// Capture author metadata once before mounting. The keys checked against the
+// linked ports are exactly the keys consumed by the native dependency graph.
+struct DeclaredFactory<F> {
+    inner: F,
+    name: String,
+    injects: Vec<TypeKey>,
+}
+impl<C: Send + Sync + 'static, F: PluginFactory<C>> PluginFactory<C> for DeclaredFactory<F> {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn injects(&self) -> &[TypeKey] {
+        &self.injects
+    }
+    fn validate_config(&self, config: &C) -> std::result::Result<(), CordisError> {
+        self.inner.validate_config(config)
+    }
+    fn build(&self, config: &C) -> std::result::Result<Box<dyn Plugin>, CordisError> {
+        self.inner.build(config)
+    }
+}
 
 pub struct StaticFactory {
     name: String,
@@ -51,7 +75,7 @@ impl StaticFactory {
             name,
             catalog,
             config_schema,
-            mount: Box::new(move |ctx, value, gate| {
+            mount: Box::new(move |ctx, value, gate, required| {
                 if !gate.is_open() {
                     return Err(ProtocolError::new(
                         ErrorCode::Unavailable,
@@ -64,6 +88,24 @@ impl StaticFactory {
                 catch_unwind(AssertUnwindSafe(|| {
                     let factory = constructor();
                     factory.validate_config(&config).map_err(native_error)?;
+                    let factory = DeclaredFactory {
+                        name: factory.name().to_owned(),
+                        injects: factory.injects().to_vec(),
+                        inner: factory,
+                    };
+                    if let Some(required) = required {
+                        let actual: std::collections::HashSet<_> =
+                            factory.injects().iter().collect();
+                        let expected: std::collections::HashSet<_> = required.iter().collect();
+                        if actual != expected
+                            || actual.len() != factory.injects().len()
+                            || expected.len() != required.len()
+                        {
+                            return Err(mismatch(
+                                "native factory injects differ from linked service ports",
+                            ));
+                        }
+                    }
                     ManagedActivation::mount_factory_gated(ctx, factory, config, gate)
                         .map_err(native_error)
                 }))
@@ -150,7 +192,24 @@ impl StaticFactories {
             .get(factory)
             .ok_or_else(|| mismatch("factory is not in the linked registry"))?;
         validate_json(&entry.config_schema, &config)?;
-        (entry.mount)(parent, config, gate)
+        (entry.mount)(parent, config, gate, None)
+    }
+    /// Service mounting requires exact native injection keys as well as the
+    /// pure wire catalog. Constructors still run only after host start.
+    pub fn mount_bound(
+        &self,
+        parent: &Ctx,
+        factory: &str,
+        config: Value,
+        gate: ActivationGate,
+        required: &[rutis::TypeKey],
+    ) -> Result<ManagedActivation> {
+        let entry = self
+            .entries
+            .get(factory)
+            .ok_or_else(|| mismatch("factory is not linked"))?;
+        validate_json(&entry.config_schema, &config)?;
+        (entry.mount)(parent, config, gate, Some(required))
     }
 }
 

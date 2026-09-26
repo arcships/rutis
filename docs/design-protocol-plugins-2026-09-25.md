@@ -1,7 +1,7 @@
 # 协议插件设计：基于 rutis / Cordis 的跨语言对象与插件体系
 
 > 2026-09-27 重设计；替代本文件此前以 schema 方法调用为中心的方案。
-> 状态：实施中，M0 原生适配验证通过；其余阶段尚未完成，详见[实施与验收记录](protocol-plugin-implementation.md)。API、消息名与描述符仍待 §16 的冻结门槛。
+> 状态：实施中，M0 原生适配验证通过（含本仓库 rutis 托管 effect 闭锁扩展）；其余阶段尚未完成，详见[实施与验收记录](protocol-plugin-implementation.md)。API、消息名与描述符仍待 §16 的冻结门槛。
 > 源码基准：rutis main `446e58d`；需求 [#46](https://github.com/arcships/rutis/issues/46)、[#47](https://github.com/arcships/rutis/issues/47)、[#48](https://github.com/arcships/rutis/issues/48)。
 > [#41](https://github.com/arcships/rutis/issues/41) 已关闭，基准已包含代绑定 Ctx；接入仍需回归。
 > 第一优先目标：Rust 插件基于 rutis，TS 插件基于 Cordis，双向提供和消费对象。

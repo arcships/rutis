@@ -1,0 +1,990 @@
+[
+  {
+    "name": "native-cycle",
+    "contracts": {
+      "session": {
+        "interface": "Session",
+        "version": "1.0.0",
+        "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1"
+      }
+    },
+    "table": {
+      "activation": {
+        "runtime": "provider",
+        "epoch": "1",
+        "activation": "1"
+      },
+      "services": {
+        "session": {
+          "stage": "1",
+          "graph": {
+            "root": {
+              "kind": "ref",
+              "index": 0
+            },
+            "references": [
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "1"
+                  },
+                  "view": {
+                    "interface": "Session",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "agent": {
+                    "kind": "ref",
+                    "index": 1
+                  }
+                }
+              },
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "2"
+                  },
+                  "view": {
+                    "interface": "Agent",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "session": {
+                    "kind": "ref",
+                    "index": 0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "error": null
+  },
+  {
+    "name": "missing-root",
+    "contracts": {
+      "session": {
+        "interface": "Session",
+        "version": "1.0.0",
+        "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1"
+      }
+    },
+    "table": {
+      "activation": {
+        "runtime": "provider",
+        "epoch": "1",
+        "activation": "1"
+      },
+      "services": {}
+    },
+    "error": "InterfaceMismatch"
+  },
+  {
+    "name": "unknown-root",
+    "contracts": {
+      "session": {
+        "interface": "Session",
+        "version": "1.0.0",
+        "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1"
+      }
+    },
+    "table": {
+      "activation": {
+        "runtime": "provider",
+        "epoch": "1",
+        "activation": "1"
+      },
+      "services": {
+        "session": {
+          "stage": "1",
+          "graph": {
+            "root": {
+              "kind": "ref",
+              "index": 0
+            },
+            "references": [
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "1"
+                  },
+                  "view": {
+                    "interface": "Session",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "agent": {
+                    "kind": "ref",
+                    "index": 1
+                  }
+                }
+              },
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "2"
+                  },
+                  "view": {
+                    "interface": "Agent",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "session": {
+                    "kind": "ref",
+                    "index": 0
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "extra": {
+          "stage": "1",
+          "graph": {
+            "root": {
+              "kind": "ref",
+              "index": 0
+            },
+            "references": [
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "1"
+                  },
+                  "view": {
+                    "interface": "Session",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "agent": {
+                    "kind": "ref",
+                    "index": 1
+                  }
+                }
+              },
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "2"
+                  },
+                  "view": {
+                    "interface": "Agent",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "session": {
+                    "kind": "ref",
+                    "index": 0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "error": "InterfaceMismatch"
+  },
+  {
+    "name": "invalid-stage",
+    "contracts": {
+      "session": {
+        "interface": "Session",
+        "version": "1.0.0",
+        "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1"
+      }
+    },
+    "table": {
+      "activation": {
+        "runtime": "provider",
+        "epoch": "1",
+        "activation": "1"
+      },
+      "services": {
+        "session": {
+          "stage": "0",
+          "graph": {
+            "root": {
+              "kind": "ref",
+              "index": 0
+            },
+            "references": [
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "1"
+                  },
+                  "view": {
+                    "interface": "Session",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "agent": {
+                    "kind": "ref",
+                    "index": 1
+                  }
+                }
+              },
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "2"
+                  },
+                  "view": {
+                    "interface": "Agent",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "session": {
+                    "kind": "ref",
+                    "index": 0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "unknown-field",
+    "contracts": {
+      "session": {
+        "interface": "Session",
+        "version": "1.0.0",
+        "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1"
+      }
+    },
+    "table": {
+      "activation": {
+        "runtime": "provider",
+        "epoch": "1",
+        "activation": "1"
+      },
+      "services": {
+        "session": {
+          "stage": "1",
+          "graph": {
+            "root": {
+              "kind": "ref",
+              "index": 0
+            },
+            "references": [
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "1"
+                  },
+                  "view": {
+                    "interface": "Session",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "agent": {
+                    "kind": "ref",
+                    "index": 1
+                  }
+                }
+              },
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "2"
+                  },
+                  "view": {
+                    "interface": "Agent",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "session": {
+                    "kind": "ref",
+                    "index": 0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "extra": true
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "invalid-runtime",
+    "contracts": {
+      "session": {
+        "interface": "Session",
+        "version": "1.0.0",
+        "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1"
+      }
+    },
+    "table": {
+      "activation": {
+        "runtime": "constructor",
+        "epoch": "1",
+        "activation": "1"
+      },
+      "services": {
+        "session": {
+          "stage": "1",
+          "graph": {
+            "root": {
+              "kind": "ref",
+              "index": 0
+            },
+            "references": [
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "1"
+                  },
+                  "view": {
+                    "interface": "Session",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "agent": {
+                    "kind": "ref",
+                    "index": 1
+                  }
+                }
+              },
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "2"
+                  },
+                  "view": {
+                    "interface": "Agent",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "session": {
+                    "kind": "ref",
+                    "index": 0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "wrong-owner",
+    "contracts": {
+      "session": {
+        "interface": "Session",
+        "version": "1.0.0",
+        "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1"
+      }
+    },
+    "table": {
+      "activation": {
+        "runtime": "provider",
+        "epoch": "1",
+        "activation": "1"
+      },
+      "services": {
+        "session": {
+          "stage": "1",
+          "graph": {
+            "root": {
+              "kind": "ref",
+              "index": 0
+            },
+            "references": [
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "2"
+                    },
+                    "object": "1"
+                  },
+                  "view": {
+                    "interface": "Session",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "agent": {
+                    "kind": "ref",
+                    "index": 1
+                  }
+                }
+              },
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "2"
+                  },
+                  "view": {
+                    "interface": "Agent",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "session": {
+                    "kind": "ref",
+                    "index": 0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "error": "CapabilityDenied"
+  },
+  {
+    "name": "wrong-source",
+    "contracts": {
+      "session": {
+        "interface": "Session",
+        "version": "1.0.0",
+        "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1"
+      }
+    },
+    "table": {
+      "activation": {
+        "runtime": "provider",
+        "epoch": "1",
+        "activation": "1"
+      },
+      "services": {
+        "session": {
+          "stage": "1",
+          "graph": {
+            "root": {
+              "kind": "ref",
+              "index": 0
+            },
+            "references": [
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "1"
+                  },
+                  "view": {
+                    "interface": "Session",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "different"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "agent": {
+                    "kind": "ref",
+                    "index": 1
+                  }
+                }
+              },
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "2"
+                  },
+                  "view": {
+                    "interface": "Agent",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "session": {
+                    "kind": "ref",
+                    "index": 0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "error": "CapabilityDenied"
+  },
+  {
+    "name": "wrong-hash",
+    "contracts": {
+      "session": {
+        "interface": "Session",
+        "version": "1.0.0",
+        "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1"
+      }
+    },
+    "table": {
+      "activation": {
+        "runtime": "provider",
+        "epoch": "1",
+        "activation": "1"
+      },
+      "services": {
+        "session": {
+          "stage": "1",
+          "graph": {
+            "root": {
+              "kind": "ref",
+              "index": 0
+            },
+            "references": [
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "1"
+                  },
+                  "view": {
+                    "interface": "Session",
+                    "bundle_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "agent": {
+                    "kind": "ref",
+                    "index": 1
+                  }
+                }
+              },
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "2"
+                  },
+                  "view": {
+                    "interface": "Agent",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "session": {
+                    "kind": "ref",
+                    "index": 0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "error": "InterfaceMismatch"
+  },
+  {
+    "name": "wrong-property",
+    "contracts": {
+      "session": {
+        "interface": "Session",
+        "version": "1.0.0",
+        "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1"
+      }
+    },
+    "table": {
+      "activation": {
+        "runtime": "provider",
+        "epoch": "1",
+        "activation": "1"
+      },
+      "services": {
+        "session": {
+          "stage": "1",
+          "graph": {
+            "root": {
+              "kind": "ref",
+              "index": 0
+            },
+            "references": [
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "1"
+                  },
+                  "view": {
+                    "interface": "Session",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "agent": {
+                    "kind": "ref",
+                    "index": 1
+                  },
+                  "undeclared": {
+                    "kind": "value",
+                    "value": 0
+                  }
+                }
+              },
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "2"
+                  },
+                  "view": {
+                    "interface": "Agent",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "session": {
+                    "kind": "ref",
+                    "index": 0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "invalid-cycle-index",
+    "contracts": {
+      "session": {
+        "interface": "Session",
+        "version": "1.0.0",
+        "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1"
+      }
+    },
+    "table": {
+      "activation": {
+        "runtime": "provider",
+        "epoch": "1",
+        "activation": "1"
+      },
+      "services": {
+        "session": {
+          "stage": "1",
+          "graph": {
+            "root": {
+              "kind": "ref",
+              "index": 0
+            },
+            "references": [
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "1"
+                  },
+                  "view": {
+                    "interface": "Session",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "agent": {
+                    "kind": "ref",
+                    "index": 999
+                  }
+                }
+              },
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "2"
+                  },
+                  "view": {
+                    "interface": "Agent",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "session": {
+                    "kind": "ref",
+                    "index": 0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "error": "InvalidParams"
+  },
+  {
+    "name": "foreign-native-root",
+    "contracts": {
+      "session": {
+        "interface": "Session",
+        "version": "1.0.0",
+        "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1"
+      }
+    },
+    "table": {
+      "activation": {
+        "runtime": "provider",
+        "epoch": "1",
+        "activation": "1"
+      },
+      "services": {
+        "session": {
+          "stage": "1",
+          "graph": {
+            "root": {
+              "kind": "ref",
+              "index": 0
+            },
+            "references": [
+              {
+                "source": {
+                  "kind": "foreign",
+                  "delivery": {
+                    "id": "1",
+                    "token": "proof",
+                    "object": {
+                      "owner": {
+                        "runtime": "provider",
+                        "epoch": "1",
+                        "activation": "1"
+                      },
+                      "object": "1"
+                    },
+                    "view": {
+                      "interface": "Session",
+                      "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                      "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                    },
+                    "recipient": {
+                      "activation": {
+                        "runtime": "provider",
+                        "epoch": "1",
+                        "activation": "1"
+                      },
+                      "scope": "1"
+                    }
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "agent": {
+                    "kind": "ref",
+                    "index": 1
+                  }
+                }
+              },
+              {
+                "source": {
+                  "kind": "own",
+                  "object": {
+                    "owner": {
+                      "runtime": "provider",
+                      "epoch": "1",
+                      "activation": "1"
+                    },
+                    "object": "2"
+                  },
+                  "view": {
+                    "interface": "Agent",
+                    "bundle_sha256": "94f3954d846cff163d5b07e43b02dbd5f0892bda367effc4b0ddd2e4a21c5aa1",
+                    "source": "b8f484ac49b683da4642e5b0bd3700fd356b521fcd9d8c8f73dff45f3fc92bb7"
+                  }
+                },
+                "ownership": "scope",
+                "properties": {
+                  "session": {
+                    "kind": "ref",
+                    "index": 0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "error": "CapabilityDenied"
+  }
+]

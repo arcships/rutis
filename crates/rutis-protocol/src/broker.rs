@@ -61,6 +61,35 @@ fn error(code: ErrorCode, message: &str) -> ProtocolError {
 }
 
 impl Broker {
+    /// One named service table can contain several exact bundles. Admission is
+    /// atomic across all its roots; a rejected last root leaves no earlier
+    /// grants, object views or recipient sequence allocations behind.
+    pub fn offer_graph_batch(
+        &mut self,
+        sender: &Activation,
+        offers: &[GraphOffer<'_>],
+        scopes: &crate::graph::GraphScopes,
+    ) -> Result<Vec<crate::graph::WireGraph>> {
+        if !self.activations.contains(sender) {
+            return Err(error(ErrorCode::ScopeClosed, "sender activation closed"));
+        }
+        self.require_scope(&scopes.scope)?;
+        self.require_scope(&scopes.borrow)?;
+        let mut transaction = self.clone();
+        let mut graphs = Vec::new();
+        for offer in offers {
+            graphs.push(transaction.offer_graph(
+                sender,
+                offer.bundle,
+                offer.expr,
+                offer.draft,
+                scopes,
+                offer.source,
+            )?);
+        }
+        *self = transaction;
+        Ok(graphs)
+    }
     /// Validate an entire draft and its original foreign proofs before any
     /// grant is issued. The prepared host supplies bundle, type and source.
     /// A transaction contains only broker metadata, never native objects.
@@ -714,4 +743,11 @@ impl Broker {
             .and_then(|r| r.grants.get(&id.0))
             .map(|g| g.state)
     }
+}
+
+pub struct GraphOffer<'a> {
+    pub bundle: &'a crate::contract::AdmittedBundle,
+    pub expr: &'a crate::contract::TypeExpr,
+    pub draft: &'a crate::draft::DraftGraph,
+    pub source: &'a str,
 }

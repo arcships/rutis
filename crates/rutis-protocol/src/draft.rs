@@ -119,6 +119,24 @@ impl GraphExporter {
                 )
             })
     }
+    /// Combine named roots encoded by this same native object table and exact
+    /// bundle. This does not add an authorization view or widen any selector;
+    /// the broker must independently admit every delivery before execution.
+    pub fn merge_registered(&self, other: &Self) -> Result<()> {
+        if !self.exports.same_table(&other.exports) || self.bundle.sha256() != other.bundle.sha256()
+        {
+            return Err(fail(
+                ErrorCode::CapabilityDenied,
+                "cannot merge another native export table or bundle",
+            ));
+        }
+        if std::ptr::eq(self, other) {
+            return Ok(());
+        }
+        let registered = other.dispatchers.lock().unwrap().clone();
+        self.dispatchers.lock().unwrap().extend(registered);
+        Ok(())
+    }
     pub fn encode(&self, expr: &TypeExpr, value: Outbound) -> Result<StagedGraph> {
         self.exports.require_open()?;
         let mut encoder = Encoder {

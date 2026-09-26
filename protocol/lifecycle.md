@@ -68,6 +68,12 @@ start 在流的 admission 顺序中保留实例/代，真实构造和装载离�
 原生 gate 失效会关闭协议入口并推进 stop，activate 不能重新打开旧代。断连的 close
 hook 同步撤销全部成员，再由独立任务清理；frame 锁不包住 native shutdown。
 
+Rust gate 关闭同步调用公开 native shutdown，业务 Ctx 仅在 native view 绑定后
+交给 apply；仅取消 generation token 不足以阻止 `Ctx.effect`。stop handler 在
+返回尚未 poll 的确认 future 前已经关闭 native 登记。import providers 纳入相同
+stop 任务，全部 removal 先启动再等待，迟到采用须显式回滚。整表服务 SDK 的
+装载/暂存顺序见[服务绑定](services.md)，当前 opaque 控制表仍未使用它。
+
 Cordis 4.0.1 的 native unload 会通过 logger 报告 disposer 错误，却可能成功返回
 dispose 等待。TS adapter 使用公开 logger exporter 保留当前成员及其子树在关闭
 阶段的 error 诊断，使 stop 失败并保持 Closing，禁止替换。作者在关闭阶段主动

@@ -128,6 +128,9 @@ impl Exports {
     pub fn owner(&self) -> &Activation {
         &self.owner
     }
+    pub(crate) fn same_table(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
     pub(crate) fn gate(&self) -> Option<ActivationGate> {
         self.gate.clone()
     }

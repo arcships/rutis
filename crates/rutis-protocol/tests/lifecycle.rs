@@ -94,6 +94,40 @@ fn id(n: u64) -> Activation {
         activation: Sequence(n),
     }
 }
+
+#[tokio::test]
+async fn stop_handler_closes_native_context_before_its_confirmation_future_is_polled() {
+    let root = Ctx::root().unwrap();
+    let observed = Arc::new(Observed::default());
+    let runner = Runner::new(NativeProbeDriver {
+        root: root.clone(),
+        observed: observed.clone(),
+        slow_cleanup: false,
+        bad_services: false,
+    });
+    runner
+        .handle("runtime/hello", serde_json::to_value(plan()).unwrap())
+        .await
+        .unwrap();
+    runner
+        .handle(
+            "plugin/start",
+            json!({"instance":"fast","activation":id(1)}),
+        )
+        .await
+        .unwrap();
+    let original = observed.seen.lock().unwrap()[0].1.clone();
+    let stopped = runner.handle("plugin/stop", json!({"activation":id(1)}));
+    assert!(original.cancellation_token().is_cancelled());
+    assert!(original.effect(|| Effect::Done).is_err());
+    assert!(original.provide(1_u64).is_err());
+    drop(stopped);
+    runner
+        .handle("plugin/stop", json!({"activation":id(1)}))
+        .await
+        .unwrap();
+    root.shutdown().await.unwrap();
+}
 #[derive(Default)]
 struct Observed {
     mounts: Mutex<Vec<(String, Activation)>>,

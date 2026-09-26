@@ -597,10 +597,10 @@ impl Runner {
         };
         let runner = self.clone();
         let activation = activation.clone();
+        if let Some(native) = &native {
+            drop(native.stop());
+        }
         self.handle.spawn(async move {
-            if let Some(native) = native {
-                drop(native.stop());
-            }
             let _ = wait(started).await;
             let native = runner.state.lock().unwrap().slots[&activation]
                 .native

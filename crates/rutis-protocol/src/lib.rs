@@ -17,5 +17,6 @@ pub mod memory;
 pub mod prepare;
 pub mod runner_image;
 pub mod sdk;
+pub mod services;
 #[cfg(target_os = "linux")]
 pub mod snapshot;

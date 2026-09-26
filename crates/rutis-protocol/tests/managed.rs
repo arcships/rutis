@@ -50,6 +50,88 @@ fn probe(injects: Vec<TypeKey>) -> Probe {
 }
 
 #[tokio::test]
+async fn closing_admission_synchronously_cancels_the_original_native_generation() {
+    let root = Ctx::root().unwrap();
+    let member = ManagedActivation::mount(&root, probe(vec![])).unwrap();
+    member.view().await.unwrap();
+    let original = member.native_context().unwrap();
+    member.gate().close();
+    // No await or scheduler yield between close and the native admission checks.
+    assert!(original.cancellation_token().is_cancelled());
+    assert!(original.effect(|| Effect::Done).is_err());
+    assert!(original.provide(1_u64).is_err());
+    let child = original.plugin(probe(vec![]));
+    assert!(child.await.is_err());
+    member.stop().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn closing_loading_admission_rejects_new_effects_before_apply_returns() {
+    let root = Ctx::root().unwrap();
+    let mut plugin = probe(vec![]);
+    let finish = Arc::new(Notify::new());
+    plugin.loading = Some(finish.clone());
+    let entered = plugin.entered.clone();
+    let member = ManagedActivation::mount(&root, plugin).unwrap();
+    entered.notified().await;
+    let original = member.native_context().unwrap();
+    drop(member.stop());
+    let rejected = original.effect(|| Effect::Done).is_err();
+    finish.notify_one();
+    member.stop().await.unwrap();
+    root.shutdown().await.unwrap();
+    assert!(
+        rejected,
+        "Loading contexts must reject new effect factories at the stop call site"
+    );
+}
+
+#[tokio::test]
+async fn owned_import_providers_join_cleanup_after_a_stop_waiter_is_dropped() {
+    let root = Ctx::root().unwrap();
+    let member = ManagedActivation::mount(&root, probe(vec![])).unwrap();
+    member.view().await.unwrap();
+    let entered = Arc::new(Notify::new());
+    let finish = Arc::new(Notify::new());
+    let completed = Arc::new(Mutex::new(false));
+    let provider = root.provide(1_u64).unwrap();
+    let e = entered.clone();
+    let f = finish.clone();
+    let c = completed.clone();
+    let slow = root
+        .effect(move || {
+            Effect::AsyncDisposer(Box::new(move || {
+                Box::pin(async move {
+                    e.notify_one();
+                    f.notified().await;
+                    *c.lock().unwrap() = true;
+                    Err(CordisError::InactiveEffect)
+                })
+            }))
+        })
+        .unwrap();
+    assert!(member.own_disposers(vec![provider, slow]).is_ok());
+    drop(member.stop());
+    entered.notified().await;
+    assert!(root.get::<u64>().is_none());
+    assert!(!*completed.lock().unwrap());
+    let late = root.provide(2_u64).unwrap();
+    let rejected = member.own_disposers(vec![late]).unwrap_err();
+    // Ownership remains with the caller, which must explicitly join rollback.
+    for disposer in rejected {
+        disposer.dispose().await.unwrap();
+    }
+    let stop = member.stop();
+    finish.notify_one();
+    assert!(stop.await.is_err());
+    assert!(*completed.lock().unwrap());
+    assert!(member.stop().await.is_err());
+    assert!(root.get::<u64>().is_none());
+    assert!(root.shutdown().await.is_err());
+}
+
+#[tokio::test]
 async fn native_context_revokes_export_admission_and_joins_execution_and_disposer() {
     let root = Ctx::root().unwrap();
     let dependency = root.provide(1_u8).unwrap();
@@ -85,7 +167,7 @@ async fn native_context_revokes_export_admission_and_joins_execution_and_dispose
     };
     exports.pin(&id, delivery).unwrap();
     exports.pin(&id, execution.clone()).unwrap();
-    let stopped = tokio::spawn(async move { dependency.dispose().await });
+    let removed = tokio::spawn(async move { dependency.dispose().await });
     ctx.cancelled().await;
     assert!(exports.register(&object).is_err());
     assert!(exports
@@ -95,12 +177,14 @@ async fn native_context_revokes_export_admission_and_joins_execution_and_dispose
         &object,
         &exports.execution_object::<String>(&execution).unwrap()
     ));
+    let stopped = tokio::spawn(managed.stop());
     assert!(!stopped.is_finished());
     exports.release(&execution);
     started.await.unwrap();
     assert!(!stopped.is_finished());
     finish.send(()).unwrap();
     stopped.await.unwrap().unwrap();
+    removed.await.unwrap().unwrap();
     managed.stop().await.unwrap();
     root.shutdown().await.unwrap();
 }
@@ -120,7 +204,7 @@ async fn dependency_loss_never_reapplies_the_old_activation() {
     assert!(!activation.gate().is_open());
     let replacement = root.provide(2_u8).unwrap();
     (activation.view()).await.unwrap();
-    assert_eq!(activation.view().state().state, FiberState::Pending);
+    assert_eq!(activation.view().state().state, FiberState::Disposed);
     assert_eq!(seen.lock().unwrap().len(), 1);
     assert_eq!(*cleanups.lock().unwrap(), 1);
     assert!(old.provide(99_u64).is_err());
@@ -258,7 +342,7 @@ async fn necessary_child_export_and_root_share_revocation() {
     assert!(!activation.gate().is_open());
     root.refresh();
     (activation.view()).await.unwrap();
-    assert_eq!(activation.view().state().state, FiberState::Pending);
+    assert_eq!(activation.view().state().state, FiberState::Disposed);
     activation.stop().await.unwrap();
     root.shutdown().await.unwrap();
 }
@@ -374,7 +458,10 @@ async fn native_factory_config_requires_a_new_host_activation() {
     assert!(!invalid.gate().is_open());
     let _ = invalid.view().restart().await;
     assert!(!invalid.gate().is_open());
-    invalid.stop().await.unwrap();
+    assert!(matches!(
+        &*invalid.stop().await.unwrap_err(),
+        CordisError::Validation { .. }
+    ));
     root.shutdown().await.unwrap();
 }
 

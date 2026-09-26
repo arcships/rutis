@@ -4,8 +4,11 @@ use rutis::{
     BoxFuture, CordisError, Ctx, Disposer, Effect, FiberView, Plugin, PluginFactory, TypeKey,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use tokio::{runtime::Handle, sync::watch};
+use std::sync::{Arc, Mutex, Weak};
+use tokio::{
+    runtime::Handle,
+    sync::{watch, Notify},
+};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
@@ -13,11 +16,12 @@ struct GateState {
     entered: bool,
     closed: bool,
     tokens: Vec<CancellationToken>,
+    native: Vec<Weak<FiberView>>,
 }
 
 /// Admission for an activation and its necessary exports. Never reopened.
 #[derive(Clone, Default)]
-pub struct ActivationGate(Arc<Mutex<GateState>>, CancellationToken);
+pub struct ActivationGate(Arc<Mutex<GateState>>, CancellationToken, Arc<Notify>);
 
 impl ActivationGate {
     pub(crate) fn same_activation(&self, other: &Self) -> bool {
@@ -28,21 +32,60 @@ impl ActivationGate {
         if state.tokens.iter().any(CancellationToken::is_cancelled) {
             state.closed = true;
         }
-        if state.closed {
-            self.1.cancel();
+        let closed = state.closed;
+        drop(state);
+        if closed {
+            self.close();
         }
-        !state.closed
+        !closed
     }
 
     pub fn close(&self) {
-        self.0.lock().unwrap().closed = true;
+        let (tokens, native) = {
+            let mut state = self.0.lock().unwrap();
+            state.closed = true;
+            (state.tokens.clone(), state.native.clone())
+        };
+        // Signal existing execution before closing native registration below.
+        for token in tokens {
+            token.cancel();
+        }
         self.1.cancel();
+        // Cancellation alone is not native registration closure. The public
+        // shutdown operation synchronously closes effects and child mounts;
+        // its independent native task remains owned by the kernel.
+        for view in native.into_iter().filter_map(|view| view.upgrade()) {
+            view.seal_effects();
+            drop(view.shutdown());
+        }
+    }
+
+    fn bind_native(&self, view: &Arc<FiberView>) {
+        let closed = {
+            let mut state = self.0.lock().unwrap();
+            state.native.push(Arc::downgrade(view));
+            state.closed
+        };
+        self.2.notify_waiters();
+        if closed {
+            view.seal_effects();
+            drop(view.shutdown());
+        }
     }
 
     /// Necessary services exported by an internal child share the root's
     /// activation, but retain the child's native cancellation boundary.
     pub fn track_export(&self, ctx: &Ctx) -> Result<(), CordisError> {
-        self.0.lock().unwrap().tokens.push(ctx.cancellation_token());
+        let token = ctx.cancellation_token();
+        let closed = {
+            let mut state = self.0.lock().unwrap();
+            state.tokens.push(token.clone());
+            state.closed || token.is_cancelled()
+        };
+        if closed {
+            self.close();
+            return Err(CordisError::InactiveEffect);
+        }
         self.observe(ctx)
     }
 
@@ -83,7 +126,29 @@ impl ActivationGate {
         Ok(())
     }
 
-    fn enter(&self, ctx: &Ctx) -> Result<(), CordisError> {
+    async fn enter(&self, ctx: &Ctx) -> Result<(), CordisError> {
+        // Native tasks may run on another worker before ctx.plugin() returns
+        // its view. Do not expose a business context until close() can also
+        // close its native registration synchronously.
+        loop {
+            let bound = self.2.notified();
+            tokio::pin!(bound);
+            bound.as_mut().enable();
+            let ready = {
+                let state = self.0.lock().unwrap();
+                if state.closed {
+                    return Err(CordisError::InactiveEffect);
+                }
+                state.native.iter().any(|view| view.upgrade().is_some())
+            };
+            if ready {
+                break;
+            }
+            tokio::select! {
+                _ = bound => {}
+                _ = self.revoked() => return Err(CordisError::InactiveEffect),
+            }
+        }
         let mut state = self.0.lock().unwrap();
         if state.closed || state.entered {
             return Err(CordisError::InactiveEffect);
@@ -129,6 +194,7 @@ struct ManagedPlugin {
     plugin: Arc<dyn Plugin>,
     gate: ActivationGate,
     injects: Vec<TypeKey>,
+    context: watch::Sender<Option<Ctx>>,
 }
 
 impl Plugin for ManagedPlugin {
@@ -146,7 +212,8 @@ impl Plugin for ManagedPlugin {
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            self.gate.enter(ctx)?;
+            self.gate.enter(ctx).await?;
+            self.context.send_replace(Some(ctx.clone()));
             self.plugin.apply(ctx).await
         })
     }
@@ -157,6 +224,7 @@ struct ManagedFactory<F> {
     name: String,
     gate: ActivationGate,
     injects: Vec<TypeKey>,
+    context: watch::Sender<Option<Ctx>>,
 }
 impl<F: PluginFactory<C>, C: Send + Sync + 'static> PluginFactory<C> for ManagedFactory<F> {
     fn name(&self) -> &str {
@@ -178,6 +246,7 @@ impl<F: PluginFactory<C>, C: Send + Sync + 'static> PluginFactory<C> for Managed
             plugin: Arc::from(plugin),
             gate: self.gate.clone(),
             injects: self.injects.clone(),
+            context: self.context.clone(),
         }))
     }
 }
@@ -187,9 +256,10 @@ impl<F: PluginFactory<C>, C: Send + Sync + 'static> PluginFactory<C> for Managed
 type StopResult = Result<(), Arc<CordisError>>;
 
 pub struct ManagedActivation {
-    view: FiberView,
+    view: Arc<FiberView>,
     gate: ActivationGate,
-    permit: Mutex<Option<Disposer>>,
+    resources: Mutex<Vec<Disposer>>,
+    context: watch::Receiver<Option<Ctx>>,
     handle: Handle,
     stop: Mutex<Option<watch::Receiver<Option<StopResult>>>>,
 }
@@ -204,12 +274,13 @@ impl ManagedActivation {
         gate: ActivationGate,
     ) -> Result<Self, CordisError> {
         let mut injects = plugin.injects().to_vec();
-        Self::mount_native(parent, gate, move |isolated, gate, key| {
+        Self::mount_native(parent, gate, move |isolated, gate, key, context| {
             injects.push(key);
             isolated.plugin(ManagedPlugin {
                 plugin: Arc::new(plugin),
                 gate,
                 injects,
+                context,
             })
         })
     }
@@ -231,7 +302,7 @@ impl ManagedActivation {
         // cannot leave an orphaned permit or a partially mounted fiber.
         let name = factory.name().to_owned();
         let mut injects = factory.injects().to_vec();
-        Self::mount_native(parent, gate, move |isolated, gate, key| {
+        Self::mount_native(parent, gate, move |isolated, gate, key, context| {
             injects.push(key);
             isolated.plugin_with(
                 ManagedFactory {
@@ -239,6 +310,7 @@ impl ManagedActivation {
                     name,
                     gate,
                     injects,
+                    context,
                 },
                 config,
             )
@@ -248,7 +320,7 @@ impl ManagedActivation {
     fn mount_native(
         parent: &Ctx,
         gate: ActivationGate,
-        mount: impl FnOnce(&Ctx, ActivationGate, TypeKey) -> FiberView,
+        mount: impl FnOnce(&Ctx, ActivationGate, TypeKey, watch::Sender<Option<Ctx>>) -> FiberView,
     ) -> Result<Self, CordisError> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT
@@ -259,11 +331,14 @@ impl ManagedActivation {
         let checked = gate.clone();
         let permit = isolated
             .provide_as_with_check(key.clone(), Arc::new(Permit), move || checked.is_open())?;
-        let view = mount(&isolated, gate.clone(), key);
+        let (context_tx, context) = watch::channel(None);
+        let view = Arc::new(mount(&isolated, gate.clone(), key, context_tx));
+        gate.bind_native(&view);
         Ok(Self {
             view,
             gate,
-            permit: Mutex::new(Some(permit)),
+            resources: Mutex::new(vec![permit]),
+            context,
             handle: parent.handle().clone(),
             stop: Mutex::new(None),
         })
@@ -275,6 +350,24 @@ impl ManagedActivation {
     pub fn gate(&self) -> ActivationGate {
         self.gate.clone()
     }
+    /// The original generation-bound business context, captured before apply.
+    /// Existing execution may retain it after closing; admission must still
+    /// check the gate. This does not manufacture an SDK replacement context.
+    pub fn native_context(&self) -> Option<Ctx> {
+        self.context.borrow().clone()
+    }
+    /// Import providers are isolated on the runtime parent before native mount.
+    /// Their ownership joins this activation's confirmation, including when a
+    /// caller abandons its stop waiter. Late adoption returns ownership so the
+    /// mounting caller must join rollback before reporting its failure.
+    pub fn own_disposers(&self, disposers: Vec<Disposer>) -> Result<(), Vec<Disposer>> {
+        let stop = self.stop.lock().unwrap();
+        if stop.is_none() {
+            self.resources.lock().unwrap().extend(disposers);
+            return Ok(());
+        }
+        Err(disposers)
+    }
 
     /// Close admission at the call site. Native shutdown includes children and
     /// waits for cleanup even when the caller drops this particular waiter.
@@ -283,21 +376,26 @@ impl ManagedActivation {
         let mut stop = self.stop.lock().unwrap();
         if stop.is_none() {
             let cleanup = self.view.shutdown();
-            let released = self.permit.lock().unwrap().take().map(Disposer::dispose);
+            let released: Vec<_> = std::mem::take(&mut *self.resources.lock().unwrap())
+                .into_iter()
+                .map(Disposer::dispose)
+                .collect();
             let (tx, rx) = watch::channel(None);
             *stop = Some(rx);
             self.handle.spawn(async move {
-                let result = cleanup.await;
-                let released = match released {
-                    Some(released) => released.await,
-                    None => Ok(()),
-                };
-                let result = match (result, released) {
-                    (Err(first), Err(second)) => Err(Arc::new(CordisError::Aggregate {
-                        errors: vec![first, second],
-                    })),
-                    (Err(error), _) | (_, Err(error)) => Err(error),
-                    _ => Ok(()),
+                let mut errors = Vec::new();
+                if let Err(error) = cleanup.await {
+                    errors.push(error);
+                }
+                for released in released {
+                    if let Err(error) = released.await {
+                        errors.push(error);
+                    }
+                }
+                let result = match errors.len() {
+                    0 => Ok(()),
+                    1 => Err(errors.pop().unwrap()),
+                    _ => Err(Arc::new(CordisError::Aggregate { errors })),
                 };
                 tx.send_replace(Some(result));
             });

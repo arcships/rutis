@@ -6,6 +6,15 @@ export const NativeState = { PENDING: 0, LOADING: 1, ACTIVE: 2, FAILED: 3, DISPO
 
 export type RevocationReason = 'stop' | 'native-invalidated' | 'necessary-export-lost'
 
+/** A synchronous native registration failure still owns rollback work. SDK
+ * async mounters join this barrier before returning an error to the Host. */
+export class NativeMountError extends Error {
+  constructor(cause: unknown, readonly cleanup: Promise<void>) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause })
+    void cleanup.catch(() => {})
+  }
+}
+
 /** Reserved before module loading. Stop closes the same admission object that
  * the eventual native mount uses, so a late import cannot start old code. */
 export class ActivationGate {
@@ -41,6 +50,7 @@ export class ManagedActivation<C = unknown> {
   private necessary = new Set<string>()
   private cleanupErrors: unknown[] = []
   private readonly scoped: Context
+  private context?: Context
 
   constructor(
     parent: Context,
@@ -50,80 +60,99 @@ export class ManagedActivation<C = unknown> {
     private readonly revoked: (reason: RevocationReason) => void = () => {},
     exports: string[] = [],
     readonly gate = new ActivationGate(),
+    checks: Record<string, () => boolean> = {},
   ) {
     if (!gate.isOpen) throw new Error('activation was stopped before native mount')
     let scoped = parent
     for (const name of exports) scoped = scoped.isolate(name)
-    // Dependencies are installed into activation-specific scopes, never the
-    // runtime's global service slots. The parent owns their native effects.
-    for (const [name, value] of Object.entries(dependencies)) {
-      scoped = scoped.isolate(name)
-      this.removeHooks.push(scoped.provide(name, value))
-    }
+    for (const name of Object.keys(dependencies)) scoped = scoped.isolate(name)
     this.scoped = scoped
-    // Cordis joins native unload work but reports disposer failures through its
-    // public logger exporter rather than rejecting Fiber.dispose(). During
-    // closing, retain descendant error diagnostics as an unconfirmed cleanup.
-    // An author error log during closing is conservatively unconfirmed too.
-    this.removeHooks.push(parent.logger.exporter({
-      levels: { default: 0 },
-      export: message => {
-        if (!this.closed || message.type !== 'error' || !this.fiber) return
-        let fiber = message.fiber?.deref()
-        while (fiber) {
-          if (fiber === this.fiber) { this.cleanupErrors.push(...message.args); return }
-          const outer: Fiber = fiber.parent.fiber
-          if (outer === fiber) return
-          fiber = outer
-        }
-      },
-    }))
-    const apply = (ctx: Context, value: C) => {
-      if (this.closed || this.entered) throw new Error('activation cannot be reused')
-      this.entered = true
-      return plugin.apply(ctx, value)
-    }
-    this.removeHooks.push(parent.on('internal/plugin', (fiber) => {
-      if (fiber.runtime?.callback === apply && fiber.uid !== null) this.fiber = fiber
-    }, { global: true }))
-    this.removeHooks.push(parent.on('internal/status', (fiber) => {
-      if (fiber !== this.fiber) return
-      if ((fiber.state === NativeState.UNLOADING || fiber.state === NativeState.FAILED || fiber.state === NativeState.DISPOSED)) {
-        this.invalidate('native-invalidated')
-      }
-    }, { global: true, prepend: true }))
-    const activation = this
-    this.removeHooks.push(parent.on('internal/service', function (name, value) {
-      if (!activation.entered || activation.closed) return
-      if (this[Context.isolate][name] !== activation.scoped[Context.isolate][name]) return
-      const required = Array.isArray(plugin.inject)
-        ? plugin.inject.includes(name) : Object.hasOwn(plugin.inject ?? {}, name)
-      const expected = activation.fiber?.store?.[name]
-      const current = activation.scoped.reflect.store[activation.scoped[Context.isolate][name]]
-      if (required && (expected !== current || current?.fiber.state !== NativeState.ACTIVE)) {
-        activation.invalidate('native-invalidated')
-      } else if (activation.necessary.has(name) && value === undefined) {
-        activation.invalidate('necessary-export-lost')
-      }
-    }, { global: true, prepend: true }))
-    this.removeHooks.push(gate.onClose(() => this.invalidate('stop')))
     try {
+      // Dependencies are installed into activation-specific scopes, never the
+      // runtime's global service slots. The parent owns their native effects.
+      for (const [name, value] of Object.entries(dependencies)) {
+        this.removeHooks.push(scoped.reflect.provide(name, value, checks[name]))
+      }
+      // Cordis joins native unload work but reports disposer failures through its
+      // public logger exporter rather than rejecting Fiber.dispose(). During
+      // closing, retain descendant error diagnostics as an unconfirmed cleanup.
+      // An author error log during closing is conservatively unconfirmed too.
+      this.removeHooks.push(parent.logger.exporter({
+        levels: { default: 0 },
+        export: message => {
+          if (!this.closed || message.type !== 'error' || !this.fiber) return
+          let fiber = message.fiber?.deref()
+          while (fiber) {
+            if (fiber === this.fiber) { this.cleanupErrors.push(...message.args); return }
+            const outer: Fiber = fiber.parent.fiber
+            if (outer === fiber) return
+            fiber = outer
+          }
+        },
+      }))
+      const apply = (ctx: Context, value: C) => {
+        if (this.closed || this.entered) throw new Error('activation cannot be reused')
+        this.entered = true
+        this.context = ctx
+        return plugin.apply(ctx, value)
+      }
+      this.removeHooks.push(parent.on('internal/plugin', (fiber) => {
+        if (fiber.runtime?.callback === apply && fiber.uid !== null) this.fiber = fiber
+      }, { global: true }))
+      this.removeHooks.push(parent.on('internal/status', (fiber) => {
+        if (fiber !== this.fiber) return
+        if ((fiber.state === NativeState.UNLOADING || fiber.state === NativeState.FAILED || fiber.state === NativeState.DISPOSED)) {
+          this.invalidate('native-invalidated')
+        }
+      }, { global: true, prepend: true }))
+      const activation = this
+      this.removeHooks.push(parent.on('internal/service', function (name, value) {
+        if (!activation.entered || activation.closed) return
+        if (this[Context.isolate][name] !== activation.scoped[Context.isolate][name]) return
+        const required = Array.isArray(plugin.inject)
+          ? plugin.inject.includes(name) : Object.hasOwn(plugin.inject ?? {}, name)
+        const expected = activation.fiber?.store?.[name]
+        const current = activation.scoped.reflect.store[activation.scoped[Context.isolate][name]]
+        if (required && (expected !== current || current?.fiber.state !== NativeState.ACTIVE)) {
+          activation.invalidate('native-invalidated')
+        } else if (activation.necessary.has(name) && value === undefined) {
+          activation.invalidate('necessary-export-lost')
+        }
+      }, { global: true, prepend: true }))
+      this.removeHooks.push(gate.onClose(() => this.invalidate('stop')))
       const registered = scoped.plugin({ ...plugin, apply }, config)
       // ctx.plugin() returns a thenable wrapper inheriting from the actual
       // Fiber. Notifications carry the actual Fiber; keep the one observed
       // during internal/plugin rather than comparing it to that wrapper.
       if (!this.fiber) {
-        void registered.dispose()
+        this.removeHooks.push(() => registered.dispose())
         throw new Error('Cordis internal/plugin did not publish the native fiber')
       }
     } catch (error) {
-      for (const remove of this.removeHooks.splice(0).reverse()) remove()
+      this.closed = true
+      this.gate.close()
+      throw new NativeMountError(error, this.beginStop())
+    }
+  }
+
+  static async mount<C>(...args: ConstructorParameters<typeof ManagedActivation<C>>): Promise<ManagedActivation<C>> {
+    try { return new ManagedActivation(...args) }
+    catch (error) {
+      if (error instanceof NativeMountError) {
+        try { await error.cleanup }
+        catch (cleanup) { throw new AggregateError([error.cause, cleanup], 'native mount and rollback failed') }
+      }
       throw error
     }
   }
 
   get native(): Fiber { return this.fiber! }
   get isOpen(): boolean { return !this.closed }
+  get nativeContext(): Context | undefined { return this.context }
+
+  /** SDK control handlers call this after import revocation, using Cordis's
+   * native availability checks and invalidation hooks. */
+  refreshDependencies(names: string[]): void { this.scoped.reflect.notify(names) }
 
   /** Export routes are registered by the SDK, including services owned by
    * internal child fibers. Losing a necessary export invalidates the root. */

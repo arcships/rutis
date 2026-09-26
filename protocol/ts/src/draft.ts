@@ -51,6 +51,12 @@ export class GraphExporter {
     if (!dispatch) fail('InterfaceMismatch', 'native dispatch adapter unavailable')
     return dispatch
   }
+  /** Merge only views already registered by this exact native table/bundle.
+   * Host admission still controls grants and the permitted selectors. */
+  mergeRegistered(other: GraphExporter): void {
+    if (this.exports !== other.exports || this.admitted.sha256 !== other.admitted.sha256) fail('CapabilityDenied', 'dispatchers belong to another native table or bundle')
+    for (const [key, dispatch] of other.dispatchers) this.dispatchers.set(key, dispatch)
+  }
   encode(type: TypeExpr, value: Outbound): StagedGraph {
     this.exports.requireOpen()
     const references: DraftReference[] = []

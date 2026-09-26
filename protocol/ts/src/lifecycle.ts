@@ -306,7 +306,7 @@ export class NativeModuleDriver implements Driver {
     const plugin = loaded.default
     if (!plugin || typeof plugin !== 'object' || typeof plugin.apply !== 'function') invalid('module default must be a native Cordis plugin object')
     if (Object.keys(plugin.inject ?? {}).length) throw failure('InterfaceMismatch', 'module requests undeclared native dependencies')
-    const native = new ManagedActivation(this.parent, plugin, member.config, {}, undefined, [], admission)
+    const native = await ManagedActivation.mount(this.parent, plugin, member.config, {}, undefined, [], admission)
     return { native, services: () => Promise.resolve({}) }
   }
 }

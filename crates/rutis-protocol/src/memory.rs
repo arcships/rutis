@@ -267,6 +267,76 @@ impl Endpoint {
             self.caller(),
         )
     }
+    /// Binding conformance for complete named native service tables. It uses
+    /// the same service batch validation and broker grants as a framed Host,
+    /// while keeping this transport explicitly in-memory.
+    pub fn import_services(
+        self: &Arc<Self>,
+        owner: &Arc<Endpoint>,
+        staged: &mut crate::services::StagedServices,
+    ) -> Result<BTreeMap<String, DecodedValue>> {
+        let network = self
+            .network
+            .upgrade()
+            .ok_or_else(|| fail(ErrorCode::Unavailable, "network closed"))?;
+        if owner
+            .network
+            .upgrade()
+            .is_none_or(|other| !Arc::ptr_eq(&other, &network))
+            || staged.table().activation != owner.activation
+            || staged
+                .contracts()
+                .values()
+                .any(|contract| contract.bundle_sha256 != network.bundle.sha256())
+        {
+            return Err(fail(
+                ErrorCode::InterfaceMismatch,
+                "named service table does not belong to this transport",
+            ));
+        }
+        staged.merge_dispatchers(&owner.exporter)?;
+        let scopes = GraphScopes::in_scope(self.root.clone());
+        let graphs = crate::services::offer_table(
+            &mut network.state.lock().unwrap().broker,
+            &owner.activation,
+            staged.table(),
+            staged.contracts(),
+            staged.bundles(),
+            &scopes,
+        )?;
+        let receive = (|| {
+            staged.commit(&graphs, &scopes)?;
+            graphs
+                .iter()
+                .map(|(name, graph)| {
+                    Ok((
+                        name.clone(),
+                        self.imports.receive_graph(
+                            &network.bundle,
+                            &crate::services::service_type(&staged.contracts()[name]),
+                            graph.clone(),
+                            &scopes,
+                        )?,
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()
+        })();
+        if receive.is_err() {
+            self.imports.reject(
+                &graphs
+                    .values()
+                    .flat_map(|graph| {
+                        graph
+                            .references
+                            .iter()
+                            .map(|reference| reference.delivery.clone())
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        self.flush();
+        receive
+    }
     pub fn flush(&self) {
         if let Some(network) = self.network.upgrade() {
             network.flush(self);
