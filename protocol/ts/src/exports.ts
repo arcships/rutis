@@ -23,6 +23,7 @@ interface Entry {
 }
 const fail = (code: 'ScopeClosed' | 'StaleObject' | 'CapabilityDenied' | 'InvalidParams', message: string): never => { throw new ProtocolError(code, 'export', message) }
 export class Exports {
+  private staging = new ObjectIds()
   private open = true
   private identities = new WeakMap<object, Entry>()
   private entries = new Map<string, Entry>()
@@ -35,6 +36,10 @@ export class Exports {
   private waiters = new Set<() => void>()
   private owner: Activation
   constructor(owner: Activation, private ids: ObjectIds, private admitted: () => boolean = () => true) { this.owner = Object.freeze(structuredClone(owner)) }
+  requireOpen(): void {
+    if (!this.admitted()) this.open = false
+    if (!this.open) fail('ScopeClosed', 'owner activation closed')
+  }
 
   static managed(ctx: Context, owner: Activation, ids: ObjectIds, gate: () => boolean = () => true): Exports {
     const fiber = ctx.fiber
@@ -44,11 +49,15 @@ export class Exports {
   }
 
   register<T extends object>(object: T): ObjectIdentity { return this.add(object) }
+  stage(identity: ObjectIdentity): PinKey {
+    const key: PinKey = { type: 'staging', id: this.staging.allocate() }
+    this.pin(identity, key); return key
+  }
   registerExclusive<T extends object>(object: T, disposer: (object: T) => Promise<void> | void): ObjectIdentity {
     return this.add(object, disposer as (object: object) => Promise<void> | void)
   }
   private add(object: object, disposer?: (object: object) => Promise<void> | void): ObjectIdentity {
-    if (!this.open || !this.admitted()) fail('ScopeClosed', 'owner activation closed')
+    this.requireOpen()
     const old = this.identities.get(object)
     if (old) {
       if (old.disposed) fail('StaleObject', 'exclusive object disposed')
@@ -61,7 +70,7 @@ export class Exports {
     return identity
   }
   pin(identity: ObjectIdentity, key: PinKey): void {
-    if (!this.open || !this.admitted()) fail('ScopeClosed', 'owner activation closed')
+    this.requireOpen()
     const lease = canonical(key)
     if (this.released.has(lease) || this.isRetired(key)) fail('StaleObject', 'released pin cannot be reacquired')
     const old = this.leases.get(lease)

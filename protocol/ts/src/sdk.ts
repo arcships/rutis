@@ -1,4 +1,5 @@
 import { ProtocolError } from './error.ts'
+import { Service } from '@deepseek-ai/cordis'
 import { ObjectProxy, type ObjectIdentity } from './imports.ts'
 import { Exports, type PinKey } from './exports.ts'
 import type { Context } from '@deepseek-ai/cordis'
@@ -77,6 +78,9 @@ export function facade<T extends object>(client: Client, methods: Record<string,
       if (Object.hasOwn(target, name)) return Reflect.get(target, name, receiver)
       if (name === 'then') return undefined // never accidentally assimilate a remote object as a Promise
       if (name === Symbol.toStringTag) return 'ProtocolObject'
+      // Native Cordis probes this public metadata symbol when reading an
+      // injected service. This facade has no native tracking metadata.
+      if (name === Service.tracker) return undefined
       throw new ProtocolError('CapabilityDenied', 'binding', 'member is not declared')
     },
   })

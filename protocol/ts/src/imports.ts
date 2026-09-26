@@ -173,6 +173,13 @@ export class Imports {
     this.retired = prefix
   }
 
+  retirement(): { received_through: string; terminal_through: string } | null {
+    let received = this.retired; let terminal = this.retired
+    while (this.seen.has((received + 1n).toString())) received++
+    while (this.seen.get((terminal + 1n).toString())?.terminal) terminal++
+    return terminal ? { received_through: received.toString(), terminal_through: terminal.toString() } : null
+  }
+
   retainedObjects(): number { return this.cache.size }
   property(proxy: ObjectProxy, name: string): unknown {
     this.delivery(proxy)

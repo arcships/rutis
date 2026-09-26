@@ -55,10 +55,13 @@ impl ObjectIds {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PinKey {
     /// Staging pins cover the gap before a broker grants a result or export.
-    Staging(Sequence),
+    Staging {
+        id: Sequence,
+    },
     Delivery {
         recipient: Activation,
         id: Sequence,
@@ -90,6 +93,7 @@ struct State {
 }
 struct Inner {
     state: Mutex<State>,
+    staging: ObjectIds,
     changed: Notify,
     runtime: tokio::runtime::Handle,
 }
@@ -106,6 +110,21 @@ fn error(code: ErrorCode, message: &str) -> ProtocolError {
 }
 
 impl Exports {
+    /// All bundle encoders for this activation share the staging namespace.
+    pub fn stage(&self, identity: &ObjectIdentity) -> Result<PinKey> {
+        let key = PinKey::Staging {
+            id: self.inner.staging.next()?,
+        };
+        self.pin(identity, key.clone())?;
+        Ok(key)
+    }
+    pub fn require_open(&self) -> Result<()> {
+        if self.admission_open(&self.inner.state.lock().unwrap()) {
+            Ok(())
+        } else {
+            Err(error(ErrorCode::ScopeClosed, "owner activation closed"))
+        }
+    }
     pub fn owner(&self) -> &Activation {
         &self.owner
     }
@@ -118,6 +137,7 @@ impl Exports {
             ids,
             gate: None,
             inner: Arc::new(Inner {
+                staging: ObjectIds::default(),
                 state: Mutex::new(State {
                     open: true,
                     entries: BTreeMap::new(),

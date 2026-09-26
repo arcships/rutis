@@ -8,6 +8,16 @@ const root: Scope = { activation: caller, scope: '1' }
 function delivery(id: string, recipient = root, source = 'route-a'): Delivery {
   return { id, token: 'test-token-' + id, object: { owner, object: '1' }, recipient, view: { interface: 'Connection', bundle_sha256: 'a'.repeat(64), source } }
 }
+test('receiver retirement proposals never cross a receipt gap or live token', () => {
+  const imports = new Imports(); imports.openScope(root)
+  imports.receive(delivery('2', root, 'route-b')).release(); assert.equal(imports.retirement(), null)
+  const first = imports.receive(delivery('1')); assert.equal(imports.retirement(), null); first.release()
+  assert.deepEqual(imports.retirement(), { received_through: '2', terminal_through: '2' }); imports.acknowledgeRetirement('2')
+  imports.receive(delivery('4', root, 'route-b')).release(); assert.deepEqual(imports.retirement(), { received_through: '2', terminal_through: '2' })
+  assert.throws(() => imports.acknowledgeRetirement('4'))
+  const third = imports.receive(delivery('3')); assert.deepEqual(imports.retirement(), { received_through: '4', terminal_through: '2' }); third.release()
+  assert.deepEqual(imports.retirement(), { received_through: '4', terminal_through: '4' })
+})
 test('T04/T07: stable identity, independent tokens and no revival of released aliases', () => {
   const imports = new Imports(); imports.openScope(root)
   const first = imports.receive(delivery('1'))

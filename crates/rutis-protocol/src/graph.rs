@@ -25,7 +25,8 @@ pub struct WireGraph {
 /// Root scope references may persist; borrow references belong to the actual
 /// executing call. Snapshot relationships inherit their containing grant's
 /// scope, so navigating a borrowed object cannot extend a child's lifetime.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GraphScopes {
     pub scope: Scope,
     pub borrow: Scope,

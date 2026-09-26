@@ -152,7 +152,9 @@ impl CallContext {
         });
         Ok(())
     }
-    pub(crate) async fn finish(&self) -> Result<()> {
+    /// Runner completion barrier: seal the root handler and join every
+    /// registered descendant before reporting execution finished.
+    pub async fn finish(&self) -> Result<()> {
         {
             let mut state = self.tasks.state.lock().unwrap();
             state.root_finished = true;

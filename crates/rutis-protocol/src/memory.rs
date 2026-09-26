@@ -1,16 +1,15 @@
 //! In-memory broker transport for binding/lifecycle conformance. It uses the
-//! same grants, object pins and graph decoder as the future framed transport.
+//! same draft encoder, grants, object pins and graph decoder as framed peers.
 //! No handler runs while the broker lock is held; nested calls are reentrant.
 use crate::broker::Broker;
-use crate::contract::{
-    callback_key, AdmittedBundle, Interface, Method, Ownership, TypeExpr, WireValue,
-};
+use crate::contract::{callback_key, AdmittedBundle, Interface, Method, Ownership, TypeExpr};
+use crate::draft::{DraftSource, GraphExporter};
 use crate::error::{ErrorCode, Execution, ProtocolError, Result};
 use crate::exports::{Exports, ObjectIds, PinKey};
-use crate::graph::{self, DecodedValue, GraphScopes, WireGraph, WireReference};
-use crate::identity::{Activation, Delivery, InterfaceView, ObjectIdentity, Scope, Sequence};
+use crate::graph::{DecodedValue, GraphScopes, WireGraph};
+use crate::identity::{Activation, ObjectIdentity, Scope, Sequence};
 use crate::imports::{ImportControl, Imports, ObjectProxy};
-use crate::sdk::{bind, CallContext, Caller, ClientHandle, Dispatcher, Outbound, RpcFuture};
+use crate::sdk::{bind, CallContext, Caller, ClientHandle, Outbound, RpcFuture};
 use std::collections::BTreeMap;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -42,10 +41,9 @@ pub struct Endpoint {
     exports: Exports,
     imports: Imports,
     native: Option<rutis::Ctx>,
-    dispatchers: Mutex<BTreeMap<(ObjectIdentity, InterfaceView), Arc<dyn Dispatcher>>>,
+    exporter: GraphExporter,
     scopes: AtomicU64,
     calls: AtomicU64,
-    staging: AtomicU64,
 }
 struct EndpointCaller(Arc<Endpoint>);
 fn callbacks(expr: &TypeExpr, interfaces: &mut BTreeMap<String, Interface>) {
@@ -144,13 +142,16 @@ impl Network {
             network: Arc::downgrade(self),
             activation: activation.clone(),
             root,
-            exports,
+            exports: exports.clone(),
             imports,
             native,
-            dispatchers: Mutex::default(),
+            exporter: GraphExporter::new(
+                self.bundle.clone(),
+                exports.clone(),
+                self.bundle.bundle().id.clone(),
+            ),
             scopes: AtomicU64::new(1),
             calls: AtomicU64::new(0),
-            staging: AtomicU64::new(0),
         });
         state.endpoints.insert(activation, endpoint.clone());
         drop(state);
@@ -327,16 +328,7 @@ impl Drop for Envelope {
         }
     }
 }
-struct Encoder {
-    network: Arc<Network>,
-    sender: Arc<Endpoint>,
-    recipient: Arc<Endpoint>,
-    references: Vec<WireReference>,
-    indices: BTreeMap<(Scope, ObjectIdentity, InterfaceView), usize>,
-    staging: Vec<(Exports, PinKey)>,
-    offered: Vec<(Exports, Delivery)>,
-    committed: bool,
-}
+struct Encoder;
 impl Encoder {
     fn encode(
         network: Arc<Network>,
@@ -349,275 +341,44 @@ impl Encoder {
         sender.imports.require_scope(&sender.root)?;
         recipient.imports.require_scope(&scopes.scope)?;
         recipient.imports.require_scope(&scopes.borrow)?;
-        {
-            let state = network.state.lock().unwrap();
+        let mut staged = sender.exporter.encode(expr, value)?;
+        let graph = {
+            let mut state = network.state.lock().unwrap();
             state.broker.require_scope(&sender.root)?;
-            state.broker.require_scope(&scopes.scope)?;
-            state.broker.require_scope(&scopes.borrow)?;
-        }
-        let mut encoder = Self {
-            network,
-            sender,
-            recipient,
-            references: Vec::new(),
-            indices: BTreeMap::new(),
-            staging: Vec::new(),
-            offered: Vec::new(),
-            committed: false,
-        };
-        let root = encoder.value(expr, value, scopes, None)?;
-        let graph = WireGraph {
-            root,
-            references: std::mem::take(&mut encoder.references),
-        };
-        graph::validate(&encoder.network.bundle, expr, &graph, scopes)?;
-        encoder.committed = true;
-        Ok(Envelope {
-            network: encoder.network.clone(),
-            recipient: encoder.recipient.clone(),
-            graph: Some(graph),
-        })
-    }
-    fn value(
-        &mut self,
-        expr: &TypeExpr,
-        value: Outbound,
-        scopes: &GraphScopes,
-        inherited: Option<&Scope>,
-    ) -> Result<WireValue> {
-        Ok(match (expr, value) {
-            (TypeExpr::Value { .. }, Outbound::Value(value)) => WireValue::Value { value },
-            (TypeExpr::Record { fields: types }, Outbound::Record(mut fields))
-                if fields.len() == types.len() =>
-            {
-                let fields = types
-                    .iter()
-                    .map(|(name, expr)| {
-                        Ok((
-                            name.clone(),
-                            self.value(
-                                expr,
-                                fields.remove(name).ok_or_else(|| {
-                                    fail(ErrorCode::InvalidParams, "missing field")
-                                })?,
-                                scopes,
-                                inherited,
-                            )?,
-                        ))
-                    })
-                    .collect::<Result<_>>()?;
-                WireValue::Record { fields }
-            }
-            (TypeExpr::List { item }, Outbound::List(items)) => WireValue::List {
-                items: items
-                    .into_iter()
-                    .map(|v| self.value(item, v, scopes, inherited))
-                    .collect::<Result<_>>()?,
-            },
-            (TypeExpr::Optional { item }, Outbound::Optional(value)) => WireValue::Optional {
-                value: value
-                    .map(|v| self.value(item, *v, scopes, inherited).map(Box::new))
-                    .transpose()?,
-            },
-            (
-                TypeExpr::Object {
-                    interface,
-                    ownership,
-                },
-                value @ (Outbound::Own(_) | Outbound::Foreign(_)),
-            ) => {
-                let scope = inherited.unwrap_or(if *ownership == Ownership::Scope {
-                    &scopes.scope
-                } else {
-                    &scopes.borrow
-                });
-                return self.object(interface, value, scopes, scope);
-            }
-            (TypeExpr::Callback { .. }, value @ (Outbound::Own(_) | Outbound::Foreign(_))) => {
-                return self.object(&callback_key(expr), value, scopes, &scopes.borrow)
-            }
-            _ => {
-                return Err(fail(
-                    ErrorCode::InvalidParams,
-                    "outbound value does not match generated contract",
-                ))
-            }
-        })
-    }
-    fn object(
-        &mut self,
-        interface: &str,
-        value: Outbound,
-        scopes: &GraphScopes,
-        scope: &Scope,
-    ) -> Result<WireValue> {
-        let iface = self
-            .network
-            .interfaces
-            .get(interface)
-            .cloned()
-            .ok_or_else(|| fail(ErrorCode::InterfaceMismatch, "interface unavailable"))?;
-        let (identity, view, owned, foreign) = match value {
-            Outbound::Own(native) => {
-                let registered = native.register(&self.sender.exports)?;
-                if registered.bundle_sha256 != self.network.bundle.sha256()
-                    || registered.interface != interface
-                    || registered.identity.owner != self.sender.activation
-                {
-                    return Err(fail(
-                        ErrorCode::InterfaceMismatch,
-                        "native adapter contract mismatch",
-                    ));
-                }
-                let key = PinKey::Staging(next(&self.sender.staging)?);
-                self.sender.exports.pin(&registered.identity, key.clone())?;
-                self.staging.push((self.sender.exports.clone(), key));
-                let view = InterfaceView {
-                    interface: interface.into(),
-                    bundle_sha256: self.network.bundle.sha256().into(),
-                    source: self.network.bundle.bundle().id.clone(),
-                };
-                self.network
-                    .state
-                    .lock()
-                    .unwrap()
-                    .broker
-                    .register_export_view(
-                        &self.sender.activation,
-                        registered.identity.clone(),
-                        view.clone(),
-                        iface.methods.keys().cloned().collect(),
-                    )?;
-                self.sender.dispatchers.lock().unwrap().insert(
-                    (registered.identity.clone(), view.clone()),
-                    registered.dispatcher,
-                );
-                (registered.identity, view, Some(native), None)
-            }
-            Outbound::Foreign(proxy) => {
-                let delivery = proxy.delivery()?;
-                if delivery.recipient.activation != self.sender.activation
-                    || delivery.view.interface != interface
-                    || delivery.view.bundle_sha256 != self.network.bundle.sha256()
-                {
-                    return Err(fail(
-                        ErrorCode::CapabilityDenied,
-                        "foreign object does not belong to sender",
-                    ));
-                }
-                (delivery.object, delivery.view, None, Some(proxy))
-            }
-            _ => unreachable!(),
-        };
-        let cache = (scope.clone(), identity.clone(), view.clone());
-        if let Some(index) = self.indices.get(&cache) {
-            return Ok(WireValue::Ref { index: *index });
-        }
-        let owner = self.network.endpoint_for(&identity.owner)?;
-        let delivery = if let Some(proxy) = &foreign {
-            let old = proxy.delivery()?;
-            self.network
-                .state
-                .lock()
-                .unwrap()
-                .broker
-                .pass_back(&old.recipient, &old, scope)?
-        } else {
-            self.network.state.lock().unwrap().broker.offer(
-                &identity.owner,
-                &identity,
-                scope,
-                &view,
+            state.broker.offer_graph(
+                &sender.activation,
+                &network.bundle,
+                expr,
+                &staged.draft,
+                scopes,
+                &network.bundle.bundle().id,
             )?
         };
-        if let Err(error) = owner.exports.pin(
-            &identity,
-            PinKey::Delivery {
-                recipient: scope.activation.clone(),
-                id: delivery.id,
-            },
-        ) {
-            let _ = self.network.state.lock().unwrap().broker.release(
-                &scope.activation,
-                delivery.id,
-                &delivery.token,
-            );
-            return Err(error);
-        }
-        self.offered.push((owner.exports.clone(), delivery.clone()));
-        let index = self.references.len();
-        self.indices.insert(cache, index);
-        self.references.push(WireReference {
-            delivery,
-            properties: BTreeMap::new(),
-        });
-        let mut snapshot = if let Some(native) = owned {
-            native.snapshot()?
-        } else {
-            iface
-                .properties
-                .keys()
-                .map(|name| {
-                    Ok((
-                        name.clone(),
-                        outbound(foreign.as_ref().unwrap().property(name)?),
-                    ))
-                })
-                .collect::<Result<_>>()?
-        };
-        if snapshot.len() != iface.properties.len() {
-            return Err(fail(ErrorCode::InvalidParams, "snapshot fields mismatch"));
-        }
-        let properties = iface
-            .properties
+        let deliveries: Vec<_> = graph
+            .references
             .iter()
-            .map(|(name, expr)| {
-                Ok((
-                    name.clone(),
-                    self.value(
-                        expr,
-                        snapshot.remove(name).ok_or_else(|| {
-                            fail(ErrorCode::InvalidParams, "snapshot property missing")
-                        })?,
-                        scopes,
-                        Some(scope),
-                    )?,
-                ))
-            })
-            .collect::<Result<_>>()?;
-        self.references[index].properties = properties;
-        Ok(WireValue::Ref { index })
-    }
-}
-fn outbound(value: DecodedValue) -> Outbound {
-    match value {
-        DecodedValue::Value(value) => Outbound::Value(value),
-        DecodedValue::Object(value) => Outbound::Foreign(value),
-        DecodedValue::Record(fields) => {
-            Outbound::Record(fields.into_iter().map(|(k, v)| (k, outbound(v))).collect())
-        }
-        DecodedValue::List(items) => Outbound::List(items.into_iter().map(outbound).collect()),
-        DecodedValue::Optional(value) => Outbound::Optional(value.map(|v| Box::new(outbound(*v)))),
-    }
-}
-impl Drop for Encoder {
-    fn drop(&mut self) {
-        if !self.committed {
-            for (exports, delivery) in &self.offered {
-                let _ = self.network.state.lock().unwrap().broker.release(
-                    &delivery.recipient.activation,
-                    delivery.id,
-                    &delivery.token,
-                );
-                exports.release(&PinKey::Delivery {
-                    recipient: delivery.recipient.activation.clone(),
-                    id: delivery.id,
-                });
+            .map(|r| r.delivery.clone())
+            .collect();
+        // An unconsumed manifest is rejected through the recipient SDK even
+        // on owner-pin failure. Its received prefix must not gain a hole.
+        let envelope = Envelope {
+            network: network.clone(),
+            recipient,
+            graph: Some(graph),
+        };
+        staged.commit(deliveries.clone(), scopes)?;
+        for (reference, delivery) in staged.draft.references.iter().zip(deliveries) {
+            if matches!(reference.source, DraftSource::Foreign { .. }) {
+                network.endpoint_for(&delivery.object.owner)?.exports.pin(
+                    &delivery.object,
+                    PinKey::Delivery {
+                        recipient: delivery.recipient.activation,
+                        id: delivery.id,
+                    },
+                )?;
             }
         }
-        for (exports, key) in &self.staging {
-            exports.release(key);
-        }
+        Ok(envelope)
     }
 }
 struct ExecutionLease {
@@ -671,12 +432,8 @@ impl Caller for EndpointCaller {
                 .ok_or_else(|| fail(ErrorCode::CapabilityDenied, "method outside view"))?;
             let owner = network.endpoint_for(&delivery.object.owner)?;
             let dispatcher = owner
-                .dispatchers
-                .lock()
-                .unwrap()
-                .get(&(delivery.object.clone(), delivery.view.clone()))
-                .cloned()
-                .ok_or_else(|| fail(ErrorCode::Unavailable, "dispatch adapter unavailable"))?;
+                .exporter
+                .dispatcher(&delivery.object, &delivery.view)?;
             let call = {
                 let mut state = network.state.lock().unwrap();
                 let call = next(&sender.calls)?;

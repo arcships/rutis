@@ -15,6 +15,14 @@ pub enum ImportControl {
     Accept { id: Sequence, token: String },
     Release { id: Sequence, token: String },
 }
+/// Runtime-wide evidence, including rejected envelopes. Zero prefixes are
+/// omitted because wire sequence numbers are canonical positive decimals.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Retirement {
+    pub received_through: Sequence,
+    pub terminal_through: Sequence,
+}
 impl std::fmt::Debug for ImportControl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
@@ -281,6 +289,30 @@ impl Imports {
             .retain(|_, wrapper| wrapper.lock().unwrap().active);
         state.retired = through.0;
         Ok(())
+    }
+
+    pub fn retirement(&self) -> Option<Retirement> {
+        let state = self.0.lock().unwrap();
+        let mut received = state.retired;
+        let mut terminal = state.retired;
+        let mut all_terminal = true;
+        for (id, seen) in state
+            .seen
+            .range(Sequence(state.retired.saturating_add(1))..)
+        {
+            if received.checked_add(1) != Some(id.0) {
+                break;
+            }
+            received = id.0;
+            all_terminal &= seen.terminal;
+            if all_terminal {
+                terminal = id.0;
+            }
+        }
+        (terminal > 0).then_some(Retirement {
+            received_through: Sequence(received),
+            terminal_through: Sequence(terminal),
+        })
     }
 
     pub fn retained_objects(&self) -> usize {

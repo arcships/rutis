@@ -237,8 +237,8 @@ export function checkSchema(schema: Schema, root = schema, stack = new Set<strin
 function safeJson(value: any): boolean {
   if (typeof value === 'number') return Number.isFinite(value) && (!Number.isInteger(value) || Number.isSafeInteger(value))
   if (typeof value === 'string') return scalarUnicode(value)
-  if (Array.isArray(value)) return value.every(safeJson)
-  if (value && typeof value === 'object') return Object.entries(value).every(([k, v]) => !['__proto__', 'prototype', 'constructor'].includes(k) && safeJson(v))
+  if (Array.isArray(value)) return Object.getPrototypeOf(value) === Array.prototype && Object.keys(value).length === value.length && value.every(safeJson)
+  if (value && typeof value === 'object') return [null, Object.prototype].includes(Object.getPrototypeOf(value)) && Object.entries(value).every(([k, v]) => !['__proto__', 'prototype', 'constructor'].includes(k) && safeJson(v))
   return value === null || ['string', 'boolean'].includes(typeof value)
 }
 export function validateJson(schema: Schema, value: unknown): void { checkSchema(schema); validateInner(schema, schema, value) }

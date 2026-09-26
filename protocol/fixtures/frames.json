@@ -1,0 +1,12 @@
+[
+  { "name": "null", "hex": "000000046e756c6c", "valid": true },
+  { "name": "UTF8 scalar across chunks", "hex": "0000000522e99baa22", "valid": true },
+  { "name": "empty length", "hex": "00000000", "valid": false },
+  { "name": "oversized length before allocation", "hex": "01000001", "valid": false },
+  { "name": "partial header", "hex": "0000", "valid": false },
+  { "name": "partial body", "hex": "000000057b7d", "valid": false },
+  { "name": "duplicate JSON keys", "hex": "0000000d7b2278223a312c2278223a327d", "valid": false },
+  { "name": "UTF8 BOM", "hex": "00000007efbbbf6e756c6c", "valid": false },
+  { "name": "malformed UTF8", "hex": "00000002c328", "valid": false },
+  { "name": "trailing JSON", "hex": "000000096e756c6c206e756c6c", "valid": false }
+]

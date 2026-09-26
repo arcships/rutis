@@ -1,0 +1,133 @@
+{
+  "id": "example.rpc",
+  "version": "1.0.0",
+  "interfaces": {
+    "Database": {
+      "methods": {
+        "connect": {
+          "params": {
+            "kind": "value",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "result": {
+            "kind": "object",
+            "interface": "Connection",
+            "ownership": "scope"
+          }
+        },
+        "inspect": {
+          "params": {
+            "kind": "object",
+            "interface": "Connection",
+            "ownership": "borrow"
+          },
+          "result": {
+            "kind": "value",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        },
+        "withCallback": {
+          "params": {
+            "kind": "callback",
+            "params": {
+              "kind": "value",
+              "schema": {
+                "type": "string"
+              }
+            },
+            "result": {
+              "kind": "value",
+              "schema": {
+                "type": "null"
+              }
+            },
+            "ownership": "borrow"
+          },
+          "result": {
+            "kind": "value",
+            "schema": {
+              "type": "null"
+            }
+          }
+        }
+      },
+      "properties": {}
+    },
+    "Connection": {
+      "methods": {
+        "query": {
+          "params": {
+            "kind": "value",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "sql": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "sql"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "result": {
+            "kind": "value",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      },
+      "properties": {
+        "session": {
+          "kind": "object",
+          "interface": "Session",
+          "ownership": "scope"
+        }
+      }
+    },
+    "Session": {
+      "methods": {},
+      "properties": {
+        "agent": {
+          "kind": "object",
+          "interface": "Agent",
+          "ownership": "scope"
+        }
+      }
+    },
+    "Agent": {
+      "methods": {},
+      "properties": {
+        "session": {
+          "kind": "object",
+          "interface": "Session",
+          "ownership": "scope"
+        }
+      }
+    }
+  },
+  "events": {},
+  "required_capabilities": [
+    "object.scope",
+    "callback.borrow"
+  ]
+}

@@ -88,7 +88,9 @@ async fn native_context_revokes_export_admission_and_joins_execution_and_dispose
     let stopped = tokio::spawn(async move { dependency.dispose().await });
     ctx.cancelled().await;
     assert!(exports.register(&object).is_err());
-    assert!(exports.pin(&id, PinKey::Staging(Sequence(1))).is_err());
+    assert!(exports
+        .pin(&id, PinKey::Staging { id: Sequence(1) })
+        .is_err());
     assert!(Arc::ptr_eq(
         &object,
         &exports.execution_object::<String>(&execution).unwrap()

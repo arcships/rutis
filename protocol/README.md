@@ -1,7 +1,7 @@
 # 实验对象协议实现约定
 
 此目录与 `rutis-protocol` crate 实施 [#59 设计](../docs/design-protocol-plugins-2026-09-25.md)。
-当前处于 M1，尚未形成可部署的 Rust↔Cordis 协议插件系统。已有生成绑定、对象图和 Rust 内存调度；跨语言实际调用、IPC、监督恢复和 broker 事件仍在开发。
+当前 M1 与 M2 的传输验证在推进，尚未形成可部署的 Rust↔Cordis 协议插件系统。已有两端生成绑定、对象图、私有 socket 上的真实跨语言调用与回收 ACK；生产 runner、监督恢复和 broker 事件仍在开发。
 实施证据及完整验收范围见[验收记录](../docs/protocol-plugin-implementation.md)。旧 `rutis-cordis` 桥继续独立存在。
 
 ## JSON 与描述符
@@ -15,7 +15,7 @@ JSON 数字使用 IEEE-754 binary64；整数结果必须处于 JS 安全整数�
 解码器安全边界为 **16 MiB 原始 UTF-8 字节、64 层子值深度**：根的深度是 0，对象成员和数组元素各加 1。
 空容器不增加子值深度。边界内的有效输入可接受，超过边界返回 `InvalidParams`，解析帧头时也必须在分配 body 前检查长度。
 这两个边界保护解码器的内存和调用栈，不是插件对象/调用配额；后续资源策略另行设计。
-帧传输尚待实现，不能据此宣称已有私有 Unix socket 互通。
+`frame::Peer` / TS `Peer` 使用 u32 大端长度和严格 JSON，独立接收泵支持重入，独立写队列持有完整帧。Rust 等待者被丢弃不会中断半帧写入；断连的未完成请求报告 execution unknown。共享帧语料覆盖分片 UTF-8、重复字段、BOM、坏长度和截断；接收任务拒绝重用/倒序 request id，避免重复执行。
 
 bundle 原始字节 SHA-256 保持精确，不做 JSON 重排、空白归一化或 semver 宽松匹配。
 先检查完整结构，再检查 capability 和契约；禁止用某个已知不支持的外层类型掩盖内部结构错误。
@@ -34,7 +34,7 @@ bundle 原始字节 SHA-256 保持精确，不做 JSON 重排、空白归一化�
 | array | `a` + 元素数十进制 + `:` + 各元素编码 |
 | object | `o` + 成员数十进制 + `:` + 各 key 编码、value 编码；key 按 UTF-8 字节序排序 |
 
-共享语料分别覆盖 JSON（35 项）、描述符（50 项）、wire value（32 项）、回调签名（9 项）、对象图（31 项）。
+共享语料分别覆盖 JSON（35 项）、描述符（50 项）、wire value（32 项）、回调签名（9 项）、对象图（31 项）、帧（10 项）。
 两端消费同一文件；语料中的非法 UTF-8、重复键以原字节保存，不先经过会覆盖字段的普通 JSON parser。
 
 ## 真实对象持有与交付准入
@@ -45,7 +45,8 @@ owner SDK 的导出表为真实 Arc / JS 对象分配稳定身份；相同字段
 本地对象仍存活时，shared 对象在无 pin 的间隔后再次导出保持身份。
 broker 接受 owner 分配的身份，重复登记保持现有接口视图，不能换对象或扩大现有视图的方法。宿主准入计划可为同一身份增加独立视图，先前 grant 的 whitelist 保持不变。
 
-临时 staging pin 覆盖导出交付提交前的间隔；每份 delivery 和实际 execution 独立持有真实对象。
+临时 staging pin 覆盖导出交付提交前的间隔；同一 owner 的多个编码器共用 staging 编号空间，每份 delivery 和实际 execution 独立持有真实对象。
+`GraphExporter` 先编码未授权 `DraftGraph`，提交真实 owner 身份与显式快照；foreign 引用提交原 accepted delivery 证明。broker 按宿主选择的 bundle/type/source 校验整图，并原子签发 grants；拒绝任一引用时不改变账本或交付序列。owner 用 `StagedGraph.commit` 确认对应 delivery pin 后，接收方才见到图。借用属性继承借用范围；snapshot 错误或 panic 释放 staging。owner pin 失败时仍向接收 SDK 提交完整拒绝清单，避免连续前缀出现缺口。
 释放 delivery 或取消用户等待不能释放 execution pin。
 shared 策略只释放协议的强引用，不调用业务 close；独占策略只用于没有合法本地使用者的外部资源，最后 pin 释放后执行一次 disposer。
 独占注册立即接管资源，首次 pin 前暂存强引用；未发布就回滚也会清理，不能让注册到交付之间成为泄漏窗口。
@@ -60,7 +61,7 @@ native 卸载关闭准入、撤销 delivery/staging pin，等待仍执行的对�
 导入表 `receive_batch` 先检查整份引用清单，再在一个临界区附加 token。
 类型/图验证失败使用 `reject`，只拒绝这次新增的交付；以前已经成功交给作者的 token 和别名保持有效。
 同 delivery id 的重传不增加 pin；相互矛盾的记录拒绝。新交付不能复活已经 release 的旧包装。
-对象图先校验整个引用表，再建齐代理和不可变身份关系；每个引用必须可达，快照关系继承父引用的 scope，借用关系不能延长子对象寿命。关系边不持有代理，scope 关闭清空包装缓存。显式释放子包装后，导航该关系失败；新交付可建立新的子包装，已释放别名仍关闭。相同活视图的快照变化拒绝。生成接口与 Rust 内存调用链已有测试；两端互通仍待实现。scope 继承 native gate，失效后缓存属性与方法同样拒绝；owner 撤销记录还拒绝尚未接收的旧 handoff。
+对象图先校验整个引用表，再建齐代理和不可变身份关系；每个引用必须可达，快照关系继承父引用的 scope，借用关系不能延长子对象寿命。关系边不持有代理，scope 关闭清空包装缓存。显式释放子包装后，导航该关系失败；新交付可建立新的子包装，已释放别名仍关闭。相同活视图的快照变化拒绝。scope 继承 native gate，失效后缓存属性与方法同样拒绝；owner 撤销记录还拒绝尚未接收的旧 handoff。
 
 ## 生成绑定与内存调度
 
@@ -73,10 +74,13 @@ cargo run -p rutis-protocol --bin rutis-protocol-bindgen -- \
 cargo run -p rutis-protocol --bin rutis-protocol-bindgen -- \
   protocol/fixtures/binding-types.bundle.json \
   protocol/generated/binding-types.rs protocol/ts/generated/binding-types.ts
+cargo run -p rutis-protocol --bin rutis-protocol-bindgen -- \
+  protocol/fixtures/rpc.bundle.json \
+  protocol/generated/rpc.rs protocol/ts/generated/rpc.ts
 ```
 
 TS 输出默认相对导入 `../src` 的 SDK；当前目录结构是实验包布局，并未发布稳定的安装接口。
-字段排序由生成器固定，不能依赖 serde_json 的 feature 联合结果。两份产物在 Rust/TS 编译，并由 workspace 测试核对重生成结果。
+字段排序由生成器固定，不能依赖 serde_json 的 feature 联合结果。三份产物在 Rust/TS 编译，并由 workspace 测试核对重生成结果；`rpc.bundle.json` 用于真实私有 socket 互通。
 Rust 生成 `InterfaceDatabaseService`、`InterfaceDatabaseClient` 等类型：业务实现返回真实 `Arc<dyn …Service>`，调用者得到门控客户端；参数和 JSON 数据 DTO 由 SDK 编码。
 可选 DTO 字段用 `OptionalField::Missing/Present` 保留缺失与 null 的区别，字符串 enum/判别 union 生成 Rust enum，开放 JSON 数据保持 Value/map。
 TS 用冻结的生成 facade 保持对象身份，属性只读本地快照；未知选择器拒绝。业务 `then` 通过 `then$` 暴露，避免 Promise 自动调用它。Caller 属于原生 activation，运行器应为该 activation 保持稳定实例。
@@ -85,7 +89,8 @@ TS 用冻结的生成 facade 保持对象身份，属性只读本地快照；未
 
 Rust `memory::Network` 是使用真实 broker 的内存传输测试入口，支持图交付、状态对象、owner pass-back、嵌套借用回调及 native endpoint effect。
 所有执行离开 broker 临界区后运行；owner-returned facade 也走 broker 调度。丢弃调用 waiter 只丢弃结果，owner handler 和登记子任务继续跟踪，晚到未消费图由 envelope 释放新增交付。
-这不是生产 runner：多 bundle 的 prepare/权限路由计划、TS 图编码和完整调度、受认证 IPC、控制帧及 supervisor 尚未接入。
+Linux `tests/objects_ipc.rs` 启动独立 Node 进程，仅继承私有 Unix stream 的 fd 3。双方用同一原字节 bundle 的生成绑定，Rust 权威 broker 根据固定连接身份准入，运行双向 connect/query、同一对象重复返回、循环属性、owner pass-back、重入 callback 和登记子任务。参数 grant 在交给业务代码前确认；callback 的 native Ctx 来自其 creator。stdout 诊断保持独立。测试还覆盖借用到期、丢弃 Rust waiter 后的真实 Node 执行 pin，以及回收 ACK。
+这是真实对象调度的 conformance fixture，生产 runner 的多 bundle prepare/权限路由计划、RuntimeReady 发布屏障、旧插件迁移及 supervisor 尚未实现，不能据此部署该协议。
 
 ## 连续前缀回收的含义
 
@@ -93,7 +98,7 @@ delivery id 属于**接收 runtime epoch 的整条连接**，覆盖其中所有 
 代理 cache key 不含 delivery id；交付账本与包装身份分开。
 同一个连接内的 accept/release 幂等，终态不复活。闭合 epoch 后，未知旧编号也不能成为新授权。
 
-控制帧接入时必须遵守以下顺序；目前已有内存表的前缀检查，真实控制帧和 ACK 仍待 M1/M2：
+控制帧必须遵守以下顺序；私有 socket fixture 已运行两端前缀提议、owner 通知和 ACK，生产多 activation 连接与故障交错仍待验收：
 
 1. 接收 runtime SDK 记录每份已处理的交付 envelope（包括取消/解码失败后拒绝的 envelope）。
    `received_through` 只推进到没有缺口的连续前缀；`terminal_through` 同时要求每个 id 已 Released/Revoked。

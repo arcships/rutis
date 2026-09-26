@@ -132,6 +132,39 @@ fn failed_graph_releases_only_new_deliveries_and_batch_is_atomic() {
 }
 
 #[test]
+fn receiver_proposes_only_contiguous_received_and_terminal_prefixes() {
+    let mut s = Setup::new();
+    let one = s.offer(None, "route-a");
+    let two = s.offer(None, "route-b");
+    s.imports.receive(two).unwrap().release();
+    assert!(s.imports.retirement().is_none());
+    let first = s.imports.receive(one).unwrap();
+    assert!(s.imports.retirement().is_none());
+    first.release();
+    let proposal = s.imports.retirement().unwrap();
+    assert_eq!(proposal.received_through, Sequence(2));
+    assert_eq!(proposal.terminal_through, Sequence(2));
+    s.imports.acknowledge_retirement(Sequence(2)).unwrap();
+    let three = s.offer(None, "route-a");
+    let four = s.offer(None, "route-b");
+    s.imports.receive(four).unwrap().release();
+    assert_eq!(
+        s.imports.retirement().unwrap().received_through,
+        Sequence(2)
+    );
+    assert!(s.imports.acknowledge_retirement(Sequence(4)).is_err());
+    let third = s.imports.receive(three).unwrap();
+    let proposal = s.imports.retirement().unwrap();
+    assert_eq!(proposal.received_through, Sequence(4));
+    assert_eq!(proposal.terminal_through, Sequence(2));
+    third.release();
+    assert_eq!(
+        s.imports.retirement().unwrap().terminal_through,
+        Sequence(4)
+    );
+}
+
+#[test]
 fn adding_an_independent_view_never_changes_an_existing_grant_whitelist() {
     let mut s = Setup::new();
     let old = s.offer(None, "route-a");

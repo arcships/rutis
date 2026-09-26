@@ -1,5 +1,22 @@
 use rutis_protocol::error::ErrorCode;
 use rutis_protocol::exports::{Exports, ObjectIds, PinKey};
+
+#[test]
+fn pin_control_wire_shape_matches_typescript_and_preserves_u64_sequences() {
+    let staging = PinKey::Staging {
+        id: Sequence(u64::MAX),
+    };
+    let wire = serde_json::json!({"type":"staging", "id":"18446744073709551615"});
+    assert_eq!(serde_json::to_value(&staging).unwrap(), wire);
+    assert_eq!(serde_json::from_value::<PinKey>(wire).unwrap(), staging);
+    assert!(
+        serde_json::from_value::<PinKey>(serde_json::json!({"type":"staging", "id":1})).is_err()
+    );
+    assert!(serde_json::from_value::<PinKey>(
+        serde_json::json!({"type":"staging", "id":"1", "caller":"forged"})
+    )
+    .is_err());
+}
 use rutis_protocol::identity::{Activation, Sequence};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},

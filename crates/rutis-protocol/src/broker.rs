@@ -17,20 +17,21 @@ impl DeliveryState {
     }
 }
 
+#[derive(Clone)]
 struct Grant {
     delivery: Delivery,
     methods: BTreeSet<String>,
     state: DeliveryState,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Recipient {
     allocated: u64,
     retired: u64,
     grants: BTreeMap<u64, Grant>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ObjectEntry {
     views: BTreeMap<InterfaceView, BTreeSet<String>>,
     delivery_pins: usize,
@@ -39,7 +40,7 @@ struct ObjectEntry {
 
 /// Connection identity is authenticated by the transport/supervisor. These
 /// methods take that identity explicitly; a frame cannot self-select its sender.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Broker {
     activations: BTreeSet<Activation>,
     scopes: BTreeMap<Scope, Option<Scope>>,
@@ -60,6 +61,87 @@ fn error(code: ErrorCode, message: &str) -> ProtocolError {
 }
 
 impl Broker {
+    /// Validate an entire draft and its original foreign proofs before any
+    /// grant is issued. The prepared host supplies bundle, type and source.
+    /// A transaction contains only broker metadata, never native objects.
+    pub fn offer_graph(
+        &mut self,
+        sender: &Activation,
+        bundle: &crate::contract::AdmittedBundle,
+        expr: &crate::contract::TypeExpr,
+        draft: &crate::draft::DraftGraph,
+        scopes: &crate::graph::GraphScopes,
+        source: &str,
+    ) -> Result<crate::graph::WireGraph> {
+        use crate::contract::{callback_key, TypeExpr};
+        use crate::draft::DraftSource;
+        let mut graph = draft.validate(bundle, expr, scopes)?;
+        if !self.activations.contains(sender) {
+            return Err(error(ErrorCode::ScopeClosed, "sender activation closed"));
+        }
+        self.require_scope(&scopes.scope)?;
+        self.require_scope(&scopes.borrow)?;
+        let mut methods: BTreeMap<String, BTreeSet<String>> = bundle
+            .bundle()
+            .interfaces
+            .iter()
+            .map(|(name, iface)| (name.clone(), iface.methods.keys().cloned().collect()))
+            .collect();
+        fn scan(expr: &TypeExpr, methods: &mut BTreeMap<String, BTreeSet<String>>) {
+            match expr {
+                TypeExpr::Callback { params, result, .. } => {
+                    methods.insert(callback_key(expr), BTreeSet::from(["call".into()]));
+                    scan(params, methods);
+                    scan(result, methods);
+                }
+                TypeExpr::Record { fields } => {
+                    for expr in fields.values() {
+                        scan(expr, methods);
+                    }
+                }
+                TypeExpr::List { item } | TypeExpr::Optional { item } => scan(item, methods),
+                _ => {}
+            }
+        }
+        scan(expr, &mut methods);
+        let mut transaction = self.clone();
+        for (reference, offered) in draft.references.iter().zip(&mut graph.references) {
+            offered.delivery = match &reference.source {
+                DraftSource::Own { object, view } => {
+                    if object.owner != *sender || view.source != source {
+                        return Err(error(
+                            ErrorCode::CapabilityDenied,
+                            "draft changed its owner or prepared route",
+                        ));
+                    }
+                    transaction.register_export_view(
+                        sender,
+                        object.clone(),
+                        view.clone(),
+                        methods.get(&view.interface).cloned().ok_or_else(|| {
+                            error(ErrorCode::InterfaceMismatch, "interface is not prepared")
+                        })?,
+                    )?;
+                    transaction.offer(sender, object, &offered.delivery.recipient, view)?
+                }
+                DraftSource::Foreign { delivery } => {
+                    if delivery.recipient.activation != *sender {
+                        return Err(error(
+                            ErrorCode::CapabilityDenied,
+                            "foreign proof belongs to another sender",
+                        ));
+                    }
+                    transaction.pass_back(
+                        &delivery.recipient,
+                        delivery,
+                        &offered.delivery.recipient,
+                    )?
+                }
+            };
+        }
+        *self = transaction;
+        Ok(graph)
+    }
     pub fn require_scope(&self, scope: &Scope) -> Result<()> {
         if self.scopes.contains_key(scope) {
             Ok(())

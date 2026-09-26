@@ -46,6 +46,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: protocol/ts/package-lock.json
+
+      - name: install locked object protocol runtime
+        run: npm --prefix protocol/ts ci --ignore-scripts
+
       - name: cargo test (workspace, skip node e2e)
         run: cargo test --workspace
         env:
