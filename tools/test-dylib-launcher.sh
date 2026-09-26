@@ -3,12 +3,14 @@ set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_dir"
-bundle="${1:-$(bash tools/build-dylib-bundle.sh | tail -n 1)}"
+base="$(mktemp -d /tmp/rutis-dylib-launcher.XXXXXX)"
+# Keep test output outside the cached target tree so repeated runs cannot
+# collide with an immutable bundle restored from a previous build.
+bundle="${1:-$(bash tools/build-dylib-bundle.sh "$base/bundle" | tail -n 1)}"
 test -d "$bundle"
 test "$(cd /tmp && "$bundle/rutis-cli" --version)" = "rutis-cli 0.2.0"
 env LD_LIBRARY_PATH=/tmp "$bundle/rutis-cli" --sdk-info > /dev/null
 
-base="$(mktemp -d /tmp/rutis-dylib-launcher.XXXXXX)"
 mkdir -p "$base/hostile"
 printf 'not an SDK' > "$base/hostile/librutis_sdk.so"
 cp -a "$bundle" "$base/relocated"
