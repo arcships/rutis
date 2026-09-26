@@ -1,5 +1,8 @@
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, FiberState, Plugin, TypeKey};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 use tokio::sync::{oneshot, Notify};
 
 struct Ping;
@@ -163,4 +166,101 @@ fn rejects_late_registration_multi_thread() {
         .build()
         .unwrap()
         .block_on(exercise());
+}
+
+struct Loading {
+    entered: Mutex<Option<oneshot::Sender<Ctx>>>,
+    resume: Mutex<Option<oneshot::Receiver<()>>>,
+    cleaned: Arc<AtomicUsize>,
+}
+struct ParentContext(Arc<Mutex<Option<Ctx>>>);
+impl Plugin for ParentContext {
+    fn name(&self) -> &str {
+        "supervised-parent"
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        *self.0.lock().unwrap() = Some(ctx.clone());
+        Box::pin(async { Ok(Effect::Done) })
+    }
+}
+impl Plugin for Loading {
+    fn name(&self) -> &str {
+        "loading-shutdown"
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let cleaned = self.cleaned.clone();
+            ctx.effect(move || {
+                Effect::Disposer(Box::new(move || {
+                    cleaned.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }))
+            })?;
+            self.entered
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .send(ctx.clone())
+                .unwrap_or_else(|_| panic!("observer dropped"));
+            let resume = self.resume.lock().unwrap().take().unwrap();
+            resume.await.unwrap();
+            let cleaned = self.cleaned.clone();
+            Ok(Effect::Disposer(Box::new(move || {
+                cleaned.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })))
+        })
+    }
+}
+
+#[tokio::test]
+async fn sealing_loading_subtree_rejects_new_factories_and_drains_existing_and_returned_effects() {
+    let root = Ctx::root().unwrap();
+    let captured = Arc::new(Mutex::new(None));
+    let parent = root.plugin(ParentContext(captured.clone()));
+    (&parent).await.unwrap();
+    let parent_ctx = captured.lock().unwrap().clone().unwrap();
+    let (entered, context) = oneshot::channel();
+    let (resume, waiting) = oneshot::channel();
+    let cleaned = Arc::new(AtomicUsize::new(0));
+    let view = parent_ctx.plugin(Loading {
+        entered: Mutex::new(Some(entered)),
+        resume: Mutex::new(Some(waiting)),
+        cleaned: cleaned.clone(),
+    });
+    let original = context.await.unwrap();
+    assert_eq!(view.state().state, FiberState::Loading);
+    parent.seal_effects();
+    drop(parent.shutdown());
+    let attempted = AtomicUsize::new(0);
+    assert!(matches!(
+        original.effect(|| {
+            attempted.fetch_add(1, Ordering::SeqCst);
+            Effect::Done
+        }),
+        Err(CordisError::Closed)
+    ));
+    assert_eq!(attempted.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        original
+            .isolate(TypeKey::of::<u8>(), "old-child")
+            .effect(|| Effect::Done),
+        Err(CordisError::Closed)
+    ));
+    assert!(original.provide(7_u8).is_err());
+    assert!(original.events().on(&original, listener).is_err());
+    let child = original.plugin(Noop);
+    assert!(matches!(
+        &*child.dispose().await.unwrap_err(),
+        CordisError::Closed
+    ));
+    assert_eq!(child.state().state, FiberState::Disposed);
+    assert_eq!(cleaned.load(Ordering::SeqCst), 0);
+    root.effect(|| Effect::Done).unwrap();
+    resume.send(()).unwrap();
+    view.shutdown().await.unwrap();
+    parent.shutdown().await.unwrap();
+    assert_eq!(cleaned.load(Ordering::SeqCst), 2);
+    root.shutdown().await.unwrap();
 }

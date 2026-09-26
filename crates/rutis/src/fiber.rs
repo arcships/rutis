@@ -164,6 +164,7 @@ pub(crate) struct FiberInner {
     pub parent_fiber: Option<Weak<FiberInner>>,
     pub children: Mutex<Vec<Weak<FiberInner>>>,
     pub closing: Arc<AtomicBool>,
+    pub effects_sealed: AtomicBool,
     pub event_flights: Mutex<usize>,
     pub event_flights_tx: watch::Sender<usize>,
     _event_flights_rx: watch::Receiver<usize>,
@@ -1046,6 +1047,7 @@ fn spawn_fiber_inner(
             parent_fiber,
             children: Mutex::new(Vec::new()),
             closing,
+            effects_sealed: AtomicBool::new(false),
             event_flights: Mutex::new(0),
             event_flights_tx,
             _event_flights_rx: event_flights_rx,
@@ -1147,6 +1149,17 @@ impl FiberView {
     /// [`Ctx::take_cleanup_errors`].
     pub fn take_cleanup_errors(&self) -> Vec<Arc<CordisError>> {
         std::mem::take(&mut *self.inner.drained_errors.lock().unwrap())
+    }
+
+    /// Permanently reject new effect factories in this fiber and descendants,
+    /// including a still-Loading apply. This does not cancel execution or
+    /// discard registered/returned effects. A supervised terminal stop calls
+    /// this before shutdown; ordinary shutdown retains cooperative Loading
+    /// cleanup registration. Keep the owning view through shutdown confirmation.
+    pub fn seal_effects(&self) {
+        let shared = self.inner.ctx.shared().clone();
+        let _admission = shared.admission.lock().unwrap();
+        self.inner.effects_sealed.store(true, Ordering::SeqCst);
     }
 
     /// Permanently close this fiber and its descendants. Admission closes at

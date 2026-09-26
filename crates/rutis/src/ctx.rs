@@ -212,6 +212,22 @@ impl Ctx {
         false
     }
 
+    fn subtree_effects_sealed(&self) -> bool {
+        let mut current = Some(self.clone());
+        while let Some(ctx) = current {
+            if ctx
+                .0
+                .fiber
+                .upgrade()
+                .is_some_and(|fiber| fiber.effects_sealed.load(Ordering::SeqCst))
+            {
+                return true;
+            }
+            current = ctx.0.parent.clone();
+        }
+        false
+    }
+
     pub(crate) fn registration_open(&self) -> Result<(), CordisError> {
         if self.0.shared.closing.load(Ordering::SeqCst) || self.subtree_closing() {
             Err(CordisError::Closed)
@@ -1021,7 +1037,11 @@ impl Ctx {
         let lease = {
             let _admission = self.0.shared.admission.lock().unwrap();
             let tr = fiber.transition.lock().unwrap();
+            // Supervised terminal closure can seal new factories even while
+            // apply is Loading. Ordinary shutdown preserves cooperative late
+            // cleanup registration; entered/returned effects always drain.
             if self.0.shared.closing.load(Ordering::SeqCst)
+                || self.subtree_effects_sealed()
                 || (self.subtree_closing() && tr.state != FiberState::Loading)
             {
                 return Err(CordisError::Closed);
