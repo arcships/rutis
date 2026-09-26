@@ -315,7 +315,7 @@ impl EventBus {
             if let Some(id) = key.instance_id() {
                 ctx.registration_preflight()?;
                 self.ensure_instance_ctx(ctx, id)?;
-            } else if ctx.registration_preflight().is_err() {
+            } else if ctx.dispatch_preflight().is_err() {
                 // Preserve the existing behavior of non-instance dispatches
                 // from inactive contexts; they simply have no observation.
                 return Ok(());

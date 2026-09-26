@@ -1,0 +1,23 @@
+[package]
+name = "rutis-sdk"
+description = "Shared Rust ABI and metadata for trusted rutis dylib plugins"
+edition.workspace = true
+version = "0.1.0"
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[lib]
+crate-type = ["dylib"]
+test = false
+doctest = false
+
+[dependencies]
+rutis = { path = "../rutis", version = "0.3.0" }
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true, features = ["full"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[build-dependencies]
+sha2 = "0.10"

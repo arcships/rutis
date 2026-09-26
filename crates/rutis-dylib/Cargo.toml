@@ -1,0 +1,26 @@
+[package]
+name = "rutis-dylib"
+description = "Optional loader for trusted rutis dylib plugins"
+edition.workspace = true
+version = "0.1.0"
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+rutis-sdk = { path = "../rutis-sdk", version = "0.1.0" }
+rutis = { path = "../rutis", version = "0.3.0" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+sha2 = "0.10"
+semver = "1"
+libc = "0.2"
+thiserror = { workspace = true }
+tempfile = "3"
+
+[dev-dependencies]
+tokio = { workspace = true }
