@@ -1,8 +1,12 @@
 # Linux 冻结进程与回收证据
 
+> 既有实验组件参考，不属于 #59 当前的实现计划或验收门槛。
+> 本文记录已提交组件；未提交的 epoch supervisor 未计入验收。
+> 当前工作范围见[简化设计](../docs/design-protocol-plugins-2026-09-25.md)。
+
 `process::FrozenProcess` 从 `SnapshotGroup` 启动真实 Rust/Node runtime，并在私有
-连接关闭后独立回收受管后代。它是 M3 的 OS 组件；完整 epoch supervisor、更新
-回滚和消费者清理屏障仍在开发，不能据此重开旧 instance 或宣布组恢复完成。
+连接关闭后独立回收受管后代。该组件的 OS receipt 不表示原生消费者清理完成，
+也不授权重开旧 instance。
 
 ## 启动与私有连接
 
@@ -57,13 +61,12 @@ OS worker 持有自己的 `SnapshotGroup`，Reaped 后才释放。错误、任�
 证明时，该租约保留在本 Host 生命周期的 quarantine 中；
 `quarantined_snapshots()` 只提供诊断路径，没有强制成功或清除隔离的 API。
 `ProcessStatus` 的 Starting/Running/Reaping/Reaped/FailedToLaunch/Quarantined
-是这个组件的观测状态，不是完整 supervisor 的恢复状态。
+只描述这个组件的观测状态。
 
 原生消费者另外拥有自己的快照租约，直到实际 disposer 完成才释放。因此 OS
 Reaped 可以先到，而消费者仍继续保留冻结目录。当前调用方必须显式管理这些
 消费者租约。[HostGraph 清理观察](dependency-cleanup.md) 已记录实际消费者代的
-清理结果；尚未实现 supervisor 自动持有全部旧成员/失效消费者租约、合并两道屏障
-与签发新代。丢失远端 native stop ACK 仍使 HostProxy stop 失败，
+清理结果。丢失远端 native stop ACK 仍使 HostProxy stop 失败，
 Reaped 不伪造该 ACK，不开放新的 instance 或 epoch。Host 原生 proxy 清理单独
 join 本地 SDK 结果，能在远端 ACK 丢失后真实完成；普通 stop 仍报告配对失败。
 
@@ -76,11 +79,10 @@ OS receipt 与绑定共享独立的 launch 身份，Host 按这个身份核对�
 独立任务在实际 OS receipt 后确认相同 epoch 已断连，才结算 broker 中以该死亡
 epoch 为 owner 的调用；`ReapedEpoch` 缓存完整身份、OS receipt 与结算数量。丢弃
 `EpochReaping` waiter 不停止结算，重复 join 返回同一结果。死亡进程只是 caller 时，
-其他存活 owner 的执行 pin 保留到实际 finished ACK，新代仍可因这份在途执行被
-拒绝。普通超时、连接关闭、未完成查询的 waiter 丢弃和 native stop 错误都不构成
-这份 OS 证明。原生消费者清理与全组恢复许可仍是另外的屏障。
+其他存活 owner 的执行 pin 保留到实际 finished ACK。普通超时、连接关闭、未完成
+查询的 waiter 丢弃和 native stop 错误都不构成这份 OS 证明。
 
-## 验收证据与剩余范围
+## 已验证组件行为
 
 Linux `native_runner_ipc` 的原有正常停止用例通过同一 helper 启动冻结 Rust/Node
 镜像，继续验证 hello、双向 DI、真实服务、延迟 Accept/activate ACK、正常 native
@@ -106,8 +108,4 @@ cleanup 和退出码。原有六项中另含 child-entry 与本地缺少 export 
 真实 runtime、双向调用和停止交错保持并发。child-entry 是子进程入口，不能另算
 一个独立运行时验收结果。
 
-M3 仍须完成：全组旧成员/消费者清理与 OS 回收的恢复屏障、死亡 owner 结算的完整
-跨语言故障交错、精确新 epoch、配置/代码/runner 更新及回滚、StopUnconfirmed 的
-显式等待/继续、RecoveryBlocked/Quarantined 管理与持久诊断，以及实际 OS 回收
-失败注入。这些证据覆盖 T20/T23 的部分平台行为，不宣称完整 T20、T23 或 M3
-通过，M0–M5 / T01–T24 的目标保持不变。
+这些是既有组件的局部证据，不表示完整部署或恢复系统已经验收，也不产生本轮待办。

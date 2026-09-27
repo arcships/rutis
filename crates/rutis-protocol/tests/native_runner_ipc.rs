@@ -577,7 +577,7 @@ impl Plugin for BlockedConsumer {
             .get_as::<rutis_protocol::imports::ObjectProxy>(self.key.clone())
             .is_some());
         *self.context.lock().unwrap() = Some(ctx.clone());
-        let snapshot = self.snapshot.lock().unwrap().take().unwrap();
+        let snapshot = self.snapshot.lock().unwrap().take();
         let entered = self.entered.lock().unwrap().take().unwrap();
         let resume = self.resume.lock().unwrap().take().unwrap();
         Box::pin(async move {
@@ -605,8 +605,30 @@ async fn frozen_runtime_reaps_detached_descendants_while_native_consumer_cleanup
         let host = objects.host();
         let graph = HostGraph::new(objects, identity("host")).unwrap();
         let root = Ctx::root().unwrap();
-        let mut node =
-            Process::launch(&host, "node", &snapshot.groups()["node"], Arc::default()).await;
+        let mut node = Process::launch_held_supervised(
+            &graph,
+            "node",
+            &snapshot.groups()["node"],
+            Arc::default(),
+            None,
+        )
+        .await;
+        assert!(
+            rutis_protocol::supervisor::EpochSupervisor::attach(
+                graph.clone(),
+                "rust",
+                snapshot.groups()["rust"].clone(),
+                node.process.clone(),
+                identity("node"),
+                &node.peer,
+            )
+            .is_err(),
+            "a different frozen group cannot certify this launch"
+        );
+        assert_eq!(
+            node.supervisor.as_ref().unwrap().status().phase,
+            rutis_protocol::supervisor::RecoveryPhase::Running
+        );
         let launch = Hello::prepared(
             &plan,
             "node",
@@ -629,7 +651,7 @@ async fn frozen_runtime_reaps_detached_descendants_while_native_consumer_cleanup
             &root,
             BlockedConsumer {
                 key: plan.export_key("node-provider", "rpc").unwrap(),
-                snapshot: Mutex::new(Some(snapshot.groups()["node"].clone())),
+                snapshot: Mutex::new(None),
                 entered: Mutex::new(Some(entered)),
                 resume: Mutex::new(Some(waiting)),
                 context: captured.clone(),
@@ -739,8 +761,29 @@ async fn frozen_runtime_reaps_detached_descendants_while_native_consumer_cleanup
         drop(snapshot);
         assert!(
             path.exists(),
-            "native consumer still owns the snapshot lease"
+            "supervisor automatically retains the native consumer snapshot lease"
         );
+        let cleanup = node.supervisor.as_ref().unwrap().cleanup();
+        match cleanup
+            .wait_until(tokio::time::Instant::now() + Duration::from_millis(10))
+            .await
+        {
+            rutis_protocol::supervisor::RecoveryWait::RecoveryBlocked(status) => {
+                assert_eq!(
+                    status.process.phase,
+                    rutis_protocol::process::ProcessPhase::Reaped
+                );
+                assert!(status.reaped.as_ref().unwrap().is_ok());
+                assert!(status.executions.is_empty());
+                assert!(status
+                    .consumers
+                    .iter()
+                    .any(|receipt| receipt.id() == consumer.view().id
+                        && receipt.generation() == 1
+                        && receipt.result().is_none()));
+            }
+            _ => panic!("a blocked native disposer cannot confirm epoch quiescence"),
+        }
         let mut stopping = consumer.stop();
         assert!(
             tokio::time::timeout(Duration::from_millis(10), &mut stopping)
@@ -757,6 +800,14 @@ async fn frozen_runtime_reaps_detached_descendants_while_native_consumer_cleanup
         stopping.await.unwrap();
         observed.wait().await.unwrap();
         provider.native().stop().await.unwrap();
+        let closed = tokio::time::timeout(Duration::from_secs(5), cleanup.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(closed.is_for(&graph));
+        assert_eq!(closed.identity(), &identity("node"));
+        assert!(closed.consumers().contains(&(consumer.view().id, 1)));
+        assert!(cleanup.wait().await.unwrap().is_for(&graph));
         assert!(
             provider.stop().await.is_err(),
             "OS proof does not fabricate a lost native stop ACK"
@@ -772,7 +823,7 @@ async fn frozen_runtime_reaps_detached_descendants_while_native_consumer_cleanup
         node.stderr.await.unwrap();
         assert!(
             !path.exists(),
-            "all explicit process and native snapshot leases ended"
+            "confirmed dual barriers released the automatic snapshot lease"
         );
     })
     .await
@@ -949,6 +1000,7 @@ fn handler(host: &Arc<HostObjects>, runtime: &str, fence: Arc<Fence>) -> Handler
 struct Process {
     process: ProcessHandle,
     epoch: EpochReaping,
+    supervisor: Option<rutis_protocol::supervisor::EpochSupervisor>,
     peer: Peer,
     records: tokio::sync::mpsc::UnboundedReceiver<Value>,
     stderr: tokio::task::JoinHandle<String>,
@@ -968,6 +1020,33 @@ impl Process {
         group: &SnapshotGroup,
         fence: Arc<Fence>,
         held: Option<(&'static str, Arc<Fence>)>,
+    ) -> Self {
+        Self::launch_inner(host, runtime, group, fence, held, None).await
+    }
+    async fn launch_held_supervised(
+        graph: &Arc<rutis_protocol::host::HostGraph>,
+        runtime: &str,
+        group: &SnapshotGroup,
+        fence: Arc<Fence>,
+        held: Option<(&'static str, Arc<Fence>)>,
+    ) -> Self {
+        Self::launch_inner(
+            &graph.objects().host(),
+            runtime,
+            group,
+            fence,
+            held,
+            Some(graph.clone()),
+        )
+        .await
+    }
+    async fn launch_inner(
+        host: &Arc<HostObjects>,
+        runtime: &str,
+        group: &SnapshotGroup,
+        fence: Arc<Fence>,
+        held: Option<(&'static str, Arc<Fence>)>,
+        supervised: Option<Arc<rutis_protocol::host::HostGraph>>,
     ) -> Self {
         let mut options = LaunchOptions::default();
         if runtime == "rust" {
@@ -1016,12 +1095,28 @@ impl Process {
         } else {
             Peer::start(stream, handler(host, runtime, fence))
         };
-        let epoch = process
-            .attach_epoch(host, identity(runtime), &peer)
-            .unwrap();
+        let supervisor = supervised.map(|graph| {
+            rutis_protocol::supervisor::EpochSupervisor::attach(
+                graph,
+                runtime,
+                group.clone(),
+                process.clone(),
+                identity(runtime),
+                &peer,
+            )
+            .unwrap()
+        });
+        let epoch = if let Some(supervisor) = &supervisor {
+            supervisor.reaping()
+        } else {
+            process
+                .attach_epoch(host, identity(runtime), &peer)
+                .unwrap()
+        };
         Self {
             process,
             epoch,
+            supervisor,
             peer,
             records,
             stderr,
@@ -1419,8 +1514,8 @@ async fn native_host_graph_waits_for_activate_ack_refreshes_real_keys_and_closes
         let root = Ctx::root().unwrap();
         let activate = Arc::new(Fence::default());
         activate.enabled.store(true, Ordering::SeqCst);
-        let mut rust = Process::launch_held(
-            &host,
+        let mut rust = Process::launch_held_supervised(
+            &graph,
             "rust",
             &snapshot.groups()["rust"],
             Arc::default(),
@@ -1610,13 +1705,39 @@ async fn native_host_graph_waits_for_activate_ack_refreshes_real_keys_and_closes
                 .await
                 .is_err()
         );
+        rust_consumer.stop().await.unwrap();
+        let epoch_cleanup = rust.supervisor.as_ref().unwrap().cleanup();
+        rust.finish().await;
+        match epoch_cleanup
+            .wait_until(tokio::time::Instant::now() + Duration::from_millis(10))
+            .await
+        {
+            rutis_protocol::supervisor::RecoveryWait::RecoveryBlocked(status) => {
+                assert!(status.reaped.as_ref().unwrap().is_ok());
+                assert!(status
+                    .members
+                    .iter()
+                    .any(|member| member.instance == "node-consumer"
+                        && member.cleanup.as_ref().is_some_and(|result| result.is_ok())
+                        && member.paired.is_none()));
+            }
+            _ => panic!("a live remote consumer still requires physical native confirmation"),
+        }
         stop_ack.resume.notify_one();
         stopping.await.unwrap();
+        let proof = tokio::time::timeout(Duration::from_secs(5), epoch_cleanup.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(proof.is_for(&graph));
+        assert_eq!(proof.identity(), &identity("rust"));
+        assert!(proof
+            .consumers()
+            .contains(&(node_consumer.native().view().id, 1)));
         graph.shutdown().await.unwrap();
         root.shutdown().await.unwrap();
         drop(rust_ready);
         drop(node_ready);
-        rust.finish().await;
         node.finish().await;
         drop(rust_provider);
         drop(rust_consumer);

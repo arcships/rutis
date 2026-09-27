@@ -24,8 +24,8 @@ apply 业务错误不会被冒充为 disposer 错误。下一代清理有独立 
 receipt 不保留 native view 的强引用；调用方仍须按原生 owning view 契约发起关闭。
 
 等待者取消不会取消真实清理，重复等待取得同一结果。实际 drain 被中断时保留
-abandoned 错误，不生成成功结果。观察器存在期间保留历史 receipt；生产 supervisor
-后续须在真实恢复屏障通过后退役这些记录，不能靠时间或列表为空清除失败。
+abandoned 错误，不生成成功结果。观察器存在期间保留历史 receipt，不能靠时间或
+列表为空清除失败。
 
 ## Host 接入与证据
 
@@ -41,5 +41,6 @@ rutis 的两个真实原生用例覆盖内部 child、两个隔离 scope、慢 d
 
 这是本仓库 rutis 的公开扩展，尚须随正式发行版本发布。Host proxy 的原生 effect
 等待独立本地 SDK 清理结果；普通 HostProxy stop 另要求远端 native stop ACK。
-OS receipt 不能替代本地错误或伪造 ACK。自动消费者快照租约、全组
-supervisor、显式新 epoch 与 StopUnconfirmed 管理尚待 M3，不能以本 API 重挂旧代。
+OS receipt 不能替代本地错误或伪造 ACK，本 API 不提供重挂旧代的入口。
+本文记录已验证的观察机制；当前工作区增强随 2026-09-27 全量回归通过，证据见[工作记录](../docs/protocol-plugin-implementation.md)。
+本 API 的存在不增加[当前交付范围](../docs/design-protocol-plugins-2026-09-25.md)。

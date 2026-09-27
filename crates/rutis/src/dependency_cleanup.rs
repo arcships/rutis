@@ -71,8 +71,19 @@ impl DependencyCleanup {
         cleanup.wait().await
     }
     pub fn consumers(&self) -> Vec<ConsumerCleanup> {
-        self.0.consumers.lock().unwrap().values().cloned().collect()
+        self.0
+            .consumers
+            .lock()
+            .unwrap()
+            .values()
+            .map(|consumer| consumer.cleanup.clone())
+            .collect()
     }
+}
+struct ConsumerRecord {
+    cleanup: ConsumerCleanup,
+    outcome: watch::Sender<Option<Outcome>>,
+    draining: bool,
 }
 pub(crate) struct Observer {
     root: Weak<FiberInner>,
@@ -80,7 +91,7 @@ pub(crate) struct Observer {
     root_token: CancellationToken,
     provider: watch::Sender<Option<ConsumerCleanup>>,
     providers: Mutex<HashSet<(PluginId, u64)>>,
-    consumers: Mutex<BTreeMap<(PluginId, u64), ConsumerCleanup>>,
+    consumers: Mutex<BTreeMap<(PluginId, u64), ConsumerRecord>>,
 }
 impl Observer {
     pub(crate) fn new(
@@ -97,12 +108,81 @@ impl Observer {
             consumers: Mutex::default(),
         })
     }
+    pub(crate) fn evicting(
+        &self,
+        quad: &(PluginId, u64, crate::TypeKey, Option<crate::key::ScopeId>),
+        consumers: &[Arc<FiberInner>],
+    ) {
+        if !self.providers.lock().unwrap().contains(&(quad.0, quad.1)) {
+            return;
+        }
+        for fiber in consumers {
+            if self
+                .root
+                .upgrade()
+                .is_some_and(|root| fiber.ctx.is_within(&root.ctx))
+            {
+                continue;
+            }
+            let generation = fiber.state_snapshot().generation;
+            let bound = fiber
+                .last_deps
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|deps| deps.contains(quad));
+            if bound && fiber.state_snapshot().generation == generation {
+                self.consumers
+                    .lock()
+                    .unwrap()
+                    .entry((fiber.id, generation))
+                    .or_insert_with(|| Self::consumer(fiber, generation));
+            }
+        }
+    }
+    fn consumer(fiber: &Arc<FiberInner>, generation: u64) -> ConsumerRecord {
+        let (outcome, receiver) = watch::channel(None);
+        ConsumerRecord {
+            cleanup: ConsumerCleanup {
+                id: fiber.id,
+                generation,
+                name: fiber.name.clone().into(),
+                outcome: receiver,
+            },
+            outcome,
+            draining: false,
+        }
+    }
     pub(crate) fn provider(&self, binding: &Binding) {
         if self.root_token.is_cancelled() {
             return;
         }
         if let (Some(root), Some(provider)) = (self.root.upgrade(), binding.provider.upgrade()) {
-            if provider.ctx.is_within(&root.ctx) {
+            let mut belongs = provider.ctx.is_within(&root.ctx);
+            if !belongs {
+                // A real consumer can publish another service, including from
+                // an internal child. Track before that binding becomes visible:
+                // its consumers may finish draining before this consumer does.
+                let providers = self.providers.lock().unwrap();
+                let mut ancestor = Some(provider);
+                while let Some(fiber) = ancestor {
+                    belongs = fiber
+                        .last_deps
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|deps| {
+                            deps.iter().any(|(id, generation, _, _)| {
+                                providers.contains(&(*id, *generation))
+                            })
+                        });
+                    if belongs {
+                        break;
+                    }
+                    ancestor = fiber.parent_fiber.as_ref().and_then(Weak::upgrade);
+                }
+            }
+            if belongs {
                 self.providers
                     .lock()
                     .unwrap()
@@ -139,32 +219,28 @@ impl Observer {
         {
             return None; // Internal children remain owned by native subtree cleanup.
         }
-        let deps = fiber.last_deps.lock().unwrap().clone()?;
+        let generation = fiber.state_snapshot().generation;
+        let key = (fiber.id, generation);
+        let already_captured = self.consumers.lock().unwrap().contains_key(&key);
+        let deps = fiber.last_deps.lock().unwrap().clone().unwrap_or_default();
         let providers = self.providers.lock().unwrap();
-        if !deps
-            .iter()
-            .any(|(id, generation, _, _)| providers.contains(&(*id, *generation)))
+        if !already_captured
+            && !deps
+                .iter()
+                .any(|(id, generation, _, _)| providers.contains(&(*id, *generation)))
         {
             return None;
         }
         drop(providers);
-        let generation = fiber.state_snapshot().generation;
         let mut consumers = self.consumers.lock().unwrap();
-        let key = (fiber.id, generation);
-        if consumers.contains_key(&key) {
+        let consumer = consumers
+            .entry(key)
+            .or_insert_with(|| Self::consumer(fiber, generation));
+        if consumer.draining {
             return None;
         }
-        let (outcome, receiver) = watch::channel(None);
-        consumers.insert(
-            key,
-            ConsumerCleanup {
-                id: fiber.id,
-                generation,
-                name: fiber.name.clone().into(),
-                outcome: receiver,
-            },
-        );
-        Some(outcome)
+        consumer.draining = true;
+        Some(consumer.outcome.clone())
     }
 }
 pub(crate) struct ConsumerDrain(pub(crate) Vec<watch::Sender<Option<Outcome>>>);

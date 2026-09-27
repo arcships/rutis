@@ -70,7 +70,7 @@ child 清理等待真实 handler、登记后代、独占 disposer 和远端撤�
 Rust 撤销任务 panic/失败和 TS ACK rejection 保存在导出表中；重复 join 仍报告
 错误。Cordis 原生 child dispose 会记录 disposer 错误而不拒绝其 Promise，SDK
 保留失败供 join 和托管根 stop 观察，不能把该 Promise 的完成当作清理成功证明。
-整体 StopUnconfirmed 与监督恢复屏障仍待 M3。
+清理未完成或失败仍保持关闭，不以关闭通知代替实际清理结果。
 
 ## 可执行证据
 
@@ -90,5 +90,5 @@ Rust `services` 另验证不属于托管根的 Ctx 被拒绝，停止普通 chil
 交给 Rust 原生消费者。暂停真实 Release ACK 时 child stop 不完成；已有登记后代
 继续持有 execution pin，随后慢 disposer 仍阻止 child stop。旧循环属性失效，
 provider 与消费者根保持开放，其他根对象仍可调用，结束后 pin 归零且 disposer
-只执行一次。它仍是私有 session fixture；更新恢复、双向独占清理的完整故障矩阵
-及最终 M0–M5 / T01–T24 验收尚未完成。
+只执行一次。它仍是私有 session fixture；当前范围还需在实际插件适配与基础事件
+路径验证，见[简化设计](../docs/design-protocol-plugins-2026-09-25.md)。

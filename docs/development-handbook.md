@@ -2,6 +2,8 @@
 
 本手册介绍插件的实现、服务调用、资源管理和运行控制。应用结构的设计方法见 [应用开发指南](development-guide.md)。
 
+在同一应用中接入 Rust/rutis 与 Node/Cordis 跨进程插件，见[跨进程插件开发指南](protocol-plugin-guide.md)。该指南包含源码接入、完整设置示例、端口声明和当前实验 API 的边界。
+
 ## 快速开始
 
 在 Rust 项目中添加依赖：

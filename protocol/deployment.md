@@ -1,15 +1,17 @@
 # 冻结计划中的根交付
 
+> 既有路由装配 API 参考。包部署和完整拓扑不是 #59 当前交付要求。
+> 当前范围见[简化设计](../docs/design-protocol-plugins-2026-09-25.md)。
+
 Rust `deployment::DeploymentObjects` 持有完整 `PreparedDeployment`，从冻结的 bundle
-原字节创建 `HostObjects`，选择每个消费者的完整 required 表。它是生产 Host 图的
-路由装配层，已接默认 Rust/Node 服务 driver 与首代 [HostProxy 原生图](host.md)；
-监督者的快照租约与恢复仍待接入。
+原字节创建 `HostObjects`，选择每个消费者的完整 required 表。它是既有 Host 图的
+路由装配层，已接默认 Rust/Node 服务 driver 与首代 [HostProxy 原生图](host.md)。
 
 ## Host 顺序
 
 1. `reserve(instance, activation)` 按 Host 顺序分配本代成员。每个 prepared group
    绑定一个 runtime/epoch，其他组不能借用同一 runtime 名称。当前只支持首代保留；
-   监督者尚未给出 cleanup/reaping 证明，因此没有 unchecked rebind API。
+   没有 unchecked rebind API。
 2. native Ready 后，把 runner 报告的完整 `ServiceTable` 交给 `stage`。检查完整
    provides 名称、精确契约、真实 owner 和每项原始 source；不能把一个服务的图
    冒充另一个服务。未启用的 provides 仍须满足声明，但不进入授权路由。
@@ -73,6 +75,6 @@ native adapter 选择。启动 apply 内执行 stateful query、循环对象和�
 装载，实际 Cordis 子进程使用 session fixture。该用例只支持冻结根装配；另一个
 `native_runner_ipc` 用例覆盖实际 frozen runner → RuntimeReady → HostProxy Active
 发布链，见 [Host 原生图](host.md)。事件能力在 metadata
-中通过完整 bundle 检查，但本用例没有 broker 事件，不计作 M4。
-[内部 child 创建者上下文](native-context.md) 已有后续冻结 runner 证据；单对象
-远端撤销、监督恢复、真实旧桥迁移和完整 T24 仍待验收。
+中通过完整 bundle 检查，但本用例没有 broker 事件。
+[内部 child 创建者上下文](native-context.md) 另有实际 runner 证据。这些是现有
+组件的验证结果，不替代实际插件适配与基础事件，也不增加交付任务。

@@ -3,7 +3,7 @@
 Rust `lifecycle::{Runner,NativeDriver,Hello,RuntimeReady}` 与 TS
 `lifecycle::{Runner,NativeModuleDriver}` 在真实 native fiber 外记录宿主意图。
 两端默认服务 driver 已能在私有帧连接中工作；首代 [Host 原生图](host.md) 已接入，
-supervisor 与完整迁移仍在开发，协议尚未冻结。
+实际设置服务适配与双向基础事件已在真实私有 IPC 验证，见[设置示例](settings-example.md)。当前范围见[简化设计](../docs/design-protocol-plugins-2026-09-25.md)。
 
 ## 引导
 
@@ -26,8 +26,7 @@ shutdown 预取消其 Ctx；单纯 `ctx.refresh()` 是异步重查，不能替�
 `NativeDriver::new` 保留无服务控制模式，拒绝对象/事件 capability 与命名服务。
 stream 必须来自宿主私有连接；不使用 stdout/stderr 承载协议。`serve` 在断连后等待
 成员清理，嵌入程序随后 shutdown 自己的 native root。`serve` 不负责创建或回收
-进程树；独立的 [Linux 冻结进程](process.md) 组件负责 OS receipt，完整 supervisor
-仍须合并原生消费者清理、OS 回收及恢复换代屏障。
+进程树。既有 [Linux 进程](process.md) 组件是独立实验 API，不构成本轮恢复任务。
 
 Node 的通用入口由 `npm --prefix protocol/ts run build` 生成
 `dist/src/node-runner.js`。包的 runner 导入该入口，宿主在 `SnapshotGroup::argv()` 后
@@ -86,8 +85,8 @@ stop 任务，全部 removal 先启动再等待，迟到采用须显式回滚。
 Cordis 4.0.1 的 native unload 会通过 logger 报告 disposer 错误，却可能成功返回
 dispose 等待。TS adapter 使用公开 logger exporter 保留当前成员及其子树在关闭
 阶段的 error 诊断，使 stop 失败并保持 Closing，禁止替换。作者在关闭阶段主动
-记录 error 也保守地归为未确认清理；这个机制不修改 Cordis。管理 timeout 和操作员
-处理仍需后续 StopUnconfirmed API，当前失败或卡住不会自动放行。
+记录 error 也保守地归为未确认清理；这个机制不修改 Cordis。当前失败或卡住
+保持关闭，不自动放行或替换。
 
 ## 当前能力边界与证据
 
@@ -106,7 +105,7 @@ runner，在原包删除后运行双向 DI、状态对象、循环属性、owner
 最初的用例直接操作控制层；
 后续 HostGraph 用例覆盖 RuntimeReady → HostProxy Active → activate ACK →
 availability/refresh，以及 Loading stop、迟到 activate ACK 和 Pending epoch 失效，
-见 [Host 原生图](host.md)。完整监督恢复和迁移仍待验收。
+见 [Host 原生图](host.md)。实际插件适配与基础事件仍待完成。
 
 `tests/lifecycle.rs` 使用真实 rutis Ctx、effect 与 native fiber 验证独立 RuntimeReady、
 一个成员 Loading 时另一个发布、构造/stop 交错、发布前拒绝、失效后旧 Ctx 闭锁、
@@ -122,5 +121,5 @@ Node executable、通用 SDK runner 与两个不同代码包，通过 fd 3 验�
 期间快成员发布、独立 native Ctx、stop、旧 Ctx 拒绝迟到 effect 和全组 cleanup。
 stdout 只承载诊断，fixture 的 stdin 仅控制慢 apply 何时返回。
 
-上述首代发布与命名服务调用已有实际证据；共享/单独完整拓扑、StopUnconfirmed
-管理等待、配置更新、故障恢复的消费者/OS 双屏障或真实旧插件迁移仍待验收。
+上述首次发布与命名服务调用已有实际证据；当前还需在真实插件场景验证基础事件
+与必要清理，不展开更新、恢复或布局比较。

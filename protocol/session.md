@@ -4,10 +4,10 @@
 `frame::Peer` / `Peer`。Rust `HostObjects` 是授权方，两端 `RuntimeObjects` 只保存
 本进程的实际 native 表、暂存图与已接收代理；作者不分配 grant、object id 或 token。
 
-这是 M1/M2 的可复用传输层。默认 Rust/Node native driver 已接命名服务传输并拒绝
+这是对象调用的可复用传输层。默认 Rust/Node native driver 已接命名服务传输并拒绝
 事件能力；首代 [HostProxy 原生图](host.md) 已接入。
 [内部 child 创建者上下文](native-context.md) 已保存在同一导出表并用于实际调度；
-单对象远端撤销已接入；更新恢复、事件和完整 T24 尚未验收。
+单对象远端撤销已接入；基础事件和实际设置服务适配见[事件](events.md)与[设置示例](settings-example.md)。
 
 ## 接入顺序
 
@@ -83,13 +83,13 @@ runtime 跟踪已 pin、运行中和完成待确认的执行。断连关闭 nati
 scopes，释放尚未执行的 admission pins；已经运行的任务仍等待后代完成后释放本地
 native pin。Host 丢失 owner ACK 时保留执行记录；绑定实际进程的
 [OS receipt](process.md) 到达后，只结算该死亡 owner 的执行。死亡 caller 的存活
-owner 执行仍等待实际 finished。全组恢复与 StopUnconfirmed 管理尚待 M3。
+owner 执行仍等待实际 finished。
 epoch 断连可以凭 Host 的撤销证据向存活的 owner
 释放 delivery pins，这不构成执行完成证据。
 
 HostGraph 另记录[真实原生消费者清理](dependency-cleanup.md)，保留 disposer
 失败和精确代身份。提供者停止成功、连接断开或 OS receipt 均不能替代这些
-实际清理结果；当前 stop 仍要求远端 ACK，完整恢复许可尚未接入。
+实际清理结果；当前 stop 仍要求远端 ACK。
 
 native 必要服务或依赖失效触发单次 closing 通知。接收 revoke 时同步关闭被撤销
 成员以及已绑定的依赖成员，旧原始 context 随即拒绝新 effect；不会在旧 id 重建。
@@ -121,6 +121,5 @@ Rust 还丢弃第一位 flush 等待者，再确认第二位仍等待同一实�
 结束后缓存关系失效、pin 归零、disposer 仅一次，provider/consumer 根均保持开放。
 
 该用例使用 SDK actor 和权威 broker，没有手工根 id/token；管理入口仍是明确标注的
-fixture，并非 frozen plan 到完整 HostProxy 的生产装配。它不替代整个 T01–T24、
-同组多个独立包的双语言最终验收、Linux descendant supervisor、真实旧桥迁移或
-最终 family/version 冻结。
+fixture。它证明基础对象互通，不替代实际插件适配与基础事件验证。
+当前交付条件见[简化设计](../docs/design-protocol-plugins-2026-09-25.md)。

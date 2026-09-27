@@ -50,6 +50,58 @@ fn probe(injects: Vec<TypeKey>) -> Probe {
 }
 
 #[tokio::test]
+async fn last_native_owner_drop_keeps_actual_cleanup_receipt_after_waiter_cancellation() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let root = Ctx::root().unwrap();
+        let member = ManagedActivation::mount(&root, probe(vec![])).unwrap();
+        member.view().await.unwrap();
+        let ctx = member.native_context().unwrap();
+        let cleanup = member.cleanup();
+        assert_eq!(cleanup.id(), member.view().id);
+        assert_eq!(cleanup.name(), "native-probe");
+        assert!(cleanup.result().is_none());
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (resume, waiting) = tokio::sync::oneshot::channel();
+        let resource = root
+            .effect(move || {
+                Effect::AsyncDisposer(Box::new(move || {
+                    Box::pin(async move {
+                        entered.send(()).unwrap();
+                        waiting.await.unwrap();
+                        Err(CordisError::InactiveEffect)
+                    })
+                }))
+            })
+            .unwrap();
+        assert!(member.own_disposers(vec![resource]).is_ok());
+        let receiver = cleanup.clone();
+        let (entered, started_waiter) = tokio::sync::oneshot::channel();
+        let abandoned = tokio::spawn(async move {
+            entered.send(()).unwrap();
+            receiver.wait().await
+        });
+        started_waiter.await.unwrap();
+        abandoned.abort();
+        let _ = abandoned.await;
+        drop(member);
+        started.await.unwrap();
+        assert!(ctx.effect(|| Effect::Done).is_err());
+        assert_eq!(cleanup.state().state, FiberState::Disposed);
+        assert!(
+            cleanup.result().is_none(),
+            "owned SDK disposer is still running"
+        );
+        resume.send(()).unwrap();
+        let error = cleanup.wait().await.unwrap_err();
+        assert!(Arc::ptr_eq(&error, &cleanup.wait().await.unwrap_err()));
+        assert!(cleanup.result().unwrap().is_err());
+        assert!(root.shutdown().await.is_err());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn closing_admission_synchronously_cancels_the_original_native_generation() {
     let root = Ctx::root().unwrap();
     let member = ManagedActivation::mount(&root, probe(vec![])).unwrap();

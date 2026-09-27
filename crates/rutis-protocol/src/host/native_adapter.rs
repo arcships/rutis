@@ -173,7 +173,10 @@ impl NativeControl {
             .lock()
             .unwrap()
             .dependency_cleanup
-            .push(cleanup);
+            .push(TrackedCleanup {
+                identity: self.graph.local_identity.clone(),
+                observation: cleanup,
+            });
         let cleanup = self.clone();
         ctx.effect_named("protocol native adapter cleanup", move || {
             Effect::AsyncDisposer(Box::new(move || {

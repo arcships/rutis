@@ -126,13 +126,15 @@ export class NativePorts {
     const requires = Object.fromEntries([...this.imports].map(([name, port]) => [name, port.contract]))
     if (canonical(provides) !== canonical(catalog.provides) || canonical(requires) !== canonical(catalog.requires)) fail('InterfaceMismatch', 'native ports differ from frozen factory service declarations')
   }
-  async mount<C>(parent: Context, plugin: Plugin.Object<C>, config: C, owner: Activation, values: Record<string, unknown>, caller: Caller, gate = new ActivationGate()): Promise<NativeServices<C>> {
+  async mount<C>(parent: Context, plugin: Plugin.Object<C>, config: C, owner: Activation, values: Record<string, unknown>, caller: Caller, gate = new ActivationGate(), localInjects: string[] = []): Promise<NativeServices<C>> {
     activation(owner); record(values)
     if (!gate.isOpen) fail('Unavailable', 'native bindings cannot be installed or reused')
     const required = [...this.imports.values()].map(port => port.native).sort()
+    const remoteNames = new Set([...required, ...[...this.exports.values()].map(port => port.native)])
+    if (new Set(localInjects).size !== localInjects.length || localInjects.some(name => !identifier(name) || remoteNames.has(name))) fail('InterfaceMismatch', 'invalid or overlapping local native dependencies')
     const inject = Inject.resolve(plugin.inject)
     const actual = Object.keys(inject).sort()
-    if (canonical(required) !== canonical(actual)) fail('InterfaceMismatch', 'native plugin injects differ from linked service ports')
+    if (canonical([...required, ...localInjects].sort()) !== canonical(actual)) fail('InterfaceMismatch', 'native plugin injects differ from declared remote and local dependencies')
     if (!sameNames(values, Object.fromEntries(this.imports))) fail('InterfaceMismatch', 'native required service table differs')
     const dependencies: Record<string, object> = Object.create(null)
     const checks: Record<string, () => boolean> = Object.create(null)

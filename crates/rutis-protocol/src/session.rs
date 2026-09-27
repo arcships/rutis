@@ -1333,12 +1333,14 @@ struct ProcessRegistration {
 pub struct HostObjects {
     bundles: Bundles,
     state: Mutex<HostState>,
+    execution_changed: tokio::sync::Notify,
 }
 impl HostObjects {
     pub fn new(bundles: Bundles) -> Arc<Self> {
         Arc::new(Self {
             bundles,
             state: Mutex::default(),
+            execution_changed: tokio::sync::Notify::new(),
         })
     }
     /// Pending proxies belong to their epoch before member apply can capture
@@ -1497,6 +1499,38 @@ impl HostObjects {
         Ok(())
     }
     #[cfg(target_os = "linux")]
+    pub(crate) fn epoch_executions(
+        &self,
+        identity: &RuntimeIdentity,
+    ) -> Vec<crate::broker::ExecutionRecord> {
+        self.state
+            .lock()
+            .unwrap()
+            .broker
+            .epoch_executions(&identity.runtime, identity.epoch)
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn wait_epoch_idle(&self, identity: &RuntimeIdentity) {
+        loop {
+            let changed = self.execution_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.epoch_executions(identity).is_empty() {
+                return;
+            }
+            changed.await;
+        }
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn is_reaped_epoch(&self, identity: &RuntimeIdentity) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .processes
+            .get(identity)
+            .is_some_and(|registration| registration.settled_calls.is_some())
+    }
+    #[cfg(target_os = "linux")]
     pub(crate) fn confirm_reaped_epoch(
         &self,
         identity: &RuntimeIdentity,
@@ -1520,6 +1554,8 @@ impl HostObjects {
             .broker
             .settle_reaped_epoch(&identity.runtime, identity.epoch)?;
         state.processes.get_mut(identity).unwrap().settled_calls = Some(count);
+        drop(state);
+        self.execution_changed.notify_waiters();
         Ok(count)
     }
     fn peer(&self, owner: &Activation) -> Result<Peer> {
@@ -2147,6 +2183,8 @@ impl HostObjects {
             )?;
             if let Err(error) = state.broker.open_scope(borrow.clone(), Some(root(&owner))) {
                 state.broker.finish_call(&owner, &sender, call)?;
+                drop(state);
+                self.execution_changed.notify_waiters();
                 return Err(error);
             }
             state.calls.insert(sender.clone(), call.0);
@@ -2162,6 +2200,8 @@ impl HostObjects {
                 Err(error) => {
                     state.broker.close_scope(&borrow);
                     state.broker.finish_call(&owner, &sender, call)?;
+                    drop(state);
+                    self.execution_changed.notify_waiters();
                     return Err(error);
                 }
             };
@@ -2176,6 +2216,8 @@ impl HostObjects {
                 Err(error) => {
                     state.broker.close_scope(&borrow);
                     state.broker.finish_call(&owner, &sender, call)?;
+                    drop(state);
+                    self.execution_changed.notify_waiters();
                     return Err(error);
                 }
             };
@@ -2256,6 +2298,7 @@ impl HostObjects {
                 state.broker.close_scope(&scopes.borrow);
                 state.broker.finish_call(&owner, &sender, call)?;
             }
+            host.execution_changed.notify_waiters();
             result.map(wire)
         }))
     }

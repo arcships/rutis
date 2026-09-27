@@ -1,7 +1,10 @@
 # 实验包与部署 prepare
 
+> 既有实验 API 参考，不属于 #59 当前的交付要求。
+> 当前范围见[简化设计](../docs/design-protocol-plugins-2026-09-25.md)。
+
 `rutis-protocol::prepare` 读取版本目录，验证全部文件和依赖图，产生只读的
-`PreparedDeployment`。这个格式属于 #59 的实验实现，尚未冻结为发布接口。
+`PreparedDeployment`。这个格式尚未冻结为发布接口。
 prepare 不启动 executable、不 import Node entry，也不构造 Rust factory 或插件。
 
 ```sh
@@ -11,7 +14,7 @@ cargo run -p rutis-protocol --bin rutis-protocol-prepare -- deployment.json
 CLI 输出部署原字节摘要、组的 trust/capabilities 与 image/environment/code 摘要、
 成员、精确路由、导出名、event 权限、缺失路由和拓扑信息；不输出配置值。缺失路由
 留在计划里供原生 Pending 使用。拓扑信息不是
-等待全组成员 Active 的屏障；实际 RuntimeReady 和成员发布协议仍待 runner 接入。
+等待全组成员 Active 的屏障。实际发布由[生命周期控制](lifecycle.md)处理。
 
 ## 包目录
 
@@ -113,7 +116,7 @@ framework、environment 和 capabilities 精确相同；不兼容成员或空组
 
 包的 events 声明 `{bundle, event, publish, subscribe}`；实例的 events 声明
 `{scope, publish, subscribe}`。publish/subscribe 为 parallel/serial 列表，部署只能
-缩减包允许的模式。scope 当前冻结为宿主逻辑名称；M4 的真实原生子树、列表和 ready
+缩减包允许的模式。scope 当前冻结为宿主逻辑名称；真实原生子树、列表和 ready
 映射尚未完成，不能把该字符串准入当作运行期事件作用域证据。
 
 ## Rust 注册表与启动边界
@@ -132,7 +135,7 @@ effect 与清理由 rutis native fiber 执行。失效后不能自动重入旧 a
 另行暂存导出，等待 HostActive ACK 后发布。相同 catalog 也不能代替实际 native 服务
 适配器、参数/结果 codec 和依赖绑定的验证。
 
-## 冻结与后续启动
+## 现有快照接口
 
 配置、manifest 原字节、artifact 字节、bundle 和路由在 prepare 后保持不变。
 `verify_unchanged()` 会重读版本目录，拒绝 manifest、库存、路径、可执行标志或摘要
@@ -145,11 +148,10 @@ hardlink 复用。每组建立一份 dependency tree，各包的 dependency 链�
 canonical tree，保持实际 Cordis/SDK 模块身份。相同包快照的多个实例共享代码目录，
 配置仍各自独立。链接不会指回原包；原包删除后，已准入快照仍可使用。
 
-生产启动必须使用 `SnapshotGroup::argv()` 的快照路径，而不是
+使用本组件启动时应使用 `SnapshotGroup::argv()` 的快照路径，而不是
 `PreparedGroup::argv()` 的原路径。group/member clone 持有快照租约；
-`Snapshot::cleanup()` 拒绝删除仍被租用的树。supervisor 必须直到进程与后代回收和
-native consumer cleanup 都完成后才释放租约。目录权限与只读文件不是同 uid 插件的
-OS 沙箱，也不代替真实监督恢复。
+`Snapshot::cleanup()` 拒绝删除仍被租用的树。持有该树的进程或消费者仍在使用时，
+调用方不能释放其租约。目录权限与只读文件不提供同 uid 插件的 OS 隔离。
 
 TS SDK 的 `npm --prefix protocol/ts run build` 生成 `dist/src` 和 `dist/generated` 的
 JavaScript/声明文件，并把 `.ts` 相对导入改为 `.js`。这些输出可进入包的 dependency
@@ -158,5 +160,4 @@ JavaScript/声明文件，并把 `.ts` 相对导入改为 `.js`。这些输出�
 快照 conformance 测试从删除原目录后的冻结文件启动实际 Node executable、Cordis
 4.0.1 与编译后的本仓库 SDK，确认两个不同代码包共享同一框架类、内部 alias 保持
 身份，并分别装载和清理 native 实例。它是固定启动 fixture，未实现 private IPC
-生命周期。生产多成员 runner、RuntimeReady/发布屏障、监督恢复与真实旧插件迁移仍
-在开发，当前 CLI 的计划不能直接作为完成部署的证据。
+生命周期。当前 CLI 的计划不能直接作为完成部署的证据，也不构成本轮前置要求。

@@ -302,22 +302,35 @@ impl Registry {
         key: &TypeKey,
         quad: (PluginId, u64, TypeKey, Option<ScopeId>),
     ) -> Vec<Arc<FiberInner>> {
-        let index = self.inject_index.lock().unwrap();
-        let Some(list) = index.get(key) else {
-            return Vec::new();
+        let consumers = {
+            let index = self.inject_index.lock().unwrap();
+            let Some(list) = index.get(key) else {
+                return Vec::new();
+            };
+            list.iter()
+                .filter_map(|weak| {
+                    let fiber = weak.upgrade()?;
+                    let bound = fiber
+                        .last_deps
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|deps| deps.contains(&quad));
+                    bound.then_some(fiber)
+                })
+                .collect::<Vec<_>>()
         };
-        list.iter()
-            .filter_map(|weak| {
-                let fiber = weak.upgrade()?;
-                let bound = fiber
-                    .last_deps
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .is_some_and(|deps| deps.contains(&quad));
-                bound.then_some(fiber)
-            })
-            .collect()
+        let observers = self
+            .cleanup_observers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>();
+        for observer in observers {
+            observer.evicting(&quad, &consumers);
+        }
+        consumers
     }
 
     pub(crate) fn register_inject(&self, key: TypeKey, fiber: &Arc<FiberInner>) {

@@ -4,7 +4,7 @@ Rust `services::{Bundles,NativePorts,ServiceTable,StagedServices}` 与 TS `servi
 把精确 bundle、wire 服务名与本地原生服务键绑定。当前实现是生产装配所需的 SDK
 基础；默认生命周期 driver、首代 [HostProxy 原生图](host.md) 与
 [Host native export adapter](native-adapters.md) 已通过实际冻结子进程验证。
-监督恢复和完整迁移仍待验收，不能用这些 API 或单元测试宣布 M2 完成。
+实际设置服务适配和双向基础事件已在真实私有 IPC 验证，见[设置示例](settings-example.md)与[事件](events.md)。
 
 ## 本地绑定与装载
 
@@ -43,7 +43,7 @@ imports 的根 scope 同时必须绑定本代 gate。默认 driver 已接这些�
 两端管理器记录传入 apply 的原始 Ctx/Context。Rust gate 使用 native view 的弱引用，
 close 在调用点同步调用公开 `FiberView.shutdown`，而非仅取消 token 或排队 refresh。
 Loading 时先调用本仓库 rutis 的公开 `FiberView.seal_effects`，普通 shutdown 的
-协作清理语义保持原样；详见 [M0 补查与维护责任](../docs/protocol-plugin-implementation.md#m0-补查loading-子树的公开-effect-闭锁扩展)。
+协作清理语义保持原样；详见[原生适配与维护责任](../docs/protocol-plugin-implementation.md#来源与维护责任)。
 业务 apply 在 native view 完成绑定后才取得 Ctx，避免多 worker 装载/stop 竞争窗口。
 已经进入且失效的成员终态为 Disposed；尚未进入的缺依赖成员仍可 Pending 等待首次
 宿主授权装载。stop join native 清理及全部 import providers，丢弃 waiter 不放弃清理。
@@ -67,7 +67,7 @@ foreign 属性只带原接收证明，不能增加第三方转发能力；最终
 
 Rust `offer_table` 校验整张表，再在单次外层 broker 事务中准入所有服务，包括多个
 bundle。最后一图被拒绝时，前面图的对象视图、delivery id 和授权都不提交。
-当前事务通过账本复制实现，开销仍需 T24 测量，不能推断达到性能目标。
+当前事务通过账本复制实现，没有给出性能保证。
 
 owner 的 `StagedServices.commit` 保留私有 native manifest，先检查全部 proposed
 graphs 的 root、对象、精确 view、快照和 scope，再转换第一个 staging pin。
@@ -81,7 +81,7 @@ Host 必须在 owner 确认 pin 后才暴露 grants，失败时撤销 broker 的
 同一原生对象表、同一 bundle 的已登记 dispatchers 可以合并到调度端；合并不签发
 grants，也不能扩展 view。默认 driver 与 Host SDK 的 dispatcher registry 已按精确
 bundle 保存服务表，prepared route source 经独立 stage 和 broker 授权绑定。首代
-Host 图的完整多 bundle 拓扑仍需验证，不能忽略 source 来绕过授权。
+已有 Host 路由仍按完整 source 验证授权，不能忽略 source 来绕过检查。
 
 ## 当前验证边界
 
@@ -98,5 +98,6 @@ Host broker；不能把这些测试计作私有 IPC 的完整命名服务发布�
 两端消费同一 `services-corpus.json` 的 12 个合法/非法服务表用例。
 既有 `objects_ipc` 继续提供真实私有 fd 的跨语言对象调用证据。
 `native_runner_ipc` 已验证首代 instance/native HostActive 发布、原生 Pending 业务图
-和[内部 child 创建者 Ctx](native-context.md)。单对象远端撤销、完整拓扑、迁移/恢复和 T01–T24 全部运行时
-证据仍未完成，原设计范围保持不变。
+和[内部 child 创建者 Ctx](native-context.md)。[现有设置服务适配](settings-example.md)
+与[基础事件](events.md)已完成真实私有 IPC 验证；接入方式和当前入口边界见
+[开发指南](../docs/protocol-plugin-guide.md)。

@@ -11,6 +11,14 @@ pub enum DeliveryState {
     Released,
     Revoked,
 }
+
+/// Actual execution still awaiting its owner completion, never a deadline guess.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionRecord {
+    pub caller: Activation,
+    pub call: Sequence,
+    pub object: ObjectIdentity,
+}
 impl DeliveryState {
     fn terminal(self) -> bool {
         matches!(self, Self::Released | Self::Revoked)
@@ -62,6 +70,20 @@ fn error(code: ErrorCode, message: &str) -> ProtocolError {
 }
 
 impl Broker {
+    pub(crate) fn epoch_executions(&self, runtime: &str, epoch: Sequence) -> Vec<ExecutionRecord> {
+        self.calls
+            .iter()
+            .filter(|((caller, _), object)| {
+                (caller.runtime == runtime && caller.epoch == epoch)
+                    || (object.owner.runtime == runtime && object.owner.epoch == epoch)
+            })
+            .map(|((caller, call), object)| ExecutionRecord {
+                caller: caller.clone(),
+                call: *call,
+                object: object.clone(),
+            })
+            .collect()
+    }
     /// One named service table can contain several exact bundles. Admission is
     /// atomic across all its roots; a rejected last root leaves no earlier
     /// grants, object views or recipient sequence allocations behind.
@@ -912,6 +934,10 @@ mod reaping_tests {
         assert_eq!(broker.pins(&objects[0]), (0, 0));
         assert_eq!(broker.pins(&objects[1]), (0, 1));
         assert_eq!(broker.settle_reaped_epoch("dead", Sequence(1)).unwrap(), 0);
+        let residual = broker.epoch_executions("dead", Sequence(1));
+        assert_eq!(residual.len(), 1);
+        assert_eq!(residual[0].caller, dead);
+        assert_eq!(residual[0].object, objects[1]);
         let next = Activation {
             epoch: Sequence(2),
             ..dead.clone()
@@ -920,6 +946,7 @@ mod reaping_tests {
         assert!(broker.finish_call(&dead, &dead, Sequence(1)).is_err());
         assert_eq!(broker.pins(&objects[1]), (0, 1));
         broker.finish_call(&live, &dead, Sequence(1)).unwrap();
+        assert!(broker.epoch_executions("dead", Sequence(1)).is_empty());
         broker.start_activation(next).unwrap();
         broker.finish_call(&dead, &client, Sequence(1)).unwrap();
         assert_eq!(broker.pins(&objects[0]), (0, 0));

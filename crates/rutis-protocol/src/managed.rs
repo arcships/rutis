@@ -289,6 +289,46 @@ impl<F: PluginFactory<C>, C: Send + Sync + 'static> PluginFactory<C> for Managed
 type StopResult = Result<(), Arc<CordisError>>;
 pub(crate) type NativeEnter = Arc<dyn Fn(&Ctx) -> Result<(), CordisError> + Send + Sync>;
 
+/// Read-only confirmation of actual native shutdown and owned SDK disposers.
+/// It neither owns the native view nor drives shutdown. Last owner Drop still
+/// starts the same independent cleanup that an explicit stop would join.
+#[derive(Clone)]
+pub struct ManagedCleanup {
+    id: rutis::PluginId,
+    name: Arc<str>,
+    state: watch::Receiver<rutis::Snapshot>,
+    completion: watch::Receiver<Option<StopResult>>,
+}
+impl ManagedCleanup {
+    pub fn id(&self) -> rutis::PluginId {
+        self.id
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn state(&self) -> rutis::Snapshot {
+        self.state.borrow().clone()
+    }
+    pub fn result(&self) -> Option<StopResult> {
+        self.completion.borrow().clone()
+    }
+    pub async fn wait(&self) -> StopResult {
+        Self::join(self.completion.clone()).await
+    }
+    async fn join(mut completion: watch::Receiver<Option<StopResult>>) -> StopResult {
+        loop {
+            if let Some(result) = completion.borrow_and_update().clone() {
+                return result;
+            }
+            completion.changed().await.map_err(|_| {
+                Arc::new(CordisError::PluginFailed(
+                    "managed native cleanup confirmation lost".into(),
+                ))
+            })?;
+        }
+    }
+}
+
 pub struct ManagedActivation {
     view: Arc<FiberView>,
     gate: ActivationGate,
@@ -296,6 +336,8 @@ pub struct ManagedActivation {
     context: watch::Receiver<Option<Ctx>>,
     handle: Handle,
     stop: Mutex<Option<watch::Receiver<Option<StopResult>>>>,
+    cleanup: ManagedCleanup,
+    complete: watch::Sender<Option<StopResult>>,
 }
 
 impl ManagedActivation {
@@ -387,6 +429,13 @@ impl ManagedActivation {
         let (context_tx, context) = watch::channel(None);
         let view = Arc::new(mount(&isolated, gate.clone(), key, context_tx));
         gate.bind_native(&view);
+        let (complete, completion) = watch::channel(None);
+        let cleanup = ManagedCleanup {
+            id: view.id,
+            name: view.name().into(),
+            state: view.watch(),
+            completion,
+        };
         Ok(Self {
             view,
             gate,
@@ -394,6 +443,8 @@ impl ManagedActivation {
             context,
             handle: parent.handle().clone(),
             stop: Mutex::new(None),
+            cleanup,
+            complete,
         })
     }
 
@@ -408,6 +459,9 @@ impl ManagedActivation {
     /// check the gate. This does not manufacture an SDK replacement context.
     pub fn native_context(&self) -> Option<Ctx> {
         self.context.borrow().clone()
+    }
+    pub fn cleanup(&self) -> ManagedCleanup {
+        self.cleanup.clone()
     }
     /// Import providers are isolated on the runtime parent before native mount.
     /// Their ownership joins this activation's confirmation, including when a
@@ -433,8 +487,8 @@ impl ManagedActivation {
                 .into_iter()
                 .map(Disposer::dispose)
                 .collect();
-            let (tx, rx) = watch::channel(None);
-            *stop = Some(rx);
+            let tx = self.complete.clone();
+            *stop = Some(self.cleanup.completion.clone());
             self.handle.spawn(async move {
                 let mut errors = Vec::new();
                 if let Err(error) = cleanup.await {
@@ -453,16 +507,12 @@ impl ManagedActivation {
                 tx.send_replace(Some(result));
             });
         }
-        let mut rx = stop.as_ref().unwrap().clone();
-        Box::pin(async move {
-            loop {
-                if let Some(result) = rx.borrow_and_update().clone() {
-                    return result;
-                }
-                rx.changed()
-                    .await
-                    .expect("managed stop task must deliver its result");
-            }
-        })
+        let rx = stop.as_ref().unwrap().clone();
+        Box::pin(ManagedCleanup::join(rx))
+    }
+}
+impl Drop for ManagedActivation {
+    fn drop(&mut self) {
+        drop(self.stop());
     }
 }

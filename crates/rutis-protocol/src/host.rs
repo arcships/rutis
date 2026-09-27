@@ -9,7 +9,7 @@ use crate::{
     identity::{Activation, Sequence},
     imports::ObjectProxy,
     lifecycle::{ready_key, Phase, RuntimeIdentity, RuntimeReady, Status},
-    managed::{ActivationGate, ManagedActivation},
+    managed::{ActivationGate, ManagedActivation, ManagedCleanup},
     services::ServiceTable,
     session::{RootDelivery, RuntimeIdentity as ObjectIdentity, RuntimeObjects},
 };
@@ -19,7 +19,7 @@ use rutis::{
 };
 use serde_json::json;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, Weak,
@@ -46,9 +46,117 @@ type Publication = std::result::Result<Arc<ServiceTable>, ProtocolError>;
 struct GraphState {
     next: BTreeMap<ObjectIdentity, u64>,
     next_local: u64,
-    slots: BTreeMap<String, Weak<Control>>,
+    slots: BTreeMap<String, ProxySlot>,
     native_slots: BTreeMap<String, Weak<native_adapter::NativeControl>>,
-    dependency_cleanup: Vec<DependencyCleanup>,
+    dependency_cleanup: Vec<TrackedCleanup>,
+    closing_epochs: BTreeSet<ObjectIdentity>,
+    #[cfg(target_os = "linux")]
+    epoch_cleanup: BTreeMap<ObjectIdentity, EpochNativeCleanup>,
+    #[cfg(target_os = "linux")]
+    supervised_epochs: BTreeMap<ObjectIdentity, BTreeSet<String>>,
+}
+#[derive(Clone)]
+struct ProxySlot {
+    identity: ObjectIdentity,
+    control: Weak<Control>,
+    mounted: watch::Receiver<Option<Result<ManagedCleanup>>>,
+    paired: watch::Receiver<Option<Confirmation>>,
+}
+#[derive(Clone)]
+struct TrackedCleanup {
+    identity: ObjectIdentity,
+    observation: DependencyCleanup,
+}
+async fn join_record<T: Clone>(
+    mut record: watch::Receiver<Option<Result<T>>>,
+    lost: &'static str,
+) -> Result<T> {
+    loop {
+        if let Some(result) = record.borrow_and_update().clone() {
+            return result;
+        }
+        record
+            .changed()
+            .await
+            .map_err(|_| fail(ErrorCode::Unavailable, lost))?;
+    }
+}
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub(crate) struct EpochNativeCleanup {
+    graph: Weak<HostGraph>,
+    identity: ObjectIdentity,
+    members: Vec<(String, ProxySlot)>,
+    consumers: watch::Receiver<Vec<ConsumerCleanup>>,
+    complete: watch::Receiver<Option<Confirmation>>,
+}
+#[cfg(target_os = "linux")]
+pub(crate) struct NativeMemberRecord {
+    pub instance: String,
+    pub identity: ObjectIdentity,
+    pub mounted: Option<Result<ManagedCleanup>>,
+    pub paired: Option<Confirmation>,
+}
+#[cfg(target_os = "linux")]
+impl EpochNativeCleanup {
+    pub(crate) fn members(&self) -> Vec<NativeMemberRecord> {
+        let mut members = self.members.iter().cloned().collect::<BTreeMap<_, _>>();
+        if let Some(graph) = self.graph.upgrade() {
+            let consumers = self.consumers();
+            for (name, slot) in &graph.state.lock().unwrap().slots {
+                let related = slot.mounted.borrow().as_ref().is_some_and(|result| {
+                    result.as_ref().is_ok_and(|member| {
+                        consumers.iter().any(|consumer| {
+                            consumer.id() == member.id()
+                                && consumer.generation() == member.state().generation
+                        })
+                    })
+                });
+                if related {
+                    members.entry(name.clone()).or_insert_with(|| slot.clone());
+                }
+            }
+        }
+        members
+            .into_iter()
+            .map(|(instance, slot)| NativeMemberRecord {
+                instance,
+                identity: slot.identity,
+                mounted: slot.mounted.borrow().clone(),
+                paired: slot.paired.borrow().clone(),
+            })
+            .collect()
+    }
+    pub(crate) fn consumers(&self) -> Vec<ConsumerCleanup> {
+        let mut consumers = self
+            .consumers
+            .borrow()
+            .iter()
+            .map(|consumer| ((consumer.id(), consumer.generation()), consumer.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(graph) = self.graph.upgrade() {
+            let observations = graph
+                .state
+                .lock()
+                .unwrap()
+                .dependency_cleanup
+                .iter()
+                .filter(|tracked| tracked.identity == self.identity)
+                .map(|tracked| tracked.observation.clone())
+                .collect::<Vec<_>>();
+            for observation in observations {
+                for consumer in observation.consumers() {
+                    consumers
+                        .entry((consumer.id(), consumer.generation()))
+                        .or_insert(consumer);
+                }
+            }
+        }
+        consumers.into_values().collect()
+    }
+    pub(crate) async fn wait(&self) -> Confirmation {
+        join_record(self.complete.clone(), "epoch native cleanup task lost").await
+    }
 }
 /// Construct proxies before RuntimeReady. Native injection keeps missing routes
 /// Pending; no member start waits for the rest of its runtime group.
@@ -104,13 +212,186 @@ impl HostGraph {
         let observations = self.state.lock().unwrap().dependency_cleanup.clone();
         let mut consumers = BTreeMap::new();
         for observation in observations {
-            for consumer in observation.consumers() {
+            for consumer in observation.observation.consumers() {
                 consumers
                     .entry((consumer.id(), consumer.generation()))
                     .or_insert(consumer);
             }
         }
         consumers.into_values().collect()
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn supervise_epoch(&self, identity: &ObjectIdentity, group: &str) -> Result<()> {
+        let members = self
+            .objects
+            .plan()
+            .groups()
+            .get(group)
+            .ok_or_else(|| fail(ErrorCode::InvalidParams, "unknown supervised group"))?
+            .members()
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut state = self.state.lock().unwrap();
+        if state.closing_epochs.contains(identity) || state.supervised_epochs.contains_key(identity)
+        {
+            return Err(fail(
+                ErrorCode::ScopeClosed,
+                "epoch already closed or supervised",
+            ));
+        }
+        if state
+            .slots
+            .iter()
+            .any(|(name, slot)| &slot.identity == identity && !members.contains(name))
+        {
+            return Err(fail(
+                ErrorCode::InterfaceMismatch,
+                "native members differ from supervised group",
+            ));
+        }
+        state.supervised_epochs.insert(identity.clone(), members);
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn close_epoch(self: &Arc<Self>, identity: &ObjectIdentity) -> EpochNativeCleanup {
+        let (cleanup, completed, recorded) = {
+            let mut state = self.state.lock().unwrap();
+            if let Some(cleanup) = state.epoch_cleanup.get(identity) {
+                return cleanup.clone();
+            }
+            state.closing_epochs.insert(identity.clone());
+            let (completed, complete) = watch::channel(None);
+            let (recorded, consumers) = watch::channel(Vec::new());
+            let cleanup = EpochNativeCleanup {
+                graph: Arc::downgrade(self),
+                identity: identity.clone(),
+                members: state
+                    .slots
+                    .iter()
+                    .filter(|(_, slot)| &slot.identity == identity)
+                    .map(|(name, slot)| (name.clone(), slot.clone()))
+                    .collect(),
+                consumers,
+                complete,
+            };
+            state
+                .epoch_cleanup
+                .insert(identity.clone(), cleanup.clone());
+            (cleanup, completed, recorded)
+        };
+        for (_, slot) in &cleanup.members {
+            if let Some(control) = slot.control.upgrade() {
+                control.close_intent();
+                if let Some(member) = control.native.lock().unwrap().upgrade() {
+                    drop(member.stop());
+                }
+            }
+        }
+        let graph = self.clone();
+        let identity = identity.clone();
+        let joined = cleanup.clone();
+        tokio::spawn(async move {
+            let mut errors = Vec::new();
+            for (_, slot) in &joined.members {
+                match join_record(slot.mounted.clone(), "native mount confirmation lost").await {
+                    Ok(member) => {
+                        if let Err(error) = member.wait().await {
+                            errors.push(native(error));
+                        }
+                    }
+                    Err(error) => errors.push(error),
+                }
+            }
+            // Mount admission is sealed and all owning native receipts have
+            // completed. An enter racing with close is now included too.
+            let observations = graph
+                .state
+                .lock()
+                .unwrap()
+                .dependency_cleanup
+                .iter()
+                .filter(|tracked| tracked.identity == identity)
+                .map(|tracked| tracked.observation.clone())
+                .collect::<Vec<_>>();
+            let mut consumers = BTreeMap::new();
+            for observation in observations {
+                if let Err(error) = observation.wait_provider().await {
+                    errors.push(native(error));
+                }
+                for consumer in observation.consumers() {
+                    consumers
+                        .entry((consumer.id(), consumer.generation()))
+                        .or_insert(consumer);
+                }
+            }
+            let consumers = consumers.into_values().collect::<Vec<_>>();
+            recorded.send_replace(consumers.clone());
+            for consumer in &consumers {
+                if let Err(error) = consumer.wait().await {
+                    errors.push(native(format!(
+                        "consumer {:?} generation {} ({}): {error}",
+                        consumer.id(),
+                        consumer.generation(),
+                        consumer.name()
+                    )));
+                }
+            }
+            // A consumer in another runtime also owns remote native cleanup.
+            // Its local proxy drain alone cannot certify that remote disposer.
+            let slots = graph
+                .state
+                .lock()
+                .unwrap()
+                .slots
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            for slot in slots {
+                if slot.identity == identity {
+                    continue;
+                }
+                let member =
+                    match join_record(slot.mounted.clone(), "native mount confirmation lost").await
+                    {
+                        Ok(member) => member,
+                        Err(error) => {
+                            errors.push(error);
+                            continue;
+                        }
+                    };
+                if !consumers.iter().any(|consumer| {
+                    consumer.id() == member.id()
+                        && consumer.generation() == member.state().generation
+                }) {
+                    continue;
+                }
+                let local = member.wait().await;
+                if let Err(error) = &local {
+                    errors.push(native(error));
+                }
+                if let Err(error) = join_record(slot.paired, "paired stop confirmation lost").await
+                {
+                    if local.is_err() || !graph.objects.host().is_reaped_epoch(&slot.identity) {
+                        errors.push(error);
+                    }
+                }
+            }
+            let result = if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(fail(
+                    ErrorCode::Business,
+                    format!(
+                        "{} epoch native cleanup failures: {}",
+                        errors.len(),
+                        errors[0]
+                    ),
+                ))
+            };
+            completed.send_replace(Some(result));
+        });
+        cleanup
     }
     /// Identity is the supervisor's successful hello identity, not configuration.
     pub fn mount(
@@ -142,6 +423,13 @@ impl HostGraph {
         }
         let gate = ActivationGate::default();
         let (published, publication) = watch::channel(None);
+        let (paired_complete, paired) = watch::channel(None);
+        let (local_complete, local_stop) = watch::channel(None);
+        let (mounted_tx, mounted) = watch::channel(None);
+        let epoch = ObjectIdentity {
+            runtime: identity.runtime.clone(),
+            epoch: identity.epoch,
+        };
         let control = Arc::new(Control {
             graph: self.clone(),
             instance: instance.into(),
@@ -149,7 +437,10 @@ impl HostGraph {
             gate: gate.clone(),
             available: AtomicBool::new(false),
             closed: AtomicBool::new(false),
-            stop_ready: tokio::sync::Notify::new(),
+            paired: paired.clone(),
+            paired_complete,
+            local_stop,
+            local_complete,
             state: Mutex::default(),
             native: Mutex::new(Weak::new()),
             published,
@@ -157,15 +448,32 @@ impl HostGraph {
         });
         {
             let mut state = self.state.lock().unwrap();
-            if state.slots.contains_key(instance) {
+            #[cfg(target_os = "linux")]
+            if state
+                .supervised_epochs
+                .get(&epoch)
+                .is_some_and(|members| !members.contains(instance))
+            {
+                return Err(fail(
+                    ErrorCode::InterfaceMismatch,
+                    "instance is outside supervised frozen group",
+                ));
+            }
+            if state.slots.contains_key(instance) || state.closing_epochs.contains(&epoch) {
                 return Err(fail(
                     ErrorCode::ScopeClosed,
                     "Host proxy cannot rebind before recovery proof",
                 ));
             }
-            state
-                .slots
-                .insert(instance.into(), Arc::downgrade(&control));
+            state.slots.insert(
+                instance.into(),
+                ProxySlot {
+                    identity: epoch,
+                    control: Arc::downgrade(&control),
+                    mounted,
+                    paired,
+                },
+            );
         }
         let mut injects = vec![ready_key(&control.identity)];
         for identity in [
@@ -202,6 +510,7 @@ impl HostGraph {
             .map_err(native)?,
         );
         *control.native.lock().unwrap() = Arc::downgrade(&member);
+        mounted_tx.send_replace(Some(Ok(member.cleanup())));
         let watched = control.clone();
         tokio::spawn(async move {
             watched.gate.revoked().await;
@@ -291,7 +600,7 @@ impl HostGraph {
             .unwrap()
             .slots
             .values()
-            .filter_map(Weak::upgrade)
+            .filter_map(|slot| slot.control.upgrade())
             .collect::<Vec<_>>();
         let adapters = self
             .state
@@ -336,7 +645,7 @@ impl HostGraph {
         }
         let observations = self.state.lock().unwrap().dependency_cleanup.clone();
         for observation in observations {
-            if let Err(error) = observation.wait_provider().await {
+            if let Err(error) = observation.observation.wait_provider().await {
                 errors.push(native(error));
             }
         }
@@ -379,8 +688,6 @@ struct ControlState {
     local: Option<Activation>,
     peer: Option<Peer>,
     start_queued: bool,
-    stop: Option<watch::Receiver<Option<Confirmation>>>,
-    local_stop: Option<watch::Receiver<Option<Confirmation>>>,
     table: Option<Arc<ServiceTable>>,
     start_error: Option<ProtocolError>,
     ctx: Option<Ctx>,
@@ -400,7 +707,10 @@ struct Control {
     available: AtomicBool,
     closed: AtomicBool,
     state: Mutex<ControlState>,
-    stop_ready: tokio::sync::Notify,
+    paired: watch::Receiver<Option<Confirmation>>,
+    paired_complete: watch::Sender<Option<Confirmation>>,
+    local_stop: watch::Receiver<Option<Confirmation>>,
+    local_complete: watch::Sender<Option<Confirmation>>,
     native: Mutex<Weak<ManagedActivation>>,
     published: watch::Sender<Option<Publication>>,
     publication: watch::Receiver<Option<Publication>>,
@@ -416,11 +726,7 @@ impl Control {
         }
         self.gate.close();
         let (tx, local_tx, stopping, remote, local, ctx) = {
-            let mut state = self.state.lock().unwrap();
-            let (tx, rx) = watch::channel(None);
-            state.stop = Some(rx);
-            let (local_tx, local_rx) = watch::channel(None);
-            state.local_stop = Some(local_rx);
+            let state = self.state.lock().unwrap();
             let stopping: BoxFuture<'static, Confirmation> = if state.start_queued {
                 let request = state.peer.as_ref().unwrap().start_request(
                     "plugin/stop",
@@ -448,15 +754,14 @@ impl Control {
                 Box::pin(async { Ok(()) })
             };
             (
-                tx,
-                local_tx,
+                self.paired_complete.clone(),
+                self.local_complete.clone(),
                 stopping,
                 state.remote.clone(),
                 state.local.clone(),
                 state.ctx.clone(),
             )
         };
-        self.stop_ready.notify_waiters();
         // Host native effects may still be Loading. Stop is already queued;
         // revocation and native drain cannot postpone its transmission.
         let mut revocations = Vec::new();
@@ -521,21 +826,9 @@ impl Control {
     }
     async fn confirm_stop(&self, part: StopPart) -> Confirmation {
         self.close_intent();
-        let mut rx = loop {
-            let notified = self.stop_ready.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            let rx = {
-                let state = self.state.lock().unwrap();
-                match part {
-                    StopPart::Local => state.local_stop.clone(),
-                    StopPart::Paired => state.stop.clone(),
-                }
-            };
-            if let Some(rx) = rx {
-                break rx;
-            }
-            notified.await;
+        let mut rx = match part {
+            StopPart::Local => self.local_stop.clone(),
+            StopPart::Paired => self.paired.clone(),
         };
         loop {
             if let Some(result) = rx.borrow_and_update().clone() {
@@ -584,7 +877,13 @@ impl Control {
             .lock()
             .unwrap()
             .dependency_cleanup
-            .push(cleanup);
+            .push(TrackedCleanup {
+                identity: ObjectIdentity {
+                    runtime: self.identity.runtime.clone(),
+                    epoch: self.identity.epoch,
+                },
+                observation: cleanup,
+            });
         // Rollback is a real effect of this original native generation, and is
         // registered before issuance or a request can create remote ownership.
         let cleanup = self.clone();

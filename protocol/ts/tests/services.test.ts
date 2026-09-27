@@ -195,6 +195,40 @@ test('native port declaration and typed binding errors precede native plugin app
   await root.fiber.dispose()
 })
 
+test('explicit local dependencies use native readiness and invalidate the original context on loss', async () => {
+  const root = new Context()
+  let applied = 0
+  let original!: Context
+  const nativeValue = { count: 3 }
+  const member = await new NativePorts().mount(root, { inject: ['localSettings'], apply(ctx) {
+    original = ctx
+    assert.equal(ctx.get('localSettings'), nativeValue)
+    applied++
+  } }, {}, owner('local-consumer'), {}, caller, new ActivationGate(), ['localSettings'])
+  assert.equal(applied, 0, 'missing local dependency must not enter apply')
+  const provider = root.plugin({ apply(ctx) { ctx.provide('localSettings', nativeValue) } })
+  await provider
+  await member.native.ready()
+  assert.equal(applied, 1)
+  await provider.dispose()
+  assert.equal(member.native.gate.isOpen, false)
+  assert.throws(() => original.effect(() => () => {}), /inactive context/)
+  await member.native.stop(); await root.fiber.dispose()
+})
+
+test('local dependency declarations reject duplicate names and protocol port overlap before apply', async () => {
+  const root = new Context()
+  let applied = false
+  const plugin = { inject: ['nativeSession'], apply() { applied = true } }
+  const ports = new NativePorts()
+  ports.provide('session', 'nativeSession', session, bundles, exportInterfaceSession)
+  for (const names of [['nativeSession'], ['nativeSession', 'nativeSession'], ['not a service']]) {
+    await assert.rejects(ports.mount(root, plugin, {}, owner('provider'), {}, caller, new ActivationGate(), names), (error: any) => error.code === 'InterfaceMismatch')
+  }
+  assert.equal(applied, false)
+  await root.fiber.dispose()
+})
+
 test('native provider registration failure joins rollback of every earlier isolated import', async () => {
   const root = new Context()
   const { member: source, staged } = await provider(root, owner('provider'))

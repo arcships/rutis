@@ -5,6 +5,7 @@ pub mod contract;
 pub mod deployment;
 pub mod draft;
 pub mod error;
+pub mod events;
 pub mod exports;
 pub mod factories;
 pub mod frame;
@@ -26,3 +27,5 @@ pub mod services;
 pub mod session;
 #[cfg(target_os = "linux")]
 pub mod snapshot;
+#[cfg(target_os = "linux")]
+pub mod supervisor;

@@ -79,5 +79,6 @@ ready 失败，真实 cleanup 一次，native 终态 Disposed，没有残留的 
 
 这些用例的 provider 与 borrow callback 已由实际内部 child 创建，并核对精确
 [创建者 Ctx](native-context.md)。这是首代 native export adapter 的安装与关闭证据。
-自动适配任意既有 Host 服务、单对象远端撤销、配置/代码恢复、监督快照租约、Linux descendant
-reaping、broker 事件、真实旧桥迁移与完整 T24 尚待完成；不计作完整 M2 或最终验收。
+[现有设置服务适配](settings-example.md)与[基础事件](events.md)已完成真实私有 IPC
+验证；不承诺自动适配任意 Host 服务。
+验收范围见[简化设计](../docs/design-protocol-plugins-2026-09-25.md)。

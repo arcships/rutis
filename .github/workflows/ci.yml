@@ -56,6 +56,9 @@ jobs:
       - name: install locked object protocol runtime
         run: npm --prefix protocol/ts ci --ignore-scripts
 
+      - name: install locked settings adaptation fixture
+        run: npm --prefix host ci --ignore-scripts
+
       - name: cargo test (workspace, skip node e2e)
         run: cargo test --workspace
         env:

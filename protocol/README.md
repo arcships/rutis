@@ -1,22 +1,18 @@
 # 实验对象协议实现约定
 
-此目录与 `rutis-protocol` crate 实施 [#59 设计](../docs/design-protocol-plugins-2026-09-25.md)。
-当前 M1–M3 在推进，尚未形成可部署的 Rust↔Cordis 协议插件系统。已有两端生成绑定、对象图、私有 socket 上的真实跨语言调用与回收 ACK，以及 prepare、冻结启动、默认服务 driver、首代 Host 原生代理发布图和 Linux 后代回收组件；监督恢复、broker 事件及完整迁移验收仍在开发。
-实施证据及完整验收范围见[验收记录](../docs/protocol-plugin-implementation.md)。旧 `rutis-cordis` 桥继续独立存在。
+此目录记录 `rutis-protocol` crate 与 TS SDK 的当前实验实现。
+应用接入和业务插件编写从[跨进程插件开发指南](../docs/protocol-plugin-guide.md)开始；本目录提供详细协议与 API 参考。
+#59 当前只交付原生 Rust/TS 插件的双向服务对象、借用回调、基础事件与必要清理，范围见[简化设计](../docs/design-protocol-plugins-2026-09-25.md)，证据见[工作记录](../docs/protocol-plugin-implementation.md)。真实私有 IPC 已验证对象互通、双向基础事件及[现有设置服务适配](settings-example.md)。旧 `rutis-cordis` 桥继续独立存在。
 
 Rust/Node 私有连接的 hello/start/activate/stop、native RuntimeReady 与发布门控见[生命周期控制](lifecycle.md)。通用 Node 入口使用冻结快照的启动 catalog 和 bundle 原字节；启用服务传输的默认驱动支持 object.scope/callback.borrow，事件能力在 hello 拒绝。
+
+[基础事件](events.md) 通过显式 Host 端点接线复用对象 transport，提供统一列表、parallel/serial、once、scope、ready 与注销。默认 driver 未安装端点，因此不自动宣称事件能力。
 
 命名原生端口、生成客户端注入、跨 bundle 整表 broker 事务和 owner pin 确认见[服务绑定](services.md)。[私有 session](session.md) 已接入权威 broker 和 named roots；[Host 原生图](host.md) 在实际冻结子进程中验证发布顺序及同步关闭，[原生适配器](native-adapters.md) 把 Host 实际插件接到 frozen native service keys。
 
 内部 child 的对象、返回对象和借用 callback 保持真实创建者 Ctx，见[原生创建者上下文](native-context.md)。必要 child 导出失效撤销托管根；普通 child 对象通过 broker 单独撤销，并等待执行、独占清理与远端 ACK。
 
-[冻结根交付](deployment.md) 从 prepared routes 捕获整张 required 表，复用 owner 保留清单，为多个消费者建立独立 source views，并跨 provider 原子签发；已接入首代 instance/native Host 发布图，完整拓扑仍待验收。
-
-包/部署 JSON 格式、原字节文件库存、精确路由、静态 ELF catalog、私有启动快照与只读 CLI 见[prepare 约定](package-format.md)。prepare 冻结计划，快照固定 artifact 与 Node canonical dependency tree；实际 runner 已接入 RuntimeReady 与首代成员发布屏障，监督快照租约仍待完成。
-
-[Linux 冻结进程](process.md) 在独立 helper 中回收真实 runtime 与脱离会话的后代，缓存 OS receipt，并保留缺少证明的快照。OS 回收与原生消费者清理各自持有租约；完整组恢复屏障仍待 M3。
-
-[消费者清理观察](dependency-cleanup.md) 在真实 rutis 代排干时记录结果；慢清理、失败及被丢弃的等待者均有回归证据。HostGraph 在提供者排干后等待这些 receipt，自动快照租约和恢复新代仍在开发。
+[消费者清理观察](dependency-cleanup.md) 保存实际原生清理结果。目录中的部署、包格式及进程回收文档记录既有实验组件，不定义本轮待办或验收门槛。
 
 ## JSON 与描述符
 
@@ -28,7 +24,7 @@ JSON 数字使用 IEEE-754 binary64；整数结果必须处于 JS 安全整数�
 
 解码器安全边界为 **16 MiB 原始 UTF-8 字节、64 层子值深度**：根的深度是 0，对象成员和数组元素各加 1。
 空容器不增加子值深度。边界内的有效输入可接受，超过边界返回 `InvalidParams`，解析帧头时也必须在分配 body 前检查长度。
-这两个边界保护解码器的内存和调用栈，不是插件对象/调用配额；后续资源策略另行设计。
+这两个边界保护解码器的内存和调用栈，不是插件对象/调用配额。
 `frame::Peer` / TS `Peer` 使用 u32 大端长度和严格 JSON，独立接收泵支持重入，独立写队列持有完整帧。Rust 等待者被丢弃不会中断半帧写入；断连的未完成请求报告 execution unknown。共享帧语料覆盖分片 UTF-8、重复字段、BOM、坏长度和截断；接收任务拒绝重用/倒序 request id，避免重复执行。
 
 bundle 原始字节 SHA-256 保持精确，不做 JSON 重排、空白归一化或 semver 宽松匹配。
@@ -70,7 +66,7 @@ panic/rejection 会成为可观察的清理失败，不能计作成功卸载。
 Rust `Exports::managed` 与 TS `Exports.managed` 把表交给真实 native ctx 的 effect。
 每次准入同步检查原生代的 gate/uid；清理观察任务不能成为失效判定的唯一依据。
 native 卸载关闭准入、撤销 delivery/staging pin，等待仍执行的对象和 disposer。
-这是原生清理接入证据；整体 StopUnconfirmed / supervisor 恢复屏障仍待 M3。
+这是原生清理接入证据；等待未完成或失败的结果不会被计作清理成功。
 
 导入表 `receive_batch` 先检查整份引用清单，再在一个临界区附加 token。
 类型/图验证失败使用 `reject`，只拒绝这次新增的交付；以前已经成功交给作者的 token 和别名保持有效。
@@ -91,10 +87,13 @@ cargo run -p rutis-protocol --bin rutis-protocol-bindgen -- \
 cargo run -p rutis-protocol --bin rutis-protocol-bindgen -- \
   protocol/fixtures/rpc.bundle.json \
   protocol/generated/rpc.rs protocol/ts/generated/rpc.ts
+cargo run -p rutis-protocol --bin rutis-protocol-bindgen -- \
+  protocol/fixtures/settings.bundle.json \
+  protocol/generated/settings.rs protocol/ts/generated/settings.ts
 ```
 
 TS 输出默认相对导入 `../src` 的 SDK；当前目录结构是实验包布局，并未发布稳定的安装接口。
-字段排序由生成器固定，不能依赖 serde_json 的 feature 联合结果。三份产物在 Rust/TS 编译，并由 workspace 测试核对重生成结果；`rpc.bundle.json` 用于真实私有 socket 互通。
+字段排序由生成器固定，不能依赖 serde_json 的 feature 联合结果。四份产物在 Rust/TS 编译，并由 workspace 测试核对重生成结果；`rpc.bundle.json` 用于真实私有 socket 互通，`settings.bundle.json` 用于现有服务适配及双向事件。
 Rust 生成 `InterfaceDatabaseService`、`InterfaceDatabaseClient` 等类型：业务实现返回真实 `Arc<dyn …Service>`，调用者得到门控客户端；参数和 JSON 数据 DTO 由 SDK 编码。
 可选 DTO 字段用 `OptionalField::Missing/Present` 保留缺失与 null 的区别，字符串 enum/判别 union 生成 Rust enum，开放 JSON 数据保持 Value/map。
 TS 用冻结的生成 facade 保持对象身份，属性只读本地快照；未知选择器拒绝。业务 `then` 通过 `then$` 暴露，避免 Promise 自动调用它。Caller 属于原生 activation，运行器应为该 activation 保持稳定实例。
@@ -104,7 +103,7 @@ TS 用冻结的生成 facade 保持对象身份，属性只读本地快照；未
 Rust `memory::Network` 是使用真实 broker 的内存传输测试入口，支持图交付、状态对象、owner pass-back、嵌套借用回调及 native endpoint effect。
 所有执行离开 broker 临界区后运行；owner-returned facade 也走 broker 调度。丢弃调用 waiter 只丢弃结果，owner handler 和登记子任务继续跟踪，晚到未消费图由 envelope 释放新增交付。
 Linux `tests/objects_ipc.rs` 启动独立 Node 进程，仅继承私有 Unix stream 的 fd 3。双方用同一原字节 bundle 的生成绑定，Rust 权威 broker 根据固定连接身份准入，运行双向 connect/query、同一对象重复返回、循环属性、owner pass-back、重入 callback 和登记子任务。参数 grant 在交给业务代码前确认；callback 的 native Ctx 来自其 creator。stdout 诊断保持独立。测试还覆盖借用到期、丢弃 Rust waiter 后的真实 Node 执行 pin，以及回收 ACK。
-这是真实对象调度的 conformance fixture。多 bundle prepare/权限路由计划及两端生命周期控制已有独立证据；完整 runner 的实际服务路由、HostActive 发布装配、旧插件迁移及 supervisor 尚未完成，不能据此部署该协议。
+这是真实对象调度的 conformance fixture。现有插件适配与基础事件的实际路径另见 `settings_ipc.rs` 和[设置服务说明](settings-example.md)。
 
 ## 连续前缀回收的含义
 
@@ -112,7 +111,7 @@ delivery id 属于**接收 runtime epoch 的整条连接**，覆盖其中所有 
 代理 cache key 不含 delivery id；交付账本与包装身份分开。
 同一个连接内的 accept/release 幂等，终态不复活。闭合 epoch 后，未知旧编号也不能成为新授权。
 
-控制帧必须遵守以下顺序；私有 socket fixture 已运行两端前缀提议、owner 通知和 ACK，生产多 activation 连接与故障交错仍待验收：
+现有控制帧遵守以下顺序；私有 socket fixture 已运行两端前缀提议、owner 通知和 ACK：
 
 1. 接收 runtime SDK 记录每份已处理的交付 envelope（包括取消/解码失败后拒绝的 envelope）。
    `received_through` 只推进到没有缺口的连续前缀；`terminal_through` 同时要求每个 id 已 Released/Revoked。
@@ -128,4 +127,8 @@ delivery id 属于**接收 runtime epoch 的整条连接**，覆盖其中所有 
    owner `close_recipient_epoch` 可回收其 delivery 终态记录，并永久拒绝该旧 epoch 的新 pin；仍 executing 的 pin 继续跟踪到实际完成或监督者确认 owner 被回收。
 
 目前 API 中的身份参数是宿主/SDK 内部可信参数。实现真实消息路由时，不能直接把作者提交的身份字段作为 authenticated caller。
-断线后的进程回收与 consumer cleanup 双屏障尚未实现，这些前缀方法不代替监督者。
+前缀确认只证明交付终态，不证明实际 handler 或 native cleanup 已经结束。
+
+## 已有实验组件参考
+
+[根交付](deployment.md)、[包与 prepare](package-format.md)、[Linux 进程回收](process.md) 记录已有 API，供阅读现存代码使用。它们不增加 #59 当前的实现任务；部署更新、组恢复与性能专项已移出交付范围。

@@ -13,7 +13,7 @@ use std::{
     io::Write,
     os::unix::fs::{symlink, DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Weak},
 };
 
 struct Tree {
@@ -87,10 +87,30 @@ pub struct SnapshotGroup {
     node_catalog: Option<PathBuf>,
     members: BTreeMap<String, SnapshotMember>,
     code_sha256: String,
+    environment_sha256: String,
+}
+pub(crate) struct SnapshotBinding {
+    tree: Weak<Tree>,
+    environment: PathBuf,
+}
+impl SnapshotBinding {
+    pub(crate) fn confirms(&self, group: &SnapshotGroup) -> bool {
+        Weak::ptr_eq(&self.tree, &Arc::downgrade(&group.tree))
+            && self.environment == group.environment
+    }
 }
 impl SnapshotGroup {
+    pub(crate) fn binding(&self) -> SnapshotBinding {
+        SnapshotBinding {
+            tree: Arc::downgrade(&self.tree),
+            environment: self.environment.clone(),
+        }
+    }
     pub fn code_sha256(&self) -> &str {
         &self.code_sha256
+    }
+    pub fn environment_sha256(&self) -> &str {
+        &self.environment_sha256
     }
     pub fn environment(&self) -> &Path {
         &self.environment
@@ -284,6 +304,7 @@ impl Snapshot {
                     node_catalog,
                     members,
                     code_sha256: group.code_sha256().into(),
+                    environment_sha256: group.environment_sha256().into(),
                 },
             );
         }

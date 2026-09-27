@@ -1,12 +1,13 @@
 # 原生 Host 依赖图
 
+Host 指开发者使用 rutis 编写的应用，以下组件来自应用嵌入的协议库。应用接线步骤见[开发指南](../docs/protocol-plugin-guide.md)。
+
 Rust `host::{HostGraph,HostProxy}` 把同一个冻结计划的 instance 变为实际 rutis
 fiber。`HostGraph` 使用 `DeploymentObjects` 的权威 broker，并为 Host 自己建立
 一条真实私有帧连接和 `RuntimeObjects` SDK；原生 TypeKey 下保存真实 `ObjectProxy`。
-它实现首代成员的发布与关闭，并可挂载实际 [Host 原生适配器](native-adapters.md)；
-尚不拥有 Linux 进程监督、快照租约或恢复换代。
-嵌入者可把独立的 [Linux 冻结进程](process.md) handle 接到同一个私有 peer；
-这会在退出时同步关闭本图，但不替代 native stop ACK 或完整组恢复屏障。
+它实现首代成员的发布与关闭，并可挂载实际 [Host 原生适配器](native-adapters.md)。
+本文记录已经验证的发布与关闭路径；监督等实验组件不属于本轮交付目标。
+工作范围以[简化设计](../docs/design-protocol-plugins-2026-09-25.md)为准。
 
 ## 挂载与发布
 
@@ -56,17 +57,14 @@ broker 撤销与 Host SDK Release ACK，原生 proxy effect 只 join 这份本�
 `native().stop()` 的实际清理不排在远端 stop ACK 之后。`HostProxy::stop()` 仍要求
 本地原生清理和配对确认都完成，两种结果均缓存，等待者丢弃不停止工作。
 已断连的 epoch 使用其同步撤销证据，不等待它
-回复新的 revoke；远端 native stop 未确认仍是失败，不能据此放行恢复。
+回复新的 revoke；远端 native stop 未确认仍是失败。
 
 `HostGraph::shutdown()` 先关闭所有成员，再 join 远端确认、实际原生提供者和
 [消费者清理](dependency-cleanup.md)；成功后关闭 Host SDK 私有连接。观察器在
 服务发布前登记，消费者的精确 id/generation、慢 disposer 和失败结果会保留到
 本图释放，即使原生依赖边或管理句柄已消失。`consumer_cleanup()` 提供这些真实
-清理 receipt；提供者尚未排干时，空列表不能作为恢复证据。
-失败仍可观察，不作为恢复证明。同一 instance 不能重新
-mount；监督者的 cleanup/reaping 屏障与新代 API 尚待 M3。嵌入者须独立持有快照，
-直到原生清理和 OS receipt 都确认，不能把关连接当作 OS reaping。process worker
-保留自己的冻结租约；消费者清理租约仍须由调用方显式拥有。
+清理 receipt；提供者尚未排干时，空列表不能证明清理完成。
+失败仍可观察。同一 instance 不能重新 mount；本轮只验证首次装载与关闭。
 
 ## 实际证据与剩余范围
 
@@ -85,12 +83,12 @@ Closing 且无构造/import；丢弃首个 stop waiter 后，重复 stop 仍 joi
 另一个真实 Node stop ACK 被 transport wrapper 保留时，Host native proxy 已
 Disposed，本地 join 成功，普通 stop 仍等待。取消已开始的普通 waiter 后再次 stop
 仍等待同一 ACK；放行后成功。OS 强停用例也分别观察本地清理成功与丢失远端
-ACK 的普通 stop 失败，完整 supervisor 尚须将这两份证据接入恢复许可。
+ACK 的普通 stop 失败，两种结果没有被合并成虚假的成功。
 
 这些用例覆盖首代 instance 路由的 Host 发布与关闭；另一个 native adapter 用例
 验证实际原生 slot 安装。[内部 child 创建者 Ctx](native-context.md) 已有实际调度
 和单对象远端撤销证据。process 用例另验证实际 detached descendants 回收早于
 慢原生消费者清理，receipt 在等待期间保持未完成，旧 instance 仍不可重挂。
 native adapter 用例让实际消费者 disposer 失败；提供者停止成功后，本图仍报告
-该失败。共享/单独完整拓扑、自动快照监督租约、
-更新恢复双屏障、broker 事件、真实旧桥迁移与完整 T24 仍需验收。
+该失败。[设置服务示例](settings-example.md)另验证真实插件适配与基础事件路径的
+正常发布、关闭和旧引用失效。

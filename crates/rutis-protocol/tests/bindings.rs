@@ -226,6 +226,20 @@ fn generated_sources_are_deterministic_and_match_checked_in_artifacts() {
         rpc.typescript,
         include_str!("../../../protocol/ts/generated/rpc.ts")
     );
+    let settings = codegen::generate(
+        &AdmittedBundle::parse(include_bytes!(
+            "../../../protocol/fixtures/settings.bundle.json"
+        ))
+        .unwrap(),
+    );
+    assert_eq!(
+        settings.rust,
+        include_str!("../../../protocol/generated/settings.rs")
+    );
+    assert_eq!(
+        settings.typescript,
+        include_str!("../../../protocol/ts/generated/settings.ts")
+    );
 }
 #[tokio::test]
 async fn generated_clients_preserve_state_cycles_and_owner_passback_dispatch() {

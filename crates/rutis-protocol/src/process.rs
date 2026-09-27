@@ -174,6 +174,7 @@ impl ExitSignal {
 }
 struct Lease {
     launch: Arc<()>,
+    snapshot: crate::snapshot::SnapshotBinding,
     bound: AtomicBool,
     stop: CancellationToken,
     disconnected: CancellationToken,
@@ -249,6 +250,9 @@ impl Reaping {
     }
 }
 impl ProcessHandle {
+    pub(crate) fn uses_snapshot(&self, group: &SnapshotGroup) -> bool {
+        self.0.snapshot.confirms(group)
+    }
     pub fn status(&self) -> ProcessStatus {
         self.0.status.borrow().clone()
     }
@@ -447,6 +451,7 @@ impl FrozenProcess {
         let launch_identity = Arc::new(());
         let handle = ProcessHandle(Arc::new(Lease {
             launch: launch_identity.clone(),
+            snapshot: group.binding(),
             bound: AtomicBool::new(false),
             stop: stop.clone(),
             disconnected: disconnected.clone(),

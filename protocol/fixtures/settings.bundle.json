@@ -1,0 +1,251 @@
+{
+  "id": "rutis.settings",
+  "version": "1.0.0",
+  "required_capabilities": [
+    "object.scope",
+    "callback.borrow",
+    "event.parallel",
+    "event.serial"
+  ],
+  "interfaces": {
+    "Settings": {
+      "methods": {
+        "open": {
+          "params": {
+            "kind": "value",
+            "schema": {
+              "type": "string"
+            }
+          },
+          "result": {
+            "kind": "object",
+            "interface": "SettingsSection",
+            "ownership": "scope"
+          }
+        },
+        "inspect": {
+          "params": {
+            "kind": "object",
+            "interface": "SettingsSection",
+            "ownership": "borrow"
+          },
+          "result": {
+            "kind": "value",
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "SettingsSection": {
+      "methods": {
+        "read": {
+          "params": {
+            "kind": "value",
+            "schema": {
+              "type": "null"
+            }
+          },
+          "result": {
+            "kind": "value",
+            "schema": {
+              "type": "object"
+            }
+          }
+        },
+        "write": {
+          "params": {
+            "kind": "value",
+            "schema": {
+              "type": "object"
+            }
+          },
+          "result": {
+            "kind": "value",
+            "schema": {
+              "type": "null"
+            }
+          }
+        },
+        "replace": {
+          "params": {
+            "kind": "value",
+            "schema": {
+              "type": "object"
+            }
+          },
+          "result": {
+            "kind": "value",
+            "schema": {
+              "type": "null"
+            }
+          }
+        },
+        "visit": {
+          "params": {
+            "kind": "callback",
+            "ownership": "borrow",
+            "params": {
+              "kind": "value",
+              "schema": {
+                "type": "object"
+              }
+            },
+            "result": {
+              "kind": "value",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "result": {
+            "kind": "value",
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "properties": {
+        "namespace": {
+          "kind": "value",
+          "schema": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "EventListener": {
+      "methods": {
+        "call": {
+          "params": {
+            "kind": "record",
+            "fields": {
+              "section": {
+                "kind": "object",
+                "interface": "SettingsSection",
+                "ownership": "scope"
+              },
+              "value": {
+                "kind": "value",
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "result": {
+            "kind": "record",
+            "fields": {
+              "returned": {
+                "kind": "value",
+                "schema": {
+                  "type": "boolean"
+                }
+              },
+              "value": {
+                "kind": "optional",
+                "item": {
+                  "kind": "value",
+                  "schema": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "EventPublisher": {
+      "methods": {
+        "dispatch": {
+          "params": {
+            "kind": "record",
+            "fields": {
+              "mode": {
+                "kind": "value",
+                "schema": {
+                  "enum": [
+                    "parallel",
+                    "serial"
+                  ]
+                }
+              },
+              "payload": {
+                "kind": "record",
+                "fields": {
+                  "section": {
+                    "kind": "object",
+                    "interface": "SettingsSection",
+                    "ownership": "scope"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "schema": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "result": {
+            "kind": "record",
+            "fields": {
+              "returned": {
+                "kind": "value",
+                "schema": {
+                  "type": "boolean"
+                }
+              },
+              "value": {
+                "kind": "optional",
+                "item": {
+                  "kind": "value",
+                  "schema": {}
+                }
+              },
+              "errors": {
+                "kind": "value",
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "events": {
+    "changed": {
+      "params": {
+        "kind": "record",
+        "fields": {
+          "section": {
+            "kind": "object",
+            "interface": "SettingsSection",
+            "ownership": "scope"
+          },
+          "value": {
+            "kind": "value",
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "result": {
+        "kind": "value",
+        "schema": {}
+      },
+      "modes": [
+        "parallel",
+        "serial"
+      ]
+    }
+  }
+}
