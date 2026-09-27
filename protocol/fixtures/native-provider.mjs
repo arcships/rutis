@@ -18,6 +18,10 @@ export default {
       const connection = { session, async query(context, { sql }) {
         assert.equal(context.native(), ctx)
         assert.equal(context.native().get('nativeDatabase'), ctx.get('nativeDatabase'))
+        if (sql === 'block-until-process-exit') {
+          console.log(JSON.stringify({ executing: 'blocked-native-query' }))
+          await new Promise(() => {})
+        }
         if (sql === 'spawn-detached-descendants') {
           const leaf = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"
           const script = `const { spawn } = require('node:child_process'); const child = spawn(process.execPath, ['-e', ${JSON.stringify(leaf)}], { detached: true, stdio: 'ignore' }); child.once('spawn', () => { process.stdout.write(JSON.stringify({ grandchild: child.pid }) + '\\n'); child.unref(); }); process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)`

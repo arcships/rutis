@@ -81,8 +81,10 @@ caller waiter 不取消实际执行，未消费的 object-valued result 会拒�
 
 runtime 跟踪已 pin、运行中和完成待确认的执行。断连关闭 native gate 和所有 root
 scopes，释放尚未执行的 admission pins；已经运行的任务仍等待后代完成后释放本地
-native pin。Host 丢失 owner ACK 时保留执行记录，后续 supervisor 的 reaping /
-StopUnconfirmed 管理尚待 M3。epoch 断连可以凭 Host 的撤销证据向存活的 owner
+native pin。Host 丢失 owner ACK 时保留执行记录；绑定实际进程的
+[OS receipt](process.md) 到达后，只结算该死亡 owner 的执行。死亡 caller 的存活
+owner 执行仍等待实际 finished。全组恢复与 StopUnconfirmed 管理尚待 M3。
+epoch 断连可以凭 Host 的撤销证据向存活的 owner
 释放 delivery pins，这不构成执行完成证据。
 
 native 必要服务或依赖失效触发单次 closing 通知。接收 revoke 时同步关闭被撤销

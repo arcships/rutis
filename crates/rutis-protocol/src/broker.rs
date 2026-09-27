@@ -812,6 +812,32 @@ impl Broker {
         self.next_objects.remove(&(runtime.into(), epoch));
     }
 
+    /// Only the private session's matching OS receipt can authorize this.
+    /// A dead caller alone does not settle execution in another living owner.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn settle_reaped_epoch(&mut self, runtime: &str, epoch: Sequence) -> Result<usize> {
+        if !self
+            .closed_epochs
+            .get(runtime)
+            .is_some_and(|closed| epoch <= *closed)
+        {
+            return Err(error(
+                ErrorCode::Unavailable,
+                "reaped owner epoch is still open",
+            ));
+        }
+        let calls = self
+            .calls
+            .iter()
+            .filter(|(_, object)| object.owner.runtime == runtime && object.owner.epoch == epoch)
+            .map(|((caller, call), object)| (caller.clone(), *call, object.owner.clone()))
+            .collect::<Vec<_>>();
+        for (caller, call, owner) in &calls {
+            self.finish_call(owner, caller, *call)?;
+        }
+        Ok(calls.len())
+    }
+
     pub fn pins(&self, object: &ObjectIdentity) -> (usize, usize) {
         self.objects
             .get(object)
@@ -831,4 +857,72 @@ pub struct GraphOffer<'a> {
     pub expr: &'a crate::contract::TypeExpr,
     pub draft: &'a crate::draft::DraftGraph,
     pub source: &'a str,
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod reaping_tests {
+    use super::*;
+
+    #[test]
+    fn reaped_owner_settlement_preserves_calls_running_in_other_owners() {
+        let activation = |runtime: &str| Activation {
+            runtime: runtime.into(),
+            epoch: Sequence(1),
+            activation: Sequence(1),
+        };
+        let dead = activation("dead");
+        let live = activation("live");
+        let client = activation("client");
+        let mut broker = Broker::default();
+        for owner in [&dead, &live, &client] {
+            broker.start_activation(owner.clone()).unwrap();
+        }
+        let view = InterfaceView {
+            interface: "Connection".into(),
+            bundle_sha256: "a".repeat(64),
+            source: "route".into(),
+        };
+        let objects = [&dead, &live].map(|owner| {
+            broker
+                .register_object(
+                    owner,
+                    BTreeMap::from([(view.clone(), BTreeSet::from(["query".into()]))]),
+                )
+                .unwrap()
+        });
+        for (caller, object) in [&client, &dead].into_iter().zip(&objects) {
+            let scope = Scope {
+                activation: caller.clone(),
+                scope: Sequence(1),
+            };
+            broker.open_scope(scope.clone(), None).unwrap();
+            let delivery = broker.offer(&object.owner, object, &scope, &view).unwrap();
+            broker.accept(caller, delivery.id, &delivery.token).unwrap();
+            broker
+                .begin_call(&scope, Sequence(1), &delivery, "query", &object.owner)
+                .unwrap();
+            assert_eq!(broker.pins(object), (1, 1));
+        }
+        assert!(broker.settle_reaped_epoch("dead", Sequence(1)).is_err());
+        broker.close_epoch("dead", Sequence(1));
+        for object in &objects {
+            assert_eq!(broker.pins(object), (0, 1));
+        }
+        assert_eq!(broker.settle_reaped_epoch("dead", Sequence(1)).unwrap(), 1);
+        assert_eq!(broker.pins(&objects[0]), (0, 0));
+        assert_eq!(broker.pins(&objects[1]), (0, 1));
+        assert_eq!(broker.settle_reaped_epoch("dead", Sequence(1)).unwrap(), 0);
+        let next = Activation {
+            epoch: Sequence(2),
+            ..dead.clone()
+        };
+        assert!(broker.start_activation(next.clone()).is_err());
+        assert!(broker.finish_call(&dead, &dead, Sequence(1)).is_err());
+        assert_eq!(broker.pins(&objects[1]), (0, 1));
+        broker.finish_call(&live, &dead, Sequence(1)).unwrap();
+        broker.start_activation(next).unwrap();
+        broker.finish_call(&dead, &client, Sequence(1)).unwrap();
+        assert_eq!(broker.pins(&objects[0]), (0, 0));
+        assert!(broker.start_activation(dead).is_err());
+    }
 }

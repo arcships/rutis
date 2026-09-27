@@ -81,13 +81,13 @@ CI 增加锁定依赖的 TS 检查；Rust crate 纳入现有 workspace 测试。
 - 双端 `GraphExporter` 先暂存真实对象，完整验证草稿，再向 broker 请求授权。broker 整图事务拒绝伪造 owner/source/foreign proof，不留下交付 id 缺口；SDK commit 只确认对应的真实对象与视图。Rust snapshot panic 与两端验证失败释放 staging；原生闭锁后纯值结果也不能编码。同一 owner 的多个 bundle 编码器共用 staging 编号空间；Rust 内存链路复用同一编码器，owner pin 失败通过完整拒绝 manifest 记录接收前缀。
 - 双端帧接收泵支持重入和并发，拒绝重复/倒序请求 id；Rust 独立 writer 在等待者被丢弃时继续完成已排队帧，关闭时可打断阻塞写并释放 stream。TS 编码前拒绝 undefined、NaN、Date、稀疏数组和自定义原型，防止 stringify 改变数据含义。
 
-可执行证据：Rust imports 单元 1、child exports 单元 2、bindings 8、contracts 5、drafts 5、exports 10、factories 6、frames 5、graphs 7、objects 15、managed 14、objects_ipc 1、prepare 21、lifecycle 12、services 8、session_ipc 2、native_runner_ipc 10 项（合计 132，其中 lifecycle 与 native_runner_ipc 各一项是子进程入口）；TS bindings 7、contracts 5、drafts 4、exports 11、frames 5、graphs 5、imports 7、managed 8、lifecycle 12、services 10、session 1 项（合计 75）。共享语料包含 JSON 35、描述符 50、wire value 32、回调签名 9、对象图 31、帧 10、lifecycle hello 17、named services 12 个用例。Rust 使用两个真实线程同时交付/释放；两端另验证原生失效时的执行 pin 和慢对象清理。
+可执行证据：Rust imports 单元 1、child exports 单元 2、broker OS 结算单元 1、bindings 8、contracts 5、drafts 5、exports 10、factories 6、frames 5、graphs 7、objects 15、managed 14、objects_ipc 1、prepare 21、lifecycle 12、services 8、session_ipc 2、native_runner_ipc 10 项（合计 133，其中 lifecycle 与 native_runner_ipc 各一项是子进程入口）；TS bindings 7、contracts 5、drafts 4、exports 11、frames 5、graphs 5、imports 7、managed 8、lifecycle 12、services 10、session 1 项（合计 75）。共享语料包含 JSON 35、描述符 50、wire value 32、回调签名 9、对象图 31、帧 10、lifecycle hello 17、named services 12 个用例。Rust 使用两个真实线程同时交付/释放；两端另验证原生失效时的执行 pin 和慢对象清理。
 
 Linux `objects_ipc` 运行独立 Node 进程与真实 managed rutis/Cordis Ctx，使用继承的私有 Unix stream fd 3，stdout 诊断另行读取。Rust 权威 broker 从固定连接取得 Node activation，校验 family/version/raw SHA/capabilities；两端生成客户端实际 connect/query，保留同一状态对象和 session→agent→session 循环，owner pass-back 仍走 broker。两端借用 callback 重入第三层调用并等待登记子任务；保存的 callback 到期后拒绝调用。Node 在业务 dispatch 前通过控制帧确认参数 grant，避免回调/pass-back 读取尚未 accepted 的引用。丢弃 Rust waiter 后 Node 实际执行仍持有 execution pin，完成后才释放。
 
 同一私有 socket fixture 已完成 Node 接收 SDK 的前缀提议、broker 独立检查、owner 回收通知、ACK 后 SDK 清理；Rust 接收端也走同一 broker 和 Node owner 通知。活的首份 grant 阻止后续已释放 borrow 的回收，旧 id 的控制重传不能恢复授权，低于水位的接收和 pin 拒绝。后续 `session_ipc` 又覆盖多个 activation 共用前缀和全部成员关闭后的 epoch 回收。当前约定见 [protocol README](../protocol/README.md)。这些是 conformance 证据；完整断连/取消/finished 故障交错与 supervisor 尚未验收。
 
-本阶段工作区回归：修复下文记录的并发 Accept 竞态、增加 exec `ETXTBSY` 有界重试、接入单对象撤销与独立 Linux 后代回收后，`cargo test --workspace` 499 passed / 0 failed / 2 ignored；新对象协议私有 Node socket、Rust 生命周期子进程、冻结目录的默认 Rust/Node 服务 driver、首代 Host instance/native 发布与关闭、实际 child 创建者、受管后代回收及旧桥真实 Node TCP e2e 均通过。两个 ignored 是依赖外部 min-cordis/dsh 检出的 host e2e 与需要真实模型后端的 agent e2e，不能计入通过。`cargo check --workspace --all-targets`、全仓 fmt、协议 crate clippy `-D warnings`、TS check/build/test 通过；没有执行外部 min-cordis/dsh 整体迁移验收。Linux Rust CI 安装锁定 Node/TS 依赖并运行该新互通测试，旧桥的跳过变量不跳过它。
+本阶段工作区回归：修复下文记录的并发 Accept 竞态、增加 exec `ETXTBSY` 有界重试、接入单对象撤销、独立 Linux 后代回收及死亡 owner 结算后，`cargo test --workspace` 500 passed / 0 failed / 2 ignored；新对象协议私有 Node socket、Rust 生命周期子进程、冻结目录的默认 Rust/Node 服务 driver、首代 Host instance/native 发布与关闭、实际 child 创建者、受管后代回收及旧桥真实 Node TCP e2e 均通过。两个 ignored 是依赖外部 min-cordis/dsh 检出的 host e2e 与需要真实模型后端的 agent e2e，不能计入通过。`cargo check --workspace --all-targets`、全仓 fmt、协议 crate clippy `-D warnings`、TS check/build/test 通过；没有执行外部 min-cordis/dsh 整体迁移验收。Linux Rust CI 安装锁定 Node/TS 依赖并运行该新互通测试，旧桥的跳过变量不跳过它。
 
 ### 普通原生 child 的单对象撤销
 
@@ -543,18 +543,47 @@ quarantine、强行成功或自动新 epoch 的入口。
 semaphore 限制为最多两个并行，等待发生在各用例期限前；用例内部的多个真实
 runtime、双向调用与停止交错仍并发。最终结果以下述完整重跑证据为准。
 
-最终 `cargo test --workspace` 为 499 passed / 0 failed / 2 ignored，其中协议 crate
-132 项、native runner 10 项全部通过，旧桥真实 Node TCP 回归继续通过。
+最终 `cargo test --workspace` 为 500 passed / 0 failed / 2 ignored，其中协议 crate
+133 项、native runner 10 项全部通过，旧桥真实 Node TCP 回归继续通过。
 `cargo check --workspace --all-targets`、fmt、协议 crate clippy `-D warnings` 与
 TS check/build/test（75 passed）通过。最终 native runner 的丢弃 lease 用例还实际
 核对 runtime 的全部可读 fd，确认业务 socket 存在但 helper 证据 socket 未继承；
 异常 monitor 双向关闭通道，避免 helper 因证据写入背压而停在 OS 回收之前。
-11 份协议/验收文档的 42 个相对链接全部存在。当前沙箱禁止本地 TCP/Unix listen，
+11 份协议/验收文档的 43 个相对链接全部存在。当前沙箱禁止本地 TCP/Unix listen，
 完整 Rust 与 TS 测试已获准在沙箱外执行；其绑定失败未归为实现测试通过。
 
 OS worker 自动持有冻结组到回收证明；未确认时保留到本 Host 生命周期。原生
 消费者租约当前由调用方显式拥有。还需实现全组 epoch supervisor 自动捕获全部
-旧成员/失效消费者、等待实际清理与 OS receipt、收敛死亡 owner 的 execution
-pins、精确开新 epoch，并完成配置/代码/runner 更新与回滚、StopUnconfirmed、
+旧成员/失效消费者、等待实际清理与 OS receipt、精确开新 epoch，并完成死亡
+owner 结算的完整跨语言交错、配置/代码/runner 更新与回滚、StopUnconfirmed、
 RecoveryBlocked/Quarantined 的管理和真实 OS 失败注入。此阶段只提供 T20/T23
 部分平台证据，不能记作完整 T20、T23 或 M3 完成。
+
+### OS receipt 绑定与死亡 owner 执行结算
+
+`ProcessHandle.attach_epoch` 把 Host 的同一私有连接绑定到固定 runtime/epoch，
+一次 launch 只绑定一次。绑定与 `Reaped` 持有独立的 launch 身份，Host 在 epoch
+已断连且身份精确匹配后结算 broker；不按 PID 相等或业务帧确认死亡。独立任务
+推进结算，`EpochReaping` 缓存 `ReapedEpoch` 的完整身份、OS receipt 和结算数量，
+waiter 不拥有执行租约，也不驱动结算。底层账本结算没有公开的强制成功入口。
+
+只清除以死亡 epoch 为 owner 的在途调用。调用者死亡不能清除其他存活 owner
+的执行：新增账本用例先从另一调用者进入死亡 owner，又从死亡调用者进入存活
+owner。开放 epoch 拒绝结算；断连仍保留两个执行 pin；OS owner 结算后仅一个
+归零且重复幂等。新代继续因存活 owner 的旧调用被拒绝，错误 owner 的 finished
+也不能释放它，实际 owner finished 后才解除这份账本阻塞。
+
+真实 frozen Node 用例在派生子孙后，使实际 Connection 查询进入永久等待，Host
+execution pin 为 1；丢弃已经开始等待的 epoch receipt，再强停 runtime。独立 OS
+回收和 broker 结算使该 pin 归零，查询失败且不重放，重复 receipt 仍报告一份
+调用。消费者慢 disposer 继续持有快照，旧 HostProxy 的 native stop ACK 仍是失败，
+旧 instance 不能重挂。这是死亡 owner 的结算证据，不是恢复成功证明。
+
+正常 frozen Rust/Node driver、HostProxy 与 Host native adapter 的私有连接均采用
+同一绑定；OS receipt 后 join broker 结算。后续仍须实现全组 supervisor 的 native
+消费者捕获、清理诊断、双屏障与显式新 epoch，不能用本段结算绕过它们。
+
+最终完整工作区 500 passed / 0 failed / 2 ignored，协议 crate 133 项通过；其中
+native runner 10 项包含实际未完成查询、waiter 丢弃和重复确认的交错。工作区
+all-targets check、fmt、协议 crate clippy `-D warnings` 与 TS 75 项测试通过，原有
+旧桥真实 TCP 回归继续通过；此结果不记作完整 M3 或最终 T01–T24 验收完成。

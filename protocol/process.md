@@ -62,8 +62,21 @@ OS worker 持有自己的 `SnapshotGroup`，Reaped 后才释放。错误、任�
 原生消费者另外拥有自己的快照租约，直到实际 disposer 完成才释放。因此 OS
 Reaped 可以先到，而消费者仍继续保留冻结目录。当前调用方必须显式管理这些
 消费者租约；尚未实现 supervisor 自动捕获全部旧成员/失效消费者、合并两道屏障
-与确认 broker 在途执行 pin。丢失远端 native stop ACK 仍使 HostProxy stop 失败，
+与签发新代。丢失远端 native stop ACK 仍使 HostProxy stop 失败，
 Reaped 不伪造该 ACK，不开放新的 instance 或 epoch。
+
+`handle.attach_epoch(&host, identity, &peer)` 为 Host 将这个实际私有连接绑定到固定
+runtime/epoch，并返回 `EpochReaping`。调用方必须使用本 launch 的 stream 或其
+Host transport wrapper；一份 launch 只能绑定一次，不能重绑另一个 epoch 或 Host。
+OS receipt 与绑定共享独立的 launch 身份，Host 按这个身份核对，而不是按可能复用
+的 PID 猜测。绑定与结算只由 Host API 建立，业务帧不能选择代或提交回收证明。
+
+独立任务在实际 OS receipt 后确认相同 epoch 已断连，才结算 broker 中以该死亡
+epoch 为 owner 的调用；`ReapedEpoch` 缓存完整身份、OS receipt 与结算数量。丢弃
+`EpochReaping` waiter 不停止结算，重复 join 返回同一结果。死亡进程只是 caller 时，
+其他存活 owner 的执行 pin 保留到实际 finished ACK，新代仍可因这份在途执行被
+拒绝。普通超时、连接关闭、未完成查询的 waiter 丢弃和 native stop 错误都不构成
+这份 OS 证明。原生消费者清理与全组恢复许可仍是另外的屏障。
 
 ## 验收证据与剩余范围
 
@@ -74,6 +87,8 @@ cleanup 和退出码。原有六项中另含 child-entry 与本地缺少 export 
 
 - Node provider 生成脱离会话的子、孙进程；强制退出关闭真实 HostGraph 与原生
   消费者，旧 Ctx 拒绝 effect。OS receipt 和四个 PID 的实际消失先于受控慢 disposer；
+  另让真实查询在 handler 内永久等待，核对实际 execution pin。丢弃 epoch waiter
+  后终止，OS 回收独立结算该 pin，重复 receipt 仍报告一次结算；查询失败，不重放。
   快照继续存在，放行实际消费者清理后才删除，旧 instance 仍不能重挂。
 - 丢弃一个 receipt waiter 不影响 Running；最后一个进程 handle 丢弃后仍完成实际
   回收，两份 receipt 得到同一结果。实际 runtime 的 `/proc/.../fd` 另确认保留
@@ -88,8 +103,8 @@ cleanup 和退出码。原有六项中另含 child-entry 与本地缺少 export 
 真实 runtime、双向调用和停止交错保持并发。child-entry 是子进程入口，不能另算
 一个独立运行时验收结果。
 
-M3 仍须完成：全组旧成员/消费者清理与 OS 回收的恢复屏障、死亡 owner 的 broker
-执行 pin 收敛、精确新 epoch、配置/代码/runner 更新及回滚、StopUnconfirmed 的
+M3 仍须完成：全组旧成员/消费者清理与 OS 回收的恢复屏障、死亡 owner 结算的完整
+跨语言故障交错、精确新 epoch、配置/代码/runner 更新及回滚、StopUnconfirmed 的
 显式等待/继续、RecoveryBlocked/Quarantined 管理与持久诊断，以及实际 OS 回收
 失败注入。这些证据覆盖 T20/T23 的部分平台行为，不宣称完整 T20、T23 或 M3
 通过，M0–M5 / T01–T24 的目标保持不变。

@@ -1320,6 +1320,13 @@ struct HostState {
     runtime_hooks: BTreeMap<RuntimeIdentity, Vec<std::sync::Weak<dyn Fn() + Send + Sync>>>,
     object_hooks: BTreeMap<ObjectIdentity, Vec<std::sync::Weak<dyn Fn() + Send + Sync>>>,
     disconnected: BTreeSet<RuntimeIdentity>,
+    #[cfg(target_os = "linux")]
+    processes: BTreeMap<RuntimeIdentity, ProcessRegistration>,
+}
+#[cfg(target_os = "linux")]
+struct ProcessRegistration {
+    binding: crate::process::ProcessBinding,
+    settled_calls: Option<usize>,
 }
 /// Authoritative multi-runtime router. Every handler is bound to the inherited
 /// stream's identity, never an identity supplied by business configuration.
@@ -1471,6 +1478,49 @@ impl HostObjects {
         }
         peer.on_close(&hook);
         Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn attach_process(
+        self: &Arc<Self>,
+        identity: RuntimeIdentity,
+        peer: &Peer,
+        binding: crate::process::ProcessBinding,
+    ) -> Result<()> {
+        self.attach(identity.clone(), peer)?;
+        self.state.lock().unwrap().processes.insert(
+            identity,
+            ProcessRegistration {
+                binding,
+                settled_calls: None,
+            },
+        );
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn confirm_reaped_epoch(
+        &self,
+        identity: &RuntimeIdentity,
+        proof: &crate::process::Reaped,
+    ) -> Result<usize> {
+        let mut state = self.state.lock().unwrap();
+        let registration = state
+            .processes
+            .get(identity)
+            .ok_or_else(|| fail(ErrorCode::CapabilityDenied, "epoch has no process binding"))?;
+        if !registration.binding.confirms(proof) || !state.disconnected.contains(identity) {
+            return Err(fail(
+                ErrorCode::CapabilityDenied,
+                "OS receipt does not confirm this closed epoch",
+            ));
+        }
+        if let Some(count) = registration.settled_calls {
+            return Ok(count);
+        }
+        let count = state
+            .broker
+            .settle_reaped_epoch(&identity.runtime, identity.epoch)?;
+        state.processes.get_mut(identity).unwrap().settled_calls = Some(count);
+        Ok(count)
     }
     fn peer(&self, owner: &Activation) -> Result<Peer> {
         self.peer_identity(&RuntimeIdentity {

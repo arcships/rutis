@@ -4,6 +4,7 @@
 use crate::{
     error::{ErrorCode, ProtocolError, Result},
     frame::{Peer, WeakPeer},
+    session::{HostObjects, RuntimeIdentity},
     snapshot::SnapshotGroup,
 };
 use serde::{Deserialize, Serialize};
@@ -19,7 +20,10 @@ use std::{
     },
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     time::Duration,
 };
 use tokio::{
@@ -88,6 +92,7 @@ pub struct ProcessStatus {
 /// the guardian's successful exit. This proves OS reaping, not native cleanup.
 #[derive(Clone, Debug)]
 pub struct Reaped {
+    launch: Arc<()>,
     guardian_pid: u32,
     runtime_pid: u32,
     runtime_exit: ProcessExit,
@@ -168,6 +173,8 @@ impl ExitSignal {
     }
 }
 struct Lease {
+    launch: Arc<()>,
+    bound: AtomicBool,
     stop: CancellationToken,
     disconnected: CancellationToken,
     exit: Arc<ExitSignal>,
@@ -185,6 +192,48 @@ impl Drop for Lease {
 pub struct ProcessHandle(Arc<Lease>);
 #[derive(Clone)]
 pub struct Reaping(watch::Receiver<Option<Result<Reaped>>>);
+/// One launch identity, shared only with its actual OS completion receipt.
+#[derive(Clone)]
+pub(crate) struct ProcessBinding(Arc<()>);
+impl ProcessBinding {
+    pub(crate) fn confirms(&self, proof: &Reaped) -> bool {
+        Arc::ptr_eq(&self.0, &proof.launch)
+    }
+}
+#[derive(Clone, Debug)]
+pub struct ReapedEpoch {
+    identity: RuntimeIdentity,
+    process: Reaped,
+    settled_calls: usize,
+}
+impl ReapedEpoch {
+    pub fn identity(&self) -> &RuntimeIdentity {
+        &self.identity
+    }
+    pub fn process(&self) -> &Reaped {
+        &self.process
+    }
+    pub fn settled_calls(&self) -> usize {
+        self.settled_calls
+    }
+}
+/// Joining this receipt includes broker settlement, not native consumer cleanup.
+#[derive(Clone)]
+pub struct EpochReaping(watch::Receiver<Option<Result<ReapedEpoch>>>);
+impl EpochReaping {
+    pub async fn wait(&self) -> Result<ReapedEpoch> {
+        let mut receipt = self.0.clone();
+        loop {
+            if let Some(result) = receipt.borrow().clone() {
+                return result;
+            }
+            receipt
+                .changed()
+                .await
+                .map_err(|_| fail("epoch reaping confirmation lost"))?;
+        }
+    }
+}
 impl Reaping {
     pub async fn wait(&self) -> Result<Reaped> {
         let mut receipt = self.0.clone();
@@ -211,6 +260,46 @@ impl ProcessHandle {
         let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || token.cancel());
         peer.on_close(&hook);
         self.0.hooks.lock().unwrap().push(hook);
+    }
+    /// Trusted Host operation: peer must use this launch's private stream (or
+    /// its Host-owned transport wrapper). One launch binds exactly one epoch;
+    /// no business frame can select this identity or supply an OS receipt.
+    pub fn attach_epoch(
+        &self,
+        host: &Arc<HostObjects>,
+        identity: RuntimeIdentity,
+        peer: &Peer,
+    ) -> Result<EpochReaping> {
+        if !crate::contract::identifier(&identity.runtime) || identity.epoch.0 == 0 {
+            return Err(fail("invalid process epoch identity"));
+        }
+        if self.0.bound.swap(true, Ordering::SeqCst) {
+            return Err(fail("process launch cannot bind another epoch"));
+        }
+        let binding = ProcessBinding(self.0.launch.clone());
+        if let Err(error) = host.attach_process(identity.clone(), peer, binding) {
+            self.terminate();
+            return Err(error);
+        }
+        self.attach(peer);
+        let reaping = self.reaping();
+        let host = Arc::downgrade(host);
+        let (tx, receipt) = watch::channel(None);
+        tokio::spawn(async move {
+            let result = reaping.wait().await.and_then(|process| {
+                let host = host
+                    .upgrade()
+                    .ok_or_else(|| fail("process Host no longer exists"))?;
+                let settled_calls = host.confirm_reaped_epoch(&identity, &process)?;
+                Ok(ReapedEpoch {
+                    identity,
+                    process,
+                    settled_calls,
+                })
+            });
+            tx.send_replace(Some(result));
+        });
+        Ok(EpochReaping(receipt))
     }
     pub fn terminate(&self) {
         self.0.exit.close();
@@ -355,7 +444,10 @@ impl FrozenProcess {
         let stop = CancellationToken::new();
         let disconnected = CancellationToken::new();
         let exit = Arc::new(ExitSignal::default());
+        let launch_identity = Arc::new(());
         let handle = ProcessHandle(Arc::new(Lease {
+            launch: launch_identity.clone(),
+            bound: AtomicBool::new(false),
             stop: stop.clone(),
             disconnected: disconnected.clone(),
             exit: exit.clone(),
@@ -374,6 +466,7 @@ impl FrozenProcess {
                 complete: false,
             };
             let mut worker = Monitor {
+                launch: launch_identity,
                 child,
                 monitor,
                 status,
@@ -426,6 +519,7 @@ impl FrozenProcess {
     }
 }
 struct Monitor {
+    launch: Arc<()>,
     child: tokio::process::Child,
     monitor: tokio::net::UnixStream,
     status: watch::Sender<ProcessStatus>,
@@ -536,6 +630,7 @@ impl Monitor {
                         state.remaining.clear();
                     });
                     return Ok(Reaped {
+                        launch: self.launch.clone(),
                         guardian_pid: state.guardian_pid,
                         runtime_pid,
                         runtime_exit: status,

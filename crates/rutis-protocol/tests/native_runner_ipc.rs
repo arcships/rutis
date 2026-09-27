@@ -19,7 +19,7 @@ use rutis_protocol::{
     frame::{Handler, Peer},
     identity::{Activation, Sequence},
     lifecycle::{hello, serve, Hello, NativeDriver},
-    process::{FrozenProcess, LaunchOptions, ProcessHandle},
+    process::{EpochReaping, FrozenProcess, LaunchOptions, ProcessHandle},
     runner_image::RunnerCatalog,
     sdk::*,
     services::{Bundles, NativePorts, ServiceTable},
@@ -581,7 +581,8 @@ async fn frozen_runtime_reaps_detached_descendants_while_native_consumer_cleanup
         let host = objects.host();
         let graph = HostGraph::new(objects, identity("host")).unwrap();
         let root = Ctx::root().unwrap();
-        let node = Process::launch(&host, "node", &snapshot.groups()["node"], Arc::default()).await;
+        let mut node =
+            Process::launch(&host, "node", &snapshot.groups()["node"], Arc::default()).await;
         let launch = Hello::prepared(
             &plan,
             "node",
@@ -596,6 +597,7 @@ async fn frozen_runtime_reaps_detached_descendants_while_native_consumer_cleanup
         hello(&node.peer, &launch).await.unwrap();
         let _ready = publish_ready(&root, launch.identity.clone(), node.peer.clone()).unwrap();
         provider.ready().await.unwrap();
+        node.record("loaded", "node-provider").await;
         let (entered, closing) = tokio::sync::oneshot::channel();
         let (resume, waiting) = tokio::sync::oneshot::channel();
         let captured = Arc::new(Mutex::new(None));
@@ -630,6 +632,39 @@ async fn frozen_runtime_reaps_detached_descendants_while_native_consumer_cleanup
         let grandchild = row["grandchild"].as_u64().unwrap();
         assert!(std::path::Path::new(&format!("/proc/{child}")).exists());
         assert!(std::path::Path::new(&format!("/proc/{grandchild}")).exists());
+        let object = connection.client().proxy().delivery().unwrap().object;
+        let pending = connection.clone();
+        let query = tokio::spawn(async move {
+            pending
+                .query(InterfaceConnectionMethod0Params {
+                    sql: "block-until-process-exit".into(),
+                })
+                .await
+        });
+        node.record("executing", "blocked-native-query").await;
+        assert_eq!(host.pins(&object).1, 1);
+        let waiter = node.epoch.clone();
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let abandoned = tokio::spawn(async move {
+            entered.send(()).unwrap();
+            waiter.wait().await
+        });
+        waiting.await.unwrap();
+        abandoned.abort();
+        let _ = abandoned.await;
+        assert!(
+            node.process
+                .attach_epoch(
+                    &host,
+                    RuntimeIdentity {
+                        runtime: "node".into(),
+                        epoch: Sequence(2),
+                    },
+                    &node.peer
+                )
+                .is_err(),
+            "one launch cannot bind a new epoch"
+        );
         node.process.terminate();
         assert!(node.peer.is_closed());
         assert!(!provider.is_available());
@@ -638,7 +673,22 @@ async fn frozen_runtime_reaps_detached_descendants_while_native_consumer_cleanup
         assert!(original
             .effect(|| panic!("closed consumer admitted an effect"))
             .is_err());
-        let proof = node.process.reaped().await.unwrap();
+        node.process.reaped().await.unwrap();
+        // Broker settlement must progress without an epoch-receipt waiter.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while host.pins(&object).1 != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("OS-confirmed execution remained pinned without a waiter");
+        let settled = node.epoch.wait().await.unwrap();
+        assert_eq!(settled.identity(), &identity("node"));
+        assert_eq!(settled.settled_calls(), 1);
+        assert_eq!(node.epoch.wait().await.unwrap().settled_calls(), 1);
+        assert_eq!(host.pins(&object), (0, 0));
+        assert!(query.await.unwrap().is_err());
+        let proof = settled.process();
         assert_eq!(proof.runtime_exit().signal, Some(libc::SIGKILL));
         assert!(proof.descendants() >= 2, "{proof:?}");
         for pid in [
@@ -859,6 +909,7 @@ fn handler(host: &Arc<HostObjects>, runtime: &str, fence: Arc<Fence>) -> Handler
 }
 struct Process {
     process: ProcessHandle,
+    epoch: EpochReaping,
     peer: Peer,
     records: tokio::sync::mpsc::UnboundedReceiver<Value>,
     stderr: tokio::task::JoinHandle<String>,
@@ -926,10 +977,12 @@ impl Process {
         } else {
             Peer::start(stream, handler(host, runtime, fence))
         };
-        host.attach(identity(runtime), &peer).unwrap();
-        process.attach(&peer);
+        let epoch = process
+            .attach_epoch(host, identity(runtime), &peer)
+            .unwrap();
         Self {
             process,
+            epoch,
             peer,
             records,
             stderr,
@@ -952,7 +1005,8 @@ impl Process {
             "test",
             "native cleanup confirmed",
         ));
-        let status = self.process.reaped().await.unwrap();
+        let settled = self.epoch.wait().await.unwrap();
+        let status = settled.process();
         let stderr = self.stderr.await.unwrap();
         assert_eq!(status.runtime_exit().code, Some(0), "{status:?}: {stderr}");
         let mut cleaned = Vec::new();
