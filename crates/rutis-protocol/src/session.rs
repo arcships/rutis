@@ -115,6 +115,12 @@ struct Pin {
     object: ObjectIdentity,
     key: PinKey,
 }
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObjectsClosed {
+    owner: Activation,
+    objects: Vec<ObjectIdentity>,
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Release {
@@ -165,6 +171,7 @@ struct NativeMember {
     services: Option<StagedServices>,
     published: bool,
     upstream: BTreeSet<Activation>,
+    required_roots: BTreeSet<ObjectIdentity>,
     executing: BTreeSet<PinKey>,
     admitted: BTreeSet<PinKey>,
     running: BTreeSet<PinKey>,
@@ -234,6 +241,7 @@ impl RuntimeObjects {
                 services: None,
                 published: false,
                 upstream: BTreeSet::new(),
+                required_roots: BTreeSet::new(),
                 executing: BTreeSet::new(),
                 admitted: BTreeSet::new(),
                 running: BTreeSet::new(),
@@ -255,7 +263,7 @@ impl RuntimeObjects {
         Ok(())
     }
     pub fn bind(
-        &self,
+        self: &Arc<Self>,
         activation: &Activation,
         native: rutis::Ctx,
         exports: Exports,
@@ -272,8 +280,48 @@ impl RuntimeObjects {
             ));
         }
         member.native = Some(native);
-        member.exports = Some(exports);
+        member.exports = Some(exports.clone());
+        drop(state);
+        let runtime = Arc::downgrade(self);
+        let owner = activation.clone();
+        if let Err(error) = exports.on_revoke(Arc::new(move |objects| {
+            let runtime = runtime.clone();
+            let owner = owner.clone();
+            Box::pin(async move {
+                let runtime = runtime
+                    .upgrade()
+                    .ok_or_else(|| fail(ErrorCode::Unavailable, "object runtime unavailable"))?;
+                if runtime.member_closed(&owner) {
+                    return Ok(());
+                }
+                let result = runtime
+                    .peer()?
+                    .request(
+                        "object/closed",
+                        wire(ObjectsClosed {
+                            owner: owner.clone(),
+                            objects,
+                        }),
+                    )
+                    .await;
+                if runtime.member_closed(&owner) {
+                    return Ok(());
+                }
+                result.map(|_| ())
+            })
+        })) {
+            self.close_member(activation);
+            return Err(error);
+        }
         Ok(())
+    }
+    fn member_closed(&self, owner: &Activation) -> bool {
+        let state = self.state.lock().unwrap();
+        state.closed
+            || state
+                .members
+                .get(owner)
+                .is_none_or(|member| !member.gate.is_open())
     }
     pub fn stage_services(&self, services: StagedServices) -> Result<ServiceTable> {
         let mut state = self.state.lock().unwrap();
@@ -332,6 +380,7 @@ impl RuntimeObjects {
         values: &BTreeMap<String, DecodedValue>,
     ) -> Result<()> {
         let mut upstream = BTreeSet::new();
+        let mut required_roots = BTreeSet::new();
         for value in values.values() {
             let DecodedValue::Object(proxy) = value else {
                 return Err(fail(
@@ -346,7 +395,8 @@ impl RuntimeObjects {
                     "native import belongs to another root",
                 ));
             }
-            upstream.insert(delivery.object.owner);
+            upstream.insert(delivery.object.owner.clone());
+            required_roots.insert(delivery.object);
         }
         let mut state = self.state.lock().unwrap();
         let member = state
@@ -360,6 +410,7 @@ impl RuntimeObjects {
             ));
         }
         member.upstream = upstream;
+        member.required_roots = required_roots;
         Ok(())
     }
     pub async fn receive_services(
@@ -807,6 +858,24 @@ impl RuntimeObjects {
                 self.imports.reject(&deliveries);
                 self.flush_reply()
             }
+            "object/revoke-objects" => {
+                let objects: Vec<ObjectIdentity> = decode(value)?;
+                self.imports.revoke_objects(&objects);
+                let closed = objects.into_iter().collect::<BTreeSet<_>>();
+                let dependents = self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .members
+                    .iter()
+                    .filter(|(_, member)| !member.required_roots.is_disjoint(&closed))
+                    .map(|(owner, _)| owner.clone())
+                    .collect::<Vec<_>>();
+                for owner in dependents {
+                    self.close_member(&owner);
+                }
+                self.flush_reply()
+            }
             "object/revoke" => {
                 let owner: Activation = decode(value)?;
                 self.imports.revoke_owner(&owner);
@@ -1249,6 +1318,7 @@ struct HostState {
     deliveries: BTreeMap<(RuntimeIdentity, Sequence), Delivery>,
     retired: BTreeMap<RuntimeIdentity, Sequence>,
     runtime_hooks: BTreeMap<RuntimeIdentity, Vec<std::sync::Weak<dyn Fn() + Send + Sync>>>,
+    object_hooks: BTreeMap<ObjectIdentity, Vec<std::sync::Weak<dyn Fn() + Send + Sync>>>,
     disconnected: BTreeSet<RuntimeIdentity>,
 }
 /// Authoritative multi-runtime router. Every handler is bound to the inherited
@@ -1282,6 +1352,31 @@ impl HostObjects {
             hook();
         }
     }
+    pub(crate) fn on_object_close(
+        &self,
+        object: &ObjectIdentity,
+        hook: &Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<()> {
+        let closed = {
+            let mut state = self.state.lock().unwrap();
+            let member = state
+                .members
+                .get(&object.owner)
+                .ok_or_else(|| fail(ErrorCode::Unavailable, "unknown object owner"))?;
+            let closed = member.closed || state.broker.object_revoked(object);
+            if !closed {
+                let hooks = state.object_hooks.entry(object.clone()).or_default();
+                hooks.retain(|hook| hook.strong_count() != 0);
+                hooks.push(Arc::downgrade(hook));
+            }
+            closed
+        };
+        if closed {
+            hook();
+        }
+        Ok(())
+    }
+
     /// Reserve IDs in Host order before independently sending member starts.
     pub fn reserve(&self, activation: Activation) -> Result<()> {
         RuntimeIdentity {
@@ -1412,6 +1507,10 @@ impl HostObjects {
             "object/call" => {
                 decode::<Call>(value).and_then(|request| self.admit_call(identity, request))
             }
+            "object/closed" => decode::<ObjectsClosed>(value).and_then(|request| {
+                identity.require(&request.owner)?;
+                self.close_objects(&request.owner, &request.objects)
+            }),
             "object/closing" => decode::<Activation>(value).and_then(|activation| {
                 identity.require(&activation)?;
                 if !self.state.lock().unwrap().members.contains_key(&activation) {
@@ -2110,6 +2209,43 @@ impl HostObjects {
             result.map(wire)
         }))
     }
+    /// Object authority and captured native roots close synchronously. Remote
+    /// import release and native pin confirmation survive dropping this waiter.
+    pub fn close_objects(
+        self: &Arc<Self>,
+        owner: &Activation,
+        objects: &[ObjectIdentity],
+    ) -> Result<HandlerFuture> {
+        let (peers, hooks) = {
+            let mut state = self.state.lock().unwrap();
+            if !state.members.contains_key(owner) {
+                return Err(fail(ErrorCode::Unavailable, "unknown object owner"));
+            }
+            state.broker.close_objects(owner, objects)?;
+            let hooks = objects
+                .iter()
+                .flat_map(|object| state.object_hooks.remove(object).unwrap_or_default())
+                .filter_map(|hook| hook.upgrade())
+                .collect::<Vec<_>>();
+            let peers = state
+                .peers
+                .iter()
+                .filter_map(|(identity, connection)| {
+                    connection
+                        .peer
+                        .upgrade()
+                        .map(|peer| (identity.clone(), peer))
+                })
+                .filter(|(_, peer)| !peer.is_closed())
+                .collect::<Vec<_>>();
+            (peers, hooks)
+        };
+        for hook in hooks {
+            hook();
+        }
+        Ok(self.notify_revocation(peers, "object/revoke-objects", wire(objects)))
+    }
+
     pub fn close_member(self: &Arc<Self>, owner: &Activation) -> HandlerFuture {
         let (peers, hooks) = {
             let mut state = self.state.lock().unwrap();
@@ -2126,6 +2262,9 @@ impl HostObjects {
                 member.close_hooks.clear();
             }
             state.broker.close_activation(owner);
+            state
+                .object_hooks
+                .retain(|object, _| &object.owner != owner);
             let peers = state
                 .peers
                 .iter()
@@ -2137,10 +2276,18 @@ impl HostObjects {
         for hook in hooks {
             hook();
         }
+        self.notify_revocation(peers, "object/revoke", wire(owner))
+    }
+    fn notify_revocation(
+        self: &Arc<Self>,
+        peers: Vec<(RuntimeIdentity, Peer)>,
+        method: &'static str,
+        value: Value,
+    ) -> HandlerFuture {
         let host = self.clone();
         let requests = peers
             .into_iter()
-            .map(|(identity, peer)| (identity, peer.start_request("object/revoke", wire(owner))))
+            .map(|(identity, peer)| (identity, peer.start_request(method, value.clone())))
             .collect::<Vec<_>>();
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
@@ -2193,6 +2340,9 @@ impl HostObjects {
                 .map(|(_, d)| d.clone())
                 .collect::<Vec<_>>();
             state.broker.close_epoch(&identity.runtime, identity.epoch);
+            state
+                .object_hooks
+                .retain(|object, _| !identity.contains(&object.owner));
             let owners = state
                 .members
                 .iter_mut()

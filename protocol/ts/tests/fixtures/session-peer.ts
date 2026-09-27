@@ -9,7 +9,7 @@ import { ProtocolError } from '../../src/error.ts'
 import { ActivationGate } from '../../src/managed.ts'
 import { Bundles, NativePorts, type NativeServices } from '../../src/services.ts'
 import { RuntimeObjects } from '../../src/session.ts'
-import { handle } from '../../src/sdk.ts'
+import { bindNative, handle } from '../../src/sdk.ts'
 import * as rpc from '../../generated/rpc.ts'
 import * as db from '../../generated/database.ts'
 
@@ -33,6 +33,13 @@ let slowEntered = false
 let resumeSlow: (() => void) | undefined
 let childEntered = false
 let resumeChild: (() => void) | undefined
+const optionalChildren = new Map<string, () => Promise<void>>()
+let optionalEntered = false
+let optionalStopped = false
+let resumeOptional: (() => void) | undefined
+let optionalCleaning = false
+let optionalCleanups = 0
+let resumeOptionalCleanup: (() => void) | undefined
 let tamperRoute = false
 let failRouteCommit = false
 const routeStages = new Map<string, string>()
@@ -45,7 +52,7 @@ async function fixture(method: string, input: unknown): Promise<unknown> {
       const ports = new NativePorts()
       ports.provide('rpc', 'nativeRpc', contracts.rpc, bundles, rpc.exportInterfaceDatabase)
       ports.provide('data', 'nativeData', contracts.data, bundles, db.exportInterfaceDatabase)
-      const member = await ports.mount(nativeRoot, { apply(ctx) {
+      const member = await ports.mount(nativeRoot, { async apply(ctx) {
         const exports = Exports.managed(ctx, identity, runtime.ids, () => gate.isOpen); runtime.bind(identity, ctx, exports); providerTables.set(index, exports)
         ctx.effect(() => () => { cleanup++ })
         let session!: rpc.InterfaceSessionService
@@ -60,8 +67,28 @@ async function fixture(method: string, input: unknown): Promise<unknown> {
           }
           return [{ owner: 'node', count: ++count, sql: params.sql }]
         } }
+        let optional!: rpc.InterfaceConnectionService
+        const child = ctx.plugin({ apply(creator) {
+          let session!: rpc.InterfaceSessionService
+          const agent = { get session() { return session } }; session = { agent }
+          optional = { session, async query(context, params) {
+            if (context.native() !== creator) throw new Error('wrong optional child creator')
+            if (params.sql === 'optional-slow') context.spawn(async () => {
+              optionalEntered = true; await new Promise<void>(resolve => { resumeOptional = resolve })
+            })
+            return [{ owner: 'optional-node-child', sql: params.sql }]
+          } }
+          exports.inContext(creator, () => exports.registerExclusive(optional, async () => {
+            if (index === '1') {
+              optionalCleaning = true; optionalCleanups++
+              if (optionalEntered) await new Promise<void>(resolve => { resumeOptionalCleanup = resolve })
+            }
+          }))
+          bindNative(runtime.caller(identity), creator, rpc.exportInterfaceConnection(optional))
+        } })
+        optionalChildren.set(index, () => child.dispose()); await child
         const service: rpc.InterfaceDatabaseService = {
-          async connect(context, params) { if (context.native() !== ctx) throw new Error('wrong original Ctx'); if (params.name === 'slow-connect') { connectEntered = true; await new Promise<void>(resolve => { resumeConnect = resolve }) }; return connection },
+          async connect(context, params) { if (context.native() !== ctx) throw new Error('wrong original Ctx'); if (params.name === 'optional-child') return optional; if (params.name === 'slow-connect') { connectEntered = true; await new Promise<void>(resolve => { resumeConnect = resolve }) }; return connection },
           async inspect(_, client) { return (await client.query({ sql: 'owner-passback' }))[0].owner === 'node' },
           async withCallback(context, callback) { borrowed = callback; await callback.call('callback'); context.spawn(async () => { await callback.call('descendant') }); return null },
         }
@@ -106,7 +133,10 @@ async function fixture(method: string, input: unknown): Promise<unknown> {
       await Promise.all([first, second]); return null
     }
     case 'fixture/pins': return providerTables.get(value.activation)!.pins(providerObjects.get(value.activation)!)
-    case 'fixture/status': return { slowEntered, childEntered, connectEntered, fenceSecondFinished, consumerOpen: gates.get('2')?.isOpen ?? false, extraOpen: gates.get('4')?.isOpen ?? false, cleanup }
+    case 'fixture/status': return { slowEntered, childEntered, connectEntered, optionalEntered, optionalStopped, optionalCleaning, optionalCleanups, providerOpen: gates.get('1')?.isOpen ?? false, fenceSecondFinished, consumerOpen: gates.get('2')?.isOpen ?? false, extraOpen: gates.get('4')?.isOpen ?? false, cleanup }
+    case 'fixture/stop-optional': await optionalChildren.get(value.activation ?? '1')!(); optionalStopped = true; return null
+    case 'fixture/resume-optional': resumeOptional?.(); return null
+    case 'fixture/resume-optional-cleanup': resumeOptionalCleanup?.(); return null
     case 'fixture/tamper-route': tamperRoute = true; return null
     case 'fixture/fail-route-commit': failRouteCommit = true; return null
     case 'fixture/resume': resumeSlow?.(); resumeChild?.(); resumeConnect?.(); return null

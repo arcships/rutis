@@ -55,10 +55,22 @@ Rust 保存原始代的 cancellation token 所属 Ctx；新 pin 和 dispatch 入
 已有 execution pin 继续持有实际对象，真实执行及登记后代结束后才释放。
 
 必要导出仍由托管根的原生 guard 管理：child 服务失效关闭根 gate，撤销 Host
-权威及已捕获的消费者。非必要 child 对象目前同步拒绝 owner 新 pin 与调度，但
-尚未实现只撤销该对象的远端通知；其旧 delivery pins 仍按现有 recipient release
-或托管根撤销收敛。单对象撤销及 child 在飞 handler/慢 disposer 的完整交错仍需
-验收，不能用精确创建者测试代替这些门槛。
+权威及已捕获的消费者。普通 child 取消时，SDK 关闭该原生代首次创建的对象，
+通过 `object/closed` 通知权威 broker；broker 记录不可逆的对象终态，拒绝迟到
+首次导出、重传和新执行，再广播 `object/revoke-objects`。接收表关闭这些对象的
+全部 scope/source 包装与缓存关系，确认 Release 和 owner pin 更新后才返回 ACK。
+其他对象和 scope 保持开放；只有被撤销对象本身是声明的 required 根时，才关闭
+已捕获该根的 runtime/Host 原生消费者。
+
+Rust 用原始 child token 的观察任务尽早撤销，并由原生 child effect 等待确认。
+TS 用托管根拥有的公开 `internal/status` 监听器，在 child 进入卸载时同步闭合
+该子树的对象，再由每个原始创建者的 effect 等待。两端保留既有 execution pin，
+child 清理等待真实 handler、登记后代、独占 disposer 和远端撤销 ACK；丢弃等待者
+不取消发送或清理。整根关闭使用已有整代撤销屏障，仍等待真实执行与资源清理。
+Rust 撤销任务 panic/失败和 TS ACK rejection 保存在导出表中；重复 join 仍报告
+错误。Cordis 原生 child dispose 会记录 disposer 错误而不拒绝其 Promise，SDK
+保留失败供 join 和托管根 stop 观察，不能把该 Promise 的完成当作清理成功证明。
+整体 StopUnconfirmed 与监督恢复屏障仍待 M3。
 
 ## 可执行证据
 
@@ -69,7 +81,14 @@ child 中创建、关联并执行。双向回调重入、登记后代、循环�
 和 Host native adapter 路由继续走同一个实际 SDK、broker 和私有 fd。
 
 Rust `services` 另验证不属于托管根的 Ctx 被拒绝，停止普通 child 后根仍 Active、
-旧 Connection 不能取得新执行 pin、根上下文重新导出不能复活它。TS `exports`
-验证第一次创建者不被重传改写、跨树拒绝、native stop 后新 pin/dispatch/纯值
-结果拒绝，已有 execution pin 仍持有原对象。更新恢复、选择性撤销和最终 M0–M5 /
-T01–T24 验收仍未完成。
+旧 Connection 不能取得新执行 pin、根上下文重新导出不能复活它；child stop 返回
+后远端 delivery 和缓存属性均已关闭，broker pins 归零。Rust/TS `exports` 分别验证
+在途执行、慢 disposer 和延迟 ACK 均阻止 child stop，Rust 另丢弃 stop waiter 并
+验证撤销任务 panic，TS 验证失败 ACK 在 child disposal 后仍可观察。
+
+`session_ipc` 在真实 Node 原生 child 中登记独占 Connection，经私有 Unix stream
+交给 Rust 原生消费者。暂停真实 Release ACK 时 child stop 不完成；已有登记后代
+继续持有 execution pin，随后慢 disposer 仍阻止 child stop。旧循环属性失效，
+provider 与消费者根保持开放，其他根对象仍可调用，结束后 pin 归零且 disposer
+只执行一次。它仍是私有 session fixture；更新恢复、双向独占清理的完整故障矩阵
+及最终 M0–M5 / T01–T24 验收尚未完成。

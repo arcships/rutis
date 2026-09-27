@@ -40,6 +40,7 @@ export class Imports {
   private scopes = new Map<string, { scope: Scope; parent?: string }>()
   private gates = new Map<string, { admitted: () => boolean; closed: boolean }>()
   private closedOwners = new Set<string>()
+  private closedObjects = new Set<string>()
   private latest = new Map<string, bigint>()
   private cache = new Map<string, ObjectProxy>()
   private seen = new Map<string, Seen>()
@@ -111,7 +112,7 @@ export class Imports {
   private checkBatch(deliveries: Delivery[]): void {
     const batch = new Map<string, Delivery>()
     for (const delivery of deliveries) {
-      if (this.closedOwners.has(canonical(delivery.object.owner))) fail('StaleObject', 'owner activation closed')
+      if (this.closedOwners.has(canonical(delivery.object.owner)) || this.closedObjects.has(canonical(delivery.object))) fail('StaleObject', 'owner object closed')
       if (BigInt(delivery.id) <= this.retired) fail('StaleObject', 'delivery is below retirement watermark')
       if (!this.scopeOpen(delivery.recipient)) fail('ScopeClosed', 'delivery scope closed')
       const seen = this.seen.get(delivery.id)
@@ -145,6 +146,10 @@ export class Imports {
     }
   }
 
+  revokeObjects(objects: ObjectIdentity[]): void {
+    for (const object of objects) this.closedObjects.add(canonical(object))
+    for (const proxy of this.cache.values()) if (this.closedObjects.has(canonical(proxy.identity))) this.release(proxy)
+  }
   revokeOwner(owner: Activation): void {
     this.closedOwners.add(canonical(owner))
     for (const proxy of this.cache.values()) if (canonical(proxy.identity.owner) === canonical(owner)) this.release(proxy)

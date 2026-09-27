@@ -641,6 +641,124 @@ async fn scenario() {
         .unwrap();
     let object = connection.client().proxy().identity();
     assert_eq!(host.pins(&object).1, 0);
+    // An ordinary native child owns returned objects, not the required root.
+    // Its stop must await both the remote Release ACK and an actual execution.
+    let optional = db
+        .connect(rpc::InterfaceDatabaseMethod0Params {
+            name: "optional-child".into(),
+        })
+        .await
+        .unwrap();
+    let optional_object = optional.client().proxy().identity();
+    let cached_session = optional.session().unwrap();
+    let cached_agent = cached_session.agent().unwrap();
+    let before = host.pins(&optional_object);
+    assert_eq!(
+        host.handle(
+            &identity("rust"),
+            "object/closed",
+            json!({"owner": owner("node", 1), "objects": [&optional_object]})
+        )
+        .await
+        .unwrap_err()
+        .code,
+        ErrorCode::CapabilityDenied
+    );
+    assert_eq!(host.pins(&optional_object), before);
+    assert_eq!(
+        optional
+            .query(rpc::InterfaceConnectionMethod0Params {
+                sql: "original-child".into()
+            })
+            .await
+            .unwrap()[0]["owner"],
+        "optional-node-child"
+    );
+    let called = optional.clone();
+    let execution = tokio::spawn(async move {
+        called
+            .query(rpc::InterfaceConnectionMethod0Params {
+                sql: "optional-slow".into(),
+            })
+            .await
+    });
+    eventually(async || {
+        node_peer
+            .request("fixture/status", Value::Null)
+            .await
+            .unwrap()["optionalEntered"]
+            == true
+    })
+    .await;
+    rust_fence.enabled.store(true, Ordering::SeqCst);
+    let peer = node_peer.clone();
+    let child_stop = tokio::spawn(async move {
+        peer.request("fixture/stop-optional", json!({"activation":"1"}))
+            .await
+    });
+    rust_fence.entered.notified().await;
+    assert!(!child_stop.is_finished());
+    assert_eq!(host.pins(&optional_object), (0, 1));
+    assert!(optional.client().proxy().delivery().is_err());
+    assert!(cached_session.agent().is_err());
+    assert!(cached_agent.session().is_err());
+    assert!(consumer.gate().is_open());
+    rust_fence.resume.notify_one();
+    assert_eq!(
+        connection
+            .query(rpc::InterfaceConnectionMethod0Params {
+                sql: "root-still-active".into()
+            })
+            .await
+            .unwrap()[0]["owner"],
+        "node"
+    );
+    assert!(!child_stop.is_finished());
+    node_peer
+        .request("fixture/resume-optional", Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(
+        execution.await.unwrap().unwrap_err().code,
+        ErrorCode::ScopeClosed
+    );
+    eventually(async || {
+        node_peer
+            .request("fixture/status", Value::Null)
+            .await
+            .unwrap()["optionalCleaning"]
+            == true
+    })
+    .await;
+    assert!(!child_stop.is_finished());
+    assert_eq!(host.pins(&optional_object), (0, 0));
+    assert_eq!(
+        node_peer
+            .request("fixture/status", Value::Null)
+            .await
+            .unwrap()["optionalCleanups"],
+        1
+    );
+    node_peer
+        .request("fixture/resume-optional-cleanup", Value::Null)
+        .await
+        .unwrap();
+    child_stop.await.unwrap().unwrap();
+    assert_eq!(host.pins(&optional_object), (0, 0));
+    assert!(consumer.gate().is_open());
+    assert_eq!(
+        node_peer
+            .request("fixture/status", Value::Null)
+            .await
+            .unwrap()["providerOpen"],
+        true
+    );
+    assert!(db
+        .connect(rpc::InterfaceDatabaseMethod0Params {
+            name: "optional-child".into()
+        })
+        .await
+        .is_err());
     assert_eq!(
         node_peer
             .request("fixture/expired", Value::Null)
@@ -1056,6 +1174,21 @@ async fn scenario() {
 
     // Revocation closes the dependent original Ctx before ACK. Another pair in
     // this same connection remains live until it is independently stopped.
+    // Losing only the declared root closes its captured native consumers,
+    // while the actual provider activation remains open until its own stop.
+    host.close_objects(&owner("node", 1), &[db.client().proxy().identity()])
+        .unwrap()
+        .await
+        .unwrap();
+    assert!(!consumer.gate().is_open());
+    assert!(!extra_consumer.gate().is_open());
+    let status = node_peer
+        .request("fixture/status", Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(status["providerOpen"], true);
+    assert_eq!(status["consumerOpen"], true);
+    assert_eq!(status["extraOpen"], false);
     host.close_member(&owner("node", 1)).await.unwrap();
     assert!(!consumer.gate().is_open());
     assert!(!extra_consumer.gate().is_open());

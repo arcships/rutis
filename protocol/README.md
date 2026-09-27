@@ -8,7 +8,7 @@ Rust/Node 私有连接的 hello/start/activate/stop、native RuntimeReady 与发
 
 命名原生端口、生成客户端注入、跨 bundle 整表 broker 事务和 owner pin 确认见[服务绑定](services.md)。[私有 session](session.md) 已接入权威 broker 和 named roots；[Host 原生图](host.md) 在实际冻结子进程中验证发布顺序及同步关闭，[原生适配器](native-adapters.md) 把 Host 实际插件接到 frozen native service keys。
 
-内部 child 的对象、返回对象和借用 callback 保持真实创建者 Ctx，见[原生创建者上下文](native-context.md)。必要 child 导出失效撤销托管根；非必要对象的选择性远端撤销仍需补齐。
+内部 child 的对象、返回对象和借用 callback 保持真实创建者 Ctx，见[原生创建者上下文](native-context.md)。必要 child 导出失效撤销托管根；普通 child 对象通过 broker 单独撤销，并等待执行、独占清理与远端 ACK。
 
 [冻结根交付](deployment.md) 从 prepared routes 捕获整张 required 表，复用 owner 保留清单，为多个消费者建立独立 source views，并跨 provider 原子签发；已接入首代 instance/native Host 发布图，完整拓扑仍待验收。
 

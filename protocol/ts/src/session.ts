@@ -37,7 +37,7 @@ export function root(owner: Activation): Scope { return { activation: owner, sco
 export function callSource(owner: Activation, hash: string): string {
   return createHash('sha256').update(signatureCanonical(['protocol-call', owner, hash])).digest('hex')
 }
-interface Member { owner: Activation; gate: ActivationGate; native?: Context; exports?: Exports; exporters: Map<string, GraphExporter>; services?: StagedServices; published: boolean; upstream: Set<string>; executing: Set<string>; admitted: Map<string, PinKey>; running: Set<string> }
+interface Member { owner: Activation; gate: ActivationGate; native?: Context; exports?: Exports; exporters: Map<string, GraphExporter>; services?: StagedServices; published: boolean; upstream: Set<string>; requiredRoots: Set<string>; executing: Set<string>; admitted: Map<string, PinKey>; running: Set<string> }
 
 /** Reserve before plugin construction; bind the actual apply Ctx before it
  * makes required-service calls. Publication follows lifecycle/HostActive. */
@@ -66,7 +66,7 @@ export class RuntimeObjects {
     if (this.closed || this.members.has(key) || !gate.isOpen) fail('ScopeClosed', 'closed or reused native member')
     owner = Object.freeze(structuredClone(owner))
     this.imports.openScope(root(owner)); this.imports.bindScope(root(owner), () => gate.isOpen)
-    this.members.set(key, { owner, gate, exporters: new Map(), published: false, upstream: new Set(), executing: new Set(), admitted: new Map(), running: new Set() })
+    this.members.set(key, { owner, gate, exporters: new Map(), published: false, upstream: new Set(), requiredRoots: new Set(), executing: new Set(), admitted: new Map(), running: new Set() })
     gate.onClose(() => {
       this.closeMember(owner)
       if (this.peer && !this.peer.isClosed) void this.peer.request('object/closing', owner).catch(() => {})
@@ -76,6 +76,13 @@ export class RuntimeObjects {
     const member = this.member(owner)
     if (!member.gate.isOpen || member.native || canonical(exports.activation) !== canonical(owner)) fail('CapabilityDenied', 'closed, rebound or mismatched native table')
     member.native = native; member.exports = exports
+    try {
+      exports.onRevoke(async objects => {
+        if (this.closed || !member.gate.isOpen) return
+        try { await this.connection().request('object/closed', { owner, objects }) }
+        catch (error) { if (!this.closed && member.gate.isOpen) throw error }
+      })
+    } catch (error) { this.closeMember(owner); throw error }
   }
   stageServices(services: StagedServices): ServiceTable {
     const member = this.member(services.table.activation)
@@ -94,13 +101,16 @@ export class RuntimeObjects {
     const member = this.member(owner)
     if (member.native || !member.gate.isOpen) fail('ScopeClosed', 'native imports already mounted')
     const upstream = new Set<string>()
+    const requiredRoots = new Set<string>()
     for (const value of Object.values(values)) {
       if (!(value instanceof ObjectProxy)) fail('InterfaceMismatch', 'native import is not an object')
       const delivery = value.delivery()
       if (canonical(delivery.recipient) !== canonical(root(owner))) fail('CapabilityDenied', 'native import belongs to another root')
       upstream.add(canonical(delivery.object.owner))
+      requiredRoots.add(canonical(delivery.object))
     }
     member.upstream = upstream
+    member.requiredRoots = requiredRoots
   }
   closeMember(owner: Activation): void {
     const member = this.members.get(canonical(owner))
@@ -262,6 +272,14 @@ export class RuntimeObjects {
       case 'object/reject': {
         if (!Array.isArray(value)) fail('InvalidParams', 'invalid rejected deliveries')
         this.imports.reject(value.map(parseDelivery)); await this.flush(); return []
+      }
+      case 'object/revoke-objects': {
+        if (!Array.isArray(value)) fail('InvalidParams', 'invalid object revocation')
+        for (const object of value) { keys(object, ['owner', 'object']); activation(object.owner); sequence(object.object) }
+        this.imports.revokeObjects(value)
+        const closed = new Set(value.map(object => canonical(object)))
+        for (const member of this.members.values()) if ([...member.requiredRoots].some(object => closed.has(object))) this.closeMember(member.owner)
+        await this.flush(); return []
       }
       case 'object/revoke': { activation(value); this.imports.revokeOwner(value); this.closeMember(value); for (const member of this.members.values()) if (member.upstream.has(canonical(value))) this.closeMember(member.owner); await this.flush(); return [] }
       case 'object/retire-owner': {

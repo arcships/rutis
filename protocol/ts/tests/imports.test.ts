@@ -18,6 +18,26 @@ test('receiver retirement proposals never cross a receipt gap or live token', ()
   const third = imports.receive(delivery('3')); assert.deepEqual(imports.retirement(), { received_through: '4', terminal_through: '2' }); third.release()
   assert.deepEqual(imports.retirement(), { received_through: '4', terminal_through: '4' })
 })
+test('individual object revocation closes every source and scope without reviving late envelopes', () => {
+  const imports = new Imports(); imports.openScope(root)
+  const child = { ...root, scope: '2' }; imports.openScope(child, root)
+  const first = imports.receive(delivery('1'))
+  const alias = imports.receive(delivery('2', child, 'route-b'))
+  const unrelated = { ...delivery('3'), object: { owner, object: '2' } }
+  const live = imports.receive(unrelated)
+  imports.revokeObjects([{ owner, object: '1' }, { owner, object: '1' }])
+  assert.throws(() => first.delivery()); assert.throws(() => alias.delivery())
+  assert.equal(live.delivery().id, '3')
+  assert.throws(() => imports.receive(delivery('1')), (e: any) => e.code === 'StaleObject')
+  assert.throws(() => imports.receive(delivery('4')), (e: any) => e.code === 'StaleObject')
+  imports.revokeObjects([{ owner, object: '99' }])
+  const late = { ...delivery('5'), object: { owner, object: '99' } }
+  assert.throws(() => imports.receive(late), (e: any) => e.code === 'StaleObject')
+  const fresh = { ...delivery('6'), object: { owner, object: '3' } }
+  assert.throws(() => imports.receiveBatch([fresh, late]))
+  assert.equal(live.delivery().id, '3')
+  assert.deepEqual(imports.takeControls().filter(c => c.type === 'release').map(c => c.id), ['1', '2', '4', '5', '6'])
+})
 test('T04/T07: stable identity, independent tokens and no revival of released aliases', () => {
   const imports = new Imports(); imports.openScope(root)
   const first = imports.receive(delivery('1'))

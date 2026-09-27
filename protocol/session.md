@@ -7,7 +7,7 @@
 这是 M1/M2 的可复用传输层。默认 Rust/Node native driver 已接命名服务传输并拒绝
 事件能力；首代 [HostProxy 原生图](host.md) 已接入。
 [内部 child 创建者上下文](native-context.md) 已保存在同一导出表并用于实际调度；
-单对象远端撤销、更新恢复、事件和完整 T24 尚未验收。
+单对象远端撤销已接入；更新恢复、事件和完整 T24 尚未验收。
 
 ## 接入顺序
 
@@ -57,6 +57,8 @@ activate 成功后才开放普通 object execute；stop 意图同步关闭对象
 | end | Host → owner | 实际 handler 和登记后代结束后关闭 Borrow scope、释放执行 pin |
 | reject / abort | Host → runtime | 未消费的新 envelope 拒收或暂存图中止；不释放以前成功接受的重传 token |
 | closing | runtime → Host | native gate 的终态通知；撤销服务及其已绑定消费者，属于关闭意图 |
+| closed | owner runtime → Host | 原始 child 创建的对象列表；固定连接校验 owner，整批记录对象终态并撤销 grants |
+| revoke-objects | Host → runtime | 关闭指定对象的全部包装；仅当对象是声明的 required 根时关闭该原生消费者；确认 Release 后 ACK |
 | revoke / release | Host → runtime | owner/member 失效和 native delivery pin 释放 |
 | retire / retire-owner | 双向确认 | 整个连接 epoch 的连续收到/终态前缀，Host 独立检查后通知 owner |
 
@@ -85,6 +87,10 @@ StopUnconfirmed 管理尚待 M3。epoch 断连可以凭 Host 的撤销证据向�
 
 native 必要服务或依赖失效触发单次 closing 通知。接收 revoke 时同步关闭被撤销
 成员以及已绑定的依赖成员，旧原始 context 随即拒绝新 effect；不会在旧 id 重建。
+普通 child 的 `closed` 请求不关闭 owner activation 或其他对象。未曾宣布的对象
+也可以先进入终态，防止首次 handoff 迟到后恢复授权；同 epoch 的对象编号不能
+换 activation 重用。Host 原生消费者持有 required 对象的弱关闭租约，broker
+闭合该对象时同步取消它们，调用原生关闭逻辑前已经释放管理锁。
 回收使用连接身份，允许所有成员已关闭但 epoch 仍连接时提交前缀；不创建虚拟业务
 activation。owner pins 确认前不推进 SDK watermark。
 
@@ -104,6 +110,9 @@ object-valued waiter 后仍完成、释放并回收。伪造跨连接 sender 在
 实际 Node 正常退出都被检查。两端另验证未 execute 的 native admission 不阻塞关闭。
 两端用真实 broker 控制交付延迟 Release ACK，验证后续空队列 flush 不提前完成；
 Rust 还丢弃第一位 flush 等待者，再确认第二位仍等待同一实际 ACK。
+另一位普通 Node child 提供独占返回对象，Rust 保存循环关系；child stop 等待
+真实延迟 Release ACK、仍在执行的登记后代和慢 disposer，其他根对象继续调用。
+结束后缓存关系失效、pin 归零、disposer 仅一次，provider/consumer 根均保持开放。
 
 该用例使用 SDK actor 和权威 broker，没有手工根 id/token；管理入口仍是明确标注的
 fixture，并非 frozen plan 到完整 HostProxy 的生产装配。它不替代整个 T01–T24、

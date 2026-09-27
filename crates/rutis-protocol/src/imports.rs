@@ -51,6 +51,7 @@ struct State {
     scopes: BTreeMap<Scope, Option<Scope>>,
     gates: BTreeMap<Scope, ActivationGate>,
     closed_owners: BTreeSet<crate::identity::Activation>,
+    closed_objects: BTreeSet<ObjectIdentity>,
     cache: BTreeMap<CacheKey, Arc<Mutex<Wrapper>>>,
     seen: BTreeMap<Sequence, Seen>,
     retired: u64,
@@ -204,6 +205,20 @@ impl Imports {
     /// an already accepted token owned by a previous successful delivery.
     pub fn reject(&self, deliveries: &[Delivery]) {
         reject_deliveries(&mut self.0.lock().unwrap(), deliveries);
+    }
+
+    pub fn revoke_objects(&self, objects: &[ObjectIdentity]) {
+        let mut state = self.0.lock().unwrap();
+        state.closed_objects.extend(objects.iter().cloned());
+        let wrappers = state
+            .cache
+            .iter()
+            .filter(|((_, object, _), _)| state.closed_objects.contains(object))
+            .map(|(_, wrapper)| wrapper.clone())
+            .collect::<Vec<_>>();
+        for wrapper in wrappers {
+            release_wrapper(&mut state, &wrapper);
+        }
     }
 
     pub fn revoke_owner(&self, owner: &crate::identity::Activation) {
@@ -480,8 +495,10 @@ fn materialize(
 }
 
 fn check_delivery(state: &State, delivery: &Delivery) -> Result<()> {
-    if state.closed_owners.contains(&delivery.object.owner) {
-        return Err(error(ErrorCode::StaleObject, "owner activation closed"));
+    if state.closed_owners.contains(&delivery.object.owner)
+        || state.closed_objects.contains(&delivery.object)
+    {
+        return Err(error(ErrorCode::StaleObject, "owner object closed"));
     }
     if delivery.id.0 <= state.retired {
         return Err(error(

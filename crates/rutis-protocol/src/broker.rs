@@ -46,6 +46,7 @@ pub struct Broker {
     scopes: BTreeMap<Scope, Option<Scope>>,
     recipients: BTreeMap<(String, Sequence), Recipient>,
     objects: BTreeMap<ObjectIdentity, ObjectEntry>,
+    closed_objects: BTreeSet<ObjectIdentity>,
     calls: BTreeMap<(Activation, Sequence), ObjectIdentity>,
     next_objects: BTreeMap<(String, Sequence), u64>,
     object_owners: BTreeMap<(String, Sequence, Sequence), Activation>,
@@ -299,6 +300,9 @@ impl Broker {
         if !self.activations.contains(owner) {
             return Err(error(ErrorCode::Unavailable, "object owner unavailable"));
         }
+        if self.closed_objects.contains(&identity) {
+            return Err(error(ErrorCode::StaleObject, "object has been revoked"));
+        }
         if views.is_empty() {
             return Err(error(
                 ErrorCode::InterfaceMismatch,
@@ -353,6 +357,9 @@ impl Broker {
                 ErrorCode::CapabilityDenied,
                 "export owner unavailable",
             ));
+        }
+        if self.closed_objects.contains(&identity) {
+            return Err(error(ErrorCode::StaleObject, "object has been revoked"));
         }
         if let Some(entry) = self.objects.get_mut(&identity) {
             if let Some(old) = entry.views.get(&view) {
@@ -427,6 +434,9 @@ impl Broker {
         }
         if !self.activations.contains(owner) {
             return Err(error(ErrorCode::StaleObject, "owner activation closed"));
+        }
+        if self.closed_objects.contains(object) {
+            return Err(error(ErrorCode::StaleObject, "object has been revoked"));
         }
         let entry = self
             .objects
@@ -701,6 +711,59 @@ impl Broker {
         }
     }
 
+    pub(crate) fn object_revoked(&self, object: &ObjectIdentity) -> bool {
+        self.closed_objects.contains(object)
+    }
+
+    /// Authenticated owner closure is terminal even if its first handoff is
+    /// still in flight. Validate the whole batch before revoking any grant.
+    /// Executions already admitted retain their pins until finished.
+    pub fn close_objects(&mut self, owner: &Activation, objects: &[ObjectIdentity]) -> Result<()> {
+        for object in objects {
+            if &object.owner != owner || object.object.0 == 0 {
+                return Err(error(
+                    ErrorCode::CapabilityDenied,
+                    "object closure changed owner",
+                ));
+            }
+            if self
+                .object_owners
+                .get(&(owner.runtime.clone(), owner.epoch, object.object))
+                .is_some_and(|known| known != owner)
+            {
+                return Err(error(
+                    ErrorCode::CapabilityDenied,
+                    "object closure reused another owner's id",
+                ));
+            }
+        }
+        let closed = objects.iter().cloned().collect::<BTreeSet<_>>();
+        for object in &closed {
+            self.object_owners.insert(
+                (owner.runtime.clone(), owner.epoch, object.object),
+                owner.clone(),
+            );
+            let next = self
+                .next_objects
+                .entry((owner.runtime.clone(), owner.epoch))
+                .or_default();
+            *next = (*next).max(object.object.0);
+        }
+        self.closed_objects.extend(closed.iter().cloned());
+        for recipient in self.recipients.values_mut() {
+            for grant in recipient.grants.values_mut() {
+                if closed.contains(&grant.delivery.object) && !grant.state.terminal() {
+                    grant.state = DeliveryState::Revoked;
+                    self.objects
+                        .get_mut(&grant.delivery.object)
+                        .unwrap()
+                        .delivery_pins -= 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn close_activation(&mut self, activation: &Activation) {
         let scopes: Vec<_> = self
             .scopes
@@ -744,6 +807,8 @@ impl Broker {
         self.recipients.remove(&(runtime.into(), epoch));
         self.object_owners
             .retain(|(r, e, _), _| r != runtime || *e != epoch);
+        self.closed_objects
+            .retain(|object| object.owner.runtime != runtime || object.owner.epoch != epoch);
         self.next_objects.remove(&(runtime.into(), epoch));
     }
 

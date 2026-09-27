@@ -88,6 +88,134 @@ impl Setup {
 }
 
 #[test]
+fn object_revocation_preserves_other_objects_and_inflight_execution() {
+    let mut s = Setup::new();
+    let first = s.offer(None, "route-a");
+    let old = s.imports.receive(first.clone()).unwrap();
+    let second = s.offer(None, "route-b");
+    let alias = s.imports.receive(second).unwrap();
+    let delayed = s.offer(None, "route-a");
+    let other = s
+        .broker
+        .register_object(
+            &s.owner,
+            BTreeMap::from([(view("route-a"), BTreeSet::from(["query".into()]))]),
+        )
+        .unwrap();
+    let live_delivery = s
+        .broker
+        .offer(&s.owner, &other, &s.scope, &view("route-a"))
+        .unwrap();
+    let live = s.imports.receive(live_delivery).unwrap();
+    s.flush();
+    s.broker
+        .begin_call(&s.scope, Sequence(1), &first, "query", &s.owner)
+        .unwrap();
+    s.broker
+        .close_objects(&s.owner, &[s.object.clone(), s.object.clone()])
+        .unwrap();
+    s.imports.revoke_objects(&[s.object.clone()]);
+    assert!(old.delivery().is_err());
+    assert!(alias.delivery().is_err());
+    assert!(live.delivery().is_ok());
+    assert_eq!(
+        s.imports.receive(delayed).err().unwrap().code,
+        ErrorCode::StaleObject
+    );
+    assert_eq!(
+        s.imports.receive(first.clone()).err().unwrap().code,
+        ErrorCode::StaleObject
+    );
+    s.flush();
+    assert_eq!(s.broker.pins(&s.object), (0, 1));
+    assert_eq!(s.broker.pins(&other), (1, 0));
+    assert!(s
+        .broker
+        .begin_call(&s.scope, Sequence(2), &first, "query", &s.owner)
+        .is_err());
+    assert!(s
+        .broker
+        .offer(&s.owner, &s.object, &s.scope, &view("route-a"))
+        .is_err());
+    s.broker
+        .close_objects(&s.owner, &[s.object.clone()])
+        .unwrap();
+    s.broker
+        .finish_call(&s.owner, &s.caller, Sequence(1))
+        .unwrap();
+    s.broker
+        .finish_call(&s.owner, &s.caller, Sequence(1))
+        .unwrap();
+    assert_eq!(s.broker.pins(&s.object), (0, 0));
+}
+
+#[test]
+fn object_closure_batch_is_atomic_and_prevents_late_first_export_and_rebinding() {
+    let mut s = Setup::new();
+    let first = s.offer(None, "route-a");
+    let old = s.imports.receive(first).unwrap();
+    s.flush();
+    let foreign = ObjectIdentity {
+        owner: s.caller.clone(),
+        object: Sequence(99),
+    };
+    assert!(s
+        .broker
+        .close_objects(&s.owner, &[s.object.clone(), foreign])
+        .is_err());
+    assert!(old.delivery().is_ok());
+    assert_eq!(s.broker.pins(&s.object), (1, 0));
+    let late = ObjectIdentity {
+        owner: s.owner.clone(),
+        object: Sequence(99),
+    };
+    s.broker
+        .close_objects(&s.owner, std::slice::from_ref(&late))
+        .unwrap();
+    s.imports.revoke_objects(std::slice::from_ref(&late));
+    let delayed = Delivery {
+        id: Sequence(2),
+        token: "late-envelope".into(),
+        object: late.clone(),
+        recipient: s.scope.clone(),
+        view: view("route-a"),
+    };
+    assert_eq!(
+        s.imports.receive(delayed).err().unwrap().code,
+        ErrorCode::StaleObject
+    );
+    assert!(old.delivery().is_ok());
+    assert!(matches!(
+        s.imports.take_controls().as_slice(),
+        [ImportControl::Release {
+            id: Sequence(2),
+            ..
+        }]
+    ));
+    let views = BTreeMap::from([(view("route-a"), BTreeSet::from(["query".into()]))]);
+    assert_eq!(
+        s.broker
+            .register_export(&s.owner, late.clone(), views.clone())
+            .unwrap_err()
+            .code,
+        ErrorCode::StaleObject
+    );
+    let next_owner = Activation {
+        activation: Sequence(2),
+        ..s.owner.clone()
+    };
+    s.broker.start_activation(next_owner.clone()).unwrap();
+    let reused = ObjectIdentity {
+        owner: next_owner.clone(),
+        ..late
+    };
+    assert!(s
+        .broker
+        .register_export(&next_owner, reused, views)
+        .is_err());
+}
+
+#[test]
 fn failed_graph_releases_only_new_deliveries_and_batch_is_atomic() {
     let mut s = Setup::new();
     let old = s.offer(None, "route-a");

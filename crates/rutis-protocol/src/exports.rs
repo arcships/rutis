@@ -4,18 +4,23 @@ use crate::error::{ErrorCode, ProtocolError, Result};
 use crate::identity::{Activation, ObjectIdentity, Sequence};
 use crate::managed::ActivationGate;
 use std::any::{Any, TypeId};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex, Weak,
 };
+use tokio::sync::watch;
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 type Object = Arc<dyn Any + Send + Sync>;
 type CleanupFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 type Disposer = Box<dyn FnOnce(Object) -> CleanupFuture + Send>;
+pub(crate) type RevokeObjects = Arc<dyn Fn(Vec<ObjectIdentity>) -> CleanupFuture + Send + Sync>;
+type Revocation = watch::Receiver<Option<Result<()>>>;
+type Cleanup = (ObjectIdentity, Object, Option<Disposer>);
 
 trait WeakSource: Send + Sync {
     fn upgrade(&self) -> Option<Object>;
@@ -79,6 +84,7 @@ struct Entry {
     held: Option<Object>,
     pins: usize,
     disposed: bool,
+    closed: bool,
     disposer: Option<Disposer>,
 }
 struct State {
@@ -91,12 +97,18 @@ struct State {
     closed_epochs: BTreeMap<String, Sequence>,
     cleaning: usize,
     errors: Vec<ProtocolError>,
+    creators: HashMap<rutis::InstanceId, CancellationToken>,
+    revoke: Option<RevokeObjects>,
+    pending_revocations: BTreeSet<ObjectIdentity>,
+    revocations: BTreeMap<ObjectIdentity, Revocation>,
+    cleanup_results: BTreeMap<ObjectIdentity, Option<Result<()>>>,
 }
 struct Inner {
     state: Mutex<State>,
     staging: ObjectIds,
     changed: Notify,
     runtime: tokio::runtime::Handle,
+    creator_setup: Mutex<()>,
 }
 #[derive(Clone)]
 pub struct Exports {
@@ -157,9 +169,15 @@ impl Exports {
                     closed_epochs: BTreeMap::new(),
                     cleaning: 0,
                     errors: Vec::new(),
+                    creators: HashMap::new(),
+                    revoke: None,
+                    pending_revocations: BTreeSet::new(),
+                    revocations: BTreeMap::new(),
+                    cleanup_results: BTreeMap::new(),
                 }),
                 changed: Notify::new(),
                 runtime: tokio::runtime::Handle::current(),
+                creator_setup: Mutex::new(()),
             }),
         }
     }
@@ -207,10 +225,9 @@ impl Exports {
 
     fn admission_open(&self, state: &State) -> bool {
         state.open
-            && self
-                .native
-                .as_ref()
-                .is_none_or(|native| native.gate.is_open())
+            && self.native.as_ref().is_none_or(|native| {
+                native.gate.is_open() && !native.creator.cancellation_token().is_cancelled()
+            })
     }
 
     /// Keep the same object table and activation, while assigning first-time
@@ -230,6 +247,11 @@ impl Exports {
         if ctx.cancellation_token().is_cancelled() {
             return Err(error(ErrorCode::ScopeClosed, "export creator is closed"));
         }
+        if ctx.instance() != native.root.instance() {
+            self.track_creator(ctx).map_err(|error| {
+                ProtocolError::new(ErrorCode::ScopeClosed, "export", error.to_string())
+            })?;
+        }
         let mut table = self.clone();
         table.native = Some(Arc::new(NativeContext {
             gate: native.gate.clone(),
@@ -237,6 +259,225 @@ impl Exports {
             creator: ctx.clone(),
         }));
         Ok(table)
+    }
+
+    fn track_creator(&self, ctx: &rutis::Ctx) -> std::result::Result<(), rutis::CordisError> {
+        // Effect registration performs only our observer setup. Object-table
+        // locks are released before entering native registration or shutdown.
+        let _setup = self.inner.creator_setup.lock().unwrap();
+        let instance = ctx.instance();
+        let token = ctx.cancellation_token();
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            if state
+                .creators
+                .get(&instance)
+                .is_some_and(|old| !old.is_cancelled())
+            {
+                return Ok(());
+            }
+            state.creators.insert(instance, token.clone());
+        }
+        let weak = Arc::downgrade(&self.inner);
+        let owner = self.owner.clone();
+        let runtime = self.inner.runtime.clone();
+        let registered = ctx.effect_named("protocol child objects", move || {
+            let stopped = CancellationToken::new();
+            let stopping = stopped.clone();
+            let observed = weak.clone();
+            let observer_owner = owner.clone();
+            let observer = runtime.spawn(async move {
+                tokio::select! { _ = token.cancelled() => {}, _ = stopping.cancelled() => {} }
+                if let Some(inner) = observed.upgrade() {
+                    Self::from_inner(observer_owner, inner).close_creator(instance);
+                }
+            });
+            rutis::Effect::AsyncDisposer(Box::new(move || {
+                stopped.cancel();
+                let closed = weak.upgrade().map(|inner| {
+                    let table = Self::from_inner(owner, inner);
+                    let objects = table.close_creator(instance);
+                    (table, objects)
+                });
+                Box::pin(async move {
+                    observer
+                        .await
+                        .map_err(|error| rutis::CordisError::PluginFailed(Box::new(error)))?;
+                    if let Some((table, objects)) = closed {
+                        table
+                            .join_objects(&objects)
+                            .await
+                            .map_err(|error| rutis::CordisError::PluginFailed(Box::new(error)))?;
+                    }
+                    Ok(())
+                })
+            }))
+        });
+        if let Err(error) = registered {
+            self.inner.state.lock().unwrap().creators.remove(&instance);
+            return Err(error);
+        }
+        Ok(())
+    }
+    fn from_inner(owner: Activation, inner: Arc<Inner>) -> Self {
+        Self {
+            owner,
+            inner,
+            ids: ObjectIds::default(),
+            native: None,
+        }
+    }
+    pub(crate) fn on_revoke(&self, revoke: RevokeObjects) -> Result<()> {
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            if state.revoke.is_some() {
+                return Err(error(
+                    ErrorCode::CapabilityDenied,
+                    "object table already has a revocation transport",
+                ));
+            }
+            state.revoke = Some(revoke);
+        }
+        self.send_revocations();
+        Ok(())
+    }
+    fn close_creator(&self, instance: rutis::InstanceId) -> Vec<ObjectIdentity> {
+        let (objects, cleanups) = {
+            let mut state = self.inner.state.lock().unwrap();
+            let objects = state
+                .entries
+                .iter()
+                .filter(|(_, entry)| {
+                    entry.native.as_ref().is_some_and(|ctx| {
+                        ctx.instance() == instance && ctx.cancellation_token().is_cancelled()
+                    })
+                })
+                .map(|(identity, _)| identity.clone())
+                .collect::<Vec<_>>();
+            let mut newly_closed = Vec::new();
+            for identity in &objects {
+                let entry = state.entries.get_mut(identity).unwrap();
+                if !entry.closed {
+                    entry.closed = true;
+                    newly_closed.push(identity.clone());
+                }
+            }
+            if state.open {
+                state.pending_revocations.extend(newly_closed);
+            }
+            if state
+                .creators
+                .get(&instance)
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                state.creators.remove(&instance);
+            }
+            let closed = objects.iter().cloned().collect::<BTreeSet<_>>();
+            let keys = state
+                .pins
+                .iter()
+                .filter(|(key, identity)| {
+                    !matches!(key, PinKey::Execution { .. }) && closed.contains(*identity)
+                })
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            let mut cleanups = Vec::new();
+            for key in keys {
+                state.released.insert(key.clone());
+                let identity = state.pins.remove(&key).unwrap();
+                cleanups.extend(unpin(&mut state, &identity));
+            }
+            for identity in &objects {
+                let entry = &state.entries[identity];
+                if entry.pins == 0 && entry.held.is_some() && entry.disposer.is_some() {
+                    cleanups.push(take_cleanup(&mut state, identity));
+                }
+            }
+            (objects, cleanups)
+        };
+        self.schedule(cleanups);
+        self.send_revocations();
+        objects
+    }
+    fn send_revocations(&self) {
+        let (objects, revoke, tx) = {
+            let mut state = self.inner.state.lock().unwrap();
+            let Some(revoke) = state.revoke.clone() else {
+                return;
+            };
+            if state.pending_revocations.is_empty() {
+                return;
+            }
+            let objects = std::mem::take(&mut state.pending_revocations)
+                .into_iter()
+                .collect::<Vec<_>>();
+            let (tx, rx) = watch::channel(None);
+            for object in &objects {
+                state.revocations.insert(object.clone(), rx.clone());
+            }
+            (objects, revoke, tx)
+        };
+        let inner = self.inner.clone();
+        let task = self
+            .inner
+            .runtime
+            .spawn(async move { revoke(objects).await });
+        self.inner.runtime.spawn(async move {
+            let result = task.await.unwrap_or_else(|error| {
+                Err(ProtocolError::new(
+                    ErrorCode::Unavailable,
+                    "export",
+                    format!("object revocation task failed: {error}"),
+                ))
+            });
+            if let Err(error) = &result {
+                inner.state.lock().unwrap().errors.push(error.clone());
+            }
+            tx.send_replace(Some(result));
+            inner.changed.notify_waiters();
+        });
+    }
+    async fn join_objects(&self, objects: &[ObjectIdentity]) -> Result<()> {
+        loop {
+            let changed = self.inner.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let done = {
+                let state = self.inner.state.lock().unwrap();
+                let mut ready = true;
+                for object in objects {
+                    if state
+                        .entries
+                        .get(object)
+                        .is_some_and(|entry| entry.pins != 0)
+                    {
+                        ready = false;
+                    }
+                    if let Some(result) = state.cleanup_results.get(object) {
+                        match result {
+                            Some(result) => result.clone()?,
+                            None => ready = false,
+                        }
+                    }
+                    if state.open {
+                        if state.revoke.is_some() && state.pending_revocations.contains(object) {
+                            ready = false;
+                        }
+                        if let Some(receipt) = state.revocations.get(object) {
+                            match receipt.borrow().clone() {
+                                Some(result) => result?,
+                                None => ready = false,
+                            }
+                        }
+                    }
+                }
+                ready
+            };
+            if done {
+                return Ok(());
+            }
+            changed.await;
+        }
     }
 
     pub fn register<T: Any + Send + Sync>(&self, object: &Arc<T>) -> Result<ObjectIdentity> {
@@ -336,10 +577,11 @@ impl Exports {
                 .values()
                 .any(|source| source.strong_count() != 0)
             {
-                if entry
-                    .native
-                    .as_ref()
-                    .is_some_and(|ctx| ctx.cancellation_token().is_cancelled())
+                if entry.closed
+                    || entry
+                        .native
+                        .as_ref()
+                        .is_some_and(|ctx| ctx.cancellation_token().is_cancelled())
                 {
                     return Err(error(ErrorCode::ScopeClosed, "export creator is closed"));
                 }
@@ -356,7 +598,18 @@ impl Exports {
                 return Ok(identity);
             }
             state.addresses.remove(&address);
-            discarded = state.entries.remove(&identity);
+            let pending = state.pending_revocations.contains(&identity)
+                || state
+                    .revocations
+                    .get(&identity)
+                    .is_some_and(|receipt| !matches!(*receipt.borrow(), Some(Ok(()))))
+                || state
+                    .cleanup_results
+                    .get(&identity)
+                    .is_some_and(|result| !matches!(result, Some(Ok(()))));
+            if !pending {
+                discarded = state.entries.remove(&identity);
+            }
         }
         let identity = ObjectIdentity {
             owner: self.owner.clone(),
@@ -374,6 +627,7 @@ impl Exports {
                 held: disposer.as_ref().map(|_| object.clone()),
                 pins: 0,
                 disposed: false,
+                closed: false,
                 disposer,
             },
         );
@@ -396,8 +650,12 @@ impl Exports {
         if state
             .entries
             .get(identity)
-            .and_then(|entry| entry.native.as_ref())
-            .is_some_and(|ctx| ctx.cancellation_token().is_cancelled())
+            .is_some_and(|entry| entry.closed)
+            || state
+                .entries
+                .get(identity)
+                .and_then(|entry| entry.native.as_ref())
+                .is_some_and(|ctx| ctx.cancellation_token().is_cancelled())
         {
             return Err(error(ErrorCode::ScopeClosed, "export creator is closed"));
         }
@@ -496,9 +754,10 @@ impl Exports {
             .get(key)
             .ok_or_else(|| error(ErrorCode::StaleObject, "execution already finished"))?;
         let native = state.entries[identity].native.clone();
-        if native
-            .as_ref()
-            .is_some_and(|ctx| ctx.cancellation_token().is_cancelled())
+        if state.entries[identity].closed
+            || native
+                .as_ref()
+                .is_some_and(|ctx| ctx.cancellation_token().is_cancelled())
         {
             return Err(error(ErrorCode::ScopeClosed, "export creator is closed"));
         }
@@ -567,8 +826,8 @@ impl Exports {
         self.schedule(cleanups);
     }
 
-    fn schedule(&self, cleanups: Vec<(Object, Option<Disposer>)>) {
-        for (object, disposer) in cleanups {
+    fn schedule(&self, cleanups: Vec<Cleanup>) {
+        for (identity, object, disposer) in cleanups {
             if let Some(disposer) = disposer {
                 let inner = self.inner.clone();
                 // Supervise panic/abort as a cleanup error instead of leaving
@@ -586,6 +845,7 @@ impl Exports {
                     });
                     let mut state = inner.state.lock().unwrap();
                     state.cleaning -= 1;
+                    state.cleanup_results.insert(identity, Some(result.clone()));
                     if let Err(error) = result {
                         state.errors.push(error);
                     }
@@ -631,15 +891,27 @@ impl Exports {
         let dead: Vec<_> = state
             .entries
             .iter()
-            .filter(|(_, e)| {
-                e.pins == 0 && e.sources.values().all(|source| source.strong_count() == 0)
+            .filter(|(id, e)| {
+                e.pins == 0
+                    && !state
+                        .cleanup_results
+                        .get(id)
+                        .is_some_and(|result| !matches!(result, Some(Ok(()))))
+                    && !state.pending_revocations.contains(*id)
+                    && !state
+                        .revocations
+                        .get(id)
+                        .is_some_and(|receipt| !matches!(*receipt.borrow(), Some(Ok(()))))
+                    && e.sources.values().all(|source| source.strong_count() == 0)
             })
             .map(|(id, e)| (id.clone(), e.address))
             .collect();
         let mut discarded = Vec::new();
         for (id, address) in dead {
             discarded.push(state.entries.remove(&id));
-            state.addresses.remove(&address);
+            if state.addresses.get(&address) == Some(&id) {
+                state.addresses.remove(&address);
+            }
         }
         drop(state);
         drop(discarded);
@@ -732,7 +1004,7 @@ fn retired(state: &State, key: &PinKey) -> bool {
     }
 }
 
-fn unpin(state: &mut State, identity: &ObjectIdentity) -> Option<(Object, Option<Disposer>)> {
+fn unpin(state: &mut State, identity: &ObjectIdentity) -> Option<Cleanup> {
     let entry = state.entries.get_mut(identity).unwrap();
     entry.pins -= 1;
     if entry.pins != 0 {
@@ -741,13 +1013,179 @@ fn unpin(state: &mut State, identity: &ObjectIdentity) -> Option<(Object, Option
     Some(take_cleanup(state, identity))
 }
 
-fn take_cleanup(state: &mut State, identity: &ObjectIdentity) -> (Object, Option<Disposer>) {
+fn take_cleanup(state: &mut State, identity: &ObjectIdentity) -> Cleanup {
     let entry = state.entries.get_mut(identity).unwrap();
     let object = entry.held.take().unwrap();
     let disposer = entry.disposer.take();
     if disposer.is_some() {
         entry.disposed = true;
         state.cleaning += 1;
+        state.cleanup_results.insert(identity.clone(), None);
     }
-    (object, disposer)
+    (identity.clone(), object, disposer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct Child(Arc<Mutex<Option<rutis::Ctx>>>);
+    impl rutis::Plugin for Child {
+        fn name(&self) -> &str {
+            "object-child"
+        }
+        fn apply<'a>(
+            &'a self,
+            ctx: &'a rutis::Ctx,
+        ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+            *self.0.lock().unwrap() = Some(ctx.clone());
+            Box::pin(async { Ok(rutis::Effect::Done) })
+        }
+    }
+    fn owner() -> Activation {
+        Activation {
+            runtime: "native-owner".into(),
+            epoch: Sequence(1),
+            activation: Sequence(1),
+        }
+    }
+    fn pin(execution: bool) -> PinKey {
+        if execution {
+            PinKey::Execution {
+                caller: owner(),
+                call: Sequence(1),
+            }
+        } else {
+            PinKey::Delivery {
+                recipient: owner(),
+                id: Sequence(1),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn child_stop_keeps_execution_and_joins_cleanup_and_remote_ack_after_waiter_drop() {
+        let root = rutis::Ctx::root().unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let view = root.plugin(Child(captured.clone()));
+        (&view).await.unwrap();
+        let child = captured.lock().unwrap().clone().unwrap();
+        let exports = Exports::managed(
+            &root,
+            owner(),
+            ObjectIds::default(),
+            ActivationGate::default(),
+        )
+        .unwrap();
+        let table = exports.in_context(&child).unwrap();
+        let (notified, notification) = tokio::sync::oneshot::channel();
+        let (ack, receipt) = tokio::sync::oneshot::channel();
+        let transport = Mutex::new(Some((notified, receipt)));
+        exports
+            .on_revoke(Arc::new(move |objects| {
+                let (notified, receipt) = transport.lock().unwrap().take().unwrap();
+                Box::pin(async move {
+                    notified.send(objects).unwrap();
+                    receipt.await.unwrap();
+                    Ok(())
+                })
+            }))
+            .unwrap();
+        let (entered, cleaning) = tokio::sync::oneshot::channel();
+        let (finish, cleanup) = tokio::sync::oneshot::channel();
+        let object = Arc::new("child connection");
+        let identity = table
+            .register_exclusive(&object, move |_| async move {
+                entered.send(()).unwrap();
+                cleanup.await.unwrap();
+                Ok(())
+            })
+            .unwrap();
+        let root_object = Arc::new("root service");
+        let root_id = exports.register(&root_object).unwrap();
+        let root_pin = PinKey::Delivery {
+            recipient: owner(),
+            id: Sequence(2),
+        };
+        table.pin(&identity, pin(false)).unwrap();
+        table.pin(&identity, pin(true)).unwrap();
+        exports.pin(&root_id, root_pin.clone()).unwrap();
+        drop(view.shutdown());
+        assert_eq!(notification.await.unwrap(), vec![identity.clone()]);
+        assert_eq!(table.pins(&identity), 1);
+        assert_eq!(exports.pins(&root_id), 1);
+        assert!(Arc::ptr_eq(
+            &table.execution_object(&pin(true)).unwrap(),
+            &object
+        ));
+        let mut stopped = Box::pin(view.shutdown());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), stopped.as_mut())
+                .await
+                .is_err()
+        );
+        table.release(&pin(true));
+        cleaning.await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), stopped.as_mut())
+                .await
+                .is_err()
+        );
+        finish.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), stopped.as_mut())
+                .await
+                .is_err()
+        );
+        ack.send(()).unwrap();
+        stopped.await.unwrap();
+        assert_eq!(
+            table.register(&object).unwrap_err().code,
+            ErrorCode::ScopeClosed
+        );
+        assert_eq!(
+            table
+                .register(&Arc::new("late child object"))
+                .unwrap_err()
+                .code,
+            ErrorCode::ScopeClosed
+        );
+        assert_eq!(exports.register(&root_object).unwrap(), root_id);
+        exports.release(&root_pin);
+        root.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_revocation_task_is_observable_instead_of_leaving_child_stop_pending() {
+        let root = rutis::Ctx::root().unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let view = root.plugin(Child(captured.clone()));
+        (&view).await.unwrap();
+        let child = captured.lock().unwrap().clone().unwrap();
+        let exports = Exports::managed(
+            &root,
+            owner(),
+            ObjectIds::default(),
+            ActivationGate::default(),
+        )
+        .unwrap();
+        exports
+            .on_revoke(Arc::new(|_| {
+                Box::pin(async { panic!("lost revocation task") })
+            }))
+            .unwrap();
+        let table = exports.in_context(&child).unwrap();
+        let object = Arc::new("child");
+        let identity = table.register(&object).unwrap();
+        table.pin(&identity, pin(false)).unwrap();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(1), view.shutdown())
+            .await
+            .unwrap();
+        assert!(stopped.is_err());
+        assert_eq!(
+            exports.join().await.unwrap_err().code,
+            ErrorCode::Unavailable
+        );
+        assert_eq!(table.pins(&identity), 0);
+        let _ = root.shutdown().await;
+    }
 }

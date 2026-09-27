@@ -18,7 +18,8 @@ export class ObjectIds {
 }
 interface Entry {
   identity: ObjectIdentity; weak: WeakRef<object>; held?: object
-  pins: number; disposed: boolean
+  pins: number; disposed: boolean; closed: boolean
+  cleanup?: Promise<void>; cleanupError?: unknown
   disposer?: (object: object) => Promise<void> | void
   native?: NativeCreator
 }
@@ -38,6 +39,11 @@ export class Exports {
   private waiters = new Set<() => void>()
   private owner: Activation
   private native?: Context
+  private revoke?: (objects: ObjectIdentity[]) => Promise<void>
+  private pendingRevocations = new Map<string, ObjectIdentity>()
+  private revocations = new Map<string, Promise<void>>()
+  private ownerClosed!: () => void
+  private ownerClosing = new Promise<void>(resolve => { this.ownerClosed = resolve })
   constructor(owner: Activation, private ids: ObjectIds, private admitted: () => boolean = () => true, private nativeRoot?: Context) {
     this.owner = Object.freeze(structuredClone(owner)); this.native = nativeRoot
   }
@@ -50,6 +56,19 @@ export class Exports {
   static managed(ctx: Context, owner: Activation, ids: ObjectIds, gate: () => boolean = () => true): Exports {
     const fiber = ctx.fiber
     const exports = new Exports(owner, ids, () => fiber.uid !== null && gate(), ctx)
+    ctx.on('internal/status', changed => {
+      if (changed === fiber || (changed.state !== 3 && changed.state !== 4 && changed.state !== 5)) return
+      const closed: ObjectIdentity[] = []
+      for (const entry of exports.entries.values()) {
+        let child = entry.native?.context.fiber
+        const seen = new Set<object>()
+        while (child && child !== fiber && !seen.has(child)) {
+          if (child === changed) { closed.push(entry.identity); break }
+          seen.add(child); child = child.parent.fiber
+        }
+      }
+      exports.closeObjects(closed)
+    }, { global: true, prepend: true })
     ctx.effect(() => () => { exports.close(); return exports.join() })
     return exports
   }
@@ -65,7 +84,7 @@ export class Exports {
       if (visited.has(fiber) || fiber.parent.fiber === fiber) fail('CapabilityDenied', 'export creator is outside its managed native subtree')
       visited.add(fiber); fiber = fiber.parent.fiber
     }
-    if (ctx.fiber.uid === null) fail('ScopeClosed', 'export creator is closed')
+    if (ctx.fiber.uid === null || (ctx.fiber.state !== 1 && ctx.fiber.state !== 2)) fail('ScopeClosed', 'export creator is closed')
     const previous = this.native; this.native = ctx
     try { return register() } finally { this.native = previous }
   }
@@ -80,17 +99,18 @@ export class Exports {
     this.requireOpen()
     const old = this.identities.get(object)
     if (old) {
-      if (old.native && !old.native.isOpen()) fail('ScopeClosed', 'export creator is closed')
+      if (old.closed || (old.native && !old.native.isOpen())) fail('ScopeClosed', 'export creator is closed')
       if (old.disposed) fail('StaleObject', 'exclusive object disposed')
       if (disposer) fail('InvalidParams', 'exclusive disposer is already registered')
       return old.identity
     }
     const identity = Object.freeze({ owner: this.owner, object: this.ids.allocate() })
-    let live = true
     const context = this.native
-    const native = context ? { context, isOpen: () => live && context.fiber.uid !== null && (context.fiber.state === 1 || context.fiber.state === 2) } : undefined
-    if (native) native.context.effect(() => () => { live = false })
-    const entry: Entry = { identity, weak: new WeakRef(object), held: disposer ? object : undefined, pins: 0, disposed: false, disposer, native }
+    const native = context ? { context, isOpen: () => !entry.closed && context.fiber.uid !== null && (context.fiber.state === 1 || context.fiber.state === 2) } : undefined
+    const entry: Entry = { identity, weak: new WeakRef(object), held: disposer ? object : undefined, pins: 0, disposed: false, closed: false, disposer, native }
+    if (native && native.context.fiber !== this.nativeRoot?.fiber) native.context.effect(() => () => {
+      this.closeObjects([identity]); return this.joinObject(entry)
+    })
     this.identities.set(object, entry); this.entries.set(identity.object, entry)
     return identity
   }
@@ -98,8 +118,9 @@ export class Exports {
     this.requireOpen()
     const lease = canonical(key)
     if (this.released.has(lease) || this.isRetired(key)) fail('StaleObject', 'released pin cannot be reacquired')
-    const creator = this.entries.get(identity.object)?.native
-    if (creator && !creator.isOpen()) fail('ScopeClosed', 'export creator is closed')
+    const registered = this.entries.get(identity.object)
+    const creator = registered?.native
+    if (registered?.closed || (creator && !creator.isOpen())) fail('ScopeClosed', 'export creator is closed')
     const old = this.leases.get(lease)
     if (old) {
       if (canonical(old.identity) !== canonical(identity)) fail('CapabilityDenied', 'pin key changed object')
@@ -136,8 +157,48 @@ export class Exports {
     if (!entry) return
     this.leases.delete(lease); this.unpin(entry); this.notify()
   }
+  onRevoke(revoke: (objects: ObjectIdentity[]) => Promise<void>): void {
+    if (this.revoke) fail('CapabilityDenied', 'object table already has a revocation transport')
+    this.revoke = revoke; this.sendRevocations()
+  }
+  private closeObjects(objects: ObjectIdentity[]): void {
+    const closed = new Set(objects.map(object => object.object))
+    for (const object of objects) {
+      const entry = this.entries.get(object.object)
+      if (!entry || entry.closed) continue
+      entry.closed = true
+      if (this.open) this.pendingRevocations.set(object.object, object)
+    }
+    for (const [key, entry] of this.leases) {
+      if (JSON.parse(key).type === 'execution' || !closed.has(entry.identity.object)) continue
+      this.released.set(key, JSON.parse(key)); this.leases.delete(key); this.unpin(entry)
+    }
+    for (const id of closed) {
+      const entry = this.entries.get(id)
+      if (entry && !entry.pins && entry.held && entry.disposer) this.cleanup(entry)
+    }
+    this.sendRevocations(); this.notify()
+  }
+  private sendRevocations(): void {
+    if (!this.revoke || !this.pendingRevocations.size) return
+    const objects = [...this.pendingRevocations.values()]; this.pendingRevocations.clear()
+    const revoke = this.revoke
+    const receipt = Promise.resolve().then(() => revoke(objects))
+    void receipt.catch(error => { this.errors.push(error) })
+    for (const object of objects) this.revocations.set(object.object, receipt)
+  }
+  private async joinObject(entry: Entry): Promise<void> {
+    while (entry.pins) await new Promise<void>(resolve => this.waiters.add(resolve))
+    await entry.cleanup
+    if ('cleanupError' in entry) throw entry.cleanupError
+    if (this.open) {
+      const receipt = this.revocations.get(entry.identity.object)
+      if (receipt) await Promise.race([receipt, this.ownerClosing])
+    }
+  }
   close(): void {
     this.open = false
+    this.ownerClosed()
     for (const [key, entry] of this.leases) {
       if (JSON.parse(key).type === 'execution') continue
       this.released.set(key, JSON.parse(key))
@@ -156,7 +217,8 @@ export class Exports {
     const disposer = entry.disposer
     if (!disposer) return
     entry.disposed = true; entry.disposer = undefined
-    const cleanup = Promise.resolve().then(() => disposer(object)).catch(error => { this.errors.push(error) })
+    const cleanup = Promise.resolve().then(() => disposer(object)).catch(error => { this.errors.push(error); entry.cleanupError = error })
+    entry.cleanup = cleanup
     this.cleanups.add(cleanup)
     void cleanup.then(() => { this.cleanups.delete(cleanup); this.notify() })
   }
@@ -170,7 +232,7 @@ export class Exports {
     return entry && canonical(entry.identity) === canonical(identity) ? entry.pins : 0
   }
   sweep(): void {
-    for (const [id, entry] of this.entries) if (!entry.pins && !entry.weak.deref()) this.entries.delete(id)
+    for (const [id, entry] of this.entries) if (!entry.pins && !entry.weak.deref() && !this.cleanups.has(entry.cleanup!)) this.entries.delete(id)
   }
   private isRetired(key: PinKey): boolean {
     return key.type === 'delivery' && (BigInt(key.id) <= (this.retired.get(canonical([key.recipient.runtime, key.recipient.epoch])) ?? 0n)

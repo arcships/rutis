@@ -127,6 +127,64 @@ test('unpublished exclusive object is cleaned once on owner rollback', async () 
   assert.equal(calls, 1)
 })
 
+test('native child stop waits for execution, exclusive cleanup and object revocation ACK', async () => {
+  const root = new Context()
+  let parent!: Context; let child!: Context; let disposeChild!: () => Promise<void>
+  const managed = new ManagedActivation(root, { async apply(ctx) {
+    parent = ctx
+    const fiber = ctx.plugin({ apply(ctx) { child = ctx } })
+    disposeChild = () => fiber.dispose(); await fiber
+  } }, {})
+  await managed.ready()
+  const table = Exports.managed(parent, owner('1'), new ObjectIds(), () => managed.isOpen)
+  let ack!: () => void; let notified!: () => void
+  const notification = new Promise<void>(resolve => { notified = resolve })
+  const receipt = new Promise<void>(resolve => { ack = resolve })
+  let seen: unknown; table.onRevoke(async objects => { seen = objects; notified(); await receipt })
+  let finish!: () => void; let entered!: () => void; let disposals = 0
+  const cleanup = new Promise<void>(resolve => { finish = resolve })
+  const cleaning = new Promise<void>(resolve => { entered = resolve })
+  const object = { connection: true }
+  const id = table.inContext(child, () => table.registerExclusive(object, async () => { disposals++; entered(); await cleanup }))
+  const rootObject = {}; const rootId = table.register(rootObject)
+  table.pin(id, delivery('1')); table.pin(id, execution('1')); table.pin(rootId, delivery('2'))
+  let done = false; const stopped = disposeChild().then(() => { done = true })
+  await notification
+  assert.deepEqual(seen, [id]); assert.equal(table.pins(id), 1); assert.equal(table.pins(rootId), 1)
+  assert.equal(table.executionObject(execution('1')), object); assert.equal(managed.isOpen, true)
+  assert.equal(disposals, 0); assert.equal(done, false)
+  table.release(execution('1')); await cleaning
+  assert.equal(disposals, 1); assert.equal(done, false)
+  finish(); await Promise.resolve(); await Promise.resolve(); assert.equal(done, false)
+  ack(); await stopped
+  assert.throws(() => table.register(object), (error: any) => error.code === 'ScopeClosed')
+  assert.equal(table.register(rootObject), rootId)
+  table.release(delivery('2')); await managed.stop(); await root.fiber.dispose()
+})
+
+test('failed child revocation ACK remains observable after native child disposal', async () => {
+  const root = new Context()
+  let parent!: Context; let child!: Context; let disposeChild!: () => Promise<void>
+  const managed = new ManagedActivation(root, { async apply(ctx) {
+    parent = ctx
+    const fiber = ctx.plugin({ apply(ctx) { child = ctx } })
+    disposeChild = () => fiber.dispose(); await fiber
+  } }, {})
+  await managed.ready()
+  const table = Exports.managed(parent, owner('1'), new ObjectIds(), () => managed.isOpen)
+  const failed = new Error('object revocation ACK lost')
+  table.onRevoke(async () => { throw failed })
+  const object = {}; const id = table.inContext(child, () => table.register(object))
+  table.pin(id, delivery('1'))
+  await disposeChild()
+  assert.equal(table.pins(id), 0)
+  assert.equal(managed.isOpen, true)
+  await assert.rejects(table.join(), error => error === failed)
+  await assert.rejects(table.join(), error => error === failed)
+  await assert.rejects(managed.stop())
+  await root.fiber.dispose()
+})
+
 test('native child creator is immutable across reexports and old objects stay closed', async () => {
   const root = new Context()
   let parent!: Context

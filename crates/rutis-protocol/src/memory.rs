@@ -157,6 +157,21 @@ impl Network {
         });
         state.endpoints.insert(activation, endpoint.clone());
         drop(state);
+        let network = Arc::downgrade(self);
+        let owner = endpoint.activation.clone();
+        if let Err(error) = exports.on_revoke(Arc::new(move |objects| {
+            let network = network.clone();
+            let owner = owner.clone();
+            Box::pin(async move {
+                network
+                    .upgrade()
+                    .ok_or_else(|| fail(ErrorCode::Unavailable, "object network unavailable"))?
+                    .close_objects(&owner, &objects)
+            })
+        })) {
+            endpoint.close();
+            return Err(error);
+        }
         if let Some(ctx) = &endpoint.native {
             let cleanup = endpoint.clone();
             if let Err(error) = ctx.effect_named("protocol endpoint", move || {
@@ -179,6 +194,18 @@ impl Network {
             .get(owner)
             .cloned()
             .ok_or_else(|| fail(ErrorCode::StaleObject, "owner unavailable"))
+    }
+    fn close_objects(&self, owner: &Activation, objects: &[ObjectIdentity]) -> Result<()> {
+        let endpoints = {
+            let mut state = self.state.lock().unwrap();
+            state.broker.close_objects(owner, objects)?;
+            state.endpoints.values().cloned().collect::<Vec<_>>()
+        };
+        for endpoint in endpoints {
+            endpoint.imports.revoke_objects(objects);
+            self.flush(&endpoint);
+        }
+        Ok(())
     }
     fn flush(&self, recipient: &Endpoint) {
         // Queue take and confirmation share one receiver-level barrier. Another

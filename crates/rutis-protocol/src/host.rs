@@ -573,12 +573,20 @@ impl Control {
         self.graph.local.reserve(local.clone(), self.gate.clone())?;
         self.hook(&remote)?;
         let captures = self.state.lock().unwrap().captures.clone();
-        let owners = captures
+        let objects = captures
             .iter()
-            .map(|root| root.delivery().map(|proof| proof.object.owner))
+            .map(|root| root.delivery().map(|proof| proof.object))
             .collect::<Result<Vec<_>>>()?;
-        for owner in owners {
-            self.hook(&owner)?;
+        for object in objects {
+            self.hook(&object.owner)?;
+            let weak = Arc::downgrade(self);
+            let hook: ClosedHook = Arc::new(move || {
+                if let Some(control) = weak.upgrade() {
+                    control.close_intent();
+                }
+            });
+            self.graph.objects.host().on_object_close(&object, &hook)?;
+            self.state.lock().unwrap().hooks.push(hook);
         }
         let weak = Arc::downgrade(self);
         let hook: ClosedHook = Arc::new(move || {

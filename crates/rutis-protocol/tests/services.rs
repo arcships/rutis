@@ -252,6 +252,13 @@ async fn child_owned_objects_dispatch_in_their_original_context_and_cannot_rebin
         ErrorCode::ScopeClosed
     );
     stopped.await.unwrap();
+    assert!(connection.client().proxy().delivery().is_err());
+    assert!(connection.session().is_err());
+    assert_eq!(
+        network.pins(&connection.client().proxy().identity()),
+        (0, 0)
+    );
+    assert_eq!(managed.view().state().state, FiberState::Active);
     consumer.close();
     provider.close();
     managed.stop().await.unwrap();
