@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { Bundles, NativePorts } from './node_modules/@rutis/protocol/src/services.js'
 import { withNative } from './node_modules/@rutis/protocol/src/sdk.js'
 import { BUNDLE_SHA256, exportInterfaceDatabase } from './node_modules/@rutis/protocol/generated/rpc.js'
@@ -17,6 +18,21 @@ export default {
       const connection = { session, async query(context, { sql }) {
         assert.equal(context.native(), ctx)
         assert.equal(context.native().get('nativeDatabase'), ctx.get('nativeDatabase'))
+        if (sql === 'spawn-detached-descendants') {
+          const leaf = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"
+          const script = `const { spawn } = require('node:child_process'); const child = spawn(process.execPath, ['-e', ${JSON.stringify(leaf)}], { detached: true, stdio: 'ignore' }); child.once('spawn', () => { process.stdout.write(JSON.stringify({ grandchild: child.pid }) + '\\n'); child.unref(); }); process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)`
+          const child = spawn(process.execPath, ['-e', script], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] })
+          let bytes = ''
+          const grandchild = await new Promise((resolve, reject) => {
+            child.once('error', reject)
+            child.stdout.on('data', chunk => {
+              bytes += chunk.toString()
+              if (bytes.includes('\n')) resolve(JSON.parse(bytes.trim()).grandchild)
+            })
+          })
+          child.stdout.destroy(); child.unref()
+          return [{ owner: 'node', sql, child: child.pid, grandchild }]
+        }
         return [{ owner: 'node', sql }]
       } }
       const database = {

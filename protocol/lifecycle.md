@@ -25,8 +25,9 @@ shutdown 预取消其 Ctx；单纯 `ctx.refresh()` 是异步重查，不能替�
 `serve(private_stream, NativeDriver::with_services(root, factories, bundles, ports)?)`。
 `NativeDriver::new` 保留无服务控制模式，拒绝对象/事件 capability 与命名服务。
 stream 必须来自宿主私有连接；不使用 stdout/stderr 承载协议。`serve` 在断连后等待
-成员清理，嵌入程序随后 shutdown 自己的 native root。当前通用 API 不负责创建或回收
-进程树，不能替代 Linux supervisor。
+成员清理，嵌入程序随后 shutdown 自己的 native root。`serve` 不负责创建或回收
+进程树；独立的 [Linux 冻结进程](process.md) 组件负责 OS receipt，完整 supervisor
+仍须合并原生消费者清理、OS 回收及恢复换代屏障。
 
 Node 的通用入口由 `npm --prefix protocol/ts run build` 生成
 `dist/src/node-runner.js`。包的 runner 导入该入口，宿主在 `SnapshotGroup::argv()` 后
@@ -101,7 +102,8 @@ start 才返回 staged。缺少声明的 Rust export 直接失败并 join cleanu
 `native_runner_ipc` 从四个独立包的冻结字节启动真实 Rust 子进程与编译后的 Node
 runner，在原包删除后运行双向 DI、状态对象、循环属性、owner passback、两层回调。
 真实 Host 延迟两端 Accept ACK，验证构造/import 未开始；期间 stop 阻止迟到业务。
-每个实际 runtime 正常退出，native cleanup 都被核对。最初的用例直接操作控制层；
+正常停止用例核对 native cleanup、runtime 退出码与独立 helper 的后代回收 receipt。
+最初的用例直接操作控制层；
 后续 HostGraph 用例覆盖 RuntimeReady → HostProxy Active → activate ACK →
 availability/refresh，以及 Loading stop、迟到 activate ACK 和 Pending epoch 失效，
 见 [Host 原生图](host.md)。完整监督恢复和迁移仍待验收。
@@ -120,5 +122,5 @@ Node executable、通用 SDK runner 与两个不同代码包，通过 fd 3 验�
 期间快成员发布、独立 native Ctx、stop、旧 Ctx 拒绝迟到 effect 和全组 cleanup。
 stdout 只承载诊断，fixture 的 stdin 仅控制慢 apply 何时返回。
 
-这尚未证明同组业务依赖的完整启动图、named service 发布/对象调用、
-StopUnconfirmed 管理等待、配置更新、故障/后代回收双屏障或真实旧插件迁移。
+上述首代发布与命名服务调用已有实际证据；共享/单独完整拓扑、StopUnconfirmed
+管理等待、配置更新、故障恢复的消费者/OS 双屏障或真实旧插件迁移仍待验收。

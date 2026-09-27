@@ -17,5 +17,5 @@ thiserror = { workspace = true }
 sha2 = "0.10"
 getrandom = "0.3"
 
-[dev-dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

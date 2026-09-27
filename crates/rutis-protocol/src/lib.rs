@@ -17,6 +17,8 @@ pub mod lifecycle;
 pub mod managed;
 pub mod memory;
 pub mod prepare;
+#[cfg(target_os = "linux")]
+pub mod process;
 pub mod runner_image;
 pub mod runtime;
 pub mod sdk;

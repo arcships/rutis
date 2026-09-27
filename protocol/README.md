@@ -1,7 +1,7 @@
 # 实验对象协议实现约定
 
 此目录与 `rutis-protocol` crate 实施 [#59 设计](../docs/design-protocol-plugins-2026-09-25.md)。
-当前 M1 与 M2 在推进，尚未形成可部署的 Rust↔Cordis 协议插件系统。已有两端生成绑定、对象图、私有 socket 上的真实跨语言调用与回收 ACK，以及 prepare、冻结启动、默认服务 driver 和首代 Host 原生代理发布图；监督恢复、broker 事件及完整迁移验收仍在开发。
+当前 M1–M3 在推进，尚未形成可部署的 Rust↔Cordis 协议插件系统。已有两端生成绑定、对象图、私有 socket 上的真实跨语言调用与回收 ACK，以及 prepare、冻结启动、默认服务 driver、首代 Host 原生代理发布图和 Linux 后代回收组件；监督恢复、broker 事件及完整迁移验收仍在开发。
 实施证据及完整验收范围见[验收记录](../docs/protocol-plugin-implementation.md)。旧 `rutis-cordis` 桥继续独立存在。
 
 Rust/Node 私有连接的 hello/start/activate/stop、native RuntimeReady 与发布门控见[生命周期控制](lifecycle.md)。通用 Node 入口使用冻结快照的启动 catalog 和 bundle 原字节；启用服务传输的默认驱动支持 object.scope/callback.borrow，事件能力在 hello 拒绝。
@@ -13,6 +13,8 @@ Rust/Node 私有连接的 hello/start/activate/stop、native RuntimeReady 与发
 [冻结根交付](deployment.md) 从 prepared routes 捕获整张 required 表，复用 owner 保留清单，为多个消费者建立独立 source views，并跨 provider 原子签发；已接入首代 instance/native Host 发布图，完整拓扑仍待验收。
 
 包/部署 JSON 格式、原字节文件库存、精确路由、静态 ELF catalog、私有启动快照与只读 CLI 见[prepare 约定](package-format.md)。prepare 冻结计划，快照固定 artifact 与 Node canonical dependency tree；实际 runner 已接入 RuntimeReady 与首代成员发布屏障，监督快照租约仍待完成。
+
+[Linux 冻结进程](process.md) 在独立 helper 中回收真实 runtime 与脱离会话的后代，缓存 OS receipt，并保留缺少证明的快照。OS 回收与原生消费者清理各自持有租约；完整组恢复屏障仍待 M3。
 
 ## JSON 与描述符
 

@@ -19,6 +19,7 @@ use rutis_protocol::{
     frame::{Handler, Peer},
     identity::{Activation, Sequence},
     lifecycle::{hello, serve, Hello, NativeDriver},
+    process::{FrozenProcess, LaunchOptions, ProcessHandle},
     runner_image::RunnerCatalog,
     sdk::*,
     services::{Bundles, NativePorts, ServiceTable},
@@ -28,8 +29,7 @@ use rutis_protocol::{
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
-    os::fd::{AsRawFd, FromRawFd},
-    process::Stdio,
+    os::fd::FromRawFd,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, Weak,
@@ -40,6 +40,9 @@ const RPC: &[u8] = include_bytes!("../../../protocol/fixtures/rpc.bundle.json");
 const CONFIG: &[u8] = include_bytes!("../../../protocol/fixtures/plugin.config.json");
 const CATALOG: &[u8] = include_bytes!("../../../protocol/fixtures/native.runner.catalog.json");
 static CLEANED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+// Each fixture freezes large Rust and Node executables. Bound their filesystem
+// peak while preserving the concurrent runtimes and races within each case.
+static FROZEN_FIXTURES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 fn owner(runtime: &str, n: u64) -> Activation {
     Activation {
         runtime: runtime.into(),
@@ -398,6 +401,298 @@ async fn native_image_entry() {
     root.shutdown().await.unwrap();
 }
 
+struct BlockedConsumer {
+    key: TypeKey,
+    snapshot: Mutex<Option<SnapshotGroup>>,
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    resume: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    context: Arc<Mutex<Option<Ctx>>>,
+}
+
+#[tokio::test]
+async fn dropped_process_waiter_and_last_lease_preserve_actual_cached_reaping() {
+    let _fixture = FROZEN_FIXTURES.acquire().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(40), async {
+        let plan = native_plan::prepare();
+        let snapshot = Snapshot::materialize(&plan).unwrap();
+        let process = FrozenProcess::launch(
+            std::path::Path::new(env!("CARGO_BIN_EXE_rutis-protocol-reaper")),
+            snapshot.groups()["node"].clone(),
+            LaunchOptions::default(),
+        )
+        .await
+        .unwrap();
+        let state = process.handle.status();
+        let control = std::fs::read_link(format!("/proc/{}/fd/4", state.guardian_pid)).unwrap();
+        let runtime_fds = format!("/proc/{}/fd", state.runtime_pid.unwrap());
+        // The launched runtime keeps its business socket, but cannot inherit
+        // any alias of the helper's separate completion-evidence socket.
+        assert_ne!(
+            std::fs::read_link(format!("{runtime_fds}/3")).unwrap(),
+            control
+        );
+        for fd in std::fs::read_dir(runtime_fds).unwrap() {
+            if let Ok(target) = std::fs::read_link(fd.unwrap().path()) {
+                assert_ne!(target, control);
+            }
+        }
+        let waiter = process.handle.reaping();
+        let abandoned = tokio::spawn(async move { waiter.wait().await });
+        abandoned.abort();
+        let _ = abandoned.await;
+        assert_eq!(
+            process.handle.status().phase,
+            rutis_protocol::process::ProcessPhase::Running
+        );
+        let FrozenProcess {
+            handle,
+            stream,
+            stdout,
+            stderr,
+        } = process;
+        let receipt = handle.reaping();
+        let duplicate = receipt.clone();
+        let pid = handle.status().runtime_pid.unwrap();
+        drop(handle);
+        let proof = tokio::time::timeout(Duration::from_secs(5), receipt.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(proof.runtime_pid(), pid);
+        assert_eq!(proof.runtime_exit().signal, Some(libc::SIGKILL));
+        assert_eq!(duplicate.wait().await.unwrap().runtime_pid(), pid);
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+        drop((stream, stdout, stderr));
+        snapshot.cleanup().unwrap();
+    })
+    .await
+    .expect("process lease drop abandoned reaping");
+}
+
+#[tokio::test]
+async fn dropping_startup_before_its_receipt_closes_partial_launch_and_reaps_helper() {
+    let _fixture = FROZEN_FIXTURES.acquire().await.unwrap();
+    use std::future::Future;
+    tokio::time::timeout(Duration::from_secs(40), async {
+        let plan = native_plan::prepare();
+        let snapshot = Snapshot::materialize(&plan).unwrap();
+        let path = snapshot.root().to_owned();
+        // Larger than a socket buffer and Linux's single-argument exec limit.
+        // Whether cancellation wins before or after its write, no business
+        // runner can execute this descriptor; the trusted helper must confirm.
+        let options = LaunchOptions {
+            arguments: vec!["x".repeat(512 * 1024)],
+            ..Default::default()
+        };
+        let mut startup = Box::pin(FrozenProcess::launch(
+            std::path::Path::new(env!("CARGO_BIN_EXE_rutis-protocol-reaper")),
+            snapshot.groups()["node"].clone(),
+            options,
+        ));
+        std::future::poll_fn(|context| match startup.as_mut().poll(context) {
+            std::task::Poll::Pending => std::task::Poll::Ready(()),
+            std::task::Poll::Ready(_) => panic!("helper startup did not yield before its receipt"),
+        })
+        .await;
+        drop(startup);
+        drop(snapshot);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while path.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled startup retained an unconfirmed process lease");
+        assert!(!rutis_protocol::process::quarantined_snapshots().contains(&path));
+    })
+    .await
+    .expect("startup cancellation test timed out");
+}
+
+#[tokio::test]
+async fn missing_guardian_reaping_proof_quarantines_snapshot_instead_of_reporting_success() {
+    let _fixture = FROZEN_FIXTURES.acquire().await.unwrap();
+    let plan = native_plan::prepare();
+    let snapshot = Snapshot::materialize(&plan).unwrap();
+    let path = snapshot.root().to_owned();
+    assert!(FrozenProcess::launch(
+        std::path::Path::new("/usr/bin/true"),
+        snapshot.groups()["node"].clone(),
+        LaunchOptions::default()
+    )
+    .await
+    .is_err());
+    drop(snapshot);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !rutis_protocol::process::quarantined_snapshots().contains(&path) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        path.exists(),
+        "missing guardian receipt cannot release its snapshot"
+    );
+    // This test's inert /usr/bin/true never forks a runtime. Only the fixture
+    // removes its files; the production API exposes no quarantine override.
+    std::fs::remove_dir_all(path).unwrap();
+}
+impl Plugin for BlockedConsumer {
+    fn name(&self) -> &str {
+        "blocked-native-consumer"
+    }
+    fn injects(&self) -> &[TypeKey] {
+        std::slice::from_ref(&self.key)
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        assert!(ctx
+            .get_as::<rutis_protocol::imports::ObjectProxy>(self.key.clone())
+            .is_some());
+        *self.context.lock().unwrap() = Some(ctx.clone());
+        let snapshot = self.snapshot.lock().unwrap().take().unwrap();
+        let entered = self.entered.lock().unwrap().take().unwrap();
+        let resume = self.resume.lock().unwrap().take().unwrap();
+        Box::pin(async move {
+            Ok(Effect::AsyncDisposer(Box::new(move || {
+                Box::pin(async move {
+                    entered.send(()).unwrap();
+                    resume.await.unwrap();
+                    drop(snapshot);
+                    Ok(())
+                })
+            })))
+        })
+    }
+}
+
+#[tokio::test]
+async fn frozen_runtime_reaps_detached_descendants_while_native_consumer_cleanup_is_blocked() {
+    let _fixture = FROZEN_FIXTURES.acquire().await.unwrap();
+    use rutis_protocol::{host::HostGraph, lifecycle::publish_ready, managed::ManagedActivation};
+    tokio::time::timeout(Duration::from_secs(40), async {
+        let plan = native_plan::prepare();
+        let snapshot = Snapshot::materialize(&plan).unwrap();
+        let path = snapshot.root().to_owned();
+        let objects = DeploymentObjects::new(plan.clone()).unwrap();
+        let host = objects.host();
+        let graph = HostGraph::new(objects, identity("host")).unwrap();
+        let root = Ctx::root().unwrap();
+        let node = Process::launch(&host, "node", &snapshot.groups()["node"], Arc::default()).await;
+        let launch = Hello::prepared(
+            &plan,
+            "node",
+            &snapshot.groups()["node"],
+            "node".into(),
+            Sequence(1),
+        )
+        .unwrap();
+        let provider = graph
+            .mount(&root, "node-provider", launch.identity.clone())
+            .unwrap();
+        hello(&node.peer, &launch).await.unwrap();
+        let _ready = publish_ready(&root, launch.identity.clone(), node.peer.clone()).unwrap();
+        provider.ready().await.unwrap();
+        let (entered, closing) = tokio::sync::oneshot::channel();
+        let (resume, waiting) = tokio::sync::oneshot::channel();
+        let captured = Arc::new(Mutex::new(None));
+        let consumer = ManagedActivation::mount(
+            &root,
+            BlockedConsumer {
+                key: plan.export_key("node-provider", "rpc").unwrap(),
+                snapshot: Mutex::new(Some(snapshot.groups()["node"].clone())),
+                entered: Mutex::new(Some(entered)),
+                resume: Mutex::new(Some(waiting)),
+                context: captured.clone(),
+            },
+        )
+        .unwrap();
+        consumer.view().await.unwrap();
+        let original = captured.lock().unwrap().clone().unwrap();
+        let client = provider.service::<InterfaceDatabaseClient>("rpc").unwrap();
+        let connection = client
+            .connect(InterfaceDatabaseMethod0Params {
+                name: "process-reaping".into(),
+            })
+            .await
+            .unwrap();
+        let row = connection
+            .query(InterfaceConnectionMethod0Params {
+                sql: "spawn-detached-descendants".into(),
+            })
+            .await
+            .unwrap()
+            .remove(0);
+        let child = row["child"].as_u64().unwrap();
+        let grandchild = row["grandchild"].as_u64().unwrap();
+        assert!(std::path::Path::new(&format!("/proc/{child}")).exists());
+        assert!(std::path::Path::new(&format!("/proc/{grandchild}")).exists());
+        node.process.terminate();
+        assert!(node.peer.is_closed());
+        assert!(!provider.is_available());
+        closing.await.unwrap();
+        assert!(!consumer.gate().is_open());
+        assert!(original
+            .effect(|| panic!("closed consumer admitted an effect"))
+            .is_err());
+        let proof = node.process.reaped().await.unwrap();
+        assert_eq!(proof.runtime_exit().signal, Some(libc::SIGKILL));
+        assert!(proof.descendants() >= 2, "{proof:?}");
+        for pid in [
+            child,
+            grandchild,
+            u64::from(proof.runtime_pid()),
+            u64::from(proof.guardian_pid()),
+        ] {
+            assert!(
+                !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                "unreaped PID {pid}"
+            );
+        }
+        drop(snapshot);
+        assert!(
+            path.exists(),
+            "native consumer still owns the snapshot lease"
+        );
+        let mut stopping = consumer.stop();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut stopping)
+                .await
+                .is_err()
+        );
+        assert!(connection
+            .query(InterfaceConnectionMethod0Params {
+                sql: "old-epoch".into()
+            })
+            .await
+            .is_err());
+        resume.send(()).unwrap();
+        stopping.await.unwrap();
+        assert!(
+            provider.stop().await.is_err(),
+            "OS proof does not fabricate a lost native stop ACK"
+        );
+        assert!(
+            graph
+                .mount(&root, "node-provider", launch.identity)
+                .is_err(),
+            "no recovery API bypasses the old native barrier"
+        );
+        assert!(graph.shutdown().await.is_err());
+        let _ = root.shutdown().await;
+        node.stderr.await.unwrap();
+        assert!(
+            !path.exists(),
+            "all explicit process and native snapshot leases ended"
+        );
+    })
+    .await
+    .expect("independent OS reaping timed out");
+}
+
 #[tokio::test]
 async fn default_driver_missing_declared_export_joins_cleanup_without_a_pending_guard() {
     use rutis_protocol::{
@@ -563,76 +858,48 @@ fn handler(host: &Arc<HostObjects>, runtime: &str, fence: Arc<Fence>) -> Handler
     })
 }
 struct Process {
-    child: tokio::process::Child,
+    process: ProcessHandle,
     peer: Peer,
     records: tokio::sync::mpsc::UnboundedReceiver<Value>,
     stderr: tokio::task::JoinHandle<String>,
 }
 impl Process {
-    fn launch(
+    async fn launch(
         host: &Arc<HostObjects>,
         runtime: &str,
         group: &SnapshotGroup,
         fence: Arc<Fence>,
     ) -> Self {
-        Self::launch_held(host, runtime, group, fence, None)
+        Self::launch_held(host, runtime, group, fence, None).await
     }
-    fn launch_held(
+    async fn launch_held(
         host: &Arc<HostObjects>,
         runtime: &str,
         group: &SnapshotGroup,
         fence: Arc<Fence>,
         activate: Option<Arc<Fence>>,
     ) -> Self {
-        let (parent, child_socket) = std::os::unix::net::UnixStream::pair().unwrap();
-        parent.set_nonblocking(true).unwrap();
-        let fd = child_socket.as_raw_fd();
-        let argv = group.argv();
-        let mut command = tokio::process::Command::new(&argv[0]);
-        command.args(&argv[1..]);
+        let mut options = LaunchOptions::default();
         if runtime == "rust" {
-            command.env("RUTIS_NATIVE_IMAGE_ENTRY", "1").args([
-                "--exact",
-                "native_image_entry",
-                "--nocapture",
-            ]);
-        } else {
-            command.arg(group.node_catalog().unwrap());
+            options
+                .environment
+                .insert("RUTIS_NATIVE_IMAGE_ENTRY".into(), "1".into());
+            options.arguments = vec![
+                "--exact".into(),
+                "native_image_entry".into(),
+                "--nocapture".into(),
+            ];
         }
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        unsafe {
-            command.pre_exec(move || {
-                if libc::dup2(fd, 3) < 0 || libc::fcntl(3, libc::F_SETFD, 0) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        // Parallel snapshot writes may be inherited briefly by another fork
-        // before its CLOEXEC descriptors close. Linux refuses exec with
-        // ETXTBSY while any write descriptor still references that inode.
-        // Only that failed-exec error is retried; business never entered it.
-        let mut attempts = 0;
-        let mut child = loop {
-            match command.spawn() {
-                Ok(child) => break child,
-                Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && attempts < 8 => {
-                    std::thread::sleep(Duration::from_millis(1 << attempts));
-                    attempts += 1;
-                }
-                Err(error) => panic!(
-                    "frozen runner exec failed for {}: {error}",
-                    argv[0].display()
-                ),
-            }
-        };
-        drop(child_socket);
+        let child = FrozenProcess::launch(
+            std::path::Path::new(env!("CARGO_BIN_EXE_rutis-protocol-reaper")),
+            group.clone(),
+            options,
+        )
+        .await
+        .unwrap();
+        let process = child.handle;
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let mut lines = BufReader::new(child.stdout).lines();
         let (tx, records) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(async move {
             while let Some(line) = lines.next_line().await.unwrap() {
@@ -641,7 +908,7 @@ impl Process {
                 }
             }
         });
-        let mut error = child.stderr.take().unwrap();
+        let mut error = child.stderr;
         let stderr = tokio::spawn(async move {
             let mut text = String::new();
             error.read_to_string(&mut text).await.unwrap();
@@ -650,7 +917,7 @@ impl Process {
             }
             text
         });
-        let stream = tokio::net::UnixStream::from_std(parent).unwrap();
+        let stream = child.stream;
         let peer = if let Some(activate) = activate {
             Peer::start(
                 delayed_activate(stream, activate),
@@ -660,8 +927,9 @@ impl Process {
             Peer::start(stream, handler(host, runtime, fence))
         };
         host.attach(identity(runtime), &peer).unwrap();
+        process.attach(&peer);
         Self {
-            child,
+            process,
             peer,
             records,
             stderr,
@@ -684,9 +952,9 @@ impl Process {
             "test",
             "native cleanup confirmed",
         ));
-        let status = self.child.wait().await.unwrap();
+        let status = self.process.reaped().await.unwrap();
         let stderr = self.stderr.await.unwrap();
-        assert!(status.success(), "{status}: {stderr}");
+        assert_eq!(status.runtime_exit().code, Some(0), "{status:?}: {stderr}");
         let mut cleaned = Vec::new();
         while let Some(record) = self.records.recv().await {
             if let Some(value) = record["cleaned"].as_str() {
@@ -710,6 +978,7 @@ impl Process {
 }
 #[tokio::test]
 async fn frozen_default_drivers_accept_before_construction_and_route_bidirectionally() {
+    let _fixture = FROZEN_FIXTURES.acquire().await.unwrap();
     tokio::time::timeout(Duration::from_secs(40), async {
         let plan = native_plan::prepare();
         let snapshot = Snapshot::materialize(&plan).unwrap();
@@ -735,13 +1004,15 @@ async fn frozen_default_drivers_accept_before_construction_and_route_bidirection
             "rust",
             &snapshot.groups()["rust"],
             rust_fence.clone(),
-        );
+        )
+        .await;
         let mut node = Process::launch(
             &host,
             "node",
             &snapshot.groups()["node"],
             node_fence.clone(),
-        );
+        )
+        .await;
         for (runtime, process) in [("rust", &rust), ("node", &node)] {
             let launch = Hello::prepared(
                 &plan,
@@ -884,6 +1155,7 @@ async fn frozen_default_drivers_accept_before_construction_and_route_bidirection
 
 #[tokio::test]
 async fn host_proxy_stop_passes_a_loading_start_and_late_activate_ack_cannot_reopen_it() {
+    let _fixture = FROZEN_FIXTURES.acquire().await.unwrap();
     use rutis::FiberState;
     use rutis_protocol::{host::HostGraph, lifecycle::publish_ready};
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -901,14 +1173,16 @@ async fn host_proxy_stop_passes_a_loading_start_and_late_activate_ack_cannot_reo
             "rust",
             &snapshot.groups()["rust"],
             rust_accept.clone(),
-        );
+        )
+        .await;
         let mut node = Process::launch_held(
             &host,
             "node",
             &snapshot.groups()["node"],
             node_accept.clone(),
             Some(node_activate.clone()),
-        );
+        )
+        .await;
         let rust_launch = Hello::prepared(
             &plan,
             "rust",
@@ -1040,6 +1314,7 @@ async fn host_proxy_stop_passes_a_loading_start_and_late_activate_ack_cannot_reo
 #[tokio::test]
 async fn native_host_graph_waits_for_activate_ack_refreshes_real_keys_and_closes_consumers_synchronously(
 ) {
+    let _fixture = FROZEN_FIXTURES.acquire().await.unwrap();
     use rutis::FiberState;
     use rutis_protocol::{host::HostGraph, lifecycle::publish_ready};
     tokio::time::timeout(Duration::from_secs(50), async {
@@ -1057,8 +1332,10 @@ async fn native_host_graph_waits_for_activate_ack_refreshes_real_keys_and_closes
             &snapshot.groups()["rust"],
             Arc::default(),
             Some(activate.clone()),
-        );
-        let mut node = Process::launch(&host, "node", &snapshot.groups()["node"], Arc::default());
+        )
+        .await;
+        let mut node =
+            Process::launch(&host, "node", &snapshot.groups()["node"], Arc::default()).await;
         let rust_launch = Hello::prepared(
             &plan,
             "rust",
@@ -1224,6 +1501,7 @@ async fn native_host_graph_waits_for_activate_ack_refreshes_real_keys_and_closes
 
 #[tokio::test]
 async fn frozen_native_adapter_installs_real_keys_and_service_loss_closes_both_runtime_consumers() {
+    let _fixture = FROZEN_FIXTURES.acquire().await.unwrap();
     use rutis::FiberState;
     use rutis_protocol::{host::HostGraph, lifecycle::publish_ready};
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -1296,8 +1574,10 @@ async fn frozen_native_adapter_installs_real_keys_and_service_loss_closes_both_r
         for instance in ["rust-consumer", "node-consumer"] {
             assert_eq!(plan.instances()[instance].routes()["rpc"].key(), &key);
         }
-        let mut rust = Process::launch(&host, "rust", &snapshot.groups()["rust"], Arc::default());
-        let mut node = Process::launch(&host, "node", &snapshot.groups()["node"], Arc::default());
+        let mut rust =
+            Process::launch(&host, "rust", &snapshot.groups()["rust"], Arc::default()).await;
+        let mut node =
+            Process::launch(&host, "node", &snapshot.groups()["node"], Arc::default()).await;
         let rust_launch = Hello::prepared(
             &plan,
             "rust",

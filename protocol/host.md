@@ -5,6 +5,8 @@ fiber。`HostGraph` 使用 `DeploymentObjects` 的权威 broker，并为 Host �
 一条真实私有帧连接和 `RuntimeObjects` SDK；原生 TypeKey 下保存真实 `ObjectProxy`。
 它实现首代成员的发布与关闭，并可挂载实际 [Host 原生适配器](native-adapters.md)；
 尚不拥有 Linux 进程监督、快照租约或恢复换代。
+嵌入者可把独立的 [Linux 冻结进程](process.md) handle 接到同一个私有 peer；
+这会在退出时同步关闭本图，但不替代 native stop ACK 或完整组恢复屏障。
 
 ## 挂载与发布
 
@@ -56,7 +58,8 @@ Release ACK，并缓存供重复 join。已断连的 epoch 使用其同步撤销
 `HostGraph::shutdown()` 先关闭所有成员，再 join 远端确认和实际原生清理；成功后
 关闭 Host SDK 私有连接。失败仍可观察，不作为恢复证明。同一 instance 不能重新
 mount；监督者的 cleanup/reaping 屏障与新代 API 尚待 M3。嵌入者须独立持有快照，
-直到原生清理和实际子进程退出都确认，不能把关连接当作 OS reaping。
+直到原生清理和 OS receipt 都确认，不能把关连接当作 OS reaping。process worker
+保留自己的冻结租约；消费者清理租约仍须由调用方显式拥有。
 
 ## 实际证据与剩余范围
 
@@ -74,5 +77,6 @@ Closing 且无构造/import；丢弃首个 stop waiter 后，重复 stop 仍 joi
 
 这些用例覆盖首代 instance 路由的 Host 发布与关闭；另一个 native adapter 用例
 验证实际原生 slot 安装。[内部 child 创建者 Ctx](native-context.md) 已有实际调度
-证据；单对象远端撤销、共享/单独完整拓扑、快照监督租约、更新
-恢复、Linux descendant reaping、broker 事件、真实旧桥迁移与完整 T24 仍需验收。
+和单对象远端撤销证据。process 用例另验证实际 detached descendants 回收早于
+慢原生消费者清理，旧 instance 仍不可重挂。共享/单独完整拓扑、自动快照监督租约、
+更新恢复双屏障、broker 事件、真实旧桥迁移与完整 T24 仍需验收。
