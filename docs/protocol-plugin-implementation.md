@@ -40,11 +40,12 @@
 
 ## 验证记录
 
-- 当前完整 Rust workspace：**509 passed / 0 failed / 2 ignored**，命令终态 exit 0。包含设置服务真实 Node IPC、双向服务与事件、当前未提交代码及旧桥真实 Node TCP e2e。
+- 2026-09-28 同步 main 后完整 Rust workspace：**536 passed / 0 failed / 2 ignored**，命令终态 exit 0。包含设置服务真实 Node IPC、双向服务与事件、保留的实验组件及旧桥真实 Node TCP e2e。
 - TS 协议：**77 passed / 0 failed**，check/build 通过。
 - workspace all-targets check、rutis/协议 all-targets clippy `-D warnings`、fmt 通过；host 原有 build 与新适配器/fixture 的严格 TS 类型检查通过。
-- 开发指南的 Rust 消费者片段编译、TS 提供者片段严格类型检查通过；19 份本轮 Markdown 文档的 137 个本地链接及代码围栏检查通过。
+- 开发指南的 Rust 消费者片段编译、TS 提供者、事件监听和发布片段严格类型检查通过；19 份本轮 Markdown 文档的 139 个本地链接及代码围栏检查通过。
 - 第一次当前 workspace 回归在旧 prepare 测试出现 8 个磁盘配额失败；错误均为复制临时文件的 `QuotaExceeded`，单项复跑通过。将 `TMPDIR` 指向工作区 `target/protocol-test-tmp` 后完整复跑通过。
+- 同步 main 后修正协议依赖版本、原生事件键调用和真实运行器 catalog/清单的版本声明；完整复跑通过。更新前回归中的 runner metadata 不匹配属于这一兼容性问题。同步前收尾实现为 Rust **509 passed / 0 failed / 2 ignored**。
 - 两个 ignored 分别依赖外部 min-cordis/dsh 检出与真实模型后端，不计入通过。上一次提交基线为 Rust **502 passed / 0 failed / 2 ignored**，TS **75 passed / 0 failed**。
 
 当前日志：`/tmp/rutis59-workspace.log`、`/tmp/rutis59-ts-test.log`。本机复现完整回归使用 `TMPDIR="$PWD/target/protocol-test-tmp" cargo test --workspace`，先建立该临时目录；TS 使用 `npm --prefix protocol/ts test`。
@@ -65,3 +66,7 @@ Rust 适配使用本仓库新增的公开 `FiberView.seal_effects`、`Ctx.is_wit
 - [协议实现约定](../protocol/README.md)、[服务绑定](../protocol/services.md)、[生命周期](../protocol/lifecycle.md)：已有互通基础。
 
 其他协议目录文件是已有实验 API 参考，不增加本轮任务。
+
+## 合入与后续接入
+
+合入前检查远端 CI 与代码评审。若下一轮要减少应用装配代码，优先让通用运行器声明本地依赖并接入现有事件端点，然后把完整测试场景整理成可直接启动的最小应用示例。这是后续接入便利性工作，未加入本轮 C01–C10 完成定义。
