@@ -380,11 +380,17 @@ struct ControlState {
     peer: Option<Peer>,
     start_queued: bool,
     stop: Option<watch::Receiver<Option<Confirmation>>>,
+    local_stop: Option<watch::Receiver<Option<Confirmation>>>,
     table: Option<Arc<ServiceTable>>,
     start_error: Option<ProtocolError>,
     ctx: Option<Ctx>,
     captures: Vec<Arc<ObjectProxy>>,
     hooks: Vec<ClosedHook>,
+}
+#[derive(Clone, Copy)]
+enum StopPart {
+    Local,
+    Paired,
 }
 struct Control {
     graph: Arc<HostGraph>,
@@ -409,10 +415,12 @@ impl Control {
             return;
         }
         self.gate.close();
-        let (tx, stopping, remote, local, ctx) = {
+        let (tx, local_tx, stopping, remote, local, ctx) = {
             let mut state = self.state.lock().unwrap();
             let (tx, rx) = watch::channel(None);
             state.stop = Some(rx);
+            let (local_tx, local_rx) = watch::channel(None);
+            state.local_stop = Some(local_rx);
             let stopping: BoxFuture<'static, Confirmation> = if state.start_queued {
                 let request = state.peer.as_ref().unwrap().start_request(
                     "plugin/stop",
@@ -441,6 +449,7 @@ impl Control {
             };
             (
                 tx,
+                local_tx,
                 stopping,
                 state.remote.clone(),
                 state.local.clone(),
@@ -470,9 +479,6 @@ impl Control {
                 actor.close_member(&local);
             }
             let mut errors = Vec::new();
-            if let Err(error) = stopping.await {
-                errors.push(error);
-            }
             for revocation in revocations {
                 if let Err(error) = revocation.await {
                     errors.push(error);
@@ -481,24 +487,52 @@ impl Control {
             if let Err(error) = actor.flush().await {
                 errors.push(error);
             }
-            let result = match errors.len() {
+            let local = match errors.len() {
                 0 => Ok(()),
                 1 => Err(errors.pop().unwrap()),
                 _ => Err(fail(
                     ErrorCode::Unavailable,
-                    format!("{} paired cleanup failures: {}", errors.len(), errors[0]),
+                    format!(
+                        "{} local proxy cleanup failures: {}",
+                        errors.len(),
+                        errors[0]
+                    ),
+                )),
+            };
+            // Native drain owns the local SDK cleanup, independently of the
+            // remote physical confirmation. Stop was synchronously queued.
+            local_tx.send_replace(Some(local.clone()));
+            let result = match (local, stopping.await) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+                (Err(local), Err(remote)) => Err(fail(
+                    ErrorCode::Unavailable,
+                    format!("paired cleanup failures: local: {local}; remote: {remote}"),
                 )),
             };
             tx.send_replace(Some(result));
         });
     }
     async fn remote_stopped(&self) -> Confirmation {
+        self.confirm_stop(StopPart::Paired).await
+    }
+    async fn local_stopped(&self) -> Confirmation {
+        self.confirm_stop(StopPart::Local).await
+    }
+    async fn confirm_stop(&self, part: StopPart) -> Confirmation {
         self.close_intent();
         let mut rx = loop {
             let notified = self.stop_ready.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Some(rx) = self.state.lock().unwrap().stop.clone() {
+            let rx = {
+                let state = self.state.lock().unwrap();
+                match part {
+                    StopPart::Local => state.local_stop.clone(),
+                    StopPart::Paired => state.stop.clone(),
+                }
+            };
+            if let Some(rx) = rx {
                 break rx;
             }
             notified.await;
@@ -554,9 +588,9 @@ impl Control {
         // Rollback is a real effect of this original native generation, and is
         // registered before issuance or a request can create remote ownership.
         let cleanup = self.clone();
-        ctx.effect_named("protocol proxy remote cleanup", move || {
+        ctx.effect_named("protocol proxy local cleanup", move || {
             Effect::AsyncDisposer(Box::new(move || {
-                Box::pin(async move { cleanup.remote_stopped().await.map_err(cordis) })
+                Box::pin(async move { cleanup.local_stopped().await.map_err(cordis) })
             }))
         })
         .map_err(native)?;

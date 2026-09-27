@@ -51,8 +51,11 @@ rutis 的可选 `get_as` 可以读到尚未可用或仍待 disposer 摘除的注
 权威 Host member 关闭在 broker 锁外同步调用弱租约：provider 原生代理与已经捕获
 它的消费者同时封闭，不等 revoke/stop ACK。runtime epoch 断连也封闭尚未进入 apply
 的 Pending 代理。迟到 activate ACK 不得重开 gate、availability 或原生依赖。
-停止结果核对精确 activation/instance 与 Stopped phase，等待 broker 撤销和本地 SDK
-Release ACK，并缓存供重复 join。已断连的 epoch 使用其同步撤销证据，不等待它
+配对 stop 结果核对精确 activation/instance 与 Stopped phase。独立本地结果等待
+broker 撤销与 Host SDK Release ACK，原生 proxy effect 只 join 这份本地结果；
+`native().stop()` 的实际清理不排在远端 stop ACK 之后。`HostProxy::stop()` 仍要求
+本地原生清理和配对确认都完成，两种结果均缓存，等待者丢弃不停止工作。
+已断连的 epoch 使用其同步撤销证据，不等待它
 回复新的 revoke；远端 native stop 未确认仍是失败，不能据此放行恢复。
 
 `HostGraph::shutdown()` 先关闭所有成员，再 join 远端确认、实际原生提供者和
@@ -78,6 +81,11 @@ Closing 且无构造/import；丢弃首个 stop waiter 后，重复 stop 仍 joi
 它还在 Node activate ACK 被延迟时完成 stop，再投递旧 ACK，
 确认旧 Ctx 和 availability 不恢复；断连封闭 missing-route Pending 代理。用例核对
 实际 native 清理计数与两个子进程正常退出，最后释放 snapshot。
+
+另一个真实 Node stop ACK 被 transport wrapper 保留时，Host native proxy 已
+Disposed，本地 join 成功，普通 stop 仍等待。取消已开始的普通 waiter 后再次 stop
+仍等待同一 ACK；放行后成功。OS 强停用例也分别观察本地清理成功与丢失远端
+ACK 的普通 stop 失败，完整 supervisor 尚须将这两份证据接入恢复许可。
 
 这些用例覆盖首代 instance 路由的 Host 发布与关闭；另一个 native adapter 用例
 验证实际原生 slot 安装。[内部 child 创建者 Ctx](native-context.md) 已有实际调度

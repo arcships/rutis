@@ -64,7 +64,8 @@ Reaped 可以先到，而消费者仍继续保留冻结目录。当前调用方�
 消费者租约。[HostGraph 清理观察](dependency-cleanup.md) 已记录实际消费者代的
 清理结果；尚未实现 supervisor 自动持有全部旧成员/失效消费者租约、合并两道屏障
 与签发新代。丢失远端 native stop ACK 仍使 HostProxy stop 失败，
-Reaped 不伪造该 ACK，不开放新的 instance 或 epoch。
+Reaped 不伪造该 ACK，不开放新的 instance 或 epoch。Host 原生 proxy 清理单独
+join 本地 SDK 结果，能在远端 ACK 丢失后真实完成；普通 stop 仍报告配对失败。
 
 `handle.attach_epoch(&host, identity, &peer)` 为 Host 将这个实际私有连接绑定到固定
 runtime/epoch，并返回 `EpochReaping`。调用方必须使用本 launch 的 stream 或其

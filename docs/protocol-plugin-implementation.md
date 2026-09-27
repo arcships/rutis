@@ -614,7 +614,29 @@ consumer receipt 仍待实际 disposer；native adapter 用例令真实消费者
 本轮完整工作区 502 passed / 0 failed / 2 ignored，协议 crate 仍为 133 项、
 native runner 10 项，另新增 rutis 原生清理 2 项；TS 75 项通过。workspace
 all-targets check、fmt、rutis 与协议 crate clippy `-D warnings` 通过。此处只接入
-实际清理观察；生产 supervisor 自动持有消费者快照租约、区分本地清理与远端
-stop ACK、全组恢复许可及新 epoch 仍需完成，M0–M5 / T01–T24 范围保持不变。
+实际清理观察；生产 supervisor 自动持有消费者快照租约、全组恢复许可及新
+epoch 仍需完成，本地清理与远端 stop ACK 的后续拆分见下。M0–M5 / T01–T24
+范围保持不变。
 
 本轮 12 份协议/验收文档的 49 个相对链接全部存在。
+
+### Host 本地清理与远端停止确认分离
+
+Host proxy 的原生 effect 此前等待远端 stop ACK 与本地 SDK 的合并结果；死亡
+runtime 即使已有真实 OS receipt，本地 native drain 仍被丢失 ACK 标成失败。
+现将实际本地 SDK revoke/Release 清理独立记录，原生 effect 只 join 这份结果。
+远端 stop 仍在同步 close_intent 内入队，独立任务完成本地工作后记录结果，再
+join 精确远端 Stopped ACK；`HostProxy.stop()` 仍要求全部本地与远端确认。
+本地 SDK 错误不被忽略，普通停止的配对错误仍缓存供重复 join。
+
+真实 Node wrapper 延迟 stop ACK，帧接收泵继续工作。Host proxy 实际 Disposed
+并在独立 5 秒期限内确认 native 清理，普通 stop 仍等待；取消已经开始的 waiter
+后重复 stop 继续等待同一响应，放行真实 ACK 后才成功。另一强停用例在 OS
+结算和消费者实际 disposer 完成后确认 Host proxy 本地清理成功，同时普通 stop
+仍报告丢失远端 ACK，旧 instance 不能重挂。
+
+拆分后的完整工作区仍为 502 passed / 0 failed / 2 ignored，协议 crate 133 项、
+native runner 10 项；workspace all-targets check、fmt、rutis 与协议 crate clippy
+`-D warnings` 通过。TS 未改动，前一阶段的 75 项通过结果保持。完整 supervisor
+尚须分别校验本地清理、消费者、OS 回收和残余执行，再签发新代许可；本段
+不构成 M3 或最终 T01–T24 完成验收。

@@ -39,6 +39,7 @@ rutis 的两个真实原生用例覆盖内部 child、两个隔离 scope、慢 d
 冻结 Rust/Node 互通用例另验证 OS 回收先完成而原生 consumer receipt 仍等待，
 以及实际 Host native service 的消费者清理失败由 HostGraph 保留。
 
-这是本仓库 rutis 的公开扩展，尚须随正式发行版本发布。远端 native stop ACK、
-本地清理结果和 OS receipt 仍有各自的证据要求。自动消费者快照租约、全组
+这是本仓库 rutis 的公开扩展，尚须随正式发行版本发布。Host proxy 的原生 effect
+等待独立本地 SDK 清理结果；普通 HostProxy stop 另要求远端 native stop ACK。
+OS receipt 不能替代本地错误或伪造 ACK。自动消费者快照租约、全组
 supervisor、显式新 epoch 与 StopUnconfirmed 管理尚待 M3，不能以本 API 重挂旧代。

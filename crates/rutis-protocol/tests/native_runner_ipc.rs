@@ -756,6 +756,7 @@ async fn frozen_runtime_reaps_detached_descendants_while_native_consumer_cleanup
         resume.send(()).unwrap();
         stopping.await.unwrap();
         observed.wait().await.unwrap();
+        provider.native().stop().await.unwrap();
         assert!(
             provider.stop().await.is_err(),
             "OS proof does not fabricate a lost native stop ACK"
@@ -856,9 +857,12 @@ struct Fence {
     entered: tokio::sync::Notify,
     resume: tokio::sync::Notify,
 }
-/// Delay the real child's activate response without blocking its request pump
-/// or changing frame contents. A stop can pass while that ACK is still held.
-fn delayed_activate(stream: tokio::net::UnixStream, fence: Arc<Fence>) -> tokio::io::DuplexStream {
+/// Delay one real lifecycle response while the private frame pump keeps running.
+fn delayed_lifecycle_ack(
+    stream: tokio::net::UnixStream,
+    method: &'static str,
+    fence: Arc<Fence>,
+) -> tokio::io::DuplexStream {
     let (peer, bridge) = tokio::io::duplex(65536);
     let (mut host_read, mut host_write) = tokio::io::split(bridge);
     let (mut child_read, mut child_write) = stream.into_split();
@@ -866,7 +870,7 @@ fn delayed_activate(stream: tokio::net::UnixStream, fence: Arc<Fence>) -> tokio:
     let outbound = activations.clone();
     tokio::spawn(async move {
         while let Ok(Some(frame)) = rutis_protocol::frame::read(&mut host_read).await {
-            if frame["type"] == "request" && frame["method"] == "plugin/activate" {
+            if frame["type"] == "request" && frame["method"] == method {
                 outbound
                     .lock()
                     .unwrap()
@@ -963,7 +967,7 @@ impl Process {
         runtime: &str,
         group: &SnapshotGroup,
         fence: Arc<Fence>,
-        activate: Option<Arc<Fence>>,
+        held: Option<(&'static str, Arc<Fence>)>,
     ) -> Self {
         let mut options = LaunchOptions::default();
         if runtime == "rust" {
@@ -1004,9 +1008,9 @@ impl Process {
             text
         });
         let stream = child.stream;
-        let peer = if let Some(activate) = activate {
+        let peer = if let Some((method, fence_held)) = held {
             Peer::start(
-                delayed_activate(stream, activate),
+                delayed_lifecycle_ack(stream, method, fence_held),
                 handler(host, runtime, fence),
             )
         } else {
@@ -1269,7 +1273,7 @@ async fn host_proxy_stop_passes_a_loading_start_and_late_activate_ack_cannot_reo
             "node",
             &snapshot.groups()["node"],
             node_accept.clone(),
-            Some(node_activate.clone()),
+            Some(("plugin/activate", node_activate.clone())),
         )
         .await;
         let rust_launch = Hello::prepared(
@@ -1420,11 +1424,18 @@ async fn native_host_graph_waits_for_activate_ack_refreshes_real_keys_and_closes
             "rust",
             &snapshot.groups()["rust"],
             Arc::default(),
-            Some(activate.clone()),
+            Some(("plugin/activate", activate.clone())),
         )
         .await;
-        let mut node =
-            Process::launch(&host, "node", &snapshot.groups()["node"], Arc::default()).await;
+        let stop_ack = Arc::new(Fence::default());
+        let mut node = Process::launch_held(
+            &host,
+            "node",
+            &snapshot.groups()["node"],
+            Arc::default(),
+            Some(("plugin/stop", stop_ack.clone())),
+        )
+        .await;
         let rust_launch = Hello::prepared(
             &plan,
             "rust",
@@ -1544,6 +1555,7 @@ async fn native_host_graph_waits_for_activate_ack_refreshes_real_keys_and_closes
         );
         let rust_ctx = rust_provider.native().native_context().unwrap();
         let node_ctx = node_consumer.native().native_context().unwrap();
+        stop_ack.enabled.store(true, Ordering::SeqCst);
         let revoked = host.close_member(&rust_provider.activation().unwrap());
         assert!(!rust_provider.is_available());
         assert!(!node_consumer.is_available());
@@ -1570,7 +1582,36 @@ async fn native_host_graph_waits_for_activate_ack_refreshes_real_keys_and_closes
         assert!(root
             .get_as::<rutis_protocol::imports::ObjectProxy>(rust_key)
             .is_none());
-        node_consumer.stop().await.unwrap();
+        stop_ack.entered.notified().await;
+        tokio::time::timeout(Duration::from_secs(5), node_consumer.native().stop())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            node_consumer.native().view().state().state,
+            FiberState::Disposed
+        );
+        let stopping = node_consumer.stop();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let abandoned = tokio::spawn(async move {
+            entered.send(()).unwrap();
+            stopping.await
+        });
+        started.await.unwrap();
+        assert!(
+            !abandoned.is_finished(),
+            "paired stop still requires the held ACK"
+        );
+        abandoned.abort();
+        let _ = abandoned.await;
+        let mut stopping = node_consumer.stop();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut stopping)
+                .await
+                .is_err()
+        );
+        stop_ack.resume.notify_one();
+        stopping.await.unwrap();
         graph.shutdown().await.unwrap();
         root.shutdown().await.unwrap();
         drop(rust_ready);
