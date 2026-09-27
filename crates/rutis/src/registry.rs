@@ -68,6 +68,7 @@ pub(crate) struct Registry {
     bindings: Mutex<HashMap<(TypeKey, Option<ScopeId>), Arc<Binding>>>,
     /// 注入索引:TypeKey → 声明依赖它的 fiber。
     inject_index: Mutex<HashMap<TypeKey, Vec<Weak<FiberInner>>>>,
+    cleanup_observers: Mutex<Vec<Weak<crate::dependency_cleanup::Observer>>>,
 }
 
 /// 稀疏即收缩(0.2.5):条目逻辑删除后容器容量不随历史峰值滞留。
@@ -83,6 +84,7 @@ impl Registry {
         Self {
             bindings: Mutex::new(HashMap::new()),
             inject_index: Mutex::new(HashMap::new()),
+            cleanup_observers: Mutex::new(Vec::new()),
         }
     }
 
@@ -114,8 +116,56 @@ impl Registry {
             // 注册表槽位;旧绑定由驱逐方按 Arc 身份 finalize,不误伤新绑定)
         }
         let stored = Arc::new(binding);
+        // Observer registration and publication share bindings -> observers
+        // lock order. A newly visible binding must already be tracked.
+        for observer in self
+            .cleanup_observers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(Weak::upgrade)
+        {
+            observer.provider(&stored);
+        }
         bindings.insert(entry, stored.clone());
         Ok(stored)
+    }
+
+    pub(crate) fn observe_cleanup(
+        &self,
+        root: Weak<FiberInner>,
+        generation: u64,
+        token: tokio_util::sync::CancellationToken,
+    ) -> crate::DependencyCleanup {
+        let observer = crate::dependency_cleanup::Observer::new(root, generation, token);
+        let bindings = self.bindings.lock().unwrap();
+        let mut observers = self.cleanup_observers.lock().unwrap();
+        observers.retain(|observer| observer.strong_count() != 0);
+        observers.push(Arc::downgrade(&observer));
+        for binding in bindings.values() {
+            observer.provider(binding);
+        }
+        crate::DependencyCleanup(observer)
+    }
+
+    pub(crate) fn consumer_draining(
+        &self,
+        fiber: &Arc<FiberInner>,
+    ) -> crate::dependency_cleanup::ConsumerDrain {
+        let observers = {
+            let mut observers = self.cleanup_observers.lock().unwrap();
+            observers.retain(|observer| observer.strong_count() != 0);
+            observers
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect::<Vec<_>>()
+        };
+        crate::dependency_cleanup::ConsumerDrain(
+            observers
+                .iter()
+                .filter_map(|observer| observer.draining(fiber))
+                .collect(),
+        )
     }
 
     pub(crate) fn lookup(&self, key: &TypeKey, scope: Option<&ScopeId>) -> Option<Arc<Binding>> {

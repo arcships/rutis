@@ -10,7 +10,7 @@ TS 独立包的 `package-lock.json` 绑定 npm tarball 与完整性摘要：
 `sha512-YBdskTU2Po1kru3GgcUWUbkTsPMA9LkSQDAY8rBkFJeajdgcQad3QPJZE26JyK99Xb6HaASvoXg2DSUTeN/0Nw==`。
 运行测试从该包的公开入口导入，没有用参考源码快照替代发行包。
 
-本阶段使用本仓库 rutis 的公开托管扩展 `FiberView.seal_effects`，后续 child 创建者校验还使用只读 `Ctx.is_within`。这些扩展尚需包含在正式 rutis 发行版本中，不宣称未修改的外部 0.3.0 已有这些 API；不修改 Cordis 或维护 Cordis fork。适配层及 rutis 扩展由本仓库维护；锁版本更新必须重跑本阶段契约和后续互通测试。
+本阶段使用本仓库 rutis 的公开托管扩展 `FiberView.seal_effects`、只读 `Ctx.is_within` 和实际清理观察 `Ctx.track_dependency_cleanup`。这些扩展尚需包含在正式 rutis 发行版本中，不宣称未修改的外部 0.3.0 已有这些 API；不修改 Cordis 或维护 Cordis fork。适配层及 rutis 扩展由本仓库维护；锁版本更新必须重跑本阶段契约和后续互通测试。
 Rust 使用原生依赖谓词、代取消 token、Plugin/PluginFactory、子插件和 shutdown。
 每次 activation 独立创建 native fiber；取消后的 permit 不再打开。必要子服务创建声明该服务依赖的 native guard，发布前等待 guard Active；服务单独摘除也会预取消 guard。准入检查同步拒绝，受 effect 管理的观察任务通知失效并刷新依赖。
 TS 使用公开 `internal/plugin/status/service` 通知、`Context.isolate/provide` 与 `Fiber.dispose/await`。
@@ -49,7 +49,7 @@ CI 增加锁定依赖的 TS 检查；Rust crate 纳入现有 workspace 测试。
 | --- | --- | --- |
 | M1 | 开发中 | 两端草稿编码、事务授权、精确 native child 创建者、单对象远端撤销及生成 dispatch 已接入私有 socket；完整失败交错、双向独占资源跨语言清理、生产连接的控制流与复用评估仍需补齐 |
 | M2 | 开发中 | prepare、冻结快照、默认 Rust/Node 服务 driver、首代 HostProxy 与 Host native export adapter 的真实 slot 发布/关闭及子进程双向 DI 已有证据；快照监督租约、共享/单独完整拓扑、真实旧桥迁移和 T24 测量尚未完成 |
-| M3 | 开发中 | Linux 冻结进程和脱离会话后代的独立回收已有实际证据；调用取消/完成、更新/失败回滚、全组消费者/OS 恢复屏障及管理状态仍需完成 |
+| M3 | 开发中 | Linux 独立后代回收、死亡 owner 结算及原生消费者实际清理观察已有证据；调用取消/完成、更新/失败回滚、自动消费者租约、全组恢复屏障及管理状态仍需完成 |
 | M4 | 待完成 | broker 权威事件列表、parallel/serial、scope、ready、once 与扩展拒绝 |
 | M5 | 待完成 | T01–T24 逐项运行时证据、旧桥回归、迁移/回退指南、基础协议冻结 |
 
@@ -87,7 +87,7 @@ Linux `objects_ipc` 运行独立 Node 进程与真实 managed rutis/Cordis Ctx�
 
 同一私有 socket fixture 已完成 Node 接收 SDK 的前缀提议、broker 独立检查、owner 回收通知、ACK 后 SDK 清理；Rust 接收端也走同一 broker 和 Node owner 通知。活的首份 grant 阻止后续已释放 borrow 的回收，旧 id 的控制重传不能恢复授权，低于水位的接收和 pin 拒绝。后续 `session_ipc` 又覆盖多个 activation 共用前缀和全部成员关闭后的 epoch 回收。当前约定见 [protocol README](../protocol/README.md)。这些是 conformance 证据；完整断连/取消/finished 故障交错与 supervisor 尚未验收。
 
-本阶段工作区回归：修复下文记录的并发 Accept 竞态、增加 exec `ETXTBSY` 有界重试、接入单对象撤销、独立 Linux 后代回收及死亡 owner 结算后，`cargo test --workspace` 500 passed / 0 failed / 2 ignored；新对象协议私有 Node socket、Rust 生命周期子进程、冻结目录的默认 Rust/Node 服务 driver、首代 Host instance/native 发布与关闭、实际 child 创建者、受管后代回收及旧桥真实 Node TCP e2e 均通过。两个 ignored 是依赖外部 min-cordis/dsh 检出的 host e2e 与需要真实模型后端的 agent e2e，不能计入通过。`cargo check --workspace --all-targets`、全仓 fmt、协议 crate clippy `-D warnings`、TS check/build/test 通过；没有执行外部 min-cordis/dsh 整体迁移验收。Linux Rust CI 安装锁定 Node/TS 依赖并运行该新互通测试，旧桥的跳过变量不跳过它。
+本阶段工作区回归：修复下文记录的并发 Accept 竞态、增加 exec `ETXTBSY` 有界重试、接入单对象撤销、独立 Linux 后代回收、死亡 owner 结算和原生消费者清理观察后，`cargo test --workspace` 502 passed / 0 failed / 2 ignored；新对象协议私有 Node socket、Rust 生命周期子进程、冻结目录的默认 Rust/Node 服务 driver、首代 Host instance/native 发布与关闭、实际 child 创建者、受管后代回收及旧桥真实 Node TCP e2e 均通过。两个 ignored 是依赖外部 min-cordis/dsh 检出的 host e2e 与需要真实模型后端的 agent e2e，不能计入通过。`cargo check --workspace --all-targets`、全仓 fmt、rutis 与协议 crate clippy `-D warnings`、TS check/build/test 通过；没有执行外部 min-cordis/dsh 整体迁移验收。Linux Rust CI 安装锁定 Node/TS 依赖并运行该新互通测试，旧桥的跳过变量不跳过它。
 
 ### 普通原生 child 的单对象撤销
 
@@ -581,9 +581,40 @@ execution pin 为 1；丢弃已经开始等待的 epoch receipt，再强停 runt
 
 正常 frozen Rust/Node driver、HostProxy 与 Host native adapter 的私有连接均采用
 同一绑定；OS receipt 后 join broker 结算。后续仍须实现全组 supervisor 的 native
-消费者捕获、清理诊断、双屏障与显式新 epoch，不能用本段结算绕过它们。
+消费者租约、清理诊断、双屏障与显式新 epoch，不能用本段结算绕过它们。
 
 最终完整工作区 500 passed / 0 failed / 2 ignored，协议 crate 133 项通过；其中
 native runner 10 项包含实际未完成查询、waiter 丢弃和重复确认的交错。工作区
 all-targets check、fmt、协议 crate clippy `-D warnings` 与 TS 75 项测试通过，原有
 旧桥真实 TCP 回归继续通过；此结果不记作完整 M3 或最终 T01–T24 验收完成。
+
+### 原生消费者实际清理观察与 Host 屏障
+
+原生提供者 eviction 会等待消费者任务，但不把消费者的清理错误传播到自己的
+stop；普通依赖刷新也会在 ErrorSink 收到错误后清除 dependency edges。事后读取
+registry 因而不足以证明清理成功。本仓库 rutis 增加可选、只读的清理观察：在服务
+可见前捕获实际 provider id/generation，native drain 开始时按本代捕获的依赖
+记录消费者，在真正排干后保存结果。具体 API 与等待次序见
+[原生清理约定](../protocol/dependency-cleanup.md)。
+
+原始提供者本代也有真实 drain receipt；提供者仍在清理时，空消费者列表不能
+放行恢复。观察器包含内部 child 的服务，排除由原生子树自己清理的内部 child，
+不创建第二套业务清理。消费者 id/generation 和错误在依赖边及 view 消失后保留，
+取消 waiter 不取消清理，后续 native generation 不覆盖旧结果；任务中断记录
+abandoned 错误。提供者原始代取消后不把新提供者代记入旧 observation。
+
+HostProxy 和 Host native adapter 在服务发布前登记，HostGraph 独立保留观察器。
+shutdown 在所有提供者真实清理后 join 已记录消费者；失败可通过
+`consumer_cleanup()` 的精确代 receipt 观察，不能因提供者停止成功而丢失。
+两个新原生测试覆盖 scoped child 服务、真实慢清理、等待者取消、依赖边移除、
+failed apply 清理与下一代结果。既有冻结 Node 强停用例验证 OS receipt 到达时
+consumer receipt 仍待实际 disposer；native adapter 用例令真实消费者清理失败，
+其提供者停止成功而 HostGraph shutdown 明确失败。
+
+本轮完整工作区 502 passed / 0 failed / 2 ignored，协议 crate 仍为 133 项、
+native runner 10 项，另新增 rutis 原生清理 2 项；TS 75 项通过。workspace
+all-targets check、fmt、rutis 与协议 crate clippy `-D warnings` 通过。此处只接入
+实际清理观察；生产 supervisor 自动持有消费者快照租约、区分本地清理与远端
+stop ACK、全组恢复许可及新 epoch 仍需完成，M0–M5 / T01–T24 范围保持不变。
+
+本轮 12 份协议/验收文档的 49 个相对链接全部存在。

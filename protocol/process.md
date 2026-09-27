@@ -61,7 +61,8 @@ OS worker 持有自己的 `SnapshotGroup`，Reaped 后才释放。错误、任�
 
 原生消费者另外拥有自己的快照租约，直到实际 disposer 完成才释放。因此 OS
 Reaped 可以先到，而消费者仍继续保留冻结目录。当前调用方必须显式管理这些
-消费者租约；尚未实现 supervisor 自动捕获全部旧成员/失效消费者、合并两道屏障
+消费者租约。[HostGraph 清理观察](dependency-cleanup.md) 已记录实际消费者代的
+清理结果；尚未实现 supervisor 自动持有全部旧成员/失效消费者租约、合并两道屏障
 与签发新代。丢失远端 native stop ACK 仍使 HostProxy stop 失败，
 Reaped 不伪造该 ACK，不开放新的 instance 或 epoch。
 
@@ -89,7 +90,8 @@ cleanup 和退出码。原有六项中另含 child-entry 与本地缺少 export 
   消费者，旧 Ctx 拒绝 effect。OS receipt 和四个 PID 的实际消失先于受控慢 disposer；
   另让真实查询在 handler 内永久等待，核对实际 execution pin。丢弃 epoch waiter
   后终止，OS 回收独立结算该 pin，重复 receipt 仍报告一次结算；查询失败，不重放。
-  快照继续存在，放行实际消费者清理后才删除，旧 instance 仍不能重挂。
+  原生消费者清理 receipt 保持未完成，快照继续存在；放行实际 disposer 后才确认
+  清理并删除目录，旧 instance 仍不能重挂。
 - 丢弃一个 receipt waiter 不影响 Running；最后一个进程 handle 丢弃后仍完成实际
   回收，两份 receipt 得到同一结果。实际 runtime 的 `/proc/.../fd` 另确认保留
   业务 socket，却未继承 helper 证据 socket 的任何别名。进程回收等待有独立的

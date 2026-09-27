@@ -16,6 +16,8 @@ Rust/Node 私有连接的 hello/start/activate/stop、native RuntimeReady 与发
 
 [Linux 冻结进程](process.md) 在独立 helper 中回收真实 runtime 与脱离会话的后代，缓存 OS receipt，并保留缺少证明的快照。OS 回收与原生消费者清理各自持有租约；完整组恢复屏障仍待 M3。
 
+[消费者清理观察](dependency-cleanup.md) 在真实 rutis 代排干时记录结果；慢清理、失败及被丢弃的等待者均有回归证据。HostGraph 在提供者排干后等待这些 receipt，自动快照租约和恢复新代仍在开发。
+
 ## JSON 与描述符
 
 所有入站 JSON 使用 `json::decode` / `decodeJson`，然后解码消息或 bundle 的结构。

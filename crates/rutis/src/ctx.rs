@@ -287,6 +287,23 @@ impl Ctx {
             .unwrap_or_default()
     }
 
+    /// Observe cleanup of actual consumers of this fiber and its descendants.
+    /// Register before publishing services. Join these receipts after native
+    /// provider shutdown; observing an empty list does not prove shutdown.
+    pub fn track_dependency_cleanup(&self) -> crate::DependencyCleanup {
+        let generation = self.0.generation.unwrap_or_else(|| {
+            self.weak_fiber()
+                .upgrade()
+                .map(|fiber| fiber.state_snapshot().generation)
+                .unwrap_or(0)
+        });
+        self.0.shared.registry.observe_cleanup(
+            self.weak_fiber(),
+            generation,
+            self.cancellation_token(),
+        )
+    }
+
     /// 自动路径:`Handle::try_current()` 失败返回明确错误,绝不隐式建 runtime(D8)。
     pub fn root() -> Result<Ctx, CordisError> {
         let handle = Handle::try_current().map_err(|_| {

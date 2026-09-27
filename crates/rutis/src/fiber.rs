@@ -625,6 +625,7 @@ impl FiberInner {
     /// fiber.ts:676),仅单 effect 内部 LIFO;此处跨 effect 也串行 LIFO——
     /// 完成顺序确定、错误聚合可预期,方向性强化而非语义缺失。
     async fn drain_effects(this: &Arc<Self>) -> Vec<Arc<CordisError>> {
+        let observed = this.ctx.shared().registry.consumer_draining(this);
         let handle = this.ctx.handle().clone();
         let effects: Vec<Arc<EffectRecord>> = std::mem::take(&mut *this.effects.lock().unwrap());
         let mut errors: Vec<Arc<CordisError>> = Vec::new();
@@ -638,6 +639,7 @@ impl FiberInner {
         errors.extend(std::mem::take(&mut *this.drained_errors.lock().unwrap()));
         *this.last_deps.lock().unwrap() = None;
         this.provided.lock().unwrap().clear();
+        observed.finish(&errors);
         errors
     }
 

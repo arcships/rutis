@@ -13,7 +13,10 @@ use crate::{
     services::ServiceTable,
     session::{RootDelivery, RuntimeIdentity as ObjectIdentity, RuntimeObjects},
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, Plugin, TypeKey};
+use rutis::{
+    BoxFuture, ConsumerCleanup, CordisError, Ctx, DependencyCleanup, Effect, FiberState, Plugin,
+    TypeKey,
+};
 use serde_json::json;
 use std::{
     collections::{BTreeMap, HashSet},
@@ -45,6 +48,7 @@ struct GraphState {
     next_local: u64,
     slots: BTreeMap<String, Weak<Control>>,
     native_slots: BTreeMap<String, Weak<native_adapter::NativeControl>>,
+    dependency_cleanup: Vec<DependencyCleanup>,
 }
 /// Construct proxies before RuntimeReady. Native injection keeps missing routes
 /// Pending; no member start waits for the rest of its runtime group.
@@ -92,6 +96,21 @@ impl HostGraph {
     }
     pub fn objects(&self) -> &Arc<DeploymentObjects> {
         &self.objects
+    }
+    /// Actual consumer generation drains, including failures whose native
+    /// dependency edges have already disappeared. Join only after all affected
+    /// providers' native cleanup; an early empty list is not a recovery proof.
+    pub fn consumer_cleanup(&self) -> Vec<ConsumerCleanup> {
+        let observations = self.state.lock().unwrap().dependency_cleanup.clone();
+        let mut consumers = BTreeMap::new();
+        for observation in observations {
+            for consumer in observation.consumers() {
+                consumers
+                    .entry((consumer.id(), consumer.generation()))
+                    .or_insert(consumer);
+            }
+        }
+        consumers.into_values().collect()
     }
     /// Identity is the supervisor's successful hello identity, not configuration.
     pub fn mount(
@@ -315,6 +334,27 @@ impl HostGraph {
                 errors.push(error);
             }
         }
+        let observations = self.state.lock().unwrap().dependency_cleanup.clone();
+        for observation in observations {
+            if let Err(error) = observation.wait_provider().await {
+                errors.push(native(error));
+            }
+        }
+        // Native providers have finished draining all registrations, so no
+        // further bound consumer cleanup can be missed by this snapshot.
+        for consumer in self.consumer_cleanup() {
+            if let Err(error) = consumer.wait().await {
+                errors.push(fail(
+                    ErrorCode::Business,
+                    format!(
+                        "native consumer {:?} generation {} ({}) cleanup failed: {error}",
+                        consumer.id(),
+                        consumer.generation(),
+                        consumer.name(),
+                    ),
+                ));
+            }
+        }
         if !errors.is_empty() {
             return Err(fail(
                 ErrorCode::Unavailable,
@@ -504,6 +544,13 @@ impl Control {
         response.map(|response| delivery.start_response(response))
     }
     async fn enter(self: &Arc<Self>, ctx: &Ctx) -> Result<()> {
+        let cleanup = ctx.track_dependency_cleanup();
+        self.graph
+            .state
+            .lock()
+            .unwrap()
+            .dependency_cleanup
+            .push(cleanup);
         // Rollback is a real effect of this original native generation, and is
         // registered before issuance or a request can create remote ownership.
         let cleanup = self.clone();

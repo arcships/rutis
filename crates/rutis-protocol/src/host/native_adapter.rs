@@ -167,6 +167,13 @@ impl NativeControl {
         !self.closed.load(Ordering::SeqCst) && self.gate.is_open()
     }
     fn enter(self: &Arc<Self>, ctx: &Ctx) -> Result<()> {
+        let cleanup = ctx.track_dependency_cleanup();
+        self.graph
+            .state
+            .lock()
+            .unwrap()
+            .dependency_cleanup
+            .push(cleanup);
         let cleanup = self.clone();
         ctx.effect_named("protocol native adapter cleanup", move || {
             Effect::AsyncDisposer(Box::new(move || {

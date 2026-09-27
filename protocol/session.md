@@ -87,6 +87,10 @@ owner 执行仍等待实际 finished。全组恢复与 StopUnconfirmed 管理尚
 epoch 断连可以凭 Host 的撤销证据向存活的 owner
 释放 delivery pins，这不构成执行完成证据。
 
+HostGraph 另记录[真实原生消费者清理](dependency-cleanup.md)，保留 disposer
+失败和精确代身份。提供者停止成功、连接断开或 OS receipt 均不能替代这些
+实际清理结果；当前 stop 仍要求远端 ACK，完整恢复许可尚未接入。
+
 native 必要服务或依赖失效触发单次 closing 通知。接收 revoke 时同步关闭被撤销
 成员以及已绑定的依赖成员，旧原始 context 随即拒绝新 effect；不会在旧 id 重建。
 普通 child 的 `closed` 请求不关闭 owner activation 或其他对象。未曾宣布的对象

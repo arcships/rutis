@@ -11,6 +11,7 @@
 
 mod bus;
 mod ctx;
+mod dependency_cleanup;
 mod diagnostics;
 mod effect;
 mod error;
@@ -23,6 +24,7 @@ mod registry;
 
 pub use bus::{DispatchAttempt, DispatchMode, EventBus};
 pub use ctx::Ctx;
+pub use dependency_cleanup::{ConsumerCleanup, DependencyCleanup};
 pub use diagnostics::{
     BindingDiagnostics, DependencyDiagnostics, DependencyStatus, PluginDiagnostics,
     ResolvedDependency, RuntimeDiagnostics, ServiceAccess,

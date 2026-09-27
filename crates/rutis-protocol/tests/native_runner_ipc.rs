@@ -408,6 +408,30 @@ struct BlockedConsumer {
     resume: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     context: Arc<Mutex<Option<Ctx>>>,
 }
+struct FailedConsumer(TypeKey);
+impl Plugin for FailedConsumer {
+    fn name(&self) -> &str {
+        "failed-native-consumer"
+    }
+    fn injects(&self) -> &[TypeKey] {
+        std::slice::from_ref(&self.0)
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            assert!(ctx
+                .get_as::<rutis_protocol::imports::ObjectProxy>(self.0.clone())
+                .is_some());
+            Ok(Effect::Disposer(Box::new(|| {
+                Err(CordisError::ServiceNotFound(
+                    "fixture native consumer cleanup failure".into(),
+                ))
+            })))
+        })
+    }
+}
 
 #[tokio::test]
 async fn dropped_process_waiter_and_last_lease_preserve_actual_cached_reaping() {
@@ -669,6 +693,16 @@ async fn frozen_runtime_reaps_detached_descendants_while_native_consumer_cleanup
         assert!(node.peer.is_closed());
         assert!(!provider.is_available());
         closing.await.unwrap();
+        let observed = graph
+            .consumer_cleanup()
+            .into_iter()
+            .find(|cleanup| cleanup.id() == consumer.view().id)
+            .unwrap();
+        assert_eq!(observed.generation(), consumer.view().state().generation);
+        assert!(
+            observed.result().is_none(),
+            "actual native disposer is still blocked"
+        );
         assert!(!consumer.gate().is_open());
         assert!(original
             .effect(|| panic!("closed consumer admitted an effect"))
@@ -721,6 +755,7 @@ async fn frozen_runtime_reaps_detached_descendants_while_native_consumer_cleanup
             .is_err());
         resume.send(()).unwrap();
         stopping.await.unwrap();
+        observed.wait().await.unwrap();
         assert!(
             provider.stop().await.is_err(),
             "OS proof does not fabricate a lost native stop ACK"
@@ -1748,6 +1783,8 @@ async fn frozen_native_adapter_installs_real_keys_and_service_loss_closes_both_r
             )
             .is_none());
         assert!(adapter.is_available());
+        let failing = root.plugin(FailedConsumer(key.clone()));
+        (&failing).await.unwrap();
         let old_native = adapter.native().native_context().unwrap();
         let old_rust = rust_consumer.native().native_context().unwrap();
         let old_node = node_consumer.native().native_context().unwrap();
@@ -1790,7 +1827,23 @@ async fn frozen_native_adapter_installs_real_keys_and_service_loss_closes_both_r
         assert!(rust_provider.is_available());
         assert!(node_provider.is_available());
         assert!(graph.mount_native(&root, ports, plugin()).is_err());
-        graph.shutdown().await.unwrap();
+        let failed = graph
+            .consumer_cleanup()
+            .into_iter()
+            .find(|cleanup| cleanup.id() == failing.id)
+            .unwrap();
+        assert!(failed
+            .wait()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("fixture native consumer cleanup failure"));
+        assert!(graph
+            .shutdown()
+            .await
+            .unwrap_err()
+            .message
+            .contains("fixture native consumer cleanup failure"));
         root.shutdown().await.unwrap();
         drop(native_ready);
         drop(rust_ready);
