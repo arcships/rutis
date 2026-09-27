@@ -51,7 +51,7 @@
 
 ## 来源与维护责任
 
-Rust 使用本仓库 rutis 源码；Cordis 使用锁定的发行包 **4.0.1**，不维护 fork。设置服务使用 **0.1.1-rc.2** 发行包。
+Rust 使用本仓库 rutis 源码，已同步 main 的待发布 **0.4.0**；Cordis 使用锁定的发行包 **4.0.1**，不维护 fork。设置服务使用 **0.1.1-rc.2** 发行包。
 
 Rust 适配使用本仓库新增的公开 `FiberView.seal_effects`、`Ctx.is_within` 和 `Ctx.track_dependency_cleanup`，需要随相应 rutis 发行版本提供；它们不属于未修改的外部 rutis 0.3.0。接口与适配层由本仓库维护。
 

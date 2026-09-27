@@ -67,7 +67,7 @@ rutis-protocol = { path = "../rutis/crates/rutis-protocol" }
 serde_json = "1"
 ```
 
-当前适配使用本仓库新增的 rutis API，不能仅换成已发行的 `rutis = "0.3.0"` 并假定接口相同，详见[来源与维护责任](protocol-plugin-implementation.md#来源与维护责任)。TS 示例按仓库源码布局导入 SDK，编译入口为 `npm --prefix protocol/ts run build`，尚不提供稳定的独立安装接口。
+当前源码跟随 main 的待发布 rutis 0.4.0，并使用本实现分支新增的适配 API。不能仅换成已发行的 `rutis = "0.3.0"` 并假定接口相同，详见[来源与维护责任](protocol-plugin-implementation.md#来源与维护责任)。TS 示例按仓库源码布局导入 SDK，编译入口为 `npm --prefix protocol/ts run build`，尚不提供稳定的独立安装接口。
 
 ## 3. 定义接口与生成绑定
 

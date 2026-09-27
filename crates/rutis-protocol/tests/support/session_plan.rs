@@ -78,7 +78,7 @@ pub fn prepare() -> PreparedDeployment {
                 files.push(json!({"path":path,"kind":kind,"sha256":digest(&bytes)}));
             }
             let manifest = json!({"id":name,"version":"1.0.0","protocol_family":"rutis-cordis-objects","protocol_version":"0.experimental",
-                "runtime":{"kind":if language=="rust"{"rust-rutis"}else{"node-cordis"},"framework_version":if language=="rust"{"0.3.0"}else{"4.0.1"},"executable":"runtime","runner":if language=="node"{json!("runner.mjs")}else{Value::Null},"environment":["dependency.lock"],"capabilities":["object.scope","callback.borrow","event.parallel","event.serial"]},
+                "runtime":{"kind":if language=="rust"{"rust-rutis"}else{"node-cordis"},"framework_version":if language=="rust"{"0.4.0"}else{"4.0.1"},"executable":"runtime","runner":if language=="node"{json!("runner.mjs")}else{Value::Null},"environment":["dependency.lock"],"capabilities":["object.scope","callback.borrow","event.parallel","event.serial"]},
                 "plugin":if language=="rust"{json!({"kind":"rust","factory":role})}else{json!({"kind":"node","entry":"entry.mjs"})},
                 "files":files,"config_schema":"config.json","provides":if role=="provider"{services.clone()}else{json!({})},"requires":if role=="consumer"{services.clone()}else{json!({})},"events":{}});
             fs::write(

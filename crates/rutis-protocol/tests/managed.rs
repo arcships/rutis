@@ -461,7 +461,8 @@ impl Plugin for EventPlugin {
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             for value in [1, 0, 2] {
-                ctx.events().on(ctx, Respond(value, self.0.clone()))?;
+                ctx.events()
+                    .on(ctx, &rutis::EventKey::of(), Respond(value, self.0.clone()))?;
             }
             Ok(Effect::Done)
         })
@@ -474,13 +475,25 @@ async fn native_event_listeners_preserve_parallel_serial_and_unload_ownership() 
     let calls = Arc::default();
     let activation = ManagedActivation::mount(&root, EventPlugin(calls)).unwrap();
     (activation.view()).await.unwrap();
-    assert_eq!(root.events().serial(&root, &Query).await.unwrap(), Some(0));
+    assert_eq!(
+        root.events()
+            .serial(&root, &rutis::EventKey::of(), &Query)
+            .await
+            .unwrap(),
+        Some(0)
+    );
     root.events()
-        .parallel(&root, Arc::new(Query))
+        .parallel(&root, &rutis::EventKey::of(), Arc::new(Query))
         .await
         .unwrap();
     activation.stop().await.unwrap();
-    assert_eq!(root.events().serial(&root, &Query).await.unwrap(), None);
+    assert_eq!(
+        root.events()
+            .serial(&root, &rutis::EventKey::of(), &Query)
+            .await
+            .unwrap(),
+        None
+    );
     root.shutdown().await.unwrap();
 }
 

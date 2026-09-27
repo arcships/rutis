@@ -249,7 +249,10 @@ async fn sealing_loading_subtree_rejects_new_factories_and_drains_existing_and_r
         Err(CordisError::Closed)
     ));
     assert!(original.provide(7_u8).is_err());
-    assert!(original.events().on(&original, listener).is_err());
+    assert!(original
+        .events()
+        .on(&original, &rutis::EventKey::of(), listener)
+        .is_err());
     let child = original.plugin(Noop);
     assert!(matches!(
         &*child.dispose().await.unwrap_err(),
