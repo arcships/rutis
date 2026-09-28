@@ -90,7 +90,7 @@ rutis 在 EventBus 增加按声明事件键选择的后端扩展点，覆盖注�
 
 当前 HostEvents 的统一 Return 规则不能直接代表两端的原生规则。wire 保留无值/有值和 JSON 值，分发使用发布端绑定的框架语义，不用 truthiness。混合语言的结果映射写进事件绑定：例如 Rust Some(false) 对应值 false，Cordis serial 按自己的规则继续；Rust serial 可将该值作为短路结果。框架配置来自可信绑定，不由业务载荷选择。
 
-once 的认领时点属于监听端的原生语义，随登记项保存，不能统一改成调用前摘除。选择、注销及重入通过单一登记项核对，避免跨进程并发重复执行。
+once 的认领时点属于监听端的原生语义，随登记项保存，不能统一改成调用前摘除。选择、注销及重入通过单一登记项核对。传输重试不得增加调用次数；原生框架自身的并发快照行为则以差分测试为准，不能擅自改成全局 at-most-once。
 
 scope、this 和过滤器属于接口约束。可映射的作用域使用应用授权的身份，实际 Context 对象不能当 JSON 传输。任意过滤闭包无法表达时明确拒绝，不能静默变成全局监听或全部忽略。
 
@@ -137,7 +137,165 @@ lifecycle、NativeDriver/NativeModuleDriver 和应用加载适配负责：
 
 settings 场景保留为实际服务适配回归，不能单独证明原生接口兼容。原 C01–C10 继续提供传输正确性证据；上述同源码验收完成前，本目标与 MR 的原生接入部分保持未完成。
 
-## 8. 当前可行性证据与范围
+## 8. 详细接口与实现约束
+
+本节为待实现规格。下面的接口名称、消息名称是设计记号，不是当前可用 API；实现可以调整命名，但不能改变业务入口和验收边界。
+
+### 8.1 三方责任与最小包描述
+
+| 角色 | 需要写什么 | 不需要写什么 |
+| --- | --- | --- |
+| 业务插件作者 | 普通插件、业务接口实现、原生依赖和 effect | 协议对象、订阅 ACK、运行器控制消息 |
+| 接口绑定维护者 | 类型/错误映射、服务键、事件声明、必要的创建者解析 | 每个应用的手工调用转发 |
+| 应用开发者 | 普通插件清单、绑定包、运行位置、服务路由 | 自制 Host、私有 IPC 握手和引用账本 |
+
+绑定包包含 `contract`（精确版本与摘要）、`services`（业务键与导入/导出转换）、`events`（事件键、参数/结果 codec、作用域规则）和 `nativeDependencies`（保留框架原有声明）。模块导出普通插件与绑定元数据；Rust 工厂注册表提供对应项。进程路径、启动参数仍使用已有运行配置，不新造部署配置系统。
+
+公共业务接口必须先独立成立，例如 `Database.connect -> Connection`、`Connection.query -> Row[]`；Rust 使用对象安全 trait 和业务包自己的异步返回类型，TS 使用 Promise。协议生成器生成实现这些接口的适配代码，不要求业务返回协议 `RpcFuture` 或接受 `CallContext`。
+
+第三方接口无法自动生成时允许在绑定包内手写转换。一次性适配也必须满足同一份消费者源码验收；同步 getter 不能靠改变远端返回类型冒充同一接口。
+
+### 8.2 服务读取、上下文与对象身份
+
+拟新增绑定入口的职责如下：
+
+```text
+require_as<WireClient, BusinessTrait>(业务键, 契约, 业务代理工厂)
+  校验 WireClient 的契约、接收者和权限
+  -> 安装带原生可用性检查的业务服务槽
+  -> 实际 Ctx 读取服务
+  -> 业务代理工厂(已校验对象, 读取者作用域)
+  -> Arc<dyn BusinessTrait> / 原有 TS 接口
+
+provide(业务键, 契约, 导出转换, 创建者解析)
+  原生插件照常提供服务
+  -> 绑定层读取原生绑定的真实 provider
+  -> 转换方法、返回对象和错误
+  -> 在该 provider 的本代导出表登记
+```
+
+Rust 当前 `intercept_require_as` 只有 `Arc<T>` 参数，且不覆盖 `get_as`，不能直接承担以上职责。拟在原生 registry 的已校验读取路径增加受信任的“按读取上下文生成视图”能力：普通值仍直接返回；上下文服务保存 `resolve(&Ctx) -> Arc<T>`，由 `get_as` 和 `require_as` 共用。它须在类型、作用域、原生可见性检查之后执行，保留 require 的声明检查与 get 的可选读取语义，不持有 registry 锁执行用户工厂。原有读取拦截器继续作用于解析后的业务值，不因协议接入而改变其他服务行为。
+
+Cordis 服务视图利用实际读取 Context 和原生追踪机制绑定；不能在安装时捕获 runner root。现有 SDK facade 主动屏蔽 Service.tracker，业务适配需要独立的上下文视图，不能只给现有 facade 换个类型声明。
+
+代理缓存键至少包括 `(对象身份, 权限视图, 读取者原生代, 作用域)`。同一视图重复读取/返回使用同一代理，循环引用闭合；不同权限或生命周期的视图不合并。回到 owner 时仍保留授权视图，不保证代理与原始实现对象的 `===` / `Arc::ptr_eq` 相等。
+
+取得服务后把 Arc/JS 引用传给另一插件，并不会自动改变它的归属。代理绑定最初读取者；要建立另一插件的独立归属，应通过该插件自己的原生服务读取。这里不使用线程局部“当前调用者”猜测异步调用来源。
+
+回调默认借用到本次调用及其已登记后代完成；内部调用上下文由代理创建。业务服务返回的对象只有在绑定声明“由本服务创建”时才继承 provider；跨子插件对象必须由绑定的 creator resolver 给出已登记的实际所有者。无法确定时拒绝导出，不偷偷延长到进程生命周期。需要长期保存回调的公共 API 须单独定义订阅句柄与关闭语义，不能把借用回调静默持久化。
+
+### 8.3 稳定插件句柄与每代协议状态
+
+`MemberHandle` 表示一次普通插件安装；`Generation` 表示原生框架的一次真实 apply。远端本体 fiber 决定 apply 次数；应用侧对应的服务代理插件只反映可用性，不能额外触发一次业务 apply。
+
+```text
+MemberHandle: installed ---------------------------------> disposed
+                     | 原生依赖满足                           ^
+                     v                                      | 显式卸载
+Generation n:  Opening -> Loading -> Staged -> Published      |
+                  \         \          \          \          |
+                   +---------+----------+----------> Closing -> Closed
+                                                               |
+                     原生依赖恢复且句柄未 dispose <-------------+
+                     -> 新 Generation n+1（全新 activation）
+```
+
+| 状态/消息 | 执行者与必要条件 | 可见性与失败处理 |
+| --- | --- | --- |
+| OpenGeneration | SDK 在真实 apply 开始处申请；协调端分配绑定 runtime epoch/member 的 activation | 初始化绑定安装完成才运行业务 apply；重复请求以本地代令牌去重 |
+| Loading | 原生 apply 执行，记录 effect、回调和订阅 | 只允许本节约定的初始化事件；不发布普通服务根 |
+| Stage / Accept / Publish | 复用已有完整表验证与交付 ACK；绑定同一 activation | apply 成功且订阅已确认才发布；失败进入 Closing |
+| CloseGeneration | 原生依赖失效、装载失败或本代退出；两端均可请求关闭 | 同步封闭新调用，撤销根和订阅，等待已准入执行与真实清理 |
+| GenerationClosed | 清理与引用退休完成；保留失败结果 | 允许仍安装的原生句柄开始下一代；旧 ACK 和旧引用始终失效 |
+| DisposeMember | 应用显式卸载原生句柄 | 先标记终态，再关闭当前代；阻止所有后续 OpenGeneration |
+
+上述 Open/Close 是代级操作；现有终态 stop 继续用于成员停止，不把 stop 后重新开放作为依赖恢复。所有消息带 epoch/member/activation，代令牌只用于同次申请去重；迟到回复不能更新新代。关闭失败通过原生错误通道返回，不能为尽快恢复而跳过仍未结束的清理。
+
+必需依赖缺失保持原生 Pending；optional 依赖缺失不人为阻止 apply。Cordis 保留 Inject 的 required/optional 含义；rutis 保留 Plugin::injects 与 get_as 的现有语义，不另造 optional 声明。依赖是否导致原生重载以各自内核为准，适配器只跟随真实代变化。
+
+### 8.4 事件登记与分发协议
+
+声明过的异步事件在一个应用路由域内使用同一协调列表，包括同进程监听；否则本地先执行、远端后执行会破坏 prepend 和 serial 的统一顺序。未声明事件继续直接走原生总线。第一阶段不接管同步 bail/waterfall、同步事件或模式匹配；绑定检查必须拒绝不支持的入口，不能退化成局部分发。
+
+拟使用以下内部记录（字段可复用已有事件协议）：
+
+```text
+Subscription = { activation, localId, eventContract, scope,
+                 sequence, prepend, oncePolicy, nativeOwner }
+Dispatch     = { activation, dispatchId, eventContract, scope,
+                 afterSequence, mode, payload }
+Invoke       = { dispatchId, invocationId, subscriptionId, payload }
+Result       = NoValue | Value(encodedBusinessValue) | Error(encodedError)
+```
+
+`sequence` 是来源内部的操作序号；协调端另分配列表顺序。注册顺序以协调端接纳顺序为准，prepend 依照接纳顺序插入前部。不同进程并发注册没有天然全局先后；需要确定顺序时由应用既有装载依赖建立顺序。
+
+同步 on/once 先建立本端句柄并排队 Subscribe；注销先立本端 tombstone，再排队 Unsubscribe，不让迟到登记复活。适配器将发送失败接到本代失败/关闭；下一次异步分发及原生就绪不能报告成功。Dispatch 必须等待该来源 `afterSequence` 之前的登记/注销生效，但不能等业务 apply 完成。原生就绪还须等待该代此前登记 ACK，保证随后装载的其他插件可见。
+
+```text
+ctx.on(...) ----> 本端句柄 ----Subscribe----> 协调监听列表
+ctx.serial(...) ------------Dispatch-----> 按顺序选择快照
+                                            |
+                                            +--Invoke(id)--> 指定本地/远端监听
+                                            <--Result------+
+                                            |
+                                            +-- 继续 / 短路 / 返回错误
+```
+
+每个 Invoke 只进入指定回调，不重新调用 ctx.serial 或 ctx.parallel。invocationId 区分同一监听的不同分发；传输层重复消息不得重复执行同一次 invocation，不对业务调用做自动重试。清理不得持有协调列表锁等待回调，允许 A→B→A 重入。
+
+serial 以发布端语义解释原始结果，不能把 Rust Some(false) 预先规范化成“短路”：
+
+| 线上结果 | Cordis 发布者 | rutis 发布者 |
+| --- | --- | --- |
+| NoValue（TS undefined / Rust None） | 继续 | 继续 |
+| Value(false) | 继续 | Some(false)，短路 |
+| Value(null) | 继续 | 若事件结果类型允许 null，则 Some(null)，短路 |
+| Value(0) | 返回 0，短路 | 若结果类型允许，则 Some(0)，短路 |
+| Error | 拒绝并停止 | Err 并停止 |
+
+无法编码为声明结果类型的值是契约错误，不能强制类型转换。parallel 等待所有已选调用，再转换成发布端原生聚合错误；不承诺跨语言 Error 类构造器或堆栈相同，业务错误码/字段必须一致。
+
+once 保留监听端策略：rutis 在选择快照时认领；Cordis 在回调入口注销。Cordis 4.0.1 的 once 包装没有检查 disposer 返回值，因此不能仅凭“once”名字承诺多个并发快照只调用一次；实现前必须以锁定版本的并发差分用例固定行为。注销后对已选但尚未开始的普通监听如何处理，也按各框架原生快照规则验证；卸载关闭代则一律禁止新的准入。
+
+this/filter 仅支持绑定声明可表达的语义。接收者的真实 Context 留在所属进程；任意依赖远端 Context 身份的过滤闭包不能假装可序列化。声明了范围身份的事件通过绑定恢复可用业务 this，并在授权范围内选择监听；不支持的调用在执行前明确失败。现有本地 filter 探针只能证明本地 Context 保留，不能证明远端任意 filter 兼容。
+
+### 8.5 初始化期事件与发布屏障
+
+服务根发布和初始化事件采用不同准入项，复用同一权限账本，不提前把整个 activation 标成 Published。
+
+1. SDK 在 apply 前完成 OpenGeneration，协调端为应用明确关联的事件路由授予初始化资格，绑定成员、代、事件契约和作用域。
+2. Loading 中的订阅可被同一授权路由内的已准入 Loading/Published 发布者调用；不存在默认全应用广播权限。
+3. 初始化 Invoke 只获得该监听及声明载荷对象的调用级授权。对象参数必须经过同样的契约、创建者、借用和权限检查；不能借此查找尚未发布的普通服务根，也不能将初始化引用转交其他调用。
+4. 回调可在相同权限约束下发起嵌套事件；控制消息泵不能等待外层 apply 才处理订阅和结果。
+5. apply 成功、Stage/Accept 完成且登记 ACK 到齐后，正常 Publish；失败先撤销初始化资格，再走本代关闭。
+
+因此 `apply -> on -> await serial -> apply 返回` 可以完成。若业务自己形成“等待尚未装载插件的结果”的依赖环，适配器不能自动补出结果；通过既有取消/失败通道退出，不扩展为依赖环恢复系统。
+
+### 8.6 错误、取消与范围边界
+
+业务方法继续返回公共接口的业务错误；契约不匹配在装载时失败，权限/旧代失效/断连映射到公共接口约定的不可用错误，保留原因。公共接口没有可表达错误通道时先解决接口设计，不能把失败变成成功默认值。
+
+丢弃远端调用的等待者不等于远端已停止执行；在途 pin 必须等真实执行结束。需要取消的公共接口须显式定义取消能力并在两端实现，不能承诺跨进程 Future drop 与本地任意 future 完全等价。不自动重试有副作用调用，也不将断连后的未知执行状态伪装为确定未执行。
+
+“原生体感一致”验收针对已声明支持的业务契约与原生入口；同步远端状态、任意反射、跨作用域原始指针相等和不可序列化过滤器明确不在透明支持范围。绑定兼容检查应输出具体接口/成员及原因，不能等用户跑到某个方法才发现整个 API 不支持。
+
+## 9. 实施落点与同源码验收
+
+每步先补差分基准，再实现对应边界；不另写协议专用业务插件规避失败。
+
+| 步骤 | 主要文件/模块 | 必须通过的用例 |
+| --- | --- | --- |
+| A 服务 | rutis ctx/registry；两端 services/sdk；codegen | 原有类型键/服务名；get/require 的原生差别；真实读取者的回调归属；重复/循环对象；子插件退出；越权及旧引用拒绝 |
+| B 生命周期 | 两端 managed；native driver；lifecycle/session | 必需依赖缺失不 apply；恢复后新代；optional 不错误阻塞；旧代清理先完成；迟到 ACK 无效；显式 dispose 不重载 |
+| C 事件 | rutis EventBus；TS 上下文适配；两端 events | 同进程与远程混排；返回值表；prepend；错误；once 快照/重入/并发；注销；apply 内 await；加载失败撤销初始化权限 |
+| D 装配 | 默认 NativeDriver/NativeModuleDriver；绑定元数据；指南 | 正式应用入口加载；能力只在完整安装后公布；两种运行位置复用同源码；没有业务 helper 或 fixture 控制 |
+
+验收目录保留一份 Rust 业务插件和一份 TS 业务插件，均只依赖本框架与公共业务契约。装配测试分别选择本地实现、Rust 消费 Node、Node 消费 Rust；对照调用结果、事件轨迹、apply/effect 次数和资源归属。混合语言特有结果映射另外按上表检查，不拿不同框架本来不同的 serial 规则互相比成“完全一样”。
+
+每步验收记录区分：原生基准结果、真实 IPC 结果、尚不支持的明确约束。已有 C01–C10 作为底层回归继续保留。当前仅完成设计与本地接入点探针，A–D 均不能标为完成；本次文档细化不触发无关的部署、恢复或性能工作。
+
+## 10. 当前可行性证据与范围
 
 已阅读锁定 Cordis 4.0.1 和当前 rutis 0.4.0 的真实事件实现。[本地 Cordis 可行性试验](../protocol/ts/probes/native-event-entry.ts)让同一插件分别运行在原生上下文和事件服务适配上下文，核对原始注册 Context 身份、ctx.serial/parallel 和 ctx.events.parallel、false/null/0、once 与卸载，结果一致。它只证明公开上下文扩展入口可用，不是跨进程兼容验收。
 
