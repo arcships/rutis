@@ -21,7 +21,14 @@ mod key;
 mod plugin;
 mod registry;
 
+pub use bus::queue::{EventListener, EventQueue, EventRegistration};
+/// Experimental continuations for external event queues; not stable API.
+pub use bus::sync::{
+    ErasedSyncNext as SyncEventContinuation, ErasedSyncTerminal as SyncEventTerminal,
+};
 pub use bus::{DispatchAttempt, DispatchMode, EventBus, EventSubscription, ListenerKind};
+/// Experimental continuations for external event queues; not stable API.
+pub use bus::{ErasedNext as EventContinuation, ErasedTerminal as EventTerminal};
 pub use ctx::Ctx;
 pub use diagnostics::{
     BindingDiagnostics, DependencyDiagnostics, DependencyStatus, PluginDiagnostics,
