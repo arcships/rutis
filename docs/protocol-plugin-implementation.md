@@ -71,8 +71,8 @@ Rust 适配使用本仓库新增的公开 `FiberView.seal_effects`、`Ctx.is_wit
 
 设计以[决策 D1–D7](design-protocol-plugins-2026-09-25.md)为唯一规格；A0–D 均未完成。本轮仅修订文档，未修改运行时代码。
 
-- A0：待验证提供端调用者执行视图，以及原生 effect 清理调用的独立准入。
-- A–D：服务绑定、逐代依赖生命周期、原生事件、默认装配，按设计验收表实施。
+- A0：待验证 Cordis origin/shadow 服务解析、intercept 与 effect 归属，以及清理权限隔离和 disposer 的 close 结束 pending read。
+- A–D：服务绑定、逐代依赖生命周期（含 provider 等待消费者清理确认）、原生事件、默认装配，按设计验收表实施。
 - 已有[本地 Cordis 探针](../protocol/ts/probes/native-event-entry.ts)验证 Context.extend/getTraceable 保留真实监听 Context，覆盖原生事件入口、false/null/0、once 和卸载；没有 IPC，不计作跨进程兼容验收。
 
 安装 protocol/ts 锁定依赖后，在仓库根目录复现探针：
