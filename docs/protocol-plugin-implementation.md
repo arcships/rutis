@@ -67,8 +67,18 @@ Rust 适配使用本仓库新增的公开 `FiberView.seal_effects`、`Ctx.is_wit
 
 其他协议目录文件是已有实验 API 参考，不增加本轮任务。
 
-## 当前必须补齐的原生接入
+## 原生接入状态与证据
 
-按修订设计依次补齐公共服务接口绑定、原生装载代和依赖恢复、原生事件入口、默认运行器与普通插件加载入口。业务不导入协议 Client/CallContext，不调用专用事件 helper，不自己登记回调创建者或装配 SDK。应用只选择插件、契约与运行位置。
+设计以[决策 D1–D7](design-protocol-plugins-2026-09-25.md)为唯一规格；A0–D 均未完成。本轮仅修订文档，未修改运行时代码。
 
-设计已细化到服务读取者上下文、每代状态/消息、事件顺序与结果映射、初始化准入及 A–D 同源码验收，见修订设计第 8–9 节。接口名称仍为提案，以上运行时代码尚未按新目标完成。Cordis 的本地可行性试验已验证公开 Context.extend/getTraceable 能保持原始监听上下文及原生事件入口；该试验没有 IPC，不能计作原生接入验收。MR 应明确保留这一完成缺口。
+- A0：待验证提供端调用者执行视图，以及原生 effect 清理调用的独立准入。
+- A–D：服务绑定、逐代依赖生命周期、原生事件、默认装配，按设计验收表实施。
+- 已有[本地 Cordis 探针](../protocol/ts/probes/native-event-entry.ts)验证 Context.extend/getTraceable 保留真实监听 Context，覆盖原生事件入口、false/null/0、once 和卸载；没有 IPC，不计作跨进程兼容验收。
+
+安装 protocol/ts 锁定依赖后，在仓库根目录复现探针：
+
+```sh
+node --import ./protocol/ts/node_modules/tsx/dist/loader.mjs protocol/ts/probes/native-event-entry.ts
+```
+
+文档分工：设计只保存决策、约束与验收；本记录保存实现状态和验证证据；指南保存已实现 API 的操作步骤。审阅过程和旧方案保留在 Git 历史，不重复复制到设计。
