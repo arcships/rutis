@@ -2,7 +2,7 @@
 
 此目录记录 `rutis-protocol` crate 与 TS SDK 的当前实验实现。
 应用接入和业务插件编写从[跨进程插件开发指南](../docs/protocol-plugin-guide.md)开始；本目录提供详细协议与 API 参考。
-#59 当前只交付原生 Rust/TS 插件的双向服务对象、借用回调、基础事件与必要清理，范围见[简化设计](../docs/design-protocol-plugins-2026-09-25.md)，证据见[工作记录](../docs/protocol-plugin-implementation.md)。真实私有 IPC 已验证对象互通、双向基础事件及[现有设置服务适配](settings-example.md)。旧 `rutis-cordis` 桥继续独立存在。
+#59 已实现双向服务对象、借用回调、基础事件与必要清理；原生服务类型、事件入口、依赖恢复及默认加载接入尚须按[修订设计](../docs/design-protocol-plugins-2026-09-25.md)完成，证据见[工作记录](../docs/protocol-plugin-implementation.md)。真实私有 IPC 已验证对象互通、双向基础事件及[现有设置服务适配](settings-example.md)，这些证据不等于原生用法已完全兼容。旧 `rutis-cordis` 桥继续独立存在。
 
 Rust/Node 私有连接的 hello/start/activate/stop、native RuntimeReady 与发布门控见[生命周期控制](lifecycle.md)。通用 Node 入口使用冻结快照的启动 catalog 和 bundle 原字节；启用服务传输的默认驱动支持 object.scope/callback.borrow，事件能力在 hello 拒绝。
 
