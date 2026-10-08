@@ -81,10 +81,22 @@ pub struct PythonRuntime {
     /// Where plugin modules that are not installed are found.
     #[serde(default = "here")]
     pub project: PathBuf,
-    /// The interpreter; by default `$VIRTUAL_ENV/bin/python`, then the
-    /// project's `.venv/bin/python`, then `python3`.
+    /// The interpreter; by default the one of `$VIRTUAL_ENV`, then the one
+    /// of the project's `.venv` ([`venv_python`]), then [`PYTHON`].
     #[serde(default)]
     pub python: Option<PathBuf>,
+}
+
+/// The interpreter on `PATH` when no virtual environment names one.
+pub const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
+
+/// The interpreter of the virtual environment `venv`: `bin/python`, or
+/// `Scripts\python.exe` on Windows.
+pub fn venv_python(venv: &Path) -> PathBuf {
+    match cfg!(windows) {
+        true => venv.join("Scripts").join("python.exe"),
+        false => venv.join("bin").join("python"),
+    }
 }
 
 fn here() -> PathBuf {
@@ -149,7 +161,15 @@ impl HostConfig {
         // it needs an absolute path, so fall back when the base is relative.
         for row in &mut self.rows {
             if let Some(name) = row["name"].as_str() {
-                if name.starts_with("./") || name.starts_with("../") {
+                let relative = ["./", "../"]
+                    .iter()
+                    .chain(if cfg!(windows) {
+                        &[".\\", "..\\"][..]
+                    } else {
+                        &[]
+                    })
+                    .any(|prefix| name.starts_with(prefix));
+                if relative {
                     let path = base.join(name);
                     let name = match url::Url::from_file_path(&path) {
                         Ok(url) => url.into(),
@@ -261,16 +281,20 @@ mod tests {
             json!({ "id": "llm", "name": "./dev/fake.ts" }),
             json!({ "id": "w", "name": "weather" }),
         ];
-        config.rebase(Path::new("/srv/app"));
-        assert_eq!(config.rows[0]["name"], "file:///srv/app/dev/fake.ts");
+        let (base, url) = match cfg!(windows) {
+            true => (r"C:\srv\app", "file:///C:/srv/app/dev/fake.ts"),
+            false => ("/srv/app", "file:///srv/app/dev/fake.ts"),
+        };
+        config.rebase(Path::new(base));
+        assert_eq!(config.rows[0]["name"], url);
         assert_eq!(config.rows[1]["name"], "weather");
         assert_eq!(
             config.runtimes.node.unwrap().project,
-            Path::new("/srv/app/.")
+            Path::new(base).join(".")
         );
         assert_eq!(
             config.runtimes.py.unwrap().python.unwrap(),
-            Path::new("/srv/app/.venv/bin/python")
+            Path::new(base).join(".venv/bin/python")
         );
         assert!(serde_json::from_value::<HostConfig>(json!({ "unknown": 1 })).is_err());
     }

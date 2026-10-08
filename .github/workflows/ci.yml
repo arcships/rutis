@@ -246,6 +246,20 @@ jobs:
       - name: cargo test (rutis-bridge, all features)
         if: '!cancelled()'
         run: cargo test -p rutis-bridge --all-features --no-fail-fast
+      - name: cargo test (rutis-host)
+        if: '!cancelled()'
+        run: cargo test -p rutis-host --no-fail-fast
+      # The binary as users run it: a new Python plugin project, checked.
+      - name: rutis-host new and check
+        if: '!cancelled()'
+        shell: bash
+        run: |
+          cargo build -p rutis-host
+          host="$PWD/target/debug/rutis-host.exe"
+          cd "$RUNNER_TEMP"
+          "$host" new greeter --lang python
+          cd greeter
+          RUTIS_PYTHON_PATH="$GITHUB_WORKSPACE/python/rutis" "$host" check
 
   static-platforms:
     strategy:

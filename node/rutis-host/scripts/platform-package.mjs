@@ -6,10 +6,12 @@ import { join } from 'node:path'
 
 const [platform, arch, binary, out] = process.argv.slice(2)
 if (!out) throw new Error('usage: platform-package.mjs <platform> <arch> <binary> <out dir>')
+// The binary keeps the name the platform runs it by.
+const name = platform === 'win32' ? 'rutis-host.exe' : 'rutis-host'
 const host = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 mkdirSync(join(out, 'bin'), { recursive: true })
-copyFileSync(binary, join(out, 'bin', 'rutis-host'))
-chmodSync(join(out, 'bin', 'rutis-host'), 0o755)
+copyFileSync(binary, join(out, 'bin', name))
+chmodSync(join(out, 'bin', name), 0o755)
 writeFileSync(join(out, 'package.json'), JSON.stringify({
   name: `@arcships/rutis-host-${platform}-${arch}`,
   version: host.version,

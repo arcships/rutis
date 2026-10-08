@@ -76,4 +76,4 @@ match &entry.status {
 
 ## Windows
 
-Embedded in Rust, Node / Python runtimes, remote runtimes and cross-language shared services now run natively on Windows with no code changes. The `rutis-host` command and the `Process::launch` / `Process::mount` compatibility API are still Unix-only and return a clear error on Windows; projects using them keep using WSL there.
+The `rutis-host` command and hosts embedded in Rust now run Node / Python plugins natively on Windows with no code changes; projects that ran `rutis-host` in WSL can switch to the Windows build. On Windows, `rutis-host` finds a virtual environment's interpreter at `Scripts\python.exe` and defaults to `python`. The `Process::launch` / `Process::mount` compatibility API is still Unix-only and returns a clear error on Windows; projects using it keep using WSL there.

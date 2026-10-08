@@ -7,14 +7,17 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::config::{HostConfig, NodeRuntime, PythonRuntime, Runtimes};
+use crate::config::{venv_python, HostConfig, NodeRuntime, PythonRuntime, Runtimes};
 
 /// The configuration that runs the plugin project in `dir`, and the id of
 /// its row.
 pub fn dev_config(dir: &Path) -> Result<(HostConfig, String), String> {
-    let dir = dir
-        .canonicalize()
-        .map_err(|error| format!("{}: {error}", dir.display()))?;
+    // Absolute, not canonical: on Windows a canonical path is a `\\?\` one,
+    // which neither the file URL nor the runtimes want.
+    let dir = std::path::absolute(dir)
+        .ok()
+        .filter(|dir| dir.is_dir())
+        .ok_or_else(|| format!("{}: not a directory", dir.display()))?;
     let (row, runtimes) = if dir.join("package.json").exists() {
         node_row(&dir)?
     } else if dir.join("pyproject.toml").exists() {
@@ -113,7 +116,7 @@ fn python_row(dir: &Path) -> Result<(Value, Runtimes), String> {
     let runtimes = Runtimes {
         py: Some(PythonRuntime {
             project,
-            python: Some(dir.join(".venv/bin/python")).filter(|venv| venv.exists()),
+            python: Some(venv_python(&dir.join(".venv"))).filter(|venv| venv.exists()),
         }),
         ..Runtimes::default()
     };
@@ -178,7 +181,10 @@ fn id_of(name: &str) -> String {
 }
 
 fn file_url(path: &Path) -> String {
-    format!("file://{}", path.display())
+    match url::Url::from_file_path(path) {
+        Ok(url) => url.into(),
+        Err(()) => format!("file://{}", path.display()),
+    }
 }
 
 /// The files a change in which reloads the plugin: sources, not
