@@ -123,6 +123,9 @@ pub struct Launcher {
     /// The process takes its channel as an inherited socket on fd 3
     /// (`fd:3`) instead of dialing a socket path.
     pub inherit_fd: bool,
+    /// The process reads this process's standard input; otherwise it gets
+    /// none (`/dev/null`). See [`Launcher::inherit_stdin`].
+    pub inherit_stdin: bool,
 }
 
 impl Launcher {
@@ -155,6 +158,15 @@ impl Launcher {
     /// The process takes `fd:3`, an inherited socket, as its channel.
     pub fn inherit_fd(mut self) -> Self {
         self.inherit_fd = true;
+        self
+    }
+
+    /// The process reads this process's standard input — for a plugin that
+    /// is the application's terminal UI and reads the keyboard. By default a
+    /// runtime gets no input. Give it to one process at most: processes
+    /// reading the same terminal race for each key.
+    pub fn inherit_stdin(mut self) -> Self {
+        self.inherit_stdin = true;
         self
     }
 

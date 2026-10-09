@@ -113,6 +113,7 @@ impl LocalRuntime {
         spawn.args = self.launcher.args.clone();
         spawn.env = self.launcher.env.clone();
         spawn.cwd = self.launcher.cwd.clone();
+        spawn.inherit_stdin = self.launcher.inherit_stdin;
         spawn.handover = match self.launcher.inherit_fd {
             true => Handover::Inherit,
             false => Handover::DialBack,

@@ -40,6 +40,8 @@ pub struct Spawn {
     /// The working directory; the application's by default.
     pub cwd: Option<PathBuf>,
     pub handover: Handover,
+    /// The process reads this process's standard input; otherwise none.
+    pub inherit_stdin: bool,
     /// Arguments after the channel.
     pub trailing: Vec<OsString>,
     /// The endpoint the process is: whoever starts a process names it.
@@ -70,6 +72,7 @@ impl Spawn {
             env: Vec::new(),
             cwd: None,
             handover: Handover::Inherit,
+            inherit_stdin: false,
             trailing: Vec::new(),
             peer,
         }
@@ -80,7 +83,10 @@ impl Spawn {
         command
             .args(&self.args)
             .envs(self.env.iter().map(|(name, value)| (name, value)))
-            .stdin(Stdio::null())
+            .stdin(match self.inherit_stdin {
+                true => Stdio::inherit(),
+                false => Stdio::null(),
+            })
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .kill_on_drop(true);

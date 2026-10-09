@@ -78,7 +78,6 @@ async fn loopback(mut command: tokio::process::Command, first: &Path) -> Result<
         .env(CHANNEL_TOKEN, listener.token())
         .arg(listener.address())
         .arg(first)
-        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .kill_on_drop(true)
@@ -163,7 +162,6 @@ fn inherit(mut command: tokio::process::Command, first: &Path) -> Result<Spawned
     let child = command
         .arg(format!("fd:{CHANNEL_FD}"))
         .arg(first)
-        .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .kill_on_drop(true)
@@ -193,7 +191,6 @@ async fn dial_back(mut command: tokio::process::Command, first: &Path) -> Result
     let mut child = command
         .arg(&socket)
         .arg(first)
-        .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .kill_on_drop(true)
@@ -257,7 +254,11 @@ pub(crate) fn command(
     let mut command = tokio::process::Command::new(&launcher.program);
     command
         .args(&launcher.args)
-        .envs(launcher.env.iter().map(|(name, value)| (name, value)));
+        .envs(launcher.env.iter().map(|(name, value)| (name, value)))
+        .stdin(match launcher.inherit_stdin {
+            true => std::process::Stdio::inherit(),
+            false => std::process::Stdio::null(),
+        });
     // Without a directory of its own, it runs where the application does.
     if let Some(cwd) = &launcher.cwd {
         command.current_dir(cwd);
