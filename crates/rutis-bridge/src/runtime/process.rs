@@ -195,6 +195,16 @@ impl Launcher {
             .inherit_fd()
     }
 }
+impl Launcher {
+    /// A Go runtime: `binary`, built with the Go SDK (`go/rutis`), serving
+    /// the plugins compiled into it; in `project`, on an inherited socket
+    /// (on Windows, a loopback address).
+    #[cfg(feature = "go")]
+    pub fn go(binary: &std::path::Path, project: &std::path::Path) -> Self {
+        Launcher::new(binary).cwd(project).inherit_fd()
+    }
+}
+
 /// `first` ahead of the search path `rest` (`PATH` syntax for the
 /// platform: `:` or `;` between entries).
 pub(crate) fn search_path(

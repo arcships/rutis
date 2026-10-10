@@ -106,3 +106,26 @@ async fn python_meets_the_session_contract() {
     let (far, _child) = far_end(command, "python").await;
     run(far).await;
 }
+
+/// Build the Go package `package` (a path under `go/rutis`) into a fresh
+/// directory, with the toolchain on PATH (`go`).
+fn go_binary(package: &str) -> PathBuf {
+    let directory = tempfile::tempdir().unwrap().keep();
+    let binary = directory.join("conformance");
+    let status = std::process::Command::new("go")
+        .args(["build", "-o"])
+        .arg(&binary)
+        .arg(package)
+        .current_dir(repo().join("go/rutis"))
+        .status()
+        .expect("go is on PATH");
+    assert!(status.success(), "go build {package}");
+    binary
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn go_meets_the_session_contract() {
+    let command = tokio::process::Command::new(go_binary("./internal/fixtures/session"));
+    let (far, _child) = far_end(command, "go").await;
+    run(far).await;
+}

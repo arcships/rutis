@@ -1,5 +1,6 @@
 //! Language runtimes: processes that run plugins written in another
-//! language (Node with Cordis, feature `node`; Python, feature `python`),
+//! language (Node with Cordis, feature `node`; Python, feature `python`;
+//! Go, feature `go`),
 //! whose plugins rutis-loader manages as rows.
 //!
 //! A runtime's session comes from a link, wherever the runtime runs:
@@ -49,6 +50,31 @@ pub trait RuntimeSession: Send + Sync + 'static {
         &self,
         dispatch: Arc<dyn Dispatch>,
     ) -> Result<Box<dyn std::any::Any + Send + Sync>, Error>;
+}
+
+/// The name of the Go runtime the binary at `path` runs as: its file name
+/// without `.exe`, lowercased, with every character outside `[a-z0-9-]` as
+/// `-`, after `go-` (`net.kit_v1.exe` -> `go-net-kit-v1`). It is the only
+/// name users see for it.
+#[cfg(feature = "go")]
+pub fn go_runtime_name(path: &std::path::Path) -> String {
+    let file = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stem = match file.len() > 4 && file[file.len() - 4..].eq_ignore_ascii_case(".exe") {
+        true => &file[..file.len() - 4],
+        false => &file[..],
+    };
+    let name: String = stem
+        .chars()
+        .map(|c| c.to_ascii_lowercase())
+        .map(|c| match c {
+            'a'..='z' | '0'..='9' | '-' => c,
+            _ => '-',
+        })
+        .collect();
+    format!("go-{name}")
 }
 
 /// The key the runtime session named `name` is provided under
