@@ -5,12 +5,14 @@ One connection carries one channel of UTF-8 JSON text messages; the
 session protocol is the subprotocol; the controller presents a bearer token
 in the Authorization header, never in the URL. Both sides ping; a far end
 silent for 30 s is dropped. Messages are limited to 16 MiB (1009 over it).
-Needs the `websockets` package: `pip install rutis[network]`.
+Needs the `websockets` package, 15 or newer (its threading server has
+heartbeats from 15 on): `pip install rutis[network]`.
 """
 
 from __future__ import annotations
 
 import hmac
+import inspect
 import os
 import queue
 import ssl
@@ -108,14 +110,49 @@ class Listener:
         self._server = server
         self._accepted = accepted
         self.address = address
+        self._stopped = threading.Event()
+        self._failed: list[BaseException] = []
+        threading.Thread(target=self._serve, name="rutis-websocket", daemon=True).start()
+
+    def _serve(self) -> None:
+        try:
+            self._server.serve_forever()
+        finally:
+            self._stopped.set()
 
     def accept(self) -> "WebSocketChannel":
         """Block until the next authenticated connection."""
         return self._accepted.get()
 
     def close(self) -> None:
-        """Stop accepting; established connections stay."""
-        threading.Thread(target=self._server.shutdown, kwargs={"close_connections": False}, daemon=True).start()
+        """Stop accepting: on return the listening socket is closed and a
+        new connection is refused. Established connections stay, with every
+        supported websockets version."""
+
+        def stop() -> None:
+            try:
+                _stop_accepting(self._server)
+            except BaseException as error:
+                self._failed.append(error)
+                self._stopped.set()
+
+        # websockets 17 waits in shutdown() until every connection ends, so
+        # it runs aside; serve_forever() returns once the socket is closed.
+        # A failure is raised here, not left to the thread.
+        threading.Thread(target=stop, name="rutis-websocket-close", daemon=True).start()
+        self._stopped.wait()
+        if self._failed:
+            raise self._failed[0]
+
+
+def _stop_accepting(server) -> None:
+    """Close the listening socket and leave established connections open.
+    websockets 17 added `close_connections` to shutdown(), defaulting to
+    closing them; before 17, shutdown() only closes the listening socket."""
+    if "close_connections" in inspect.signature(server.shutdown).parameters:
+        server.shutdown(close_connections=False)
+    else:
+        server.shutdown()
 
 
 def listen(
@@ -189,7 +226,6 @@ def listen(
     shown = f"[{bound_host}]" if ":" in bound_host else bound_host
     address = f"{url.scheme}://{shown}:{bound_port}{path}"
     announce(address)
-    threading.Thread(target=server.serve_forever, name="rutis-websocket", daemon=True).start()
     return Listener(server, accepted, address)
 
 
