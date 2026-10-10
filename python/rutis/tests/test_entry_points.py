@@ -6,10 +6,12 @@ import sys
 import tempfile
 import unittest
 
+import background
+
 from rutis.runner import Runtime, _entry_point
 
 
-class EntryPoints(unittest.TestCase):
+class EntryPoints(background.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         root = self.directory.name

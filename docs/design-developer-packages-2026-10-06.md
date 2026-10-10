@@ -86,7 +86,7 @@ SDK 必须单独成包：插件作者不应该因为写一个插件而装上 Cor
 
 | 包（导入名） | 内容 | 依赖 |
 | --- | --- | --- |
-| `rutis`（`rutis`） | `define_plugin`、类型（`py.typed`）、测试工具（`rutis.testing`）；运行时进程：`python -m rutis`；可选依赖 `network`（WebSocket，远程运行时） | 无；`network` 需要 `websockets>=13` |
+| `rutis`（`rutis`） | `define_plugin`、类型（`py.typed`）、测试工具（`rutis.testing`）；运行时进程：`python -m rutis`；可选依赖 `network`（WebSocket，远程运行时） | 无；`network` 需要 `websockets>=15` |
 | `rutis-host` | 宿主二进制的 wheel（`uvx rutis-host`、`uv add --dev rutis-host`） | `rutis` |
 
 Python 的运行时没有任何依赖，SDK 和运行时放在同一个包里不会让插件作者多装任何东西，所以不拆。插件依赖 `rutis`，宿主的 Python 环境里装了插件，也就有了运行时。

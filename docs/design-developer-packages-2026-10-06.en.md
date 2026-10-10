@@ -86,7 +86,7 @@ Remove the old `@arcships/rutis-interop` package directory, aliases, and publish
 
 | Package (import name) | Contents | Dependencies |
 |---|---|---|
-| `rutis` (`rutis`) | `define_plugin`, types (`py.typed`), testing tools (`rutis.testing`); runtime process via `python -m rutis`; optional `network` extra (WebSocket remote runtime) | None; `network` requires `websockets>=13` |
+| `rutis` (`rutis`) | `define_plugin`, types (`py.typed`), testing tools (`rutis.testing`); runtime process via `python -m rutis`; optional `network` extra (WebSocket remote runtime) | None; `network` requires `websockets>=15` |
 | `rutis-host` | Wheel containing the host binary (`uvx rutis-host`, `uv add --dev rutis-host`) | `rutis` |
 
 The Python runtime has no dependencies, so putting the SDK and runtime in one package does not make plugin authors install anything extra; there is no need to split them. A plugin depends on `rutis`, and the host's Python environment already has the plugin installed, so it has the runtime too.

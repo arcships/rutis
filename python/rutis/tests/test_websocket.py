@@ -1,12 +1,16 @@
 """The WebSocket binding of the Python runtime: authentication, the
 subprotocol, close codes, the size limit and heartbeats."""
 
+import functools
+import inspect
 import os
 import queue
 import socket
 import threading
 import time
 import unittest
+
+import background
 
 try:
     from websockets.exceptions import ConnectionClosed, InvalidStatus
@@ -44,7 +48,7 @@ def dial(address, token="secret", protocol=PROTOCOL, **options):
 
 
 @unittest.skipIf(websocket is None, "needs the websockets package (rutis[network])")
-class WebSocketTest(unittest.TestCase):
+class WebSocketTest(background.TestCase):
     def test_messages_cross_and_an_orderly_close_is_a_normal_end(self):
         address, channels = listen()
         client = dial(address)
@@ -55,6 +59,82 @@ class WebSocketTest(unittest.TestCase):
         self.assertEqual(client.recv(timeout=5), '{"a":"x\\ny"}')
         client.close(1001)
         self.assertIsNone(channel.recv())
+
+    def test_a_closed_listener_refuses_new_connections_and_keeps_established_ones(self):
+        # #197: before websockets 17, close() raised in a background thread
+        # and the listener went on accepting.
+        listener = websocket.listen("ws://127.0.0.1:0/rutis", PROTOCOL, "secret", announce=lambda _: None)
+        first, second = dial(listener.address), dial(listener.address)
+        channels = [listener.accept(), listener.accept()]
+        listener.close()
+        with self.assertRaises(ConnectionRefusedError):
+            dial(listener.address)
+        for client, channel in zip((first, second), channels):
+            client.send("{}")
+            self.assertEqual(channel.recv(), b"{}")
+            channel.send(b"[]")
+            self.assertEqual(client.recv(timeout=5), "[]")
+            client.close()
+            self.assertIsNone(channel.recv())
+
+    def test_closing_twice_stops_once(self):
+        listener = websocket.listen("ws://127.0.0.1:0/rutis", PROTOCOL, "secret", announce=lambda _: None)
+        stops = []
+        shutdown = listener._server.shutdown
+
+        # functools.wraps keeps the signature close() probes, so each
+        # websockets version takes its own branch.
+        @functools.wraps(shutdown)
+        def counted(*args, **kwargs):
+            stops.append(kwargs)
+            return shutdown(*args, **kwargs)
+
+        listener._server.shutdown = counted
+        listener.close()
+        listener.close()
+        takes_argument = "close_connections" in inspect.signature(shutdown).parameters
+        self.assertEqual(stops, [{"close_connections": False} if takes_argument else {}])
+        with self.assertRaises(ConnectionRefusedError):
+            dial(listener.address)
+
+    def test_a_listener_whose_serving_failed_refuses_and_close_raises(self):
+        # Review of #197: an exception out of serve_forever() (its selector
+        # failing, say; a failed accept() only makes it return) must not
+        # leave a socket that takes connections nobody serves, nor a
+        # close() that reports success. The mock raises from serve_forever.
+        real_serve = websocket.serve
+
+        def failing_serve(*args, **kwargs):
+            server = real_serve(*args, **kwargs)
+
+            def serve_forever():
+                try:
+                    raise RuntimeError("the selector failed")
+                finally:
+                    # What the real serve_forever() does on its way out;
+                    # websockets 17's shutdown() waits for it.
+                    if hasattr(server, "socket_closed"):
+                        server.socket_closed.set()
+
+            server.serve_forever = serve_forever
+            return server
+
+        websocket.serve = failing_serve
+        try:
+            listener = websocket.listen("ws://127.0.0.1:0/rutis", PROTOCOL, "secret", announce=lambda _: None)
+        finally:
+            websocket.serve = real_serve
+        with self.assertRaisesRegex(RuntimeError, "the selector failed"):
+            listener.close()
+        with self.assertRaises(ConnectionRefusedError):
+            dial(listener.address)
+        # No thread is left behind; the serving one still reports the
+        # exception as uncaught, by design.
+        for thread in (listener._serving, listener._stopping):
+            if thread is not None:
+                thread.join(timeout=10)
+                self.assertFalse(thread.is_alive(), thread.name)
+        self.assertEqual(len(background.expected()), 1)
 
     def test_wrong_or_missing_credentials_and_protocols_are_refused(self):
         address, _ = listen()
