@@ -13,8 +13,6 @@ use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-#[cfg(unix)]
-use std::process::Stdio;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -78,8 +76,6 @@ async fn loopback(mut command: tokio::process::Command, first: &Path) -> Result<
         .env(CHANNEL_TOKEN, listener.token())
         .arg(listener.address())
         .arg(first)
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
         .map_err(transport)?;
@@ -162,8 +158,6 @@ fn inherit(mut command: tokio::process::Command, first: &Path) -> Result<Spawned
     let child = command
         .arg(format!("fd:{CHANNEL_FD}"))
         .arg(first)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
         .map_err(transport)?;
@@ -191,8 +185,6 @@ async fn dial_back(mut command: tokio::process::Command, first: &Path) -> Result
     let mut child = command
         .arg(&socket)
         .arg(first)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
         .map_err(transport)?;
@@ -255,10 +247,9 @@ pub(crate) fn command(
     command
         .args(&launcher.args)
         .envs(launcher.env.iter().map(|(name, value)| (name, value)))
-        .stdin(match launcher.inherit_stdin {
-            true => std::process::Stdio::inherit(),
-            false => std::process::Stdio::null(),
-        });
+        .stdin(launcher.stdin.process())
+        .stdout(launcher.stdout.process())
+        .stderr(launcher.stderr.process());
     // Without a directory of its own, it runs where the application does.
     if let Some(cwd) = &launcher.cwd {
         command.current_dir(cwd);

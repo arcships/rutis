@@ -20,7 +20,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::channel::PeerId;
-use crate::runtime::{Launcher, RuntimeAccessPlugin, RuntimeHandle, RuntimePlugin, RuntimeState};
+use crate::runtime::{
+    Launcher, RuntimeAccessPlugin, RuntimeHandle, RuntimePlugin, RuntimeState, Stdio,
+};
 use crate::{
     identity_key, transport_key, Identity, LinkConfig, LinkPlugin, LinkState, StaticIdentity,
     Transport,
@@ -113,7 +115,9 @@ impl LocalRuntime {
         spawn.args = self.launcher.args.clone();
         spawn.env = self.launcher.env.clone();
         spawn.cwd = self.launcher.cwd.clone();
-        spawn.inherit_stdin = self.launcher.inherit_stdin;
+        spawn.stdin = self.launcher.stdin;
+        spawn.stdout = self.launcher.stdout;
+        spawn.stderr = self.launcher.stderr;
         spawn.handover = match self.launcher.inherit_fd {
             true => Handover::Inherit,
             false => Handover::DialBack,
@@ -135,6 +139,30 @@ impl LocalRuntime {
         self.runtime = self.runtime.named(name.clone());
         self.label = format!("{name}-runtime (local)");
         self.runtime_name = name;
+        self
+    }
+
+    /// The runtime process's standard input: none by default; with
+    /// [`Stdio::Inherit`], this process's, for a plugin that reads the
+    /// terminal. See [`Launcher::stdin`]: it is the whole process's, so give
+    /// such a plugin a runtime of its own ([`LocalRuntime::named`]), and the
+    /// terminal to one runtime at most.
+    pub fn stdin(mut self, stdio: Stdio) -> Self {
+        self.launcher.stdin = stdio;
+        self
+    }
+
+    /// The runtime process's standard output: this process's by default;
+    /// [`Stdio::Null`] discards it ([`Launcher::stdout`]).
+    pub fn stdout(mut self, stdio: Stdio) -> Self {
+        self.launcher.stdout = stdio;
+        self
+    }
+
+    /// The runtime process's standard error: this process's by default;
+    /// [`Stdio::Null`] discards it ([`Launcher::stderr`]).
+    pub fn stderr(mut self, stdio: Stdio) -> Self {
+        self.launcher.stderr = stdio;
         self
     }
 
