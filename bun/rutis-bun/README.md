@@ -22,6 +22,6 @@ A host starts it as one process and runs plugins in it as rows named `bun:<modul
 - **Reloading** a row imports its module again when the file changed; the modules it imports stay loaded (restart the runtime to replace those).
 - **Packages installed while the runtime runs** are found after the runtime restarts: a Bun process remembers that a package was missing.
 
-Bun 1.2 or later. This version runs on the host's machine (local channels); listening as a remote runtime is not supported yet.
+Bun 1.3 or later (1.2 has no `--no-env-file`). This version runs on the host's machine (local channels); listening as a remote runtime is not supported yet.
 
 Embedding hosts start it with `rutis_bridge::runtime::LocalRuntime::bun` (Rust, feature `bun`).
