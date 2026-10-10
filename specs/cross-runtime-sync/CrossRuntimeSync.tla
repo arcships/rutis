@@ -194,8 +194,11 @@ InFlight(y, id) == \E i \in 1..Len(toRt[y]) : toRt[y][i].op = "call" /\ toRt[y][
 \*  - a call not started at a non-reentrant runtime whose stack is not
 \*    empty, and not on its chain, waits for every call that runtime is
 \*    blocked in (it runs only once the stack is empty);
+\*    and for every incoming call running on that stack;
 \*  - a call running at stack index i waits for every call made from an
-\*    activation at index >= i (LIFO: it resumes only when they return).
+\*    activation at index >= i, and for every incoming call running at an
+\*    index > i (LIFO: it resumes only when they return).
+OnStack(y, d) == \E j \in 1..Len(stack[y]) : stack[y][j].from = d.did
 TrueSucc(h, N, new) ==
     LET y == h.dst
         idx == {i \in 1..Len(stack[y]) : stack[y][i].from = h.did /\ h /= new}
@@ -203,9 +206,11 @@ TrueSucc(h, N, new) ==
         defer == waiting /\ y \in NonReentrant /\ stack[y] /= <<>>
                  /\ ~PathRelated(y, h.path)
     IN {c \in N : InSeq(Gid(h), c.truth)}
-       \cup (IF defer THEN {d \in N : d.src = y} ELSE {})
+       \cup (IF defer THEN {d \in N : d.src = y \/ (d.dst = y /\ OnStack(y, d))} ELSE {})
        \cup {d \in N : d.src = y /\ \E i \in idx : \E j \in i..Len(stack[y]) :
                                       stack[y][j].w = d.sid}
+       \cup {d \in N : d.dst = y /\ \E i \in idx : \E j \in (i + 1)..Len(stack[y]) :
+                                      stack[y][j].from = d.did}
 TrueCycle(new) ==
     LET N == hops \cup {new}
     IN OnCycle({<<a, b>> \in N \X N : b \in TrueSucc(a, N, new)}, new)

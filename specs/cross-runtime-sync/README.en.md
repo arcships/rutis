@@ -41,6 +41,8 @@ Nodes are calls Rust forwarded that have not returned; an edge c → d means c c
 
 The model has two graphs: `TrueSucc` from the runtimes' real stacks and queues (only for judging), and `RustSucc` from Rust's own state (what policy B can do).
 
+`TrueSucc` is the criterion for `NoFalseCycle`, so it may contain only waits that really exist. The first version missed two kinds of real edges: a deferred call also waits for incoming calls that started later and are running on the stack; a call on the stack also waits for incoming calls stacked above it that have not called out yet. Both were added after review (`OnStack` and the last kind of edge); rerunning every configuration gave the same results. Any edge still missing can only make `NoFalseCycle` stricter (a real cycle judged as none, reported as a false positive); it cannot hide a false positive.
+
 ## Simplifications
 
 - Every cross-runtime call is synchronous. Async calls do not block their caller and cannot cause a deadlock on their own, but an implementation of B must tell them apart; see "Open questions".
@@ -56,7 +58,7 @@ The model has two graphs: `TrueSucc` from the runtimes' real stacks and queues (
 
 | Name | Meaning |
 | --- | --- |
-| no deadlock | TLC deadlock check: while calls are unfinished, some participant can act. The finished state stutters (`Done`) and is not a deadlock |
+| no deadlock | TLC deadlock check: while calls are unfinished, some participant can act. The finished state stutters (`Done`) and is not a deadlock. Every behaviour of the model is finite (top-level calls, call ids, chain length and calls per activation are bounded, and every step except `Done` moves these counters or queues towards completion), so "no deadlock" is equivalent to "every call eventually completes"; no separate liveness property is needed |
 | `RoutingSound` | A call run as part of a waiting chain (nested by a non-reentrant runtime, or handed to a waiting Rust thread) really belongs to that chain: a callback reaches the side that issued it, even with `node:1` on both sessions |
 | `ChainRecognised` | A non-reentrant runtime never puts aside a call of its own chain |
 | `NoFalseCycle` | Policy B answers `SyncWaitCycle` only if the real wait graph plus this call has a cycle |
@@ -69,6 +71,7 @@ TLC 2.19 (tla2tools v1.7.4), Temurin 21, 16 cores; `MaxRoots = 2`, `MaxDepth = 3
 
 | Configuration | Runtimes (`n` non-reentrant, `p` reentrant) | Result | Distinct states | Time |
 | --- | --- | --- | --- | --- |
+| `current-1node-1python` | n, p | pass | 606 | <1 s |
 | `current-2node` | n1, n2, p | **deadlock** (counterexample 1) | 1,006 | <1 s |
 | `current-1node` | n, p1, p2 | **deadlock** (counterexample 2) | 8,908 | 1 s |
 | `current-reentrant` | p1, p2, p3 | pass | 88,824 | <1 s |
@@ -86,7 +89,7 @@ TLC 2.19 (tla2tools v1.7.4), Temurin 21, 16 cores; `MaxRoots = 2`, `MaxDepth = 3
 | `policy-b-2node-seq` | n1, n2, p; 2 calls per activation, chains ≤ 2 | pass | 2,549,258 | 19 s |
 | `policy-b-acts` | n1, n2, p | `NeverCycle` violated (expected: B fires) | 408 | <1 s |
 
-"Pass" means exhaustive: no deadlock, all listed invariants hold. With chains ≤ 3, `policy-b-2node-seq` passed 44 million states in 10 minutes and was still growing, so it runs with chains ≤ 2.
+"Pass" means exhaustive: no deadlock, all listed invariants hold; state counts on these rows are exact. On deadlock and violation rows TLC stops at the first counterexample, so the count depends on the order of the multi-threaded search and varies between runs (for example 977 or 984 for `current-2node`); treat it as indicative. `current-1node-1python` backs the statement in §9 of the multi-language design that one Node and one Python runtime do not deadlock. With chains ≤ 3, `policy-b-2node-seq` passed 44 million states in 10 minutes and was still growing, so it runs with chains ≤ 2.
 
 ### Counterexamples
 

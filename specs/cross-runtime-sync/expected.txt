@@ -1,6 +1,7 @@
 # configuration  expected TLC outcome (see README.md)
 current-2node deadlock
 current-1node deadlock
+current-1node-1python ok
 current-reentrant ok
 current-norebase violated:RoutingSound
 policy-a-1node deadlock
