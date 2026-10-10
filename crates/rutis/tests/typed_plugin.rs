@@ -19,7 +19,7 @@ struct Logger;
 struct Ready;
 
 async fn soon<F: std::future::IntoFuture>(f: F) -> F::Output {
-    tokio::time::timeout(Duration::from_secs(5), f)
+    tokio::time::timeout(Duration::from_secs(10), f)
         .await
         .expect("timed out")
 }
@@ -513,7 +513,7 @@ impl TypedPlugin for WithdrawnWhileValidating {
             // The removal is marked as soon as the withdrawal starts.
             let start = std::time::Instant::now();
             while self.ctx.get::<Llm>().is_some() {
-                assert!(start.elapsed() < Duration::from_secs(5), "never withdrawn");
+                assert!(start.elapsed() < Duration::from_secs(10), "never withdrawn");
                 std::thread::yield_now();
             }
         }

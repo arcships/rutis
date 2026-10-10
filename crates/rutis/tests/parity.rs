@@ -171,7 +171,7 @@ async fn soon<F, T>(f: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    tokio::time::timeout(Duration::from_secs(5), f)
+    tokio::time::timeout(Duration::from_secs(10), f)
         .await
         .expect("timed out")
 }

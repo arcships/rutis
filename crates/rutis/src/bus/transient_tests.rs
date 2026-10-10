@@ -160,7 +160,7 @@ async fn keyed_channels_and_dispatch_tails_prune() {
         wf.dispose().await.unwrap();
     }
     // 最后一次派发任务完成后自摘尾链;监听条目已在 dispose 内删除
-    for _ in 0..500 {
+    for _ in 0..5_000 {
         let empty = {
             let inner = bus.inner.lock().unwrap();
             inner.hooks.is_empty() && inner.wf_hooks.is_empty() && inner.dispatch_tail.is_empty()

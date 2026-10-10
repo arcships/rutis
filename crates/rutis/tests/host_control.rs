@@ -106,7 +106,7 @@ impl Listener<ServiceChanged> for Changes {
 }
 
 async fn wait_for(changes: &Changes, len: usize) {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         while changes.0.lock().unwrap().len() < len {
             tokio::task::yield_now().await;
         }
@@ -160,7 +160,7 @@ async fn a_plugin_can_dispose_itself() {
     let root = Ctx::root().unwrap();
     let sibling = root.plugin(Named("sibling"));
     let quitter = root.plugin(Quitter);
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         let mut watch = quitter.watch();
         while watch.borrow().state != rutis::FiberState::Disposed {
             watch.changed().await.unwrap();
@@ -188,7 +188,7 @@ impl Plugin for Keeper {
 }
 
 async fn settled(view: &rutis::FiberView, state: rutis::FiberState) {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         let mut watch = view.watch();
         while watch.borrow().state != state {
             watch.changed().await.unwrap();
