@@ -134,10 +134,12 @@ jobs:
       - run: bun --version
       - run: bun test
         working-directory: bun/rutis-bun
+      - name: cargo test (rutis-bridge, the Bun runtime)
+        run: cargo test -p rutis-bridge --features bun --test bun_runtime
       # Only the Bun tests of the contract suites: the other runtimes run
       # in their own jobs.
-      - name: cargo test (rutis-bridge, the Bun runtime)
-        run: cargo test -p rutis-bridge --features bun,testing,websocket --test bun_runtime --test runtime_conformance --test session_matrix bun
+      - name: cargo test (rutis-bridge, the contract suites with Bun)
+        run: cargo test -p rutis-bridge --features bun,testing,websocket --test runtime_conformance --test session_matrix bun
       - name: cargo test (rutis-loader, Bun rows)
         run: cargo test -p rutis-loader --features bun,node,python --test bun_rows --test bun_instances --test bun_multilang
       - name: cargo test (rutis-loader, Bun rows on loopback channels)

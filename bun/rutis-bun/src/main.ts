@@ -49,6 +49,11 @@ if (channel.startsWith('listen:')) fail(`${channel}: listening as a remote runti
 const token = takeToken()
 
 const runtime = new Runtime(resolve(project))
+// The process lives until the session ends. The worker and its port should
+// keep it alive, but Bun 1.2 may end a process whose only pending work is
+// there (exiting normally, mid-session); a timer keeps it, and leaving
+// before the session ended is said.
+const alive = setInterval(() => {}, 1 << 30)
 let client: Client
 try {
   client = await Client.connect(channel, { dispatch: runtime.dispatch, token })
@@ -56,7 +61,13 @@ try {
   fail(`cannot connect on ${channel}: ${error.message}`)
 }
 runtime.client = client
+let ended = false
+process.on('exit', code => {
+  if (!ended) process.stderr.write(`rutis-bun: exiting (${code}) before the session ended\n`)
+})
 await client.closed()
+ended = true
+clearInterval(alive)
 // The host ending the session is the normal end; anything else is said.
 if (client.reason && client.reason !== 'the rutis host disconnected') {
   process.stderr.write(`rutis-bun: the session ended: ${client.reason}\n`)
