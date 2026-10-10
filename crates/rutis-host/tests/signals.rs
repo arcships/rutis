@@ -1,0 +1,364 @@
+//! How `rutis-host run` and `rutis-host dev` end on a signal (#174): the
+//! released binary, started as a user or a service manager starts it, with a
+//! Python and a Node row that record their cleanup and their process.
+//!
+//! guarantee: every cleanup runs exactly once on unload, also when a signal
+//! ends the host; the runtime processes it started have exited when it has
+//! (Q5.4.4, Q6.6.3; risks B2, B3); the exit code follows
+//! docs/guide/rutis-host.md.
+//!
+//! Unix only: the test sends SIGINT and SIGTERM with kill(2), to the process
+//! group as a terminal does on Ctrl-C and to the host alone as a service
+//! manager does. The Windows console events (Ctrl-C, Ctrl-Break, closing the
+//! console) need a console shared with the test process, and CI does not run
+//! the rutis-host tests on Windows; they are not covered here (#186 / S8).
+#![cfg(unix)]
+
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::time::Duration;
+
+use serde_json::json;
+
+/// Only against a hang: nothing here waits for time to pass.
+const HANG_GUARD: Duration = Duration::from_secs(60);
+
+fn repo() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn file_url(path: &Path) -> String {
+    url::Url::from_file_path(path).unwrap().to_string()
+}
+
+/// A Python plugin: it prints its process when it starts and when its
+/// cleanup starts, and records each cleanup run in `<out>/<row>.cleanup`.
+/// With `hold`, its cleanup never ends.
+const PYTHON_PLUGIN: &str = r#"
+import os, threading
+
+def apply(ctx, config):
+    out, row = config["out"], config["row"]
+    print(f"plugin {row} applied in {os.getpid()}", flush=True)
+    def cleanup():
+        print(f"plugin {row} cleanup started", flush=True)
+        if config.get("hold"):
+            threading.Event().wait()
+        with open(os.path.join(out, row + ".cleanup"), "a") as f:
+            f.write("cleanup\n")
+    ctx.effect(cleanup)
+"#;
+
+/// The same in JavaScript.
+fn node_plugin() -> String {
+    let sdk = repo()
+        .join("node/rutis/src/index.mjs")
+        .canonicalize()
+        .unwrap();
+    format!(
+        "import {{ definePlugin }} from '{}'\n\
+         import {{ appendFileSync }} from 'node:fs'\n\
+         import {{ join }} from 'node:path'\n\
+         export default definePlugin({{ apply(ctx, config) {{\n\
+           console.log(`plugin ${{config.row}} applied in ${{process.pid}}`)\n\
+           return async () => {{\n\
+             console.log(`plugin ${{config.row}} cleanup started`)\n\
+             if (config.hold) await new Promise(() => {{}})\n\
+             appendFileSync(join(config.out, config.row + '.cleanup'), 'cleanup\\n')\n\
+           }}\n\
+         }} }})\n",
+        file_url(&sdk)
+    )
+}
+
+/// A project for `rutis-host run`: a Python row and a Node row.
+fn run_project(dir: &Path, hold: bool) -> PathBuf {
+    std::fs::write(dir.join("marker.py"), PYTHON_PLUGIN).unwrap();
+    std::fs::write(dir.join("marker.mjs"), node_plugin()).unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{ "name": "signals", "type": "module" }"#,
+    )
+    .unwrap();
+    let out = dir.to_str().unwrap();
+    let mut py = json!({ "project": "." });
+    if let Some(python) = std::env::var_os("RUTIS_PYTHON") {
+        py["python"] = json!(python.to_str().unwrap());
+    }
+    let config = json!({
+        "id": "signals",
+        "runtimes": {
+            "py": py,
+            "node": { "project": ".", "runtime": repo().join("node/rutis-runtime") },
+        },
+        "rows": [
+            { "id": "py-row", "name": "py:marker", "config": { "out": out, "row": "py-row", "hold": hold } },
+            { "id": "node-row", "name": "./marker.mjs", "config": { "out": out, "row": "node-row", "hold": hold } },
+        ]
+    });
+    let file = dir.join("rutis.json");
+    std::fs::write(&file, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+    file
+}
+
+/// A Python plugin project for `rutis-host dev`.
+fn dev_project(dir: &Path) {
+    std::fs::write(dir.join("marker.py"), PYTHON_PLUGIN).unwrap();
+    std::fs::write(
+        dir.join("pyproject.toml"),
+        "[project]\nname = \"marker\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let config = json!({
+        "rows": [{ "id": "marker", "config": { "out": dir, "row": "marker" } }]
+    });
+    std::fs::write(dir.join("rutis.dev.json"), config.to_string()).unwrap();
+}
+
+/// The host binary, running in a process group of its own (as a shell
+/// starts a foreground job), its output read line by line.
+struct Host {
+    child: Child,
+    lines: Receiver<String>,
+    stderr: Receiver<String>,
+    /// Every line read so far, for the failure message.
+    seen: Vec<String>,
+}
+
+impl Host {
+    fn start(args: &[&str], dir: &Path) -> Self {
+        use std::os::unix::process::CommandExt;
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rutis-host"));
+        command
+            .args(args)
+            .current_dir(dir)
+            // The repository's rutis package, for an interpreter without it.
+            .env("RUTIS_PYTHON_PATH", repo().join("python/rutis"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        if let Some(python) = std::env::var_os("RUTIS_PYTHON") {
+            // What `dev` runs when the project has no .venv.
+            let venv = Path::new(&python).parent().and_then(Path::parent);
+            if let Some(venv) = venv.filter(|venv| venv.join("pyvenv.cfg").exists()) {
+                command.env("VIRTUAL_ENV", venv);
+            }
+        }
+        let mut child = command.spawn().expect("the rutis-host binary");
+        let (send, lines) = mpsc::channel();
+        let stdout = child.stdout.take().unwrap();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if send.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let (send, stderr) = mpsc::channel();
+        let mut error = child.stderr.take().unwrap();
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = error.read_to_string(&mut text);
+            let _ = send.send(text);
+        });
+        Self {
+            child,
+            lines,
+            stderr,
+            seen: Vec::new(),
+        }
+    }
+
+    fn pid(&self) -> i32 {
+        self.child.id() as i32
+    }
+
+    /// Read lines until one satisfies `want`; what it returns.
+    fn until<T>(&mut self, mut want: impl FnMut(&str) -> Option<T>) -> T {
+        loop {
+            match self.lines.recv_timeout(HANG_GUARD) {
+                Ok(line) => {
+                    let found = want(&line);
+                    self.seen.push(line);
+                    if let Some(found) = found {
+                        return found;
+                    }
+                }
+                Err(error) => self.fail(&format!("waiting for a line: {error}")),
+            }
+        }
+    }
+
+    /// The process of each row as it starts, once every row runs.
+    fn started(&mut self, rows: &[&str]) -> Vec<i32> {
+        let mut pids = Vec::new();
+        let mut running = 0;
+        while pids.len() < rows.len() || running < rows.len() {
+            let (pid, ran) = self.until(|line| {
+                let applied = rows.iter().find_map(|row| {
+                    line.strip_prefix(&format!("plugin {row} applied in "))
+                        .and_then(|pid| pid.trim().parse::<i32>().ok())
+                });
+                let ran = rows.iter().any(|row| line == format!("{row}: running"));
+                (applied.is_some() || ran).then_some((applied, ran))
+            });
+            pids.extend(pid);
+            running += ran as usize;
+        }
+        pids
+    }
+
+    /// Wait for the host to exit; its status and what it wrote to stderr.
+    /// Its output is read to the end: every process that shared it has
+    /// closed it.
+    fn exit(mut self) -> (ExitStatus, String, Vec<String>) {
+        let pid = self.pid();
+        let (send, exited) = mpsc::channel();
+        let mut child = self.child;
+        std::thread::spawn(move || {
+            let _ = send.send(child.wait());
+        });
+        let status = match exited.recv_timeout(HANG_GUARD) {
+            Ok(status) => status.unwrap(),
+            Err(_) => {
+                // SAFETY: plain kill(2) on the host's process group.
+                unsafe { libc::kill(-pid, libc::SIGKILL) };
+                panic!("rutis-host did not exit; its output: {:#?}", self.seen);
+            }
+        };
+        let stderr = self.stderr.recv_timeout(HANG_GUARD).unwrap_or_default();
+        loop {
+            match self.lines.recv_timeout(HANG_GUARD) {
+                Ok(line) => self.seen.push(line),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(error) => panic!("the output did not end: {error}; {:#?}", self.seen),
+            }
+        }
+        (status, stderr, self.seen)
+    }
+
+    fn fail(&mut self, what: &str) -> ! {
+        let pid = self.pid();
+        // SAFETY: plain kill(2) on the host's process group.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        let _ = self.child.wait();
+        let stderr = self.stderr.recv_timeout(HANG_GUARD).unwrap_or_default();
+        panic!("{what}; output: {:#?}; stderr: {stderr}", self.seen);
+    }
+}
+
+/// Send `signal` to the host's process group (`group`), as a terminal does
+/// on Ctrl-C, or to the host alone, as a service manager does.
+fn signal(host: &Host, signal: i32, group: bool) {
+    let target = if group { -host.pid() } else { host.pid() };
+    // SAFETY: plain kill(2).
+    assert_eq!(unsafe { libc::kill(target, signal) }, 0, "kill");
+}
+
+/// Whether the process `pid` still exists (a zombie counts: nothing reaped
+/// it).
+fn alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+fn cleanups(dir: &Path, row: &str) -> usize {
+    std::fs::read_to_string(dir.join(format!("{row}.cleanup")))
+        .map(|text| text.lines().count())
+        .unwrap_or(0)
+}
+
+/// `run` ended by `signal`: every cleanup ran once, the runtimes exited,
+/// the host exited 0.
+fn run_ends_cleanly(sig: i32, group: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let file = run_project(dir.path(), false);
+    let mut host = Host::start(&["run", file.to_str().unwrap()], dir.path());
+    let pids = host.started(&["py-row", "node-row"]);
+    signal(&host, sig, group);
+    let (status, stderr, output) = host.exit();
+    let context = format!("status {status:?}; output: {output:#?}; stderr: {stderr}");
+    assert_eq!(status.code(), Some(0), "{context}");
+    for row in ["py-row", "node-row"] {
+        assert_eq!(cleanups(dir.path(), row), 1, "{row}'s cleanup; {context}");
+    }
+    for pid in pids {
+        assert!(!alive(pid), "runtime process {pid} outlived the host; {context}");
+    }
+}
+
+/// Ctrl-C in a terminal: SIGINT reaches the host and every process of its
+/// group.
+#[test]
+fn run_ends_on_ctrl_c_after_every_cleanup() {
+    run_ends_cleanly(libc::SIGINT, true);
+}
+
+/// A service manager stopping the host: SIGTERM to the host.
+#[test]
+fn run_ends_on_sigterm_after_every_cleanup() {
+    run_ends_cleanly(libc::SIGTERM, false);
+}
+
+#[test]
+fn dev_ends_on_ctrl_c_after_its_cleanup() {
+    let dir = tempfile::tempdir().unwrap();
+    dev_project(dir.path());
+    let mut host = Host::start(&["dev", "."], dir.path());
+    let pids = host.started(&["marker"]);
+    signal(&host, libc::SIGINT, true);
+    let (status, stderr, output) = host.exit();
+    let context = format!("status {status:?}; output: {output:#?}; stderr: {stderr}");
+    assert_eq!(status.code(), Some(0), "{context}");
+    assert_eq!(cleanups(dir.path(), "marker"), 1, "{context}");
+    for pid in pids {
+        assert!(!alive(pid), "runtime process {pid} outlived the host; {context}");
+    }
+}
+
+/// A cleanup that never ends: past the deadline the host exits 2, names
+/// what was still stopping, and ends the runtime processes anyway.
+#[test]
+fn run_past_the_cleanup_deadline_exits_2_and_ends_the_runtimes() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = run_project(dir.path(), true);
+    let mut host = Host::start(
+        &["run", "--shutdown-timeout", "1", file.to_str().unwrap()],
+        dir.path(),
+    );
+    let pids = host.started(&["py-row", "node-row"]);
+    signal(&host, libc::SIGTERM, false);
+    let (status, stderr, output) = host.exit();
+    let context = format!("status {status:?}; output: {output:#?}; stderr: {stderr}");
+    assert_eq!(status.code(), Some(2), "{context}");
+    assert!(stderr.contains("did not finish"), "{context}");
+    for pid in pids {
+        assert!(!alive(pid), "runtime process {pid} outlived the host; {context}");
+    }
+}
+
+/// A second Ctrl-C while cleanups run ends the host at once, with 2, and
+/// the runtime processes with it.
+#[test]
+fn a_second_ctrl_c_exits_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = run_project(dir.path(), true);
+    // A deadline the test never reaches: only the second Ctrl-C ends it.
+    let mut host = Host::start(
+        &["run", "--shutdown-timeout", "600", file.to_str().unwrap()],
+        dir.path(),
+    );
+    let pids = host.started(&["py-row", "node-row"]);
+    signal(&host, libc::SIGINT, true);
+    host.until(|line| (line == "plugin py-row cleanup started").then_some(()));
+    signal(&host, libc::SIGINT, true);
+    let (status, stderr, output) = host.exit();
+    let context = format!("status {status:?}; output: {output:#?}; stderr: {stderr}");
+    assert_eq!(status.code(), Some(2), "{context}");
+    for pid in pids {
+        assert!(!alive(pid), "runtime process {pid} outlived the host; {context}");
+    }
+}
