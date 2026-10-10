@@ -89,7 +89,7 @@ impl Naming {
             #[cfg(feature = "node")]
             Naming::Npm if runtime.is_remote() => {
                 let local = name.starts_with("file:") || Path::new(name).is_absolute();
-                (!local).then(|| PathBuf::from(name))
+                (!local && !runtime_prefixed(name)).then(|| PathBuf::from(name))
             }
             #[cfg(feature = "node")]
             Naming::Npm => resolve_entry(runtime.anchor(), name),
@@ -122,6 +122,20 @@ impl Naming {
             }
         }
     }
+}
+
+/// Whether `name` names a runtime before a colon (`py:weather`,
+/// `bun:@acme/weather`): another runtime's row, never an npm name, which has
+/// no colon. `file:` URLs and one-letter Windows drives are not prefixes.
+#[cfg(feature = "node")]
+fn runtime_prefixed(name: &str) -> bool {
+    name.split_once(':').is_some_and(|(prefix, _)| {
+        prefix.len() >= 2
+            && prefix != "file"
+            && prefix
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    })
 }
 
 pub struct RuntimeResolver {
@@ -318,7 +332,12 @@ impl Resolver for RuntimeResolver {
                 meta: json!({
                     "source": "runtime",
                     "entry": entry,
-                    "version": (!self.runtime.is_remote()).then(|| self.naming.version(&entry)).flatten(),
+                    // The package's version where this side can read it,
+                    // else what the runtime reported.
+                    "version": (!self.runtime.is_remote())
+                        .then(|| self.naming.version(&entry))
+                        .flatten()
+                        .or_else(|| described.version.clone().map(Value::String)),
                     "inject": described.inject,
                     "provides": described.provides,
                 }),
@@ -694,6 +713,29 @@ fn package_version(entry: &Path) -> Option<Value> {
 #[cfg(test)]
 mod stale_tests {
     use super::*;
+
+    /// A remote Node runtime takes npm names, not another runtime's rows.
+    #[cfg(feature = "node")]
+    #[test]
+    fn runtime_prefixes_are_not_npm_names() {
+        for name in [
+            "py:weather",
+            "bun:@acme/weather",
+            "bun:./plugin.ts",
+            "gpu-1:model",
+        ] {
+            assert!(runtime_prefixed(name), "{name}");
+        }
+        for name in [
+            "@acme/weather",
+            "weather/sub",
+            "file:///p.mjs",
+            "C:\\p.mjs",
+            "./a:b.ts",
+        ] {
+            assert!(!runtime_prefixed(name), "{name}");
+        }
+    }
 
     fn cached(entry: &Path, version: Option<Value>) -> Arc<Resolved> {
         Arc::new(Resolved {

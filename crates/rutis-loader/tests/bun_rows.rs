@@ -1,0 +1,268 @@
+//! Bun rows (`bun:<module>`), with only the Bun runtime: rows gate on what
+//! they inject, use each other's services within the process, stop when
+//! their provider goes, run edited code after a reload, report their
+//! package's version, and a module the project lacks is unresolved without
+//! holding up the others.
+#![cfg(all(unix, feature = "bun"))]
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
+
+use rutis::{Ctx, FiberState};
+use rutis_bridge::runtime::LocalRuntime;
+use rutis_bridge::session::{host_key, HostDispatch};
+use rutis_bridge::session::{Reply, Value as RpcValue};
+use rutis_loader::{
+    Chain, EntryStatus, Layer, Loader, LoaderError, LoaderOptions, LoaderPlugin, Patch,
+    RuntimeResolver, RuntimeRowsPlugin, ServiceCatalog,
+};
+use serde_json::{json, Value};
+
+#[derive(Clone, Default)]
+struct Probe(Arc<Mutex<Vec<String>>>);
+
+impl HostDispatch for Probe {
+    fn invoke(&self, _method: &str, args: RpcValue) -> Reply {
+        let [line]: [String; 1] = rutis_bridge::session::decode_value(args)?;
+        self.0.lock().unwrap().push(line);
+        Ok(RpcValue::Undefined)
+    }
+
+    fn methods(&self) -> Option<Value> {
+        Some(json!({ "record": "sync" }))
+    }
+}
+
+impl Probe {
+    fn position(&self, line: &str) -> Option<usize> {
+        self.0.lock().unwrap().iter().position(|l| l == line)
+    }
+
+    async fn wait_for(&self, line: &str) {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while self.position(line).is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{line:?} not recorded: {:?}", self.0.lock().unwrap()));
+    }
+}
+
+fn repo() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// A plugin written with the SDK, imported from this checkout.
+fn sdk_plugin(body: &str) -> String {
+    let sdk = repo()
+        .join("node/rutis/src/index.mjs")
+        .canonicalize()
+        .unwrap();
+    format!(
+        "import {{ definePlugin }} from {:?}\nexport default definePlugin({body})\n",
+        sdk.to_string_lossy()
+    )
+}
+
+const PROVIDER: &str = r#"{
+  inject: ['probe'],
+  provides: { forecast: { today: 'sync' } },
+  apply(ctx) {
+    const probe = ctx.use('probe')
+    ctx.provide('forecast', { native: true, today: () => 'sunny' })
+    probe.record('provider: start')
+    return () => probe.record('provider: bye')
+  },
+}"#;
+
+const USER: &str = r#"{
+  inject: ['forecast', 'probe'],
+  apply(ctx) {
+    const probe = ctx.use('probe')
+    const forecast = ctx.use('forecast')
+    probe.record(`user: ${forecast.today()} (${forecast.native === true ? 'native' : 'proxy'})`)
+    return () => probe.record('user: bye')
+  },
+}"#;
+
+const BYSTANDER: &str = r#"{
+  inject: ['probe'],
+  apply(ctx) {
+    const probe = ctx.use('probe')
+    probe.record('bystander: start')
+    return () => probe.record('bystander: bye')
+  },
+}"#;
+
+struct Fixture {
+    root: Ctx,
+    loader: Loader,
+    probe: Probe,
+    dir: tempfile::TempDir,
+}
+
+async fn fixture() -> Fixture {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+    for (name, body) in [
+        ("provider", PROVIDER),
+        ("user", USER),
+        ("bystander", BYSTANDER),
+    ] {
+        std::fs::write(dir.path().join(format!("{name}.ts")), sdk_plugin(body)).unwrap();
+    }
+    let probe = Probe::default();
+    let root = Ctx::root().unwrap();
+    root.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe.clone()))
+        .unwrap();
+    let mut catalog = ServiceCatalog::new();
+    for name in ["probe", "forecast"] {
+        catalog.register_shared(name);
+    }
+    let bun = LocalRuntime::bun(repo().join("bun/rutis-bun"), dir.path());
+    let rows = Arc::new(RuntimeResolver::modules(bun.handle()).with_catalog(&catalog));
+    root.plugin(bun).await.unwrap();
+    let plugin = LoaderPlugin::new(
+        Chain::new().with_shared(rows.clone()),
+        LoaderOptions {
+            catalog,
+            ..LoaderOptions::default()
+        },
+    );
+    let loader = plugin.handle();
+    root.plugin(plugin).await.unwrap();
+    root.plugin(RuntimeRowsPlugin::new(rows));
+    Fixture {
+        root,
+        loader,
+        probe,
+        dir,
+    }
+}
+
+fn layer(rows: Vec<Value>) -> Vec<Layer> {
+    let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": rows }])).unwrap();
+    vec![Layer::new("rows", patches)]
+}
+
+fn row(id: &str, module: &str) -> Value {
+    json!({ "id": id, "name": format!("bun:{module}"), "config": {} })
+}
+
+fn state(loader: &Loader, id: &str) -> Option<FiberState> {
+    match loader.get(id)?.status {
+        EntryStatus::Running(snapshot) => Some(snapshot.state),
+        _ => None,
+    }
+}
+
+async fn until(what: &str, mut done: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !done() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+}
+
+/// A row waits for what it injects; within the process it gets the
+/// provider's own object; when the provider goes, only its user stops, and
+/// before the provider does.
+#[tokio::test(flavor = "multi_thread")]
+async fn rows_gate_share_and_stop_with_their_provider() {
+    let fixture = fixture().await;
+    let loader = &fixture.loader;
+    let all = vec![
+        row("u", "./user.ts"),
+        row("p", "./provider.ts"),
+        row("b", "./bystander.ts"),
+    ];
+    let report = loader.reconcile(layer(all.clone()), None).await.unwrap();
+    assert!(report.failures.is_empty(), "{report:?}");
+    fixture.probe.wait_for("user: sunny (native)").await;
+    fixture.probe.wait_for("bystander: start").await;
+
+    let remaining: Vec<Value> = all.into_iter().filter(|r| r["id"] != "p").collect();
+    loader.reconcile(layer(remaining), None).await.unwrap();
+    fixture.probe.wait_for("provider: bye").await;
+    until("the user to wait", || {
+        state(loader, "u") == Some(FiberState::Pending)
+    })
+    .await;
+    assert_eq!(state(loader, "b"), Some(FiberState::Active));
+    assert!(
+        fixture.probe.position("user: bye").unwrap()
+            < fixture.probe.position("provider: bye").unwrap(),
+        "the user stops first"
+    );
+    fixture.root.shutdown().await.unwrap();
+}
+
+/// After the module's source changes, reloading the row runs the new code.
+#[tokio::test(flavor = "multi_thread")]
+async fn reloading_a_row_runs_the_edited_module() {
+    let fixture = fixture().await;
+    let module = fixture.dir.path().join("edited.ts");
+    let plugin = |version: &str| {
+        sdk_plugin(&format!(
+            "{{ inject: ['probe'], apply(ctx) {{ const probe = ctx.use('probe'); probe.record('{version}: start'); return () => probe.record('{version}: bye') }} }}"
+        ))
+    };
+    std::fs::write(&module, plugin("v1")).unwrap();
+    let report = fixture
+        .loader
+        .reconcile(layer(vec![row("e", "./edited.ts")]), None)
+        .await
+        .unwrap();
+    assert!(report.failures.is_empty(), "{report:?}");
+    fixture.probe.wait_for("v1: start").await;
+
+    std::fs::write(&module, plugin("v2")).unwrap();
+    // A later modification time, even within the same clock tick.
+    std::fs::File::options()
+        .write(true)
+        .open(&module)
+        .unwrap()
+        .set_modified(SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
+    fixture.loader.reload("e").await.unwrap();
+    fixture.probe.wait_for("v1: bye").await;
+    fixture.probe.wait_for("v2: start").await;
+    fixture.root.shutdown().await.unwrap();
+}
+
+/// A row of an installed package records the package's version; a module
+/// the project lacks is unresolved, and the other rows run.
+#[tokio::test(flavor = "multi_thread")]
+async fn packages_report_versions_and_missing_modules_are_unresolved() {
+    let fixture = fixture().await;
+    let package = fixture.dir.path().join("node_modules/@acme/hello");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{ "name": "@acme/hello", "version": "2.0.1", "type": "module", "main": "index.ts" }"#,
+    )
+    .unwrap();
+    std::fs::write(package.join("index.ts"), sdk_plugin(BYSTANDER)).unwrap();
+    let report = fixture
+        .loader
+        .reconcile(
+            layer(vec![row("h", "@acme/hello"), row("m", "@acme/missing")]),
+            None,
+        )
+        .await
+        .unwrap();
+    fixture.probe.wait_for("bystander: start").await;
+    assert_eq!(
+        fixture.loader.get("h").unwrap().meta["version"],
+        json!("2.0.1")
+    );
+    match fixture.loader.get("m").unwrap().status {
+        EntryStatus::Unresolved(LoaderError::NotFound { .. }) => {}
+        other => panic!("a missing module is unresolved, got {other:?} ({report:?})"),
+    }
+    fixture.root.shutdown().await.unwrap();
+}
