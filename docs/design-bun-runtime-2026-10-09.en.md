@@ -197,7 +197,7 @@ RuntimeResolver::modules(handle)       // existing: rows "bun:<module>"
 | `runtime` | The project's `@arcships/rutis-bun`, then a `rutis-bun` executable on `PATH` | Where the runtime is: an npm package directory or an executable |
 | `program` | `bun` on `PATH` | The Bun executable; unused when `runtime` is the single-file executable |
 
-- **A missing runtime**: startup fails and names both ways to install one.
+- **A missing runtime**: startup fails and names how to install one (only the npm form in B1; both once the executable comes in B3).
 - **Remote runtimes**: `remote` gains the `language` `"bun"` (`rutis-host/src/host.rs:78-83`), with rows named `<remote runtime name>:<module>`.
 - **Other runtimes**: `runtimes.bun` is independent of `runtimes.node` and `runtimes.py`, and they can all be configured together. Services are shared by name through `host_key`.
 
@@ -301,9 +301,9 @@ Nothing this design uses depends on a recent version: `Bun.connect({ fd })`, `wo
 
 | Phase | Contents |
 | --- | --- |
-| B1 | The npm form of `rutis-bun`: local channels (fd, dial-back, loopback), the session, every control operation, synchronous re-entry, instance scopes, cancellation and errors, hot reload. Rust: the `bun` feature, the launcher, `LocalRuntime::bun`, `RowSchema.version`, the name collision checks, and `runtimes.bun`. The local tests of §8; the CI job `runtimes-bun` |
+| B1 | The npm form of `rutis-bun`: local channels (fd, dial-back, loopback), the session, every control operation, synchronous re-entry, instance scopes, cancellation and errors, hot reload. Rust: the `bun` feature, the launcher, `LocalRuntime::bun`, `RowSchema.version`, the name collision checks, and `runtimes.bun`; `rutis-host new --lang bun` / `dev` (moved up from B3 in implementation, see §11). The local tests of §8; the CI job `runtimes-bun` |
 | B2 | Remote runtimes: listening and leases (§4); `language: "bun"` for `remote`, with the lease tests |
-| B3 | The single-file executable and its releases; `rutis-host new --lang bun` / `dev`; Windows; performance numbers |
+| B3 | The single-file executable and its releases; Windows; performance numbers |
 
 ## 11. Changes in implementation (B1)
 
@@ -322,3 +322,9 @@ Nothing this design uses depends on a recent version: `Bun.connect({ fd })`, `wo
 | A remote node runtime taking prefixed row names | On a remote runtime, `Naming::Npm` no longer accepts names starting with `<runtime name>:` (except `file:` and one-letter drives) | §5.1 |
 | Duplicate runtime names | `HostConfig::check_runtime_names`: remote runtime names have two or more of `a-z0-9-`, and are neither a local runtime's nor `file` | §5.1 |
 | Session-layer tests (`cancellation.rs` and the like) | Covered by the session contract (the Bun endpoint of `runtime_conformance.rs`): cancellation, error names, references and re-entry are in the contract; `error_shape.rs` and the like are about Cordis mounts | §8 |
+| §10 puts `new --lang bun` / `dev` in B3 | Implemented in B1 | They are only a project template and the runtime choice of `dev`, which B1's Rust changes already cover; in B1 the development loop (S2) can run first |
+| `language: "bun"` for `remote` | Not accepted in B1 (only `python`, `node`) | Remote runtimes are B2; the runtime does not listen in B1 |
+| §3.1 arguments `--id` / `--peer` | Not accepted in B1 | Only network channels (B2) use them; `listen:` exits with a clear error in B1 |
+| §8 conformance fixture `conformance-greeter` | Not written | Only Cordis nodes and remote runtimes (B2) use it |
+| §8 Bun variants of E2E S2 / S3 | Not in this change | They come with the E2E framework of #186 / #187 |
+| §8 a project from `new --lang bun` passes `check` | Only the generated files are tested | Running `check` needs `@arcships/rutis-bun` installed from npm; it belongs to S2's end-to-end test (#186) |

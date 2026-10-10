@@ -63,7 +63,7 @@ A host's `rutis.json`:
 
 ## 4. What the runtime promises
 
-- **Only what the project installed**: the runtime always starts with `--no-install`; a missing package makes loading fail and is never downloaded. Install plugins and their dependencies with `bun add`.
+- **Only what the project installed**: the runtime always starts with `--no-install`; a missing package makes loading fail and is never downloaded. Install plugins and their dependencies with `bun add`. By default `bun install` runs install scripts only for dependencies on Bun's built-in trusted list; a project's `trustedDependencies` **replaces** that list, so list only the packages whose install scripts are needed.
 - **No `.env`**: the runtime starts with `--no-env-file`, so the environment comes only from the host. The project's `bunfig.toml` applies (including `preload`), as the project's own trusted configuration.
 - **Re-entrant synchronous calls**: while a plugin's synchronous call into rutis waits, other calls into this runtime still run. A plugin's service may therefore be called during its own synchronous call: do not hold a lock across a call into rutis.
 - **An uncaught error ends the process**, withdrawing every service of the runtime.

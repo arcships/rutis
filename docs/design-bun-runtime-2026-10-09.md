@@ -181,7 +181,7 @@ RuntimeResolver::modules(handle)       // 现有：行名 "bun:<模块>"
 | `runtime` | 依次找：项目里的 `@arcships/rutis-bun`、`PATH` 上的 `rutis-bun` 可执行程序 | 运行时的位置：一个 npm 包目录，或一个可执行文件 |
 | `program` | `PATH` 上的 `bun` | Bun 可执行文件；`runtime` 是单文件可执行程序时不用 |
 
-- **运行时缺失**：启动失败，并给出两种安装方式。
+- **运行时缺失**：启动失败，并给出安装方式（B1 只有 npm 形式；可执行程序随 B3 加入后给出两种）。
 - **远程运行时**：`remote` 的 `language` 新增 `"bun"`（`rutis-host/src/host.rs:78-83`），行名写作 `<远程运行时名>:<模块>`。
 - **与其他运行时的关系**：`runtimes.bun` 与 `runtimes.node`、`runtimes.py` 互相独立，可以同时配置。服务按名字共享，走 `host_key`。
 
@@ -285,9 +285,9 @@ RuntimeResolver::modules(handle)       // 现有：行名 "bun:<模块>"
 
 | 阶段 | 内容 |
 | --- | --- |
-| B1 | `rutis-bun` npm 形式，包括：本机通道（fd、dial-back、loopback）、会话、全部控制操作、同步重入、实例作用域、取消与错误、热重载。Rust 侧：`bun` feature、启动器、`LocalRuntime::bun`、`RowSchema.version`、名字冲突检查；`runtimes.bun`。§8 中本机部分的测试；CI `runtimes-bun` |
+| B1 | `rutis-bun` npm 形式，包括：本机通道（fd、dial-back、loopback）、会话、全部控制操作、同步重入、实例作用域、取消与错误、热重载。Rust 侧：`bun` feature、启动器、`LocalRuntime::bun`、`RowSchema.version`、名字冲突检查；`runtimes.bun`；`rutis-host new --lang bun` / `dev`（实现时从 B3 提前，见 §11）。§8 中本机部分的测试；CI `runtimes-bun` |
 | B2 | 远程运行时：监听与租约（§4）；`remote` 的 `language: "bun"` 及租约测试 |
-| B3 | 单文件可执行程序与发布；`rutis-host new --lang bun` / `dev`；Windows；性能数据 |
+| B3 | 单文件可执行程序与发布；Windows；性能数据 |
 
 ## 11. 实现时的调整（B1）
 
@@ -306,3 +306,9 @@ RuntimeResolver::modules(handle)       // 现有：行名 "bun:<模块>"
 | 远程 node 运行时接走带前缀的行名 | `Naming::Npm` 在远程运行时上不接受 `<运行时名>:` 开头的名字（`file:` 与单字母盘符除外） | §5.1 |
 | 运行时重名 | `HostConfig::check_runtime_names`：远程运行时名至少两个字符、只含 `a-z0-9-`，不能与本机运行时或 `file` 同名 | §5.1 |
 | 会话层专项测试（`cancellation.rs` 等） | 由会话契约（`runtime_conformance.rs` 的 Bun 端点）覆盖：取消、错误名、引用、重入都在契约内；`error_shape.rs` 等是 Cordis 挂载专用的 | §8 |
+| §10 `new --lang bun` / `dev` 在 B3 | 在 B1 实现 | 它们只是项目模板与 `dev` 的运行时选择，B1 的 Rust 侧改动已经覆盖；放到 B1 让开发循环（S2）能先跑起来 |
+| `remote` 的 `language: "bun"` | B1 不接受（只有 `python`、`node`） | 远程运行时属于 B2；B1 的运行时不监听 |
+| §3.1 参数 `--id` / `--peer` | B1 不接受 | 只用于网络通道（B2）；`listen:` 在 B1 以明确的错误退出 |
+| §8 一致性夹具 `conformance-greeter` | 未写 | 只用于 Cordis 节点与远程运行时（B2） |
+| §8 E2E S2 / S3 的 Bun 变体 | 未在本次实现 | 随 #186 / #187 的 E2E 框架一起加入 |
+| §8 `new --lang bun` 生成的项目能通过 `check` | 只测试了生成的文件 | 运行 `check` 需要从 npm 安装 `@arcships/rutis-bun`，归 S2（#186）的端到端测试 |
