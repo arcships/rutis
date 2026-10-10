@@ -190,4 +190,4 @@ Before integrating each new language (Swift, Go), decide if its runtime is reent
 | M1/M2 boundary | Cold-start two runtimes together: Python provider P and JS provider J each provide a service; JS consumer uses P, Python consumer uses J. | All four rows start without runtimes waiting on each other; revoking either provider stops only its corresponding consumer. |
 | M2 | Python runtime plugin + leaf SDK + contract compatibility tests | Same compatibility suite passes on Node and Python; Python and JS plugins use each other's services; same-process calls bypass IPC. |
 | M3 | Swift runtime plugin (macOS) + leaf SDK | EventKit plugin runs in signed helper app; system permission prompt identifies the helper. |
-| M4 | Go, when there is concrete demand | Compile a group of Go plugins into one executable launched by runtime plugin; replacing binary restarts that group. |
+| M4 | Go, when there is concrete demand (design: [the Go plugin runtime](design-go-runtime-2026-10-10.en.md)) | Compile a group of Go plugins into one executable launched by runtime plugin; replacing binary restarts that group. |
