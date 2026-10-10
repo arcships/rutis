@@ -305,7 +305,8 @@ mod tests {
         .unwrap();
         let (config, _) = dev_config(dir.path()).unwrap();
         let bun = config.runtimes.bun.unwrap();
-        assert_eq!(bun.program.unwrap(), PathBuf::from("/opt/bun/bin/bun"));
+        // On Windows `/opt/...` is relative to the drive, and rebased as such.
+        assert!(bun.program.unwrap().ends_with("opt/bun/bin/bun"));
     }
 
     #[test]

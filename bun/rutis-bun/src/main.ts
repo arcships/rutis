@@ -57,6 +57,10 @@ try {
 }
 runtime.client = client
 await client.closed()
+// The host ending the session is the normal end; anything else is said.
+if (client.reason && client.reason !== 'the rutis host disconnected') {
+  process.stderr.write(`rutis-bun: the session ended: ${client.reason}\n`)
+}
 runtime.closing = true
 await runtime.dispose()
 // Stray plugin timers and sockets must not keep the process alive: the host

@@ -144,8 +144,8 @@ jobs:
         env:
           RUTIS_LOCAL_HANDOVER: loopback
         run: cargo test -p rutis-loader --features bun,node,python --test bun_rows --test bun_instances --test bun_multilang
-      - name: cargo test (rutis-host)
-        run: cargo test -p rutis-host
+      - name: cargo test (rutis-host, Bun)
+        run: cargo test -p rutis-host bun
 
   # The network stack and the runtimes on macOS: starting processes on an
   # inherited socket, Unix sockets, WebSocket links, the Node and Python

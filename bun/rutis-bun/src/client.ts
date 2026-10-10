@@ -41,9 +41,11 @@ export class Client {
       resolve(code)
     }))
   }
+  // Why the channel ended, once it did.
+  reason?: string
   #receive(message: any) {
     if (message?.ready) { this.#session.start(); return }
-    if (message?.closed) { this.#session.close(new Error(message.closed)); return }
+    if (message?.closed) { this.reason ??= message.closed; this.#session.close(new Error(message.closed)); return }
     this.#session.receive(message)
   }
   // Connect on `channel` and greet; rejects when the channel or the

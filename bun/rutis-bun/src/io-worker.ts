@@ -17,6 +17,7 @@ function send(message: unknown) {
 process.on('uncaughtExceptionMonitor', (error: Error) => send({ closed: error.message }))
 
 let channel: Channel | undefined
+// What ends the channel when nothing failed (main.ts knows this text).
 let failure = 'the rutis host disconnected'
 port.on('message', (message: any) => {
   if (message.abort) { channel?.close(); return }
