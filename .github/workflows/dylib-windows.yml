@@ -2,12 +2,12 @@
 # (40 with the reproducibility check), so they run only when a pull request
 # touches the dylib code, when a release tag is pushed, or by hand
 # (Actions → dylib-windows → Run workflow). Other Windows builds are still
-# checked on every change by ci.yml's static-platforms job.
+# checked on every code change by ci.yml's runtimes-windows job.
 #
 # The reproducible-SDK check builds the SDK twice from scratch (about 15
 # minutes) and rarely breaks from ordinary changes, so pull requests skip it;
-# release tags and manual runs keep it. ci.yml's dylib-linux and dylib-macos
-# jobs still run the same script on every change.
+# release tags and manual runs keep it. ci.yml's dylib-linux-repro and
+# dylib-macos jobs run the same script on dylib changes and on main.
 #
 # Changes elsewhere (the rutis kernel, dependency updates in Cargo.lock) can
 # also break Windows dylib plugins; those are caught at release time, or run
