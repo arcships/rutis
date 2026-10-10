@@ -310,6 +310,17 @@ struct State {
     stale: HashMap<String, HashSet<String>>,
     /// Files skipped, and why.
     diagnostics: Vec<String>,
+    /// Files in directories found not to be Go binaries, as they were then:
+    /// not read again while unchanged.
+    rejected: HashMap<PathBuf, Stamp>,
+}
+
+/// Which manifests a scan reads again although their files did not change.
+#[derive(Clone, Copy)]
+enum Force<'a> {
+    None,
+    All,
+    Runtime(&'a str),
 }
 
 #[derive(Clone)]
@@ -372,7 +383,7 @@ impl GoResolver {
 
     /// Every binary, read again (no cache): for diagnostics.
     pub fn binaries(&self) -> Vec<GoBinary> {
-        self.scan(true)
+        self.scan(Force::All)
             .into_iter()
             .map(|binary| GoBinary {
                 path: binary.path,
@@ -388,8 +399,9 @@ impl GoResolver {
         self.state.lock().unwrap().diagnostics.clone()
     }
 
-    /// Read the binaries; `force` reads every manifest again.
-    fn scan(&self, force: bool) -> Vec<Binary> {
+    /// Read the binaries: a manifest is read again when its file changed,
+    /// or when `force` says so.
+    fn scan(&self, force: Force) -> Vec<Binary> {
         let binaries = self.binaries.lock().unwrap().clone();
         blocking(|| {
             let mut found: Vec<(PathBuf, String, bool)> = Vec::new();
@@ -409,10 +421,21 @@ impl GoResolver {
                     if found.iter().any(|(listed, _, _)| *listed == path) {
                         continue;
                     }
-                    let cached = self.state.lock().unwrap().scanned.contains_key(&path);
+                    let (cached, rejected) = {
+                        let state = self.state.lock().unwrap();
+                        let current = stamp(&path);
+                        let rejected =
+                            current.is_some() && state.rejected.get(&path) == current.as_ref();
+                        (state.scanned.contains_key(&path), rejected)
+                    };
+                    if rejected {
+                        continue;
+                    }
                     if cached || candidate(&path) {
                         let runtime = go_runtime_name(&path);
                         found.push((path, runtime, false));
+                    } else if let Some(current) = stamp(&path) {
+                        self.state.lock().unwrap().rejected.insert(path, current);
                     }
                 }
             }
@@ -437,8 +460,13 @@ impl GoResolver {
                     continue;
                 };
                 let previous = self.state.lock().unwrap().scanned.get(&path).cloned();
+                let forced = match force {
+                    Force::None => false,
+                    Force::All => true,
+                    Force::Runtime(name) => name == runtime,
+                };
                 let mut binary = match previous {
-                    Some(previous) if !force && previous.stamp == current => previous,
+                    Some(previous) if !forced && previous.stamp == current => previous,
                     _ => {
                         let manifest = read_manifest(&path).map(Arc::new);
                         Binary {
@@ -509,7 +537,7 @@ impl GoResolver {
     /// its runtime starts with; the rows resolved to it resolve again.
     fn launch(&self, runtime: &str) -> Result<PathBuf, String> {
         let binary = self
-            .scan(true)
+            .scan(Force::Runtime(runtime))
             .into_iter()
             .find(|binary| binary.runtime == runtime)
             .ok_or_else(|| format!("there is no Go runtime {runtime}"))?;
@@ -566,7 +594,7 @@ impl GoResolver {
         if plugin.is_empty() || plugin.contains('/') {
             return Err(not_found());
         }
-        let mut binaries = self.scan(false);
+        let mut binaries = self.scan(Force::None);
         let mut rescanned = false;
         loop {
             if let Some(runtime) = named {
@@ -639,7 +667,7 @@ impl GoResolver {
             }
             // Not found: a binary may have been dropped into a directory.
             rescanned = true;
-            binaries = self.scan(false);
+            binaries = self.scan(Force::None);
         }
         if let Some(runtime) = named {
             // A listed binary whose manifest failed says why.
@@ -870,7 +898,7 @@ impl GoRuntimesHandle {
 
     /// Every Go runtime: those that run, and the binaries not started.
     pub fn runtimes(&self) -> Vec<GoRuntimeInfo> {
-        let binaries = self.inner.resolver.scan(false);
+        let binaries = self.inner.resolver.scan(Force::None);
         let slots = self.inner.slots.lock().unwrap();
         binaries
             .into_iter()
@@ -1053,7 +1081,7 @@ impl Plugin for GoRuntimes {
             *inner.resolver.runtimes.lock().unwrap() = Arc::downgrade(&inner);
             let mut wanted: Vec<String> = inner.early.lock().unwrap().drain().collect();
             if inner.eager {
-                for binary in inner.resolver.scan(false) {
+                for binary in inner.resolver.scan(Force::None) {
                     if binary.manifest.is_ok() && !wanted.contains(&binary.runtime) {
                         wanted.push(binary.runtime);
                     }
