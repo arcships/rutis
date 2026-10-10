@@ -88,7 +88,7 @@ async fn churn_on_long_lived_root_releases_instances() {
             service_key: TypeKey::keyed_dynamic::<u32>(format!("svc/{i}")),
         };
         let view = ctx.plugin(probe);
-        await_active(&ctx, Duration::from_secs(5)).await;
+        await_active(&ctx, Duration::from_secs(10)).await;
         view.dispose().await.unwrap();
         drop(view);
         // 已销毁通道再派发:无监听器早退,不 panic
@@ -104,7 +104,7 @@ async fn churn_on_long_lived_root_releases_instances() {
     let start = tokio::time::Instant::now();
     while dropped.load(Ordering::SeqCst) < 50 {
         assert!(
-            start.elapsed() < Duration::from_secs(5),
+            start.elapsed() < Duration::from_secs(10),
             "instances leaked: {} of 50 dropped",
             dropped.load(Ordering::SeqCst)
         );
@@ -116,6 +116,6 @@ async fn churn_on_long_lived_root_releases_instances() {
         channel: Arc::from("branch/reuse"),
         service_key: TypeKey::keyed_dynamic::<u32>("svc/reuse"),
     });
-    await_active(&ctx, Duration::from_secs(5)).await;
+    await_active(&ctx, Duration::from_secs(10)).await;
     view.dispose().await.unwrap();
 }

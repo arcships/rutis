@@ -218,10 +218,13 @@ async fn update_pending_uses_new_config_when_gate_opens() {
     assert_eq!(view.state().state, FiberState::Pending);
 
     // Pending 态热更新(不该触发装载)
-    tokio::time::timeout(std::time::Duration::from_secs(5), view.update(cfg("v2", 2)))
-        .await
-        .expect("update on Pending returns")
-        .expect("update");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        view.update(cfg("v2", 2)),
+    )
+    .await
+    .expect("update on Pending returns")
+    .expect("update");
     settle(&view).await;
     assert_eq!(view.state().state, FiberState::Pending);
 

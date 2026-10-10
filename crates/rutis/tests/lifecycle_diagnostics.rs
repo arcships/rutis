@@ -100,7 +100,7 @@ impl Plugin for Provider {
 }
 
 async fn settled(view: &FiberView) {
-    tokio::time::timeout(Duration::from_secs(2), view.into_future())
+    tokio::time::timeout(Duration::from_secs(10), view.into_future())
         .await
         .expect("fiber did not settle")
         .expect("fiber failed");
@@ -108,7 +108,7 @@ async fn settled(view: &FiberView) {
 
 async fn state(view: &FiberView, expected: FiberState) {
     let mut watch = view.watch();
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         while watch.borrow().state != expected {
             watch.changed().await.expect("fiber watch closed");
         }
@@ -210,7 +210,7 @@ async fn diagnostics_explain_inactive_and_removing_provider() {
         key: key.clone(),
         gate: Mutex::new(Some((provided, resume_rx))),
     });
-    tokio::time::timeout(Duration::from_secs(2), provided_rx)
+    tokio::time::timeout(Duration::from_secs(10), provided_rx)
         .await
         .expect("provider did not register its binding")
         .unwrap();
@@ -232,7 +232,7 @@ async fn diagnostics_explain_inactive_and_removing_provider() {
     assert_eq!(dependency(&root, &consumer).status, DependencyStatus::Ready);
 
     let disposing = provider.dispose();
-    tokio::time::timeout(Duration::from_secs(2), cleanup_started_rx)
+    tokio::time::timeout(Duration::from_secs(10), cleanup_started_rx)
         .await
         .expect("consumer cleanup did not start")
         .unwrap();

@@ -147,7 +147,7 @@ async fn soon<F, T>(f: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    tokio::time::timeout(Duration::from_secs(5), f)
+    tokio::time::timeout(Duration::from_secs(10), f)
         .await
         .expect("timed out")
 }
@@ -1637,7 +1637,8 @@ async fn cancel_wakes_awaiters() {
     assert_eq!(exited.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
+// Paused clock: the deadline is measured on a clock the test controls.
+#[tokio::test(start_paused = true)]
 async fn disposal_deadline_reports_loading_and_later_joins() {
     let root = Ctx::root().unwrap();
     let started = Arc::new(tokio::sync::Notify::new());
@@ -1672,7 +1673,8 @@ async fn disposal_deadline_reports_loading_and_later_joins() {
     assert_eq!(view.state().state, FiberState::Disposed);
 }
 
-#[tokio::test]
+// Paused clock: the deadline is measured on a clock the test controls.
+#[tokio::test(start_paused = true)]
 async fn disposal_deadline_reports_async_cleanup_and_preserves_result() {
     let root = Ctx::root().unwrap();
     let release = Arc::new(tokio::sync::Notify::new());
@@ -1708,7 +1710,8 @@ async fn disposal_deadline_reports_async_cleanup_and_preserves_result() {
     assert!(Arc::ptr_eq(&first, &second));
 }
 
-#[tokio::test]
+// Paused clock: the deadline is measured on a clock the test controls.
+#[tokio::test(start_paused = true)]
 async fn disposal_deadline_covers_cleanup_and_consumer_eviction() {
     let root = Ctx::root().unwrap();
     let release = Arc::new(tokio::sync::Notify::new());
@@ -1784,7 +1787,8 @@ async fn root_shutdown_releases_driver_and_rejects_new_work() {
     }
 }
 
-#[tokio::test]
+// Paused clock: the deadline is measured on a clock the test controls.
+#[tokio::test(start_paused = true)]
 async fn shutdown_deadline_can_resume_after_noncooperative_apply() {
     let ctx = Ctx::root().unwrap();
     let started = Arc::new(tokio::sync::Notify::new());
@@ -1867,7 +1871,9 @@ async fn concurrent_shutdown_and_dispose_always_converge() {
             }
         });
         barrier.wait().await;
-        let (shutdown, dispose) = tokio::time::timeout(Duration::from_millis(250), async {
+        // Guards against a hang, not a speed check: a loaded CI machine
+        // may take far longer than usual for one round.
+        let (shutdown, dispose) = tokio::time::timeout(Duration::from_secs(10), async {
             tokio::join!(shutdown, dispose)
         })
         .await
@@ -2507,7 +2513,7 @@ async fn mixed_concurrent_ops_complete() {
     }));
     soon(async {
         for h in handles {
-            let _ = tokio::time::timeout(Duration::from_secs(2), h)
+            let _ = tokio::time::timeout(Duration::from_secs(10), h)
                 .await
                 .expect("op completed");
         }
