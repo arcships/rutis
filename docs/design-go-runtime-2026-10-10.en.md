@@ -440,7 +440,7 @@ G1 and G2 are implemented by #227. Where it differs from this document:
 | Remote npm naming | refuses `go:` and `<Go runtime name>:` | refuses any `<name>:` prefix |
 | macOS quarantine | reuse the dylib check | `rutis-host check` checks with `xattr` and says what to do |
 | Manifest timeout | 5 seconds | 30 seconds: on macOS a new binary's first run waits for the system's assessment, over 5 seconds when several start at once |
-| Starting, restarting, stopping one runtime | — | one at a time (the runtime is marked busy); a new process starts once the old one is gone |
+| Starting, restarting, stopping one runtime | §5: a row resolving to it during an idle stop cancels the stop | one at a time (the runtime is marked busy, a mark always cleared); a new process starts once the old one is gone. A row resolving to it during an idle stop does not cancel the stop: the runtime starts again as soon as the stop is over |
 | `rows.load`'s `inject` | in the signature | ignored, as in Python: a row's own `inject` is what a Cordis row waits for in Cordis; a leaf runtime's rows are gated in rutis on what their plugins inject |
 | `check` | prints implementation and engine | does not: they are in the `mount` reply and `check` starts no Go runtime; with Bun B1 |
 | Not done | | Python's `mount` reply `implementation` / `engine` and `check` printing them (with Bun B1); G3 |
