@@ -66,6 +66,17 @@ impl LocalRuntime {
         Self::with("py", launcher, project)
     }
 
+    /// A Bun runtime named `"bun"`: the npm package `package` (`bun/rutis-bun`,
+    /// or a deployed `@arcships/rutis-bun`) run by `bun`, importing plugin
+    /// modules from `project` (its `package.json` and `node_modules`). Choose
+    /// the Bun executable with [`LocalRuntime::interpreter`].
+    #[cfg(feature = "bun")]
+    pub fn bun(package: impl Into<PathBuf>, project: impl Into<PathBuf>) -> Self {
+        let project = project.into();
+        let launcher = Launcher::bun(None, &package.into(), &project);
+        Self::with("bun", launcher, project)
+    }
+
     /// Put `directory` ahead on the runtime's `PYTHONPATH`: a source checkout
     /// of the `rutis` package, or plugins that are not installed.
     pub fn python_path(mut self, directory: impl Into<PathBuf>) -> Self {
@@ -137,7 +148,8 @@ impl LocalRuntime {
         self
     }
 
-    /// Run the Python runtime with this interpreter instead of `python3`.
+    /// Run the runtime with this interpreter instead of its default
+    /// (`python3` for Python, `bun` for Bun).
     pub fn interpreter(mut self, program: impl Into<OsString>) -> Self {
         self.launcher.program = program.into();
         self
