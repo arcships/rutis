@@ -26,15 +26,20 @@ plugin_name="$(lib_name greeter)"
 
 base="$(native_path "$(mktemp -d /tmp/rutis-sdk-bundle.XXXXXX)")"
 
-# The runtime bundle (host, SDK, libstd, launcher) the sdk-bundle belongs to.
-echo "[sdk-bundle-test] building the runtime bundle"
-bash tools/build-dylib-bundle.sh "$base/runtime"
-sdk_sha="$(sed -n 's/^artifact_sha256 = "\(.*\)"/\1/p' "$base/runtime/sdk.toml")"
-test "$(sha256_of "$base/runtime/$sdk_name")" = "$sdk_sha"
+# The runtime bundle (host, SDK, libstd, launcher) the sdk-bundle belongs to:
+# the one given as the first argument (built by tools/build-dylib-bundle.sh,
+# and only read here), or a new one.
+runtime="${1:-$base/runtime}"
+if test -z "${1:-}"; then
+  echo "[sdk-bundle-test] building the runtime bundle"
+  bash tools/build-dylib-bundle.sh "$runtime"
+fi
+sdk_sha="$(sed -n 's/^artifact_sha256 = "\(.*\)"/\1/p' "$runtime/sdk.toml")"
+test "$(sha256_of "$runtime/$sdk_name")" = "$sdk_sha"
 
 # The sdk-bundle: prebuilt SDK, closure rlibs (shrunk by the probe), manifest.
 echo "[sdk-bundle-test] packing the sdk-bundle"
-with_timeout 2400 cargo xtask pack-sdk-bundle --bundle-dir "$base/runtime" --output "$base/sdk-bundle"
+with_timeout 2400 cargo xtask pack-sdk-bundle --bundle-dir "$runtime" --output "$base/sdk-bundle"
 test "$(sha256_of "$base/sdk-bundle/lib/$sdk_name")" = "$sdk_sha"
 test -f "$base/sdk-bundle/bundle.toml"
 test -f "$base/sdk-bundle/GUIDE.md"
@@ -83,7 +88,7 @@ for item in v1 v2; do
   marker="$base/init-$item"
   echo "[sdk-bundle-test] loading $item on the published host"
   if ! with_timeout 600 env RUTIS_PLUGIN_INIT_MARKER="$marker" \
-      "$base/runtime/rutis-cli" --scripted --load-only \
+      "$runtime/rutis-cli" --scripted --load-only \
       --plugin "$base/$item" --plugin-config '{}' > /dev/null; then
     echo "the published host rejected or hung on $item" >&2
     exit 1
@@ -148,7 +153,7 @@ EOF
 with_timeout 900 env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin \
   --manifest-path "$e2a/Cargo.toml" --bundle "$base/sdk-bundle" \
   --features export --output "$base/e2a"
-with_timeout 600 "$base/runtime/rutis-cli" --scripted --load-only \
+with_timeout 600 "$runtime/rutis-cli" --scripted --load-only \
   --plugin "$base/e2a" --plugin-config '{}' > /dev/null
 
 # The plugin links the SDK and libstd dynamically and carries no run path.

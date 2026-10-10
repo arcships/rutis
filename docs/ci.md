@@ -12,13 +12,14 @@
 4. macOS 机器少，一次运行尽量只占一个 macOS 任务。
 5. 同一项检查只在一个任务里跑。
 6. 改 CI 配置的 PR 运行全部任务。
+7. Rust 编译缓存只在 main 上保存；PR 读取 main 的缓存，不保存自己的。
 
 ## 2. 有哪些 workflow
 
 | workflow | 什么时候运行 | 做什么 |
 | --- | --- | --- |
 | `ci.yml` | 每个 PR；每次推送 main | 测试和检查（下文） |
-| `dylib-windows.yml` | PR 改了 dylib 相关文件；打 `v*` tag；手动 | Windows 上的 dylib 测试 |
+| `dylib-windows.yml` | PR 改了 dylib 相关文件；每次推送 main；打 `v*` tag；手动 | Windows 上的 dylib 测试 |
 | `stress.yml` | 每晚；手动 | 重复运行内核测试；网络长时间测试 |
 | `ci-stats.yml` | 每周；手动 | 统计 CI 的耗时和失败 |
 | `release.yml`、`release-cli.yml` | 打 tag | 发布 |
@@ -34,6 +35,8 @@
 | `dylib` | 内核 `crates/rutis`，以及 `rutis-cli`、`rutis-dylib*`、`rutis-sdk`、`rutis-dev`、`rutis-xtask`、`tools/*dylib*`、`tools/test-sdk-bundle.sh`、`tools/lib/**`、`tests/dylib-fixtures/**` |
 | `packaging` | `scripts/train.mjs`、各个 `pyproject.toml` 和 `package.json`、`crates/*/Cargo.toml`、`node/rutis-host/scripts/**` |
 | `docs` | 任何 `.md` 文件 |
+| `bun` | `bun/**`、`node/rutis/**`、`crates/rutis-bridge`、`crates/rutis-loader`、`crates/rutis-host` |
+| `repro` | `crates/rutis-sdk`、`crates/rutis-cli/build.rs`、`tools/test-dylib-repro.sh`、`tools/build-dylib-bundle.sh`、`tools/lib/**`。内核改动也会影响 SDK，但它的可复现检查放在 main 上 |
 
 ## 4. 每个任务
 
@@ -41,12 +44,13 @@
 | --- | --- | --- | --- |
 | `links` | Linux | `docs` | 检查 Markdown 里的相对链接 |
 | `test` | Linux | `code` | 全部 Rust 测试和编译检查，Node、Python 包的测试 |
-| `network-macos` | macOS | `code` | bridge、loader、rutis-host 在 macOS 上的测试；整个工作区的编译检查 |
+| `network-macos` | macOS | `code` | bridge、loader（含 Bun 的行）、rutis-host 在 macOS 上的测试，Bun 用最新版；整个工作区的编译检查 |
 | `runtimes-windows` | Windows | `code` | bridge、loader、rutis-host 在 Windows 上的测试；整个工作区的编译检查 |
-| `runtimes-bun` | Linux、macOS；Bun 1.4.0 和最新版 | 无，每次都跑（见 §7） | Bun 运行时的全部测试 |
+| `runtimes-bun` | PR：Linux，Bun 1.4.0 和最新版；main 上再加 macOS，Bun 1.4.0 | `bun` | Bun 运行时的全部测试 |
 | `semver-rutis` | Linux | `code` | 公开 API 和上次发布相比有没有不兼容的改动（只提示） |
-| `dylib-linux-launcher`、`dylib-linux-repro`、`dylib-linux-sdk-bundle` | Linux | `dylib` | dylib 测试，分三个任务同时跑 |
-| `dylib-macos` | macOS | `dylib` | 同样的 dylib 测试，在一个任务里依次跑 |
+| `dylib-linux-launcher`、`dylib-linux-sdk-bundle` | Linux | `dylib` | dylib 测试，分两个任务同时跑 |
+| `dylib-linux-repro` | Linux | `repro` | SDK 可复现构建（在一台机器上用两个目录各构建一次） |
+| `dylib-macos` | macOS | `dylib` | 同样的 dylib 测试，在一个任务里依次跑，共用一次构建的 bundle；可复现构建这一步只在 `repro` 打开时跑 |
 | `release-dry-run`、`release-windows`、`release-wheel-aarch64` | Linux、Windows、Linux | `packaging` | 发布要用的包能构建 |
 | `sdk-repro`、`sdk-repro-macos` 及比对 | Linux、macOS | `all` | 在两台机器上分别构建 SDK，比较结果是否相同 |
 | `ci-ok` | Linux | 总是 | 汇总（§5） |
@@ -71,7 +75,7 @@
 
 1. `changes` 加一个这种语言的开关，包括它的运行时目录，以及 `crates/rutis-bridge`、`crates/rutis-loader`、`crates/rutis-host`。
 2. 在 `test` 和 `network-macos` 里安装这种语言，在已有的 bridge、loader、host 测试步骤里加上它的 feature。
-3. 如果要测多个版本，加一个 `runtimes-<语言>` 任务：按第 1 步的开关运行，加进 `ci-ok`，PR 上只在 Linux 跑；macOS 上的旧版本只在 main 上跑。
+3. 如果要测多个版本，加一个 `runtimes-<语言>` 任务：按第 1 步的开关运行，加进 `ci-ok`，PR 上只在 Linux 跑；macOS 上的旧版本只在 main 上跑（做法见 `runtimes-bun` 和 `changes` 的 `bun-matrix`）。
 4. 发布相关：`release-dry-run`、`scripts/train.mjs`、`release.yml` 都加上它的包。
 5. 更新 §3、§4。
 
@@ -91,13 +95,9 @@
 - main 上的运行被手动取消后，要重新运行，每次合并都要有完整结果。
 - 偶尔失败的测试：先想办法稳定复现，再修。不用自动重试来掩盖。
 
-## 8. 现在和本文不一致的地方（2026-10-10，main `45506e8`）
+## 8. 编译缓存
 
-| 问题 | 怎么改 |
-| --- | --- |
-| `runtimes-bun` 没有开关，也不在 `ci-ok` 里。结果是每个 PR（包括只改文档的）都会跑它，占 2 个 macOS 任务；它失败了也不会阻止合并。原因是 #200 和 #213 同时合并，#200 加的这个任务没有接上 #213 的开关 | 按 §6 加 `bun` 开关；`runtimes-bun` 按开关运行，加进 `ci-ok`；PR 上只在 Linux 跑 |
-| Bun 的测试在 macOS 上跑了三遍：`network-macos` 一遍，`runtimes-bun` 两个版本各一遍 | `network-macos` 的 loader 测试加上 `bun`；macOS 上的 Bun 1.4.0 只在 main 上跑 |
-| main 上最近 4 次运行被取消，`45506e8` 没有完整结果 | 重新运行 main 最新提交 |
-| 质量现状 §8.4 写着合并到 main 时要跑 `dylib-windows`，但 `dylib-windows.yml` 推送 main 时不会运行 | 二选一：给它加上推送 main 时运行；或者把 §8.4 改成只在打 tag 时运行 |
-
-这些修改单独开一个 `ci:` PR。
+- 所有任务用 `Swatinem/rust-cache`，设置 `save-if: github.ref == 'refs/heads/main'`：只有 main 上的运行保存缓存。
+- PR 只能读取 main 和它自己的缓存。PR 不保存，是为了不占用仓库 10 GB 的缓存空间，把 main 的缓存挤掉。
+- 加任务时照此设置（`ci.yml` 第一个 `rust-cache` 处有说明）。
+- 不能用缓存的检查（SDK 可复现构建）放在 main 上，PR 只在 `repro` 打开时运行。
