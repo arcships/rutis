@@ -5,8 +5,10 @@
 //! rutis_bridge::channel::testing::contract(|| my_transport::pair());
 //! ```
 //!
-//! Each check panics with what was broken. Transport-specific behaviour
-//! (framing, heartbeats, size limits) is tested by the transport itself.
+//! Each check panics with what was broken. A transport with a message size
+//! limit also runs [`size_limit`] with its limit. Transport-specific
+//! behaviour (framing, heartbeats, what the far end is told of a message
+//! over the limit, receiving one) is tested by the transport itself.
 
 mod fault;
 pub use fault::{fault, Faults};
@@ -151,6 +153,44 @@ pub fn the_far_end_closing_ends_the_channel((mut a, mut b): (Channel, Channel)) 
     );
     let failed = (0..1000).any(|_| b.sender.send(&[b'x'; 1024]).is_err());
     assert!(failed, "sending to a closed far end must fail");
+}
+
+/// For a transport with a message size limit (Q6.3.2), on pairs whose ends
+/// both have the limit `limit`: a message of exactly `limit` bytes arrives;
+/// one byte more is refused, ends the channel, and the far end sees the end
+/// rather than the message.
+///
+/// Not part of [`contract`]: the in-memory transport has no limit (it
+/// crosses no process boundary, so nothing untrusted sends on it), and a
+/// receiver over the limit can only be reached by bypassing the sender's
+/// own check, which each transport does in its own tests.
+pub fn size_limit((mut a, mut b): (Channel, Channel), limit: usize) {
+    let at_limit = vec![b'x'; limit];
+    let sending = std::thread::spawn(move || {
+        a.sender.send(&at_limit).unwrap();
+        a
+    });
+    let received = recv(&mut b).expect("the message at the limit");
+    assert_eq!(
+        received.len(),
+        limit,
+        "a message at the limit arrives whole"
+    );
+    let mut a = sending.join().unwrap();
+
+    let over = vec![b'x'; limit + 1];
+    assert!(
+        a.sender.send(&over).is_err(),
+        "a message over the limit is refused"
+    );
+    assert!(
+        !matches!(b.receiver.recv(), Ok(Some(_))),
+        "the far end sees the end, not the message"
+    );
+    assert!(
+        a.sender.send(b"after").is_err(),
+        "the channel ended with the refused message"
+    );
 }
 
 fn recv_or_end(channel: &mut Channel) -> Option<Vec<u8>> {
