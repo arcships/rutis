@@ -239,6 +239,94 @@ async fn handshake_and_release_count_fail_closed() {
     assert!(peer.invoke("", "test", Value::Undefined).is_err());
 }
 
+/// Q6.2.3, Q5.3.4, risk P3: a message that is not a frame of this protocol,
+/// or names a call or reference this side does not have, closes the session
+/// with a transport error, whatever was in flight.
+#[tokio::test(flavor = "multi_thread")]
+async fn malformed_and_dangling_frames_close_the_session() {
+    let cases: [(&str, &[u8]); 10] = [
+        ("malformed JSON", br#"{"op":"invoke","id":"node:1""#),
+        ("not an object", b"42"),
+        ("unknown op", br#"{"op":"frobnicate","id":"node:1"}"#),
+        (
+            "wrong field type",
+            br#"{"op":"invoke","id":"node:1","path":[],"target":7,"method":"m","args":{"type":"undefined"}}"#,
+        ),
+        (
+            "missing field",
+            br#"{"op":"invoke","id":"node:1","path":[],"target":"t","args":{"type":"undefined"}}"#,
+        ),
+        (
+            "unknown wire value",
+            br#"{"op":"invoke","id":"node:1","path":[],"target":"t","method":"m","args":{"type":"bogus"}}"#,
+        ),
+        (
+            "call of an unknown reference",
+            br#"{"op":"call","id":"node:1","path":[],"reference":99,"args":{"type":"undefined"}}"#,
+        ),
+        (
+            "await of an unknown reference",
+            br#"{"op":"await","id":"node:1","path":[],"reference":99}"#,
+        ),
+        (
+            "release of an unknown reference",
+            br#"{"op":"release","reference":99,"count":1}"#,
+        ),
+        (
+            "reply to an unknown call",
+            br#"{"op":"return","id":"rust:99","value":{"type":"undefined"}}"#,
+        ),
+    ];
+    for (case, message) in cases {
+        let (peer, mut remote) = pair();
+        send(&mut remote, hello(VERSION));
+        peer.ready().await.unwrap();
+        remote.sender.lock().unwrap().send(message).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), peer.closed())
+            .await
+            .unwrap_or_else(|_| panic!("{case}: the session stayed open"));
+        assert!(
+            matches!(peer.close_reason(), Some(Error::Transport(_))),
+            "{case}: {:?}",
+            peer.close_reason()
+        );
+        assert!(peer.invoke("t", "m", Value::Undefined).is_err(), "{case}");
+    }
+}
+
+/// The exception: a cancel may cross the reply of the call it cancels, so
+/// one for a call this side does not have is ignored.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancel_for_an_unknown_call_is_ignored() {
+    struct Echo;
+    impl Dispatch for Echo {
+        fn invoke(&self, _: &Connection, _: &str, _: &str, args: Value) -> Reply {
+            Ok(args)
+        }
+    }
+    let (peer, remote) = connected(Arc::new(Echo));
+    let remote = tokio::task::spawn_blocking(move || {
+        let mut remote = Remote::start(remote);
+        remote.send(Frame::Cancel {
+            id: "node:7".into(),
+        });
+        let echoed = remote.call(
+            1,
+            Frame::Invoke {
+                id: "node:1".into(),
+                path: vec![],
+                target: "t".into(),
+                method: "echo".into(),
+                args: data(json!("still here")),
+            },
+        );
+        (echoed, remote)
+    });
+    let (echoed, _remote) = remote.await.unwrap();
+    assert_eq!(echoed, json!("still here"));
+    assert!(peer.close_reason().is_none());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn explicit_close_interrupts_a_writer_whose_peer_stopped_reading() {
     let (peer, mut remote) = pair();

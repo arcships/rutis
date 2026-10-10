@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rutis_bridge::channel::PeerId;
-use rutis_bridge::session::testing::{session, Fixture};
+use rutis_bridge::session::testing::{malformed, session, Fixture};
 use rutis_bridge::session::{Connection, Endpoint, Format};
 
 fn id(s: &str) -> PeerId {
@@ -117,4 +117,90 @@ async fn bun_meets_the_session_contract() {
         .current_dir(repo().join("bun/rutis-bun"));
     let (far, _child) = far_end(command, "bun").await;
     run(far).await;
+}
+
+/// Far ends started one per channel: a command given a Unix socket path to
+/// dial, framed by the local transport. Dropped, it kills them all.
+struct Started(std::sync::Mutex<Vec<std::process::Child>>);
+impl Drop for Started {
+    fn drop(&mut self) {
+        for mut child in self.0.lock().unwrap().drain(..) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+impl Started {
+    fn open(&self, mut command: std::process::Command) -> rutis_bridge::channel::Channel {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("malformed.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let child = command.arg(&socket).spawn().unwrap();
+        self.0.lock().unwrap().push(child);
+        let (stream, _) = listener.accept().unwrap();
+        let reader = stream.try_clone().unwrap();
+        struct Shut(std::os::unix::net::UnixStream);
+        impl rutis_bridge::channel::Closer for Shut {
+            fn close(&self, _: &str) {
+                let _ = self.0.shutdown(std::net::Shutdown::Both);
+            }
+        }
+        let closer = Arc::new(Shut(stream.try_clone().unwrap()));
+        rutis_bridge::transport::local::framed(reader, stream, closer)
+    }
+}
+
+/// Q6.2.2, Q6.2.3, risk P3: every implementation ends the session on the
+/// same malformed and dangling frames.
+#[tokio::test(flavor = "multi_thread")]
+async fn rust_ends_the_session_on_malformed_frames() {
+    tokio::task::spawn_blocking(|| {
+        let kept = std::sync::Mutex::new(Vec::new());
+        malformed(|| {
+            let (a, b) = rutis_bridge::transport::memory::pair();
+            let far = Connection::open_with(
+                b,
+                Arc::new(Fixture::default()),
+                Format::Endpoint(Endpoint::rust(id("rust")).expect(id("main"))),
+            )
+            .unwrap();
+            kept.lock().unwrap().push(far);
+            a
+        })
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn node_ends_the_session_on_malformed_frames() {
+    tokio::task::spawn_blocking(|| {
+        let started = Started(Default::default());
+        malformed(|| {
+            let mut command = std::process::Command::new("node");
+            command
+                .args(["--import", "tsx"])
+                .arg(repo().join("node/rutis-runtime/test/fixtures/conformance-session.mjs"))
+                .current_dir(repo().join("node/rutis-runtime"));
+            started.open(command)
+        })
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn python_ends_the_session_on_malformed_frames() {
+    tokio::task::spawn_blocking(|| {
+        let started = Started(Default::default());
+        malformed(|| {
+            let mut command = std::process::Command::new("python3");
+            command
+                .arg(repo().join("python/rutis/tests/conformance_session.py"))
+                .env("PYTHONPATH", repo().join("python/rutis"));
+            started.open(command)
+        })
+    })
+    .await
+    .unwrap();
 }

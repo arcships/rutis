@@ -51,6 +51,64 @@ class PeerTests(unittest.IsolatedAsyncioTestCase):
 
 
 
+class MalformedFrameTests(unittest.IsolatedAsyncioTestCase):
+    """Q6.2.3, risk P3: a frame of the wrong shape, or naming a call or
+    reference this side does not have, ends the session; the cases of
+    rutis-bridge's `malformed_and_dangling_frames_close_the_session`."""
+
+    def session(self):
+        ours, theirs = socket.socketpair()
+        theirs.settimeout(10)
+        self.addCleanup(ours.close)
+        self.addCleanup(theirs.close)
+        peer = Peer(ours, lambda target, method, args: "served")
+        self.addCleanup(peer._channel.close)
+        self.addCleanup(peer.close)
+        return peer, theirs
+
+    async def test_text_that_is_not_json_closes_the_session_and_the_channel(self):
+        peer, theirs = self.session()
+        peer.start()
+        lines = theirs.makefile("rb")
+        self.assertEqual(json.loads(lines.readline())["op"], "hello")
+        theirs.sendall(b'{"op":"invoke","id":"rust:1"\n')
+        await asyncio.wait_for(peer.closed, 10)
+        self.assertIsInstance(peer.closed_error, ConnectionError)
+        self.assertEqual(lines.readline(), b"", "the channel ends too")
+
+    async def test_malformed_and_dangling_frames_close_the_session(self):
+        cases = {
+            "not an object": 42,
+            "unknown op": {"op": "frobnicate", "id": "rust:1"},
+            "wrong field type": {"op": "invoke", "id": "rust:1", "path": [], "target": 7, "method": "m", "args": {"type": "undefined"}},
+            "missing field": {"op": "invoke", "id": "rust:1", "path": [], "target": "t", "args": {"type": "undefined"}},
+            "unknown wire value": {"op": "invoke", "id": "rust:1", "path": [], "target": "t", "method": "m", "args": {"type": "bogus"}},
+            "call of an unknown reference": {"op": "call", "id": "rust:1", "path": [], "reference": 99, "args": {"type": "undefined"}},
+            "await of an unknown reference": {"op": "await", "id": "rust:1", "path": [], "reference": 99},
+            "release of an unknown reference": {"op": "release", "reference": 99, "count": 1},
+            "reply to an unknown call": {"op": "return", "id": "node:99", "value": {"type": "undefined"}},
+            "cancel without an id": {"op": "cancel", "id": 7},
+        }
+        for name, frame in cases.items():
+            with self.subTest(name):
+                peer, _theirs = self.session()
+                peer._receive({"op": "hello", "version": 2})
+                peer.receive(frame)
+                self.assertIsNotNone(peer.closed_error)
+                self.assertTrue(peer.closed.done())
+
+    async def test_a_cancel_for_an_unknown_call_is_ignored(self):
+        peer, theirs = self.session()
+        peer._receive({"op": "hello", "version": 2})
+        lines = theirs.makefile("rb")
+        peer.receive({"op": "cancel", "id": "rust:7"})
+        peer.receive({"op": "invoke", "id": "rust:1", "path": [], "target": "t", "method": "m", "args": {"type": "data", "value": []}})
+        # The call runs on the loop: the reply is read from the far end.
+        reply = await asyncio.to_thread(lines.readline)
+        self.assertEqual(json.loads(reply)["value"], {"type": "data", "value": "served"})
+        self.assertIsNone(peer.closed_error)
+
+
 class Weather:
     def today(self):
         return "monday"

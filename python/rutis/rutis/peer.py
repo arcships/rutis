@@ -371,6 +371,11 @@ class Peer:
             while (message := self._channel.recv()) is not None:
                 self._deliver(json.loads(message))
         except Exception as error:  # noqa: BLE001 - any failure ends the session
+            # Text that is not JSON ends the channel too, not only the session.
+            try:
+                self._channel.close(str(error))
+            except OSError:
+                pass
             self._deliver((_CLOSED, f"session failed: {error}"))
             return
         self._deliver((_CLOSED, "Rust process disconnected"))
@@ -742,6 +747,11 @@ class Peer:
         if not self._handshake:
             raise ValueError("request before protocol handshake")
         if op in ("return", "throw"):
+            error = frame.get("error")
+            if op == "throw" and not (
+                isinstance(error, dict) and isinstance(error.get("name"), str) and isinstance(error.get("message"), str)
+            ):
+                raise ValueError("invalid error")
             value = self._decode(frame["value"]) if op == "return" else decode_error(frame["error"])
             call = frame.get("id")
             finish = self._pending.pop(call, None)
@@ -754,6 +764,8 @@ class Peer:
             return
         if op == "cancel":
             call = frame.get("id")
+            if not isinstance(call, str):
+                raise ValueError("invalid cancel")
             signal = self._signals.get(call)
             if signal is not None:
                 signal._cancel()
@@ -785,6 +797,8 @@ class Peer:
         if sequence <= self._received or sequence > MAX_SAFE:
             raise ValueError("invalid or repeated invocation identity")
         self._received = sequence
+        if op == "invoke" and not (isinstance(frame.get("target"), str) and isinstance(frame.get("method"), str)):
+            raise ValueError("invalid target or method")
         if op == "call" and frame.get("method") is not None and not isinstance(frame["method"], str):
             raise ValueError("invalid method")
         if op == "get" and not isinstance(frame.get("property"), str):
