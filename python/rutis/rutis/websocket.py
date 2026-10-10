@@ -112,11 +112,23 @@ class Listener:
         self.address = address
         self._stopped = threading.Event()
         self._failed: list[BaseException] = []
-        threading.Thread(target=self._serve, name="rutis-websocket", daemon=True).start()
+        self._closing = False
+        self._stopping: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._serving = threading.Thread(target=self._serve, name="rutis-websocket", daemon=True)
+        self._serving.start()
 
     def _serve(self) -> None:
         try:
             self._server.serve_forever()
+        except BaseException as error:
+            # serve_forever() itself returns when accept() fails with an
+            # OSError; anything it raises (its selector failing, say) means
+            # nothing accepts any more: refuse new connections, and let
+            # close() raise what went wrong.
+            self._failed.append(error)
+            self._server.socket.close()
+            raise
         finally:
             self._stopped.set()
 
@@ -127,7 +139,8 @@ class Listener:
     def close(self) -> None:
         """Stop accepting: on return the listening socket is closed and a
         new connection is refused. Established connections stay, with every
-        supported websockets version."""
+        supported websockets version. Raises what stopped the listener, if
+        serving or stopping failed; a second call only waits and reports."""
 
         def stop() -> None:
             try:
@@ -136,10 +149,14 @@ class Listener:
                 self._failed.append(error)
                 self._stopped.set()
 
-        # websockets 17 waits in shutdown() until every connection ends, so
-        # it runs aside; serve_forever() returns once the socket is closed.
-        # A failure is raised here, not left to the thread.
-        threading.Thread(target=stop, name="rutis-websocket-close", daemon=True).start()
+        with self._lock:
+            first, self._closing = not self._closing, True
+        if first and not self._stopped.is_set():
+            # websockets 17 waits in shutdown() until every connection ends,
+            # so it runs aside; serve_forever() returns once the socket is
+            # closed. A failure is raised here, not left to the thread.
+            self._stopping = threading.Thread(target=stop, name="rutis-websocket-close", daemon=True)
+            self._stopping.start()
         self._stopped.wait()
         if self._failed:
             raise self._failed[0]
