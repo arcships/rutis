@@ -129,7 +129,7 @@ Node channel exposes an equivalent API inside its I/O worker:
 |---|---|
 | Encoding | Compact JSON at protocol layer; escape newlines inside strings; codec is internal and not currently replaceable |
 | Byte stream | Unix sockets and inherited fds use newline-delimited framing; channel adds newline on send and removes separator on receive |
-| Byte stream size limit | At most 16 MiB per message (without its newline), the WebSocket default, the same in Rust, Node and Python. Sending over it: refused, and the channel closes. Receiving over it: once the limit is read with no newline the channel closes and reads no further, with "over the limit" as the reason. Line framing has no close code: the far end sees the connection end. A stream that ends inside a message is a failure, not a normal end |
+| Byte stream size limit | At most 16 MiB per message (without its newline), the WebSocket default, the same in Rust, Node and Python. Sending over it: refused, and the channel closes. Receiving over it: once the limit is read with no newline the channel closes and reads no further, with "over the limit" as the reason. Line framing has no close code: the far end sees the connection end. A stream that ends inside a message is a failure, not a normal end. Only `\n` separates messages: a `\r` before it is a byte of the message and counts toward the limit (JSON takes it as trailing whitespace), so the limit plus `\r\n` is over it, in all three |
 | WebSocket | One text message per UTF-8 JSON frame, without newline |
 | Future binary encoding | Length prefix on byte streams, binary message on WebSocket; connector determines both sides' encoding before session establishment; do not negotiate inside protocol frame |
 
@@ -139,7 +139,7 @@ Every message a session receives must be a frame of this protocol, and the calls
 
 | Case | Example |
 | --- | --- |
-| Not JSON | `{"op":"invoke"` |
+| Not JSON, including an empty frame (a lone newline) and invalid UTF-8 (even inside a string; Node must not replace it with U+FFFD and accept it) | `{"op":"invoke"`, `"\xff"` |
 | Not an object, or an unknown `op` | `42`, `{"op":"frobnicate"}` |
 | A missing field or one of the wrong type | `invoke` whose `target` is not a string, or without `method`; `cancel` whose `id` is not a string; `throw` whose `error.name`/`message` is not a string |
 | An unknown value tag | `{"type":"bogus"}` |

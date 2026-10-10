@@ -21,6 +21,9 @@ use crate::channel::{Channel, ChannelError};
 /// How long a check waits for something that must happen.
 const PATIENCE: Duration = Duration::from_secs(5);
 
+/// How long a check waits before it fails rather than hangs.
+const GUARD: Duration = Duration::from_secs(10);
+
 /// Run every check on fresh pairs from `pair`: two channels joined end to
 /// end, what one sends the other receives.
 pub fn contract(pair: impl Fn() -> (Channel, Channel)) {
@@ -164,13 +167,37 @@ pub fn the_far_end_closing_ends_the_channel((mut a, mut b): (Channel, Channel)) 
 /// crosses no process boundary, so nothing untrusted sends on it), and a
 /// receiver over the limit can only be reached by bypassing the sender's
 /// own check, which each transport does in its own tests.
-pub fn size_limit((mut a, mut b): (Channel, Channel), limit: usize) {
+pub fn size_limit((mut a, b): (Channel, Channel), limit: usize) {
+    // `b` receives on a thread of its own, so a far end that never sees
+    // anything fails the check instead of hanging it.
+    let Channel {
+        mut receiver,
+        closer: far_closer,
+        ..
+    } = b;
+    let (deliver, delivered) = mpsc::channel();
+    std::thread::spawn(move || loop {
+        let received = receiver.recv();
+        let more = matches!(received, Ok(Some(_)));
+        if deliver.send(received).is_err() || !more {
+            return;
+        }
+    });
+    let next = |what: &str| {
+        delivered.recv_timeout(GUARD).unwrap_or_else(|_| {
+            far_closer.close("the check gave up");
+            panic!("{what}: nothing arrived within {GUARD:?}")
+        })
+    };
+
     let at_limit = vec![b'x'; limit];
     let sending = std::thread::spawn(move || {
         a.sender.send(&at_limit).unwrap();
         a
     });
-    let received = recv(&mut b).expect("the message at the limit");
+    let received = next("the message at the limit")
+        .unwrap_or_else(|error| panic!("receive failed: {error}"))
+        .expect("the message at the limit");
     assert_eq!(
         received.len(),
         limit,
@@ -184,7 +211,7 @@ pub fn size_limit((mut a, mut b): (Channel, Channel), limit: usize) {
         "a message over the limit is refused"
     );
     assert!(
-        !matches!(b.receiver.recv(), Ok(Some(_))),
+        !matches!(next("the end"), Ok(Some(_))),
         "the far end sees the end, not the message"
     );
     assert!(

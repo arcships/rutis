@@ -68,6 +68,27 @@ class LineLimitTests(unittest.TestCase):
             channel.recv()
         writer.finish(self)
 
+    def test_a_line_at_the_limit_whose_newline_comes_in_a_later_read(self):
+        channel, theirs = self.pair(max_message=8)
+        theirs.sendall(b"1234")
+        # Sent apart, received apart: the reader sees the line in pieces.
+        writer = Writer(theirs, [b"5678", b"\n", b"123456789\n"])
+        writer.start()
+        self.assertEqual(channel.recv(), b"12345678")
+        with self.assertRaisesRegex(ConnectionError, "over the limit"):
+            channel.recv()
+        writer.finish(self)
+
+    def test_a_carriage_return_is_part_of_the_message(self):
+        # Only \n separates messages: a \r before it is a byte of the
+        # message and counts toward the limit, as in Rust and Node.
+        channel, theirs = self.pair(max_message=4)
+        theirs.sendall(b"{}\r\nabc\r\nabcd\r\n")
+        self.assertEqual(channel.recv(), b"{}\r")
+        self.assertEqual(channel.recv(), b"abc\r")
+        with self.assertRaisesRegex(ConnectionError, "over the limit"):
+            channel.recv()
+
     def test_bytes_without_a_newline_stop_at_the_limit(self):
         channel, theirs = self.pair(max_message=1024)
         # Endless, unless the channel gives up.

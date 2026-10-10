@@ -319,6 +319,25 @@ mod tests {
         assert!(over_the_limit(over.receiver.recv()));
     }
 
+    /// Only `\n` separates messages: a `\r` before it is a byte of the
+    /// message, and counts toward the limit (JSON takes it as trailing
+    /// whitespace). The same in Node and Python.
+    #[test]
+    fn a_carriage_return_is_part_of_the_message() {
+        let open = |bytes: &[u8]| {
+            limited(
+                Cursor::new(bytes.to_vec()),
+                Vec::new(),
+                Arc::new(Nothing),
+                ChannelInfo::default(),
+                4,
+            )
+        };
+        assert_eq!(open(b"{}\r\n").receiver.recv().unwrap().unwrap(), b"{}\r");
+        assert_eq!(open(b"abc\r\n").receiver.recv().unwrap().unwrap(), b"abc\r");
+        assert!(over_the_limit(open(b"abcd\r\n").receiver.recv()));
+    }
+
     /// Sending over the limit is refused, and ends the channel as the far
     /// end would on receiving it.
     #[test]

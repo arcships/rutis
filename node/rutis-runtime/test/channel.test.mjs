@@ -138,6 +138,29 @@ test('sending over the limit closes the channel instead', async () => {
   assert.equal((await lines.next()).done, true)
 })
 
+// Q6.2.3: invalid UTF-8 is not a frame. Decoding must not replace it with
+// U+FFFD, which inside a JSON string would parse with changed content.
+test('a line that is not valid UTF-8 closes the channel', async () => {
+  const { theirs, received, ended } = await framedPair()
+  theirs.on('error', () => {})
+  theirs.write(Buffer.concat([Buffer.from('{"v":"'), Buffer.from([0xff]), Buffer.from('"}\n{}\n')]))
+  assert.match(await ended, /not valid UTF-8/)
+  assert.deepEqual(received, [])
+})
+
+// Only \n separates messages: a \r before it is a byte of the message and
+// counts toward the limit, as in Rust and Python.
+test('a carriage return is part of the message', async () => {
+  const fits = await framedPair({ maxMessage: 4 })
+  fits.theirs.end('{}\r\nabc\r\n')
+  assert.equal(await fits.ended, undefined)
+  assert.deepEqual(fits.received, ['{}\r', 'abc\r'])
+  const over = await framedPair({ maxMessage: 4 })
+  over.theirs.on('error', () => {})
+  over.theirs.end('abcd\r\n')
+  assert.match(await over.ended, /over the limit/)
+})
+
 // A loopback child's socket comes paused, with what followed its token put
 // back (serve.mjs): the framing must start it and read that first.
 test('a loopback socket handed over after its token is framed from where the token ended', async () => {

@@ -9,6 +9,7 @@ const END_GRACE = 1000
 // a newline costs at most this much memory.
 export const MAX_MESSAGE = LIMITS.maxMessage
 const NEWLINE = 0x0a
+const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 
 // A newline-framed channel on a connected stream: each message sent gets a
 // trailing newline, each line received is one message. `closed(reason)`
@@ -31,7 +32,10 @@ export function frame(stream, { message, closed }, { maxMessage = MAX_MESSAGE } 
       }
       const line = size ? Buffer.concat([...pending, chunk.subarray(start, end)]) : chunk.subarray(start, end)
       pending = []; size = 0; start = end + 1
-      message(line.toString('utf8'))
+      let text
+      // Invalid UTF-8 is not a frame: decoding must not replace it quietly.
+      try { text = UTF8.decode(line) } catch { return fail('received a message that is not valid UTF-8') }
+      message(text)
     }
   })
   stream.once('end', () => { if (size) failure ??= 'stream ended inside a message' })
