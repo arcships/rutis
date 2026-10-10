@@ -28,6 +28,6 @@
 ## 环境
 
 - Linux、macOS 或 Windows x64（MSVC）。
-- Node 24 或更高，或 Bun 1.3.3 或更高（TypeScript / JavaScript 插件）。
+- Node 24 或更高，或 Bun 1.4 或更高（TypeScript / JavaScript 插件）。
 - Python 3.12 或更高（Python 插件）。
 - Rust 1.85 或更高（只在 Rust 里嵌入时需要）。

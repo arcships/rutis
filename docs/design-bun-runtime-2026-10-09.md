@@ -296,7 +296,7 @@ RuntimeResolver::modules(handle)       // 现有：行名 "bun:<模块>"
 | 通道用 `Bun.connect` | `node:net`：fd 用 `net.connect({ fd })`，Unix socket 和回环 TCP 用 `createConnection`，按行分帧由运行时自己做（`src/channel.ts`） | `node:net` 的流自带缓冲与背压；三种通道一套分帧，单条消息上限 16 MiB（与 WebSocket 相同），超过时关闭通道 |
 | 启动参数含 `--no-orphans` | 未加 | 宿主结束时通道断开，运行时随之退出；`--no-orphans` 依赖较新的 Bun，版本判断留到确定最低版本之后 |
 | `mount` 回复的 `implementation.name` 为 `rutis-bun` | `@arcships/rutis-bun`（包名） | 与 npm 包一致，`check` 里能直接对应 |
-| 版本下限 | `engines.bun` 为 `>=1.3.3`；CI 矩阵为 1.3.3 与最新版 | `--no-env-file` 从 Bun 1.3.3 起才有：CI 上 1.2.23 和 1.3.0 都把项目的 `.env` 读入（`the_projects_env_file_is_not_read` 失败）；1.2 上进程还会在会话中途正常退出，运行时已用定时器保持存活 |
+| 版本下限 | `engines.bun` 为 `>=1.4`；CI 矩阵为 1.4.0 与最新版 | `--no-env-file` 从 Bun 1.3.3 起才有：CI 上 1.2.23 和 1.3.0 都把项目的 `.env` 读入（`the_projects_env_file_is_not_read` 失败）。1.3.3 上 worker 发来的消息会被提前移入事件循环队列：同步等待期间要么乱序到达、会话因调用号不递增而出错（CI 压力测试 20 轮失败 5 轮），要么（按编号重排时）永远等不到而卡死；运行时这一侧无法修正。1.4.2 为 0/20；1.2 上进程还会在会话中途正常退出，运行时已用定时器保持存活 |
 | 远程运行时监听（B2） | B1 收到 `listen:` 时以明确的错误退出 | 按分阶段 |
 | （新发现）Bun 的目录项缓存 | 插件文件一律按真实路径导入 | 进程启动后在工作目录里新建的文件，经由符号链接目录（macOS 的 `/var`）的路径导入会失败，真实路径可以；`src/plugin.ts` 的 `locate` |
 | （新发现）运行期间新装的包 | 重启 Bun 运行时后才能解析；文档写明 | Bun 进程会记住某个包曾经不存在：一次解析失败之后，再安装的包（以及之后才出现在 `node_modules` 里的依赖）在同一进程里都解析不到，没有可用的失效接口；直接按真实路径导入文件不受影响。与 Node 运行时"代码改动后重启运行时"的约定一致 |
