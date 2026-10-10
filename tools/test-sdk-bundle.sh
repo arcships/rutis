@@ -29,13 +29,18 @@ base="$(native_path "$(mktemp -d /tmp/rutis-sdk-bundle.XXXXXX)")"
 # The runtime bundle (host, SDK, libstd, launcher) the sdk-bundle belongs to:
 # the one given as the first argument (built by tools/build-dylib-bundle.sh,
 # and only read here), or a new one.
-runtime="${1:-$base/runtime}"
+# On Windows the path is written with forward slashes (native_path): given
+# a backslash, sha256sum escapes its output and the hash no longer compares.
+runtime="$(native_path "${1:-$base/runtime}")"
 if test -z "${1:-}"; then
   echo "[sdk-bundle-test] building the runtime bundle"
   bash tools/build-dylib-bundle.sh "$runtime"
 fi
 sdk_sha="$(sed -n 's/^artifact_sha256 = "\(.*\)"/\1/p' "$runtime/sdk.toml")"
-test "$(sha256_of "$runtime/$sdk_name")" = "$sdk_sha"
+if test "$(sha256_of "$runtime/$sdk_name")" != "$sdk_sha"; then
+  echo "the SDK in $runtime does not match its sdk.toml ($sdk_sha)" >&2
+  exit 1
+fi
 
 # The sdk-bundle: prebuilt SDK, closure rlibs (shrunk by the probe), manifest.
 echo "[sdk-bundle-test] packing the sdk-bundle"
