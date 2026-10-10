@@ -16,7 +16,7 @@
   },
   "files": ["bin"],
   "engines": {
-    "node": ">=24"
+    "node": ">=22"
   },
   "publishConfig": {
     "access": "public"

@@ -29,13 +29,13 @@
     "src"
   ],
   "engines": {
-    "node": ">=24"
+    "node": ">=22"
   },
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "test": "node --test --test-isolation=none test/*.test.mjs"
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.4",
