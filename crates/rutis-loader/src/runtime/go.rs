@@ -145,7 +145,12 @@ pub struct GoBinary {
     pub manifest: Result<Arc<GoManifest>, String>,
 }
 
-/// Run `path --rutis-manifest`.
+/// What the Go binary at `path` serves: it runs `path --rutis-manifest`
+/// (within 5 s).
+pub fn read_go_manifest(path: &Path) -> Result<GoManifest, String> {
+    read_manifest(path)
+}
+
 fn read_manifest(path: &Path) -> Result<GoManifest, String> {
     let mut child = Command::new(path)
         .arg("--rutis-manifest")

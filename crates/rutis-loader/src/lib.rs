@@ -37,8 +37,8 @@ pub use resolver::{Build, Builtins, Chain, Resolved, Resolver, ScopedFactory};
 pub use runtime::resolve_entry;
 #[cfg(feature = "go")]
 pub use runtime::{
-    GoBinaries, GoBinary, GoManifest, GoResolver, GoRuntimeInfo, GoRuntimeState, GoRuntimes,
-    GoRuntimesHandle, GO_MARKER,
+    read_go_manifest, GoBinaries, GoBinary, GoManifest, GoResolver, GoRuntimeInfo, GoRuntimeState,
+    GoRuntimes, GoRuntimesHandle, GO_MARKER,
 };
 #[cfg(feature = "runtimes")]
 pub use runtime::{RowsSource, RuntimeResolver, RuntimeRows, RuntimeRowsPlugin};

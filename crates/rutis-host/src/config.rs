@@ -5,7 +5,8 @@
 //!   "id": "main",
 //!   "runtimes": {
 //!     "node": { "project": "." },
-//!     "py": { "project": ".", "python": ".venv/bin/python" }
+//!     "py": { "project": ".", "python": ".venv/bin/python" },
+//!     "go": { "dir": "plugins/go", "start": "on-demand", "idle": 60 }
 //!   },
 //!   "listen": [{ "name": "public", "address": "0.0.0.0:7443", "cert": "server.pem", "key": "server.key" }],
 //!   "rows": [
@@ -49,6 +50,8 @@ fn default_id() -> String {
 pub struct Runtimes {
     pub node: Option<NodeRuntime>,
     pub py: Option<PythonRuntime>,
+    /// Go binaries, one runtime each, started when a row uses them.
+    pub go: Option<GoRuntime>,
     /// Runtimes on other machines, reached through a `rutis-bridge/peer` row
     /// with `"runtime": "<name>"`.
     #[serde(default)]
@@ -59,8 +62,8 @@ pub struct Runtimes {
 #[serde(deny_unknown_fields)]
 pub struct RemoteRuntime {
     pub name: String,
-    /// `python`: rows `<name>:<module>`; `node`: npm names, resolved there
-    /// when no runtime before it has them.
+    /// `python`: rows `<name>:<module>`; `go`: rows `<name>:<plugin>`;
+    /// `node`: npm names, resolved there when no runtime before it has them.
     pub language: String,
 }
 
@@ -86,6 +89,54 @@ pub struct PythonRuntime {
     /// `Scripts\python.exe` in those environments, then `python`).
     #[serde(default)]
     pub python: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoRuntime {
+    /// Every Go binary in this directory (trusted as a whole: its files
+    /// that contain the Go SDK's marker are run to read their manifests).
+    #[serde(default)]
+    pub dir: Option<PathBuf>,
+    /// Go binaries, each a runtime named after its file (`go-<name>`).
+    #[serde(default)]
+    pub binaries: Vec<PathBuf>,
+    /// `on-demand` (the default): a runtime starts when a row uses it;
+    /// `eager`: every one starts with the host and keeps running.
+    #[serde(default)]
+    pub start: GoStart,
+    /// Seconds an on-demand runtime stays idle before it stops (60).
+    #[serde(default)]
+    pub idle: Option<u64>,
+    /// The directory the runtimes run in.
+    #[serde(default = "here")]
+    pub project: PathBuf,
+    /// A development build and its runtime's name (`rutis-host dev`).
+    #[serde(skip)]
+    pub dev: Option<(PathBuf, String)>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GoStart {
+    #[default]
+    OnDemand,
+    Eager,
+}
+
+impl GoRuntime {
+    /// Refuse settings that cannot work together.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.dir.is_none() && self.binaries.is_empty() && self.dev.is_none() {
+            return Err("runtimes.go needs a dir or binaries".into());
+        }
+        if self.start == GoStart::Eager && self.idle.is_some() {
+            return Err(
+                "runtimes.go: eager runtimes keep running, so idle does not apply to them".into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// The interpreter of the virtual environment `venv`.
@@ -157,6 +208,15 @@ impl HostConfig {
                 }
             }
         }
+        if let Some(go) = &mut self.runtimes.go {
+            if let Some(dir) = &mut go.dir {
+                at(dir);
+            }
+            for binary in &mut go.binaries {
+                at(binary);
+            }
+            at(&mut go.project);
+        }
         for listener in &mut self.listen {
             for path in [&mut listener.cert, &mut listener.key]
                 .into_iter()
@@ -192,6 +252,9 @@ impl HostConfig {
         }
         if self.runtimes.py.is_none() {
             self.runtimes.py = other.runtimes.py;
+        }
+        if self.runtimes.go.is_none() {
+            self.runtimes.go = other.runtimes.go;
         }
         self.runtimes.remote.extend(other.runtimes.remote);
         self.listen.extend(other.listen);
@@ -298,5 +361,32 @@ mod tests {
             Path::new("/srv/app/.venv/bin/python")
         );
         assert!(serde_json::from_value::<HostConfig>(json!({ "unknown": 1 })).is_err());
+    }
+
+    #[test]
+    fn go_runtimes_are_checked() {
+        let parse =
+            |value: serde_json::Value| -> GoRuntime { serde_json::from_value(value).unwrap() };
+        assert!(parse(json!({ "dir": "plugins/go" })).validate().is_ok());
+        assert!(
+            parse(json!({ "binaries": ["bin/netkit"], "start": "eager" }))
+                .validate()
+                .is_ok()
+        );
+        let none = parse(json!({})).validate().unwrap_err();
+        assert!(none.contains("needs a dir or binaries"), "{none}");
+        let both = parse(json!({ "dir": "d", "start": "eager", "idle": 30 }))
+            .validate()
+            .unwrap_err();
+        assert!(both.contains("idle does not apply"), "{both}");
+        let mut config: HostConfig = serde_json::from_value(json!({
+            "runtimes": { "go": { "dir": "plugins/go", "binaries": ["bin/netkit"] } }
+        }))
+        .unwrap();
+        config.rebase(Path::new("/srv/host"));
+        let go = config.runtimes.go.unwrap();
+        assert_eq!(go.dir.unwrap(), Path::new("/srv/host/plugins/go"));
+        assert_eq!(go.binaries[0], Path::new("/srv/host/bin/netkit"));
+        assert_eq!(go.project, Path::new("/srv/host/."));
     }
 }

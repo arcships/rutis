@@ -1,4 +1,4 @@
-//! `rutis-host new <name> --lang node|python`: a plugin project from a
+//! `rutis-host new <name> --lang node|python|go`: a plugin project from a
 //! template, with a working plugin, its test, a dev configuration and a
 //! publish workflow.
 
@@ -62,6 +62,29 @@ const PYTHON: &[(&str, &str)] = &[
     ),
 ];
 
+const GO: &[(&str, &str)] = &[
+    ("go.mod", include_str!("../templates/go/go.mod")),
+    ("plugin.go", include_str!("../templates/go/plugin.go")),
+    (
+        "plugin_test.go",
+        include_str!("../templates/go/plugin_test.go"),
+    ),
+    (
+        "cmd/__name__/main.go",
+        include_str!("../templates/go/cmd/__name__/main.go"),
+    ),
+    (
+        "rutis.dev.json",
+        include_str!("../templates/go/rutis.dev.json"),
+    ),
+    ("README.md", include_str!("../templates/go/README.md")),
+    (".gitignore", include_str!("../templates/go/gitignore")),
+    (
+        ".github/workflows/release.yml",
+        include_str!("../templates/go/.github/workflows/release.yml"),
+    ),
+];
+
 /// Create the project `name` in `parent`/`name`.
 pub fn create(parent: &Path, name: &str, lang: &str) -> Result<(), String> {
     let valid = !name.is_empty()
@@ -77,17 +100,23 @@ pub fn create(parent: &Path, name: &str, lang: &str) -> Result<(), String> {
     let files = match lang {
         "node" | "ts" | "typescript" | "js" => NODE,
         "python" | "py" => PYTHON,
-        other => return Err(format!("{other:?}: the language is node or python")),
+        "go" | "golang" => GO,
+        other => return Err(format!("{other:?}: the language is node, python or go")),
     };
     let dir = parent.join(name);
     if dir.exists() {
         return Err(format!("{} already exists", dir.display()));
     }
     let module = name.replace('-', "_");
+    // A Go package name has no `-` or `_`.
+    let package = name.replace('-', "");
     let next = next_minor(VERSION);
     for (path, text) in files {
-        let path = path.replace("__module__", &module);
+        let path = path
+            .replace("__module__", &module)
+            .replace("__name__", name);
         let text = text
+            .replace("{{package}}", &package)
             .replace("{{name}}", name)
             .replace("{{id}}", name)
             .replace("{{module}}", &module)
@@ -142,6 +171,19 @@ mod tests {
             "an existing directory is kept"
         );
         assert!(create(dir.path(), "Bad_Name", "node").is_err());
+        create(dir.path(), "net-probe", "go").unwrap();
+        let main =
+            std::fs::read_to_string(dir.path().join("net-probe/cmd/net-probe/main.go")).unwrap();
+        assert!(
+            main.contains("netprobe \"example.com/net-probe\""),
+            "{main}"
+        );
+        let module = std::fs::read_to_string(dir.path().join("net-probe/go.mod")).unwrap();
+        assert!(module.contains(&format!("github.com/arcships/rutis/go/rutis v{VERSION}")));
+        let plugin = std::fs::read_to_string(dir.path().join("net-probe/plugin.go")).unwrap();
+        assert!(
+            plugin.starts_with("// Package netprobe") && plugin.contains("Name: \"net-probe\"")
+        );
         assert_eq!(next_minor("0.2.0"), "0.3");
         assert_eq!(next_minor("1.4.2"), "2");
     }
