@@ -96,7 +96,7 @@ handle.reconcile(vec![Layer::new("app", rows)], None).await?;
 ```rust
 use rutis_bridge::runtime::Stdio;
 
-// 终端界面放在单独的运行时里，读键盘；插件所在的运行时不输出。
+// 终端界面放在单独的运行时里，读键盘；插件所在的运行时不往终端写标准输出。
 let tui = LocalRuntime::node("app/node_modules/@arcships/rutis-runtime", "app/package.json")
     .named("tui")
     .stdin(Stdio::Inherit);

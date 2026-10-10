@@ -96,7 +96,7 @@ handle.reconcile(vec![Layer::new("app", rows)], None).await?;
 ```rust
 use rutis_bridge::runtime::Stdio;
 
-// A terminal UI in its own runtime, reading the keyboard; the plugins' runtime stays quiet.
+// A terminal UI in its own runtime, reading the keyboard; the plugins' runtime writes no output over it.
 let tui = LocalRuntime::node("app/node_modules/@arcships/rutis-runtime", "app/package.json")
     .named("tui")
     .stdin(Stdio::Inherit);
