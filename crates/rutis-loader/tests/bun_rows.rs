@@ -345,10 +345,11 @@ async fn a_runtime_that_cannot_start_does_not_block_resolution() {
     root.shutdown().await.unwrap();
 }
 
-/// An edit that breaks the plugin fails the reload; the row runs again
-/// once the plugin is fixed.
+/// An edit that breaks the plugin fails the reload, and the previous module
+/// stays (`Loader::reload` is all or nothing): the row keeps running the old
+/// code. Once the plugin is fixed, a reload runs the new one.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_broken_edit_fails_the_reload_and_a_fix_recovers() {
+async fn a_broken_edit_keeps_the_previous_module_and_a_fix_reloads() {
     let fixture = fixture().await;
     let module = fixture.dir.path().join("edited.ts");
     let plugin = |version: &str| {
@@ -375,14 +376,24 @@ async fn a_broken_edit_fails_the_reload_and_a_fix_recovers() {
 
     touch("export default {{ this is not TypeScript\n".into(), 5);
     let reload = fixture.loader.reload("e").await;
-    let status = fixture.loader.get("e").unwrap().status;
     assert!(
-        reload.is_err() || !matches!(status, EntryStatus::Running(_)),
-        "a broken plugin does not run: {reload:?} {status:?}"
+        reload.is_err(),
+        "a broken plugin fails the reload: {reload:?}"
+    );
+    assert_eq!(
+        state(&fixture.loader, "e"),
+        Some(FiberState::Active),
+        "the row keeps running"
+    );
+    assert!(
+        fixture.probe.position("v1: bye").is_none(),
+        "the previous module was not unloaded: {:?}",
+        fixture.probe.0.lock().unwrap()
     );
 
     touch(plugin("v2"), 10);
     fixture.loader.reload("e").await.unwrap();
+    fixture.probe.wait_for("v1: bye").await;
     fixture.probe.wait_for("v2: start").await;
     fixture.root.shutdown().await.unwrap();
 }
