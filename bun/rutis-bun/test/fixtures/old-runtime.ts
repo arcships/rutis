@@ -1,0 +1,13 @@
+// A runtime that answers `mount` with no features, as a runtime that does
+// not know the row contract would.
+import { Client } from '../../src/client.ts'
+
+const [channel] = process.argv.slice(2)
+const client = await Client.connect(channel, {
+  dispatch: (target, method) => {
+    if (target === '' && method === 'mount') return { services: {} }
+    throw new Error(`no ${method}`)
+  },
+})
+await client.closed()
+process.exit(0)

@@ -1,6 +1,6 @@
 //! Language runtimes: processes that run plugins written in another
 //! language (Node with Cordis, feature `node`; Python, feature `python`;
-//! Go, feature `go`),
+//! Go, feature `go`; Bun, feature `bun`),
 //! whose plugins rutis-loader manages as rows.
 //!
 //! A runtime's session comes from a link, wherever the runtime runs:
@@ -26,6 +26,9 @@ pub mod testing;
 #[cfg(unix)]
 pub(crate) mod unix;
 
+/// Where a runtime process's standard streams go ([`Launcher::stdin`],
+/// [`LocalRuntime::stdin`]).
+pub use crate::transport::local::Stdio;
 pub use access::RuntimeAccessPlugin;
 pub use events::{EmitToCordis, EventSink, Events};
 pub use local::LocalRuntime;

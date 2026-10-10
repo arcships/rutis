@@ -1,0 +1,40 @@
+{
+  "name": "@arcships/rutis-bun",
+  "version": "0.8.0",
+  "description": "The Bun runtime of rutis: runs JavaScript and TypeScript plugins in Bun for a rutis host",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arcships/rutis.git",
+    "directory": "bun/rutis-bun"
+  },
+  "homepage": "https://github.com/arcships/rutis/tree/main/bun/rutis-bun#readme",
+  "keywords": [
+    "rutis",
+    "bun",
+    "plugin",
+    "runtime"
+  ],
+  "rutisProtocol": 2,
+  "rutisChannels": [
+    "unix",
+    "fd",
+    "tcp"
+  ],
+  "type": "module",
+  "exports": {
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "bun": ">=1.4"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "bun test"
+  }
+}

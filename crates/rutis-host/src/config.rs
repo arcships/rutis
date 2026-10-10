@@ -50,6 +50,7 @@ fn default_id() -> String {
 pub struct Runtimes {
     pub node: Option<NodeRuntime>,
     pub py: Option<PythonRuntime>,
+    pub bun: Option<BunRuntime>,
     /// Go binaries, one runtime each, started when a row uses them.
     pub go: Option<GoRuntime>,
     /// Runtimes on other machines, reached through a `rutis-bridge/peer` row
@@ -76,6 +77,21 @@ pub struct NodeRuntime {
     /// The `@arcships/rutis-runtime` package; by default the project's.
     #[serde(default)]
     pub runtime: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BunRuntime {
+    /// The project plugins are installed in (its package.json and
+    /// node_modules); rows `bun:<module>` resolve from here.
+    #[serde(default = "here")]
+    pub project: PathBuf,
+    /// The `@arcships/rutis-bun` package; by default the project's.
+    #[serde(default)]
+    pub runtime: Option<PathBuf>,
+    /// The Bun executable; by default `bun` on `PATH`.
+    #[serde(default)]
+    pub program: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -199,6 +215,18 @@ impl HostConfig {
                 at(runtime);
             }
         }
+        if let Some(bun) = &mut self.runtimes.bun {
+            at(&mut bun.project);
+            if let Some(runtime) = &mut bun.runtime {
+                at(runtime);
+            }
+            // A bare program name is looked up on PATH, not under the base.
+            if let Some(program) = &mut bun.program {
+                if program.components().count() > 1 {
+                    at(program);
+                }
+            }
+        }
         if let Some(py) = &mut self.runtimes.py {
             at(&mut py.project);
             // A bare program name is looked up on PATH, not under the base.
@@ -253,12 +281,52 @@ impl HostConfig {
         if self.runtimes.py.is_none() {
             self.runtimes.py = other.runtimes.py;
         }
+        if self.runtimes.bun.is_none() {
+            self.runtimes.bun = other.runtimes.bun;
+        }
         if self.runtimes.go.is_none() {
             self.runtimes.go = other.runtimes.go;
         }
         self.runtimes.remote.extend(other.runtimes.remote);
         self.listen.extend(other.listen);
         self.rows.extend(other.rows);
+    }
+
+    /// Each runtime's name, which is also the prefix of its rows
+    /// (`py:<module>`, `bun:<module>`, `<remote>:<module>`), names one
+    /// runtime only.
+    pub fn check_runtime_names(&self) -> Result<(), String> {
+        let local = [
+            ("node", self.runtimes.node.is_some()),
+            ("py", self.runtimes.py.is_some()),
+            ("bun", self.runtimes.bun.is_some()),
+        ];
+        let mut seen: Vec<&str> = local
+            .iter()
+            .filter(|(_, present)| *present)
+            .map(|(name, _)| *name)
+            .collect();
+        for remote in &self.runtimes.remote {
+            let name = remote.name.as_str();
+            if !rutis_loader::is_runtime_name(name) {
+                return Err(format!(
+                    "remote runtime {name:?}: a runtime name is two or more of a-z, 0-9 and -, and not file"
+                ));
+            }
+            if seen.contains(&name) {
+                return Err(format!(
+                    "remote runtime {name}: the name is already a runtime's; rows `{name}:<module>` must name one"
+                ));
+            }
+            // `go:<plugin>` and `go-<binary>:<plugin>` are the Go runtimes' rows.
+            if self.runtimes.go.is_some() && (name == "go" || name.starts_with("go-")) {
+                return Err(format!(
+                    "remote runtime {name}: go and names starting with go- are the local Go runtimes'"
+                ));
+            }
+            seen.push(name);
+        }
+        Ok(())
     }
 
     /// The rows as the loader takes them: `rutis-bridge/peer` rows get the

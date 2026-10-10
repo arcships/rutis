@@ -25,7 +25,7 @@ Tested with Bun 1.3.14 on macOS and checked against Bun's official documentation
 | Capability | Under Bun | Consequence for the design |
 | --- | --- | --- |
 | `worker_threads`, SharedArrayBuffer, `Atomics.wait` on the main thread, `receiveMessageOnPort` | Tested: work. Docs: `worker_threads` is partial (`moveMessagePortToContext` and others are missing), and terminating a Web Worker is marked experimental | I/O lives in a worker and the main thread blocks (§3.4). Worker crash and exit paths need tests |
-| An inherited socket (fd:3) | Docs: `new net.Socket({ fd })` cannot read an existing fd; tested: it fails silently. Tested: `net.connect({ fd })` and `Bun.connect({ fd, socket })` work | Use `Bun.connect({ fd })`. Docs: native sockets do not buffer, so the runtime handles backpressure itself |
+| An inherited socket (fd:3) | Docs: `new net.Socket({ fd })` cannot read an existing fd; tested: it fails silently. Tested: `net.connect({ fd })` and `Bun.connect({ fd, socket })` work | Use `net.connect({ fd })` (chosen in implementation, see §11) |
 | Unix sockets, loopback TCP | Work | Dial-back and the loopback handover |
 | WebSocket server (`Bun.serve`) | Works. Docs, defaults: `maxPayloadLength` 16MB, `idleTimeout` 120s, `backpressureLimit` 16MB | Remote runtimes listen with it. `idleTimeout` must be off or longer than the heartbeat, and the limits must match rutis's (§4) |
 | Importing a module again | Tested: a `file://` URL with a query string returns the old module. An absolute path with a query string gives a new instance, but the old instances stay cached for good. Deleting `require.cache[realpath]` and importing again gives the new module, reloading only the entry. Docs: there is no public way to invalidate modules programmatically (`--hot` uses `Loader.registry` internally, which is not exposed) | Use `require.cache` (§3.8). The docs do not promise this behaviour, so the nightly job on the latest Bun must cover it |
@@ -57,8 +57,8 @@ rutis-bun <channel> [--id <endpoint> --peer <endpoint>] <project>          # sin
 
 | Channel | How |
 | --- | --- |
-| `fd:3` (Unix: the host creates the socket and the child inherits it) | `Bun.connect({ fd: 3 })`. The Rust launcher always uses inheritance, as for Python; it does not read a declaration in the package |
-| A socket path (dial-back: the runtime connects to a socket the host gives it) | `Bun.connect({ unix })` |
+| `fd:3` (Unix: the host creates the socket and the child inherits it) | `net.connect({ fd: 3 })`. The Rust launcher always uses inheritance, as for Python; it does not read a declaration in the package |
+| A socket path (dial-back: the runtime connects to a socket the host gives it) | `net.createConnection(path)` |
 | `tcp:<address>` (the loopback handover: the default on Windows, and on Unix with `RUTIS_LOCAL_HANDOVER=loopback`) | Sends `RUTIS_CHANNEL_TOKEN` first, then **deletes it from `process.env` at once**, as Python's `__main__.py` does |
 | `listen:ws://…` / `listen:wss://…` | A remote runtime; see §4 |
 | `ws://…` (dialing out) | Refused at startup with "the Bun runtime only listens" (remote plugins design §4.4) |
@@ -197,7 +197,7 @@ RuntimeResolver::modules(handle)       // existing: rows "bun:<module>"
 | `runtime` | The project's `@arcships/rutis-bun`, then a `rutis-bun` executable on `PATH` | Where the runtime is: an npm package directory or an executable |
 | `program` | `bun` on `PATH` | The Bun executable; unused when `runtime` is the single-file executable |
 
-- **A missing runtime**: startup fails and names both ways to install one.
+- **A missing runtime**: startup fails and names how to install one (only the npm form in B1; both once the executable comes in B3).
 - **Remote runtimes**: `remote` gains the `language` `"bun"` (`rutis-host/src/host.rs:78-83`), with rows named `<remote runtime name>:<module>`.
 - **Other runtimes**: `runtimes.bun` is independent of `runtimes.node` and `runtimes.py`, and they can all be configured together. Services are shared by name through `host_key`.
 
@@ -301,6 +301,31 @@ Nothing this design uses depends on a recent version: `Bun.connect({ fd })`, `wo
 
 | Phase | Contents |
 | --- | --- |
-| B1 | The npm form of `rutis-bun`: local channels (fd, dial-back, loopback), the session, every control operation, synchronous re-entry, instance scopes, cancellation and errors, hot reload. Rust: the `bun` feature, the launcher, `LocalRuntime::bun`, `RowSchema.version`, the name collision checks, and `runtimes.bun`. The local tests of §8; the CI job `runtimes-bun` |
+| B1 | The npm form of `rutis-bun`: local channels (fd, dial-back, loopback), the session, every control operation, synchronous re-entry, instance scopes, cancellation and errors, hot reload. Rust: the `bun` feature, the launcher, `LocalRuntime::bun`, `RowSchema.version`, the name collision checks, and `runtimes.bun`; `rutis-host new --lang bun` / `dev` (moved up from B3 in implementation, see §11). The local tests of §8; the CI job `runtimes-bun` |
 | B2 | Remote runtimes: listening and leases (§4); `language: "bun"` for `remote`, with the lease tests |
-| B3 | The single-file executable and its releases; `rutis-host new --lang bun` / `dev`; Windows; performance numbers |
+| B3 | The single-file executable and its releases; Windows; performance numbers |
+
+## 11. Changes in implementation (B1)
+
+| What this document said | Implementation | Why |
+| --- | --- | --- |
+| Channels use `Bun.connect` | `node:net`: `net.connect({ fd })` for the inherited socket, `createConnection` for Unix sockets and loopback TCP, with the runtime's own line framing (`src/channel.ts`) | `node:net` streams buffer and apply backpressure; one framing for all three channels, with a 16 MiB message limit (as on WebSocket) that closes the channel when exceeded |
+| `--no-orphans` among the launch flags | Not passed | The runtime exits when the host's channel ends; `--no-orphans` needs a recent Bun, so it waits until the minimum version is settled |
+| `implementation.name` in the `mount` reply is `rutis-bun` | `@arcships/rutis-bun` (the package name) | Matches the npm package, so `check` maps to it directly |
+| The minimum version | `engines.bun` is `>=1.4`; the CI matrix runs 1.4.0 and the latest | `--no-env-file` came in Bun 1.3.3: on CI, 1.2.23 and 1.3.0 both read the project's `.env` (`the_projects_env_file_is_not_read` fails). On 1.3.3, messages from the worker move to the event loop's queue early: during a synchronous wait they either arrive out of order and the session faults on a call id that does not increase (5 of 20 rounds in a CI stress run), or, taken in order by number, never arrive and the wait hangs; the runtime cannot correct it. 1.4.2: 0 of 20; on 1.2 the process also exited normally mid-session, which the runtime now prevents with a timer |
+| Listening as a remote runtime (B2) | B1 exits with a clear error on `listen:` | Per the phases |
+| (Found) Bun's directory entry cache | Plugin files are always imported by their real path | A file created in the working directory after the process started fails to import through a symlinked directory (macOS's `/var`), but imports by its real path; `locate` in `src/plugin.ts` |
+| (Found) Packages installed while the runtime runs | Resolved only after the Bun runtime restarts; documented | A Bun process remembers that a package was missing: after one failed lookup, a package installed later (and any dependency that appears in `node_modules` later) does not resolve in that process, and there is no way to invalidate it; importing a file by its real path is not affected. This matches the Node runtime's "restart the runtime after a code change" |
+| (Found) The process or the I/O worker exiting normally mid-session | The main thread and the worker each keep a timer until the session (the channel) ends, and an early exit is said on stderr | Seen on CI with Bun 1.2.23 (Linux) and 1.3.3 (macOS): with only an inherited socket or the worker's port pending, the process or the worker ended as if idle |
+| (Found) Uncaught errors | The runtime registers `uncaughtException` / `unhandledRejection`, prints, and exits with status 1 | Bun prints an error thrown in a timer and carries on, which breaks requirements §5 rule 8 |
+| Version and engine on the Rust side | `RowSchema.version` (Python entry point versions now reach the row's meta too); `Process::about()` returns `implementation` and `engine` from the `mount` reply, printed by `rutis-host check` | §3.3, §5.1 |
+| A remote node runtime taking prefixed row names | On a remote runtime, `Naming::Npm` no longer accepts names starting with `<runtime name>:` (except `file:` and one-letter drives) | §5.1 |
+| Duplicate runtime names | `HostConfig::check_runtime_names`: remote runtime names have two or more of `a-z0-9-`, and are neither a local runtime's nor `file` | §5.1 |
+| Session-layer tests (`cancellation.rs` and the like) | Covered by the session contract (the Bun endpoint of `runtime_conformance.rs`): cancellation, error names, references and re-entry are in the contract; `error_shape.rs` and the like are about Cordis mounts | §8 |
+| §10 puts `new --lang bun` / `dev` in B3 | Implemented in B1 | They are only a project template and the runtime choice of `dev`, which B1's Rust changes already cover; in B1 the development loop (S2) can run first |
+| `language: "bun"` for `remote` | Not accepted in B1 (only `python`, `node`) | Remote runtimes are B2; the runtime does not listen in B1 |
+| §3.1 arguments `--id` / `--peer` | Not accepted in B1 | Only network channels (B2) use them; `listen:` exits with a clear error in B1 |
+| §8 conformance fixture `conformance-greeter` | Not written | Only Cordis nodes and remote runtimes (B2) use it |
+| §8 Bun variants of E2E S2 / S3 | Not in this change | They come with the E2E framework of #186 / #187 |
+| §8 a project from `new --lang bun` passes `check` | Only the generated files are tested | Running `check` needs `@arcships/rutis-bun` installed from npm; it belongs to S2's end-to-end test (#186) |
+| §5.2: `runtime` also looks for a `rutis-bun` executable on `PATH` by default | B1 looks only for the project's `@arcships/rutis-bun` | The executable comes in B3 |

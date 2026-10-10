@@ -1,4 +1,4 @@
-//! `rutis-host new <name> --lang node|python|go`: a plugin project from a
+//! `rutis-host new <name> --lang node|bun|python|go`: a plugin project from a
 //! template, with a working plugin, its test, a dev configuration and a
 //! publish workflow.
 
@@ -38,6 +38,35 @@ const NODE: &[(&str, &str)] = &[
     (
         ".github/workflows/publish.yml",
         include_str!("../templates/node/.github/workflows/publish.yml"),
+    ),
+];
+
+const BUN: &[(&str, &str)] = &[
+    (
+        "package.json",
+        include_str!("../templates/bun/package.json"),
+    ),
+    (
+        "tsconfig.json",
+        include_str!("../templates/bun/tsconfig.json"),
+    ),
+    (
+        "src/index.ts",
+        include_str!("../templates/bun/src/index.ts"),
+    ),
+    (
+        "test/index.test.ts",
+        include_str!("../templates/bun/test/index.test.ts"),
+    ),
+    (
+        "rutis.dev.json",
+        include_str!("../templates/bun/rutis.dev.json"),
+    ),
+    ("README.md", include_str!("../templates/bun/README.md")),
+    (".gitignore", include_str!("../templates/bun/gitignore")),
+    (
+        ".github/workflows/publish.yml",
+        include_str!("../templates/bun/.github/workflows/publish.yml"),
     ),
 ];
 
@@ -103,9 +132,14 @@ pub fn create(parent: &Path, name: &str, lang: &str) -> Result<(), String> {
     }
     let files = match lang {
         "node" | "ts" | "typescript" | "js" => NODE,
+        "bun" => BUN,
         "python" | "py" => PYTHON,
         "go" | "golang" => GO,
-        other => return Err(format!("{other:?}: the language is node, python or go")),
+        other => {
+            return Err(format!(
+                "{other:?}: the language is node, bun, python or go"
+            ))
+        }
     };
     let dir = parent.join(name);
     if dir.exists() {
@@ -170,6 +204,10 @@ mod tests {
         create(dir.path(), "greeter", "node").unwrap();
         let package = std::fs::read_to_string(dir.path().join("greeter/package.json")).unwrap();
         assert!(package.contains(&format!("\"@arcships/rutis\": \"^{VERSION}\"")));
+        create(dir.path(), "bun-greeter", "bun").unwrap();
+        let package = std::fs::read_to_string(dir.path().join("bun-greeter/package.json")).unwrap();
+        assert!(package.contains(&format!("\"@arcships/rutis-bun\": \"^{VERSION}\"")));
+        assert!(dir.path().join("bun-greeter/test/index.test.ts").exists());
         assert!(
             create(dir.path(), "greeter", "node").is_err(),
             "an existing directory is kept"

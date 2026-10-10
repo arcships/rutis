@@ -1,0 +1,29 @@
+# Weekly CI measurements (Q12.9, docs/quality-status.md §8.4): push-to-result
+# time, queueing, job durations, failures and cancellations of the last runs
+# of ci.yml, written to the job summary. Also runnable by hand.
+
+name: ci-stats
+
+on:
+  schedule:
+    - cron: "0 1 * * 1"
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Number of completed ci.yml runs to measure
+        default: "100"
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  stats:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: measure ci.yml
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNS: ${{ inputs.runs || '100' }}
+        run: node tools/ci-stats.mjs "$RUNS" ci.yml >> "$GITHUB_STEP_SUMMARY"

@@ -91,6 +91,18 @@ handle.reconcile(vec![Layer::new("app", rows)], None).await?;
 - For the full row format (groups, `isolate`, `inject`, expressions, imperative updates, and persistence), see the [rutis-loader design](../design-rutis-loader-2026-10-02.en.md).
 - To pick up plugin code changes, call `RuntimeResolver::invalidate_all()` and then `Loader::reload(row)`. Node and Python both reimport only the plugin's entry module.
 - With `RUTIS_TRACE` set, each runtime-channel message produces a line on stderr with its direction and length, but not its contents.
+- A runtime process gets no standard input, and writes to the application's standard output and error. A plugin that reads the terminal (a terminal UI, Python's `input()`) needs the terminal itself, since it checks that its input is one and sets the terminal's modes: give its runtime this process's input with `stdin(Stdio::Inherit)`. The setting covers the whole runtime process, so every plugin in it can read the input. Load such a plugin into a runtime of its own (`named`), and give the terminal to one runtime at most: processes reading the same terminal race for each key. `stdout(Stdio::Null)` and `stderr(Stdio::Null)` keep the other runtimes from writing over it. The same settings exist on `Launcher`.
+
+```rust
+use rutis_bridge::runtime::Stdio;
+
+// A terminal UI in its own runtime, reading the keyboard; the plugins' runtime writes no output over it.
+let tui = LocalRuntime::node("app/node_modules/@arcships/rutis-runtime", "app/package.json")
+    .named("tui")
+    .stdin(Stdio::Inherit);
+let node = LocalRuntime::node("app/node_modules/@arcships/rutis-runtime", "app/package.json")
+    .stdout(Stdio::Null);
+```
 
 ### Go runtimes
 

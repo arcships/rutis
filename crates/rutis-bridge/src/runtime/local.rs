@@ -20,7 +20,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::channel::PeerId;
-use crate::runtime::{Launcher, RuntimeAccessPlugin, RuntimeHandle, RuntimePlugin, RuntimeState};
+use crate::runtime::{
+    Launcher, RuntimeAccessPlugin, RuntimeHandle, RuntimePlugin, RuntimeState, Stdio,
+};
 use crate::{
     identity_key, transport_key, Identity, LinkConfig, LinkPlugin, LinkState, StaticIdentity,
     Transport,
@@ -77,6 +79,17 @@ impl LocalRuntime {
         Self::with(&crate::runtime::go_runtime_name(&binary), launcher, project)
     }
 
+    /// A Bun runtime named `"bun"`: the npm package `package` (`bun/rutis-bun`,
+    /// or a deployed `@arcships/rutis-bun`) run by `bun`, importing plugin
+    /// modules from `project` (its `package.json` and `node_modules`). Choose
+    /// the Bun executable with [`LocalRuntime::interpreter`].
+    #[cfg(feature = "bun")]
+    pub fn bun(package: impl Into<PathBuf>, project: impl Into<PathBuf>) -> Self {
+        let project = project.into();
+        let launcher = Launcher::bun(None, &package.into(), &project);
+        Self::with("bun", launcher, project)
+    }
+
     /// Put `directory` ahead on the runtime's `PYTHONPATH`: a source checkout
     /// of the `rutis` package, or plugins that are not installed.
     pub fn python_path(mut self, directory: impl Into<PathBuf>) -> Self {
@@ -124,6 +137,9 @@ impl LocalRuntime {
         spawn.args = self.launcher.args.clone();
         spawn.env = self.launcher.env.clone();
         spawn.cwd = self.launcher.cwd.clone();
+        spawn.stdin = self.launcher.stdin;
+        spawn.stdout = self.launcher.stdout;
+        spawn.stderr = self.launcher.stderr;
         spawn.handover = match self.launcher.inherit_fd {
             true => Handover::Inherit,
             false => Handover::DialBack,
@@ -148,7 +164,32 @@ impl LocalRuntime {
         self
     }
 
-    /// Run the Python runtime with this interpreter instead of `python3`.
+    /// The runtime process's standard input: none by default; with
+    /// [`Stdio::Inherit`], this process's, for a plugin that reads the
+    /// terminal. See [`Launcher::stdin`]: it is the whole process's, so give
+    /// such a plugin a runtime of its own ([`LocalRuntime::named`]), and the
+    /// terminal to one runtime at most.
+    pub fn stdin(mut self, stdio: Stdio) -> Self {
+        self.launcher.stdin = stdio;
+        self
+    }
+
+    /// The runtime process's standard output: this process's by default;
+    /// [`Stdio::Null`] discards it ([`Launcher::stdout`]).
+    pub fn stdout(mut self, stdio: Stdio) -> Self {
+        self.launcher.stdout = stdio;
+        self
+    }
+
+    /// The runtime process's standard error: this process's by default;
+    /// [`Stdio::Null`] discards it ([`Launcher::stderr`]).
+    pub fn stderr(mut self, stdio: Stdio) -> Self {
+        self.launcher.stderr = stdio;
+        self
+    }
+
+    /// Run the runtime with this interpreter instead of its default
+    /// (`python3` for Python, `bun` for Bun).
     pub fn interpreter(mut self, program: impl Into<OsString>) -> Self {
         self.launcher.program = program.into();
         self

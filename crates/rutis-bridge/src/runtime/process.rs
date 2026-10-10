@@ -2,6 +2,7 @@ use crate::runtime::events::EventSink;
 use crate::runtime::rpc::{Connection, Dispatch, Reply, Value as RpcValue};
 use crate::runtime::Error;
 use crate::runtime::{HostDispatch, RuntimeSession};
+use crate::transport::local::Stdio;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
@@ -113,7 +114,11 @@ pub struct Mount<'a> {
 /// then the first plugin (or the anchor) as its last two arguments: `fd:3`
 /// when it takes an inherited socket ([`Launcher::inherit_fd`]), otherwise
 /// a socket path to dial.
-#[derive(Debug, Clone, Default)]
+///
+/// Build one with [`Launcher::new`] (or `Launcher::node` with the `node`
+/// feature, `Launcher::python` with `python`) and its builders.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Launcher {
     pub program: std::ffi::OsString,
     pub args: Vec<std::ffi::OsString>,
@@ -123,6 +128,30 @@ pub struct Launcher {
     /// The process takes its channel as an inherited socket on fd 3
     /// (`fd:3`) instead of dialing a socket path.
     pub inherit_fd: bool,
+    /// Standard input: none ([`Stdio::Null`]) unless set with
+    /// [`Launcher::stdin`].
+    pub stdin: Stdio,
+    /// Standard output: this process's ([`Stdio::Inherit`]) unless set with
+    /// [`Launcher::stdout`].
+    pub stdout: Stdio,
+    /// Standard error: this process's ([`Stdio::Inherit`]) unless set with
+    /// [`Launcher::stderr`].
+    pub stderr: Stdio,
+}
+
+impl Default for Launcher {
+    fn default() -> Self {
+        Self {
+            program: Default::default(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+            inherit_fd: false,
+            stdin: Stdio::Null,
+            stdout: Stdio::Inherit,
+            stderr: Stdio::Inherit,
+        }
+    }
 }
 
 impl Launcher {
@@ -155,6 +184,38 @@ impl Launcher {
     /// The process takes `fd:3`, an inherited socket, as its channel.
     pub fn inherit_fd(mut self) -> Self {
         self.inherit_fd = true;
+        self
+    }
+
+    /// The process's standard input. By default it has none
+    /// ([`Stdio::Null`]); [`Stdio::Inherit`] gives it this process's, for a
+    /// plugin that reads the terminal (a terminal UI, Python's `input()`),
+    /// which needs the real handle: it checks that it is a terminal and sets
+    /// its modes itself. Give it to one process at most: processes reading
+    /// the same terminal race for each key.
+    ///
+    /// The setting is the whole runtime process's: every plugin loaded into
+    /// it can read the input. Run a plugin that needs the terminal in a
+    /// runtime of its own ([`LocalRuntime::named`](crate::runtime::LocalRuntime::named)).
+    pub fn stdin(mut self, stdio: Stdio) -> Self {
+        self.stdin = stdio;
+        self
+    }
+
+    /// The process's standard output: this process's by default
+    /// ([`Stdio::Inherit`]); [`Stdio::Null`] discards it, for example so
+    /// that other runtimes do not draw over a terminal UI. For the whole
+    /// runtime process, as [`Launcher::stdin`].
+    pub fn stdout(mut self, stdio: Stdio) -> Self {
+        self.stdout = stdio;
+        self
+    }
+
+    /// The process's standard error: this process's by default
+    /// ([`Stdio::Inherit`]); [`Stdio::Null`] discards it. For the whole
+    /// runtime process, as [`Launcher::stdin`].
+    pub fn stderr(mut self, stdio: Stdio) -> Self {
+        self.stderr = stdio;
         self
     }
 
@@ -201,6 +262,26 @@ impl Launcher {
     #[cfg(feature = "go")]
     pub fn go(binary: &std::path::Path, project: &std::path::Path) -> Self {
         Launcher::new(binary).cwd(project).inherit_fd()
+    }
+
+    /// The Bun runtime of the npm package `package` (`bun/rutis-bun`, or a
+    /// deployed `@arcships/rutis-bun`), run by the Bun executable `program`
+    /// (`bun` on `PATH` when `None`), in `project`, on an inherited socket
+    /// (on Windows, a loopback address). Auto-install and `.env` files are
+    /// always off: plugins resolve only what the project has installed, and
+    /// the environment is only what this process gives.
+    #[cfg(feature = "bun")]
+    pub fn bun(
+        program: Option<&std::ffi::OsStr>,
+        package: &std::path::Path,
+        project: &std::path::Path,
+    ) -> Self {
+        Launcher::new(program.unwrap_or(std::ffi::OsStr::new("bun")))
+            .arg("--no-install")
+            .arg("--no-env-file")
+            .arg(package.join("src/main.ts"))
+            .cwd(project)
+            .inherit_fd()
     }
 }
 
@@ -347,6 +428,8 @@ pub struct Process {
     child: Option<crate::runtime::spawn::Child>,
     /// Reported by the runner when mounting.
     features: std::sync::OnceLock<Vec<String>>,
+    /// What the runtime said of itself when mounted (see [`Process::about`]).
+    about: std::sync::OnceLock<Value>,
     /// The services each loaded row exports, by row key (ids, see
     /// [`scoped_id`]).
     exports: Mutex<HashMap<String, Vec<String>>>,
@@ -375,7 +458,7 @@ pub struct RowSchema {
     /// The plugin's version, when the runtime knows it (a package version,
     /// a module version, a VCS revision).
     #[serde(default)]
-    pub version: Option<Value>,
+    pub version: Option<String>,
 }
 
 /// One row's use of a host service (see [`Process::lease_host`]). Give it
@@ -583,6 +666,7 @@ impl Process {
             runtime: tokio::runtime::Handle::current(),
             child,
             features: std::sync::OnceLock::new(),
+            about: std::sync::OnceLock::new(),
             exports: Mutex::default(),
             host_changes: tokio::sync::Mutex::new(()),
             _directory: directory,
@@ -604,6 +688,11 @@ impl Process {
         let features: Vec<String> =
             crate::runtime::decode(mounted.get("features").cloned().unwrap_or(json!([])))?;
         let _ = process.features.set(features);
+        let about: serde_json::Map<String, Value> = ["implementation", "engine"]
+            .into_iter()
+            .filter_map(|field| Some((field.to_owned(), mounted.get(field)?.clone())))
+            .collect();
+        let _ = process.about.set(Value::Object(about));
         Ok(process)
     }
 
@@ -735,6 +824,14 @@ impl Process {
     pub async fn describe_row(&self, entry: &Path) -> Result<RowSchema, Error> {
         self.require("rows.v2")?;
         crate::runtime::decode(self.call_async("", "rows.schema", json!([entry])).await?)
+    }
+
+    /// What the runtime reported of itself when mounted, for diagnostics:
+    /// `implementation` (`{ name, version }`) and `engine` (`{ name,
+    /// version }`, such as the Bun that runs it), each when it said.
+    pub fn about(&self) -> &Value {
+        static NOTHING: Value = Value::Null;
+        self.about.get().unwrap_or(&NOTHING)
     }
 
     /// Whether the Node runtime supports `feature` (reported when mounting).

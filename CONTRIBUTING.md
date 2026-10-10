@@ -20,13 +20,14 @@ Thank you for spending time on rutis. A bug report, a sentence in the docs that 
 | `crates/rutis-host` | A host that needs no Rust |
 | `crates/rutis-sdk`, `crates/rutis-dylib*` | The dylib plugin toolchain |
 | `node/` | npm packages: the plugin SDK `@arcships/rutis`, the runtime, the host |
+| `bun/rutis-bun` | The npm package `@arcships/rutis-bun`: the Bun runtime |
 | `python/rutis` | The PyPI package `rutis`: Python plugin SDK and runtime |
 | `docs/` | Guides, design records, migration guides |
 
 ## Setting up
 
 - Rust: `rust-toolchain.toml` pins the toolchain, and `rustup` installs it automatically.
-- Node 24+ and Python 3.12+, when working on the language runtimes or the host.
+- Node 24+, Bun 1.4+ and Python 3.12+, when working on the language runtimes or the host.
 - Linux or macOS for working on the whole repository (rutis-dsh, the shell scripts under `tools/`); on Windows, use WSL. The language runtimes, rutis-loader rows, peers and rutis-host also build and test natively on Windows x64 (MSVC): `cargo test -p rutis-loader --features node,python,peer`, `cargo test -p rutis-bridge --all-features` and `cargo test -p rutis-host`, as the `runtimes-windows` CI job runs them.
 
 ## Running the tests
@@ -34,10 +35,11 @@ Thank you for spending time on rutis. A bug report, a sentence in the docs that 
 ```bash
 cargo test --workspace                                  # the core and most crates
 cargo test -p rutis-bridge --all-features               # channels, sessions, runtimes, nodes
-cargo test -p rutis-loader --features node,python,peer  # every kind of loader row
+cargo test -p rutis-loader --features node,python,peer,bun  # every kind of loader row
 npm --prefix node/rutis test
 npm --prefix node/rutis-runtime ci && npm --prefix node/rutis-runtime test
 (cd python/rutis && python3 -m unittest discover -s tests)
+(cd bun/rutis-bun && bun test)
 ```
 
 When you change one part, running the related tests is enough; CI runs the full set.

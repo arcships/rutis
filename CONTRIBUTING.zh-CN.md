@@ -20,13 +20,14 @@
 | `crates/rutis-host` | 不写 Rust 的宿主 |
 | `crates/rutis-sdk`、`crates/rutis-dylib*` | dylib 插件工具链 |
 | `node/` | npm 包：插件 SDK `@arcships/rutis`、运行时、宿主 |
+| `bun/rutis-bun` | npm 包 `@arcships/rutis-bun`：Bun 运行时 |
 | `python/rutis` | PyPI 包 `rutis`：Python 插件 SDK 与运行时 |
 | `docs/` | 指南、设计记录、迁移说明 |
 
 ## 开发环境
 
 - Rust：仓库的 `rust-toolchain.toml` 固定了工具链，`rustup` 会自动安装。
-- Node 24 或更高，Python 3.12 或更高（改动语言运行时或宿主时需要）。
+- Node 24 或更高，Bun 1.4 或更高，Python 3.12 或更高（改动语言运行时或宿主时需要）。
 - 开发整个仓库（rutis-dsh、`tools/` 下的 shell 脚本）需要 Linux 或 macOS，Windows 上请使用 WSL。语言运行时、rutis-loader 行、节点和 rutis-host 也可以在 Windows x64（MSVC）上原生构建和测试：`cargo test -p rutis-loader --features node,python,peer`、`cargo test -p rutis-bridge --all-features` 和 `cargo test -p rutis-host`，与 CI 的 `runtimes-windows` 一致。
 
 ## 运行测试
@@ -34,10 +35,11 @@
 ```bash
 cargo test --workspace                                  # 内核与大部分 crate
 cargo test -p rutis-bridge --all-features               # 通道、会话、运行时、节点
-cargo test -p rutis-loader --features node,python,peer  # loader 的各种插件行
+cargo test -p rutis-loader --features node,python,peer,bun  # loader 的各种插件行
 npm --prefix node/rutis test
 npm --prefix node/rutis-runtime ci && npm --prefix node/rutis-runtime test
 (cd python/rutis && python3 -m unittest discover -s tests)
+(cd bun/rutis-bun && bun test)
 ```
 
 只改了一部分时，跑相关的那几项即可，完整的检查由 CI 完成。

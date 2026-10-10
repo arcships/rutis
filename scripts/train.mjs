@@ -28,6 +28,8 @@ const versions = {
   ...Object.fromEntries(crates.map(name => [`crates/${name}`, cargo(manifest(name))])),
   'npm @arcships/rutis': json('node/rutis/package.json').version,
   'npm @arcships/rutis-runtime': json('node/rutis-runtime/package.json').version,
+  // The Bun runtime greets with this version too (its package.json).
+  'npm @arcships/rutis-bun': json('bun/rutis-bun/package.json').version,
   'npm @arcships/rutis-host': json('node/rutis-host/package.json').version,
   'pypi rutis': pyproject('python/rutis/pyproject.toml'),
   // What the Python runtime says it is when it greets.

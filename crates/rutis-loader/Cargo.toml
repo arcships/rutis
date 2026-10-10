@@ -28,6 +28,8 @@ node = ["runtimes", "rutis-bridge/node", "dep:url"]
 python = ["runtimes", "rutis-bridge/python"]
 # Go leaf plugins (`go:<plugin>` rows), one runtime per Go binary.
 go = ["runtimes", "rutis-bridge/go"]
+# JavaScript/TypeScript leaf plugins in Bun (`bun:<module>` rows).
+bun = ["runtimes", "rutis-bridge/bun"]
 # What every language shares; enabled by the language features.
 runtimes = ["dep:rutis-bridge"]
 # Rows hosted on other nodes (`peer:<id>/<plugin>`), over rutis-bridge links.

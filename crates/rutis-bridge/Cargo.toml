@@ -53,6 +53,8 @@ node = []
 python = []
 # Local Go runtimes: binaries built with the Go SDK (go/rutis).
 go = []
+# Local Bun runtimes.
+bun = []
 # The WebSocket transport.
 websocket = [
     "dep:futures-util",
