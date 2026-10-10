@@ -7,5 +7,5 @@ import (
 )
 
 func main() {
-	rutis.Serve(multilang.Provider, multilang.Consumer, multilang.Local, multilang.Gated)
+	rutis.Serve(multilang.Provider, multilang.Consumer, multilang.Local, multilang.Gated, multilang.Row)
 }

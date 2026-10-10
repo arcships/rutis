@@ -137,3 +137,36 @@ var Gated = rutis.Define(rutis.Plugin[rutis.NoConfig]{
 		return p.Record(ctx, "go gated: "+answer)
 	},
 })
+
+// Timeline is an instance's `go_timeline`.
+type Timeline struct{ title string }
+
+func (t *Timeline) Title(ctx context.Context) string { return "go " + t.title }
+
+// Row uses its instance's `tools` and provides its instance's `go_timeline`.
+var Row = rutis.Define(rutis.Plugin[rutis.NoConfig]{
+	Name:     "go_row",
+	Inject:   []string{"tools", "probe"},
+	Provides: rutis.Provides{"go_timeline": rutis.MethodsOf[*Timeline]()},
+	Apply: func(ctx *rutis.Ctx, _ rutis.NoConfig) error {
+		p, err := probe(ctx)
+		if err != nil {
+			return err
+		}
+		var tools struct {
+			Title func(ctx context.Context) (string, error)
+		}
+		if err := ctx.Use("tools", &tools); err != nil {
+			return err
+		}
+		title, err := tools.Title(ctx)
+		if err != nil {
+			return err
+		}
+		if err := p.Record(ctx, "go sees "+title); err != nil {
+			return err
+		}
+		ctx.Provide("go_timeline", &Timeline{title: title})
+		return nil
+	},
+})
