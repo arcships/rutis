@@ -335,25 +335,38 @@ impl Child {
         status.map_or_else(|_| "is gone".to_owned(), |status| status.clone().unwrap())
     }
 
-    /// The error that ends a session whose peer went away: waits briefly for
-    /// the process to end so the error can say how.
+    /// The error that ends a session whose peer went away: waits for the
+    /// process to end so the error can say how.
     pub(crate) fn disconnected(&self) -> impl FnOnce() -> Error + Send {
         let ended = self.ended.clone();
-        move || {
-            let (status, changed) = &*ended;
-            let status = changed
-                .wait_timeout_while(status.lock().unwrap(), Duration::from_secs(1), |status| {
-                    status.is_none()
-                })
-                .unwrap()
-                .0
-                .clone();
-            Error::Transport(match status {
-                Some(status) => format!("Cordis process {status}"),
-                None => "peer disconnected".to_owned(),
-            })
-        }
+        move || ended_with(&ended, HANG_GUARD)
     }
+}
+
+/// How long a process whose channel ended may go on running before the
+/// session ends without its exit status. Only a process that keeps running
+/// with its channel closed reaches it: one that is exiting gets there
+/// eventually, and a process may close its channel well before it is gone
+/// (Node tears down its I/O worker, and with it the socket, before exiting;
+/// under load that took more than the second this once was, #233).
+const HANG_GUARD: Duration = Duration::from_secs(10);
+
+/// Waits for the process to end, as `ended` records it, and says how; a
+/// process still running after `guard` is reported as such.
+fn ended_with(ended: &(Mutex<Option<String>>, Condvar), guard: Duration) -> Error {
+    let (status, changed) = ended;
+    let status = changed
+        .wait_timeout_while(status.lock().unwrap(), guard, |status| status.is_none())
+        .unwrap()
+        .0
+        .clone();
+    Error::Transport(match status {
+        Some(status) => format!("Cordis process {status}"),
+        None => format!(
+            "Cordis process closed its channel but has not exited after {}s",
+            guard.as_secs_f32()
+        ),
+    })
 }
 
 fn describe(status: std::io::Result<std::process::ExitStatus>) -> String {
@@ -411,4 +424,85 @@ fn peek_exit(pid: u32) -> Option<std::process::ExitStatus> {
         _ => status,
     };
     Some(std::process::ExitStatus::from_raw(raw))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::mpsc;
+
+    /// A shell that closes its channel (fd 3), then waits for a line on the
+    /// fifo `gate` before exiting with 17: the channel ends while the
+    /// process is still running, for as long as the test keeps it so.
+    fn closes_then_waits(gate: &Path) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg(r#"exec 3>&-; read line < "$GATE"; exit 17"#)
+            .env("GATE", gate);
+        command
+    }
+
+    fn fifo(directory: &Path) -> std::path::PathBuf {
+        let path = directory.join("gate");
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `name` is a valid C string.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        path
+    }
+
+    /// #233: a process may close its channel well before it exits (Node
+    /// closes it while tearing down). The channel's end waits for the exit,
+    /// however long that takes, and says how the process ended.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_end_of_the_channel_waits_for_the_exit_status() {
+        let directory = tempfile::tempdir().unwrap();
+        let gate = fifo(directory.path());
+        let Spawned { channel, child, .. } =
+            inherit(closes_then_waits(&gate), Path::new("first")).unwrap();
+        let mut receiver = channel.receiver;
+        let (ended, end) = mpsc::channel();
+        std::thread::spawn(move || ended.send(receiver.recv()).unwrap());
+
+        // Past the second the channel's end used to wait for: still
+        // waiting, since the process is still running.
+        assert!(
+            end.recv_timeout(Duration::from_secs(2)).is_err(),
+            "the channel ended before the process did"
+        );
+        assert_eq!(child.status(), None);
+
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&gate)
+            .unwrap()
+            .write_all(b"exit\n")
+            .unwrap();
+        match end.recv().unwrap() {
+            Err(ChannelError::Closed { reason }) => {
+                assert_eq!(reason, "Cordis process exited with exit status: 17")
+            }
+            other => panic!("the channel should end with the exit status, got {other:?}"),
+        }
+        assert_eq!(child.exited().await, "exited with exit status: 17");
+    }
+
+    /// A process that closed its channel and does not exit ends the session
+    /// once the guard runs out, saying so rather than `peer disconnected`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_process_that_does_not_exit_is_reported_as_such() {
+        let directory = tempfile::tempdir().unwrap();
+        let gate = fifo(directory.path());
+        let Spawned { child, .. } = inherit(closes_then_waits(&gate), Path::new("first")).unwrap();
+        let ended = child.ended.clone();
+        let error =
+            tokio::task::spawn_blocking(move || ended_with(&ended, Duration::from_millis(100)))
+                .await
+                .unwrap();
+        assert_eq!(
+            error.to_string(),
+            "Cordis process closed its channel but has not exited after 0.1s"
+        );
+    }
 }
