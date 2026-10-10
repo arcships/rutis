@@ -45,11 +45,11 @@ fn pair() -> (Channel, Channel) {
         .unwrap();
     let (a, _) = a.accept().unwrap();
     let (b, _) = b.accept().unwrap();
-    // The relay ends with its channels; its directory is no longer needed.
-    std::mem::forget(dir);
+    // The relay ends with its channels; its directory goes with it.
     std::thread::spawn(move || {
         let mut relay = relay;
         let _ = relay.wait();
+        drop(dir);
     });
     (framed(a), framed(b))
 }
