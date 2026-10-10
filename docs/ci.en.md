@@ -1,130 +1,103 @@
-# Continuous integration: design and process
+# Continuous integration (CI)
 
-[中文](ci.md) · Standard: [quality standard](quality-standard.en.md) §12 · Measurements and the improvement plan: [quality status](quality-status.en.md) §8
+[中文](ci.md)
 
-This document describes **how the repository's continuous integration works today**, and **the process to follow when changing it**: adding a job, connecting a language runtime, changing which changes select which jobs. The rules come from quality standard Q12. The measurements and the plan for further changes are in quality status §8 and are not repeated here.
+This document describes how CI runs today and what to do when changing it. The rules come from [quality standard](quality-standard.en.md) §12; timings are in [quality status](quality-status.en.md) §8.
 
-## 1. Principles
+## 1. Rules
 
-Taken from Q12; every rule below follows from them:
+1. A pull request runs only the jobs related to its change; main runs every job on every push.
+2. A new commit on a pull request cancels the older run; runs on main are not cancelled.
+3. Merging depends on one check: `ci-ok`.
+4. macOS runners are few, so a run uses as few macOS jobs as possible, ideally one.
+5. A check runs in one job only.
+6. A pull request that changes the CI configuration runs every job.
 
-1. **Select by change** (Q12.3): before merging, run only the checks the change affects; on main, run every check every time.
-2. **Cancel superseded runs** (Q12.4): when a pull request gets a new commit, its older run is cancelled at once. Runs on main are never cancelled.
-3. **One merge condition** (Q12.5): the summary check `ci-ok` is the only check branch protection requires.
-4. **Time is what the developer waits** (Q12.6): from push to result, queueing included. On scarce runners (macOS), each run should take as few jobs as possible.
-5. **No duplication** (Q12.7): a kind of check runs in one place per tier.
-6. **CI configuration is code** (Q12.10): a pull request that changes it runs every check, and is reviewed like code.
+## 2. Workflows
 
-## 2. Tiers and workflows
-
-| When | Workflow | What |
+| Workflow | When it runs | What it does |
 | --- | --- | --- |
-| Pull request | `ci.yml` | The jobs the change selects (§3, §4), summarised by `ci-ok` |
-| Merge to main | `ci.yml` | Every job, never cancelled |
-| A pull request touching the Windows side of dylib; `v*` tags; by hand | `dylib-windows.yml` | Dylib plugin tests on Windows (25–40 minutes) |
-| Nightly; by hand | `stress.yml` | Kernel tests repeated; network stack soaks |
-| Weekly; by hand | `ci-stats.yml` | Measurements of CI itself (§8) |
-| `v*` / `cli-v*` tags | `release.yml` / `release-cli.yml` | Releases |
+| `ci.yml` | Every pull request; every push to main | Tests and checks (below) |
+| `dylib-windows.yml` | Pull requests touching dylib files; `v*` tags; by hand | Dylib tests on Windows |
+| `stress.yml` | Nightly; by hand | Kernel tests repeated; long network tests |
+| `ci-stats.yml` | Weekly; by hand | CI timings and failures |
+| `release.yml`, `release-cli.yml` | Tags | Releases |
 
-The time budget of each tier is in quality status §8.4.
+## 3. How a pull request picks its jobs
 
-## 3. Selecting by change
+The first job of `ci.yml`, `changes`, looks at the files the pull request changed and sets the switches below. Each later job runs or not depending on a switch. On a push to main every switch is on.
 
-The first job of `ci.yml`, `changes`, uses `dorny/paths-filter` to tell what changed and sets a few outputs. Later jobs run or not depending on them. On a push to main, every output is `true`.
+| Switch | On when these files change |
+| --- | --- |
+| `all` | `Cargo.lock`, the root `Cargo.toml`, `rust-toolchain.toml`, `.github/workflows/**`. Turns every other switch on too |
+| `code` | Any file except `docs/**` and `*.md` |
+| `dylib` | The kernel `crates/rutis`; `rutis-cli`, `rutis-dylib*`, `rutis-sdk`, `rutis-dev`, `rutis-xtask`; `tools/*dylib*`, `tools/test-sdk-bundle.sh`, `tools/lib/**`, `tests/dylib-fixtures/**` |
+| `packaging` | `scripts/train.mjs`, every `pyproject.toml` and `package.json`, `crates/*/Cargo.toml`, `node/rutis-host/scripts/**` |
+| `docs` | Any `.md` file |
 
-| Output | `true` when a pull request touches | Meaning |
-| --- | --- | --- |
-| `all` | `Cargo.lock`, the root `Cargo.toml`, `rust-toolchain.toml`, `.github/workflows/**` | The reach cannot be told (Q12.3.2, Q12.10): every other output is `true` too |
-| `code` | Any file except `docs/**` and `*.md` | A code change |
-| `dylib` | The kernel `crates/rutis/**`; `rutis-cli`, `rutis-dylib*`, `rutis-sdk`, `rutis-dev`, `rutis-xtask`; `tools/*dylib*`, `tools/test-sdk-bundle.sh`, `tools/lib/**`, `tests/dylib-fixtures/**` | The dylib SDK and what goes into it |
-| `packaging` | `scripts/train.mjs`, every `pyproject.toml` / `package.json`, `crates/*/Cargo.toml`, `node/rutis-host/scripts/**` | What a release packages |
-| `docs` | `**/*.md` | Documentation |
+## 4. Jobs
 
-The mapping lives in the `changes` job of `ci.yml`. It is CI configuration, changed as §6.3 says.
-
-## 4. Job catalogue
-
-| Job | Platform | Selected by | What it does |
+| Job | Runner | Switch | What it does |
 | --- | --- | --- | --- |
-| `changes` | Linux | Always | Tells what changed (§3) |
-| `links` | Linux | `docs` | Relative links in Markdown |
-| `test` | Linux | `code` | The full set: `cargo test --workspace`; every kind of loader row (also on loopback); bridge with every feature; builds of all targets and of each feature set; the Node and Python packages' tests |
-| `network-macos` | macOS | `code` | Bridge with every feature, every kind of loader row, rutis-host, on macOS; the static build of the workspace. **The one macOS job of an ordinary change** (Q12.6.2) |
-| `runtimes-windows` | Windows | `code` | Every kind of loader row, bridge with every feature, rutis-host, on Windows; the static build of the workspace |
-| `runtimes-bun` | Linux, macOS × Bun 1.4.0, latest | **None (runs every time, see §9)** | The Bun runtime's `bun test`; bridge and loader Bun tests (also on loopback); rutis-host's Bun tests |
-| `semver-rutis` | Linux | `code` | Public API changes since the last release (warns only) |
-| `dylib-linux-launcher` / `-repro` / `-sdk-bundle` | Linux | `dylib` | Three jobs in parallel: the dylib host environment and plugin swaps; reproducible builds on one machine; external plugins built against a prebuilt SDK |
-| `dylib-macos` | macOS | `dylib` | The same three, plus quarantine and the hardened host, one after another in one job |
-| `release-dry-run` / `release-windows` / `release-wheel-aarch64` | Linux / Windows / Linux | `packaging` | Release artifacts build and pack |
-| `sdk-repro` / `sdk-repro-macos` (×2 each), and their comparisons | Linux / macOS | `all` | The SDK built on two machines and the hashes compared; uncacheable, so only on main and on full runs (Q12.6.3) |
+| `links` | Linux | `docs` | Checks relative links in Markdown |
+| `test` | Linux | `code` | All Rust tests and build checks; the Node and Python packages' tests |
+| `network-macos` | macOS | `code` | Bridge, loader and rutis-host tests on macOS; a build check of the whole workspace |
+| `runtimes-windows` | Windows | `code` | Bridge, loader and rutis-host tests on Windows; a build check of the whole workspace |
+| `runtimes-bun` | Linux, macOS; Bun 1.4.0 and latest | None; runs every time (see §7) | All Bun runtime tests |
+| `semver-rutis` | Linux | `code` | Whether the public API changed incompatibly since the last release (warning only) |
+| `dylib-linux-launcher`, `dylib-linux-repro`, `dylib-linux-sdk-bundle` | Linux | `dylib` | Dylib tests, split into three jobs that run at the same time |
+| `dylib-macos` | macOS | `dylib` | The same dylib tests, one after another in one job |
+| `release-dry-run`, `release-windows`, `release-wheel-aarch64` | Linux, Windows, Linux | `packaging` | The release packages build |
+| `sdk-repro`, `sdk-repro-macos`, and their comparisons | Linux, macOS | `all` | Builds the SDK on two machines and checks the results are identical |
 | `ci-ok` | Linux | Always | The summary (§5) |
 
-## 5. The merge condition: `ci-ok`
+## 5. Merge condition
 
-- A job listed in `ci-ok`'s `needs` passes with `success` or `skipped`. `failure` or `cancelled` fails `ci-ok`.
-- `ci-ok` is the only check branch protection requires. **A job not in its `needs` does not block a merge, even when it fails.**
-- So every new job needs both a selection condition and a place in `ci-ok`'s `needs` (§6.1).
+- `ci-ok` is the only check required on main.
+- `ci-ok` looks only at the jobs listed in its `needs`. It passes when each of them succeeded or was skipped, and fails when any of them failed or was cancelled.
+- A job not listed in `ci-ok` does not stop a merge, even when it fails.
 
-## 6. Process
+## 6. Changing CI
 
-### 6.1 Adding a job
+### Adding a job
 
-1. **Choose the tier.** How soon must the problems it finds be found (Q12.1)? Something that can only break at release goes on main or tags. Long, uncacheable checks that rarely find anything stay off the pre-merge critical path (Q12.2, Q12.6.3).
-2. **Give it a selection condition**: `needs: changes` and `if: needs.changes.outputs.<output> == 'true'`. If no output fits, add one to `changes` (§6.3) rather than leaving the condition out.
-3. **List it in `ci-ok`'s `needs`.**
-4. **Check for duplication** (Q12.7). Is the same kind of check already run by another job? If it can run on the same machine one step after another, add it to that job instead.
-5. **Scarce platforms.** Before taking a macOS runner, see whether the work fits in `network-macos`. An ordinary change takes at most one macOS job, and a dylib change at most two (quality status §8.4).
-6. **Add it to the catalogue in §4.**
+1. Give it `needs: changes` and `if: needs.changes.outputs.<switch> == 'true'`. If no switch fits, add one to `changes` and to §3.
+2. Add it to `ci-ok`'s `needs`.
+3. Check whether an existing job already does the same check. If the work fits in an existing job, put it there instead of adding a job.
+4. Before using macOS, see whether the work fits in `network-macos`. An ordinary change uses at most 1 macOS job; a dylib change at most 2.
+5. Add it to §4.
 
-### 6.2 Connecting a language runtime
+### Adding a language runtime
 
-A language runtime's tests (Node, Python, Bun, and later Go and others) come in three kinds, each with one place:
+1. Add a switch for the language to `changes`, covering its runtime directory and `crates/rutis-bridge`, `crates/rutis-loader`, `crates/rutis-host`.
+2. Install the language in `test` and `network-macos`, and add its feature to their existing bridge, loader and host test steps.
+3. To test several versions, add a `runtimes-<language>` job: it runs on the switch from step 1, is listed in `ci-ok`, and runs only on Linux for pull requests. Older versions on macOS run only on main.
+4. Releases: add its package to `release-dry-run`, `scripts/train.mjs` and `release.yml`.
+5. Update §3 and §4.
 
-| Tests | Where |
-| --- | --- |
-| The runtime's own unit tests (`bun test`, `npm test`, `unittest`) | Linux: `test`; macOS: `network-macos`; where several versions are needed, the language's version job (next row) |
-| Rust contract, row and host tests (`--features <language>`) | The same: add the feature to the bridge, loader and host steps of `test` and `network-macos`, and of `runtimes-windows` once Windows is supported |
-| The oldest and latest version matrix | One `runtimes-<language>` job: **Linux only on pull requests**, selected by the language's output (§6.3); the oldest version on macOS runs on main |
+### Changing which files turn a switch on
 
-Checklist:
+- Changing `changes` changes `.github/workflows/**`, so that pull request runs every job.
+- If a job was skipped on a pull request and then failed on main after the merge, a switch is missing some files. After fixing the failure, add those files to the switch.
 
-- [ ] `changes` gets a `<language>` output covering the runtime package's directory, `crates/rutis-bridge/**`, `crates/rutis-loader/**` and `crates/rutis-host/**`.
-- [ ] `test`, `network-macos` (and `runtimes-windows` once supported) install the language, and their existing steps gain the feature. No new job for this.
-- [ ] The version matrix job `runtimes-<language>`: `needs: changes` and its condition; listed in `ci-ok`; no macOS runner on pull requests.
-- [ ] `release-dry-run` packs it; `scripts/train.mjs` and `release.yml` include it.
-- [ ] §3 and §4 of this document are updated.
+### Changing the CI configuration
 
-### 6.3 Changing which changes select which jobs
-
-- Changing the paths in `changes`, or adding an output, changes `.github/workflows/**`. That pull request therefore runs every job (`all`).
-- A new output gets a row in the table in §3 saying when it is `true`.
-- **A job skipped before merging that then fails on main** means the mapping missed that kind of change. After fixing the failure, add the missing path (Q12.3.3).
-
-### 6.4 Changing the CI configuration
-
-- A pull request of its own, of type `ci:`, with the reason in the commit message or in this document.
-- It runs every check before merging (`all`).
-- After it merges, watch the first run on main. If the measurements (§8) change noticeably, update quality status §8.
+- Use a pull request of its own, with commit type `ci:`.
+- After it merges, check the first run on main.
 
 ## 7. Failures
 
-- **A failure on main** is the highest-priority defect (Q12.8). Find the merge that introduced it, and merge nothing it may affect until it is fixed.
-- **Runs on main are never left cancelled.** Every merge needs a complete result (Q12.4); a run cancelled by hand is run again.
-- **Intermittent failures**: reproduce first, by repeating locally, or by a temporary repetition step in CI removed before merging. Retries must not hide them. A test that is wrong gets fixed; a product that is wrong gets fixed. What cannot be fixed at once gets an issue, noted in the test.
+- Fix failures on main first. Find which merge caused them; until they are fixed, do not merge changes they may affect.
+- If a run on main is cancelled by hand, run it again. Every merge needs a complete result.
+- For tests that fail now and then, first find a way to reproduce the failure, then fix it. Do not hide it with automatic retries.
 
-## 8. Measurements
+## 8. Where CI differs from this document today (2026-10-10, main `45506e8`)
 
-`ci-stats.yml` measures the latest runs every week: time from push to result (queueing included), job durations, failures and cancellations. The results go into that run's summary. When they exceed the budgets in quality status §8.4, adjust as Q12.2 and Q12.6 say.
+| Problem | Fix |
+| --- | --- |
+| `runtimes-bun` has no switch and is not in `ci-ok`. Every pull request runs it, documentation-only ones too, using 2 macOS jobs, and its failures do not stop a merge. #200 and #213 merged at the same time, and the job #200 added was never connected to #213's switches | Add a `bun` switch as §6 says; make `runtimes-bun` run on it and list it in `ci-ok`; run it only on Linux for pull requests |
+| Bun tests run three times on macOS: once in `network-macos`, and once for each version in `runtimes-bun` | Add `bun` to `network-macos`'s loader tests; run Bun 1.4.0 on macOS only on main |
+| The last 4 runs on main were cancelled, so `45506e8` has no complete result | Run the latest commit on main again |
+| Quality status §8.4 says merges to main run `dylib-windows`, but `dylib-windows.yml` does not run on pushes to main | Choose one: make it run on pushes to main, or change §8.4 to run it on tags only |
 
-## 9. Current deviations and fixes (2026-10-10)
-
-Against `main` (`45506e8`):
-
-| Deviation | Breaks | Fix |
-| --- | --- | --- |
-| `runtimes-bun` has no selection condition and is not in `ci-ok`'s `needs`. Every pull request, documentation-only ones included, runs it on 2 macOS runners, and a failure does not block the merge. #200 and #213 merged at the same time, and the Bun job was not connected to selection | Q12.3, Q12.5, Q12.6.2 | Per §6.2: a new `bun` output; `runtimes-bun` gets its condition and a place in `ci-ok`; Linux only on pull requests |
-| Bun tests run three times on macOS: `network-macos` (bridge with every feature, host) and both versions in `runtimes-bun`. On Linux, `test` and `runtimes-bun` overlap too | Q12.7 | `network-macos`'s loader step gains `bun`; the oldest Bun on macOS runs only on main |
-| Four runs on main, `45506e8` among them, were cancelled and have no complete result | Q12.4, Q12.8 | Run the latest commit on main again |
-| Quality status §8.4 runs dylib-windows on merges to main, but `dylib-windows.yml` has no `push` trigger for main | §8.4 | Add a `push` trigger for main, or change §8.4 to tags only (to be decided) |
-
-The fixes go in a pull request of their own, as §6.4 says.
+These changes go in a separate `ci:` pull request.
