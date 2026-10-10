@@ -13,8 +13,6 @@ use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-#[cfg(unix)]
-use std::process::Stdio;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -78,9 +76,6 @@ async fn loopback(mut command: tokio::process::Command, first: &Path) -> Result<
         .env(CHANNEL_TOKEN, listener.token())
         .arg(listener.address())
         .arg(first)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
         .map_err(transport)?;
@@ -163,9 +158,6 @@ fn inherit(mut command: tokio::process::Command, first: &Path) -> Result<Spawned
     let child = command
         .arg(format!("fd:{CHANNEL_FD}"))
         .arg(first)
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
         .map_err(transport)?;
@@ -193,9 +185,6 @@ async fn dial_back(mut command: tokio::process::Command, first: &Path) -> Result
     let mut child = command
         .arg(&socket)
         .arg(first)
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
         .map_err(transport)?;
@@ -257,7 +246,10 @@ pub(crate) fn command(
     let mut command = tokio::process::Command::new(&launcher.program);
     command
         .args(&launcher.args)
-        .envs(launcher.env.iter().map(|(name, value)| (name, value)));
+        .envs(launcher.env.iter().map(|(name, value)| (name, value)))
+        .stdin(launcher.stdin.process())
+        .stdout(launcher.stdout.process())
+        .stderr(launcher.stderr.process());
     // Without a directory of its own, it runs where the application does.
     if let Some(cwd) = &launcher.cwd {
         command.current_dir(cwd);

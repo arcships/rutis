@@ -79,12 +79,9 @@ async fn start(runtime: Runtime, via: Via, dir: &Path) -> (Arc<Process>, PathBuf
                 &entry,
             )
             .unwrap();
-            let launcher = Launcher::bun(None, &repo().join("bun/rutis-bun"), dir);
+            let mut launcher = Launcher::bun(None, &repo().join("bun/rutis-bun"), dir);
             // Inheriting fd:3 is the Bun launcher's default; `via` decides.
-            let launcher = Launcher {
-                inherit_fd: false,
-                ..launcher
-            };
+            launcher.inherit_fd = false;
             (launcher, dir.to_owned(), entry)
         }
     };
