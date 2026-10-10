@@ -1,8 +1,14 @@
 # The rutis kernel tests run many times over, to catch failures that depend
 # on how tasks interleave and show up only once in a while; the network
 # stack soaks (links cut and relinked, processes started and ended, over
-# and over) check that nothing piles up. Runs nightly and on demand; a
-# failing round prints the test output it saw.
+# and over) check that nothing piles up. Runs nightly and on demand.
+#
+# Each round of the rutis tests varies what it can: the number of test
+# threads (1, 2, all cores), the test order (shuffled), the build (every
+# fifth round is a release build) and the seed of the randomized tests.
+# The seed of a round drives both the order and `RUTIS_SEED`; a failing
+# round prints its output, its settings and a command that replays it.
+# A failure is never retried.
 name: stress
 
 on:
@@ -27,20 +33,66 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p rutis --no-run
+      - name: Build the rutis tests (debug and release)
+        # bash -eo pipefail: a failing build fails the step through jq.
+        shell: bash
+        run: |
+          for profile in debug release; do
+            flag=; [ "$profile" = release ] && flag=--release
+            cargo test -p rutis $flag --no-run --message-format=json \
+              | jq -r 'select(.profile.test == true and .executable != null) | .executable' \
+              > "$RUNNER_TEMP/tests-$profile.txt"
+            echo "$profile:"; cat "$RUNNER_TEMP/tests-$profile.txt"
+          done
       - name: Repeat the rutis tests
+        # The test binaries run from the package directory, as under
+        # `cargo test`. Shuffling is an unstable libtest option; the
+        # RUSTC_BOOTSTRAP below reaches only the test binaries, not the
+        # build. Doc tests are not repeated.
+        working-directory: crates/rutis
         env:
           ROUNDS: ${{ inputs.rounds || '20' }}
         run: |
           case "$ROUNDS" in ""|*[!0-9]*) echo "::error::rounds must be a number"; exit 1;; esac
+          cores=$(nproc)
+          summary="$RUNNER_TEMP/summary.md"
+          {
+            echo "### rutis tests, $ROUNDS rounds"
+            echo
+            echo "| round | build | test threads | seed | result |"
+            echo "| --- | --- | --- | --- | --- |"
+          } > "$summary"
+          status=0
           for round in $(seq 1 "$ROUNDS"); do
-            if ! cargo test -q -p rutis > out.txt 2>&1; then
-              cat out.txt
-              echo "::error title=rutis stress::failed in round $round of $ROUNDS"
-              exit 1
+            case $((round % 3)) in 1) threads=1;; 2) threads=2;; *) threads=$cores;; esac
+            if [ $((round % 5)) -eq 0 ]; then profile=release; else profile=debug; fi
+            seed=$(od -An -N8 -tu8 /dev/urandom | tr -d ' ')
+            echo "round $round of $ROUNDS: $profile build, --test-threads=$threads, seed $seed"
+            failed=
+            : > "$RUNNER_TEMP/out.txt"
+            while read -r test; do
+              if ! RUTIS_SEED=$seed RUSTC_BOOTSTRAP=1 "$test" -q --test-threads="$threads" \
+                  -Z unstable-options --shuffle-seed "$seed" >> "$RUNNER_TEMP/out.txt" 2>&1; then
+                failed=$(basename "$test")
+                break
+              fi
+            done < "$RUNNER_TEMP/tests-$profile.txt"
+            if [ -n "$failed" ]; then
+              cat "$RUNNER_TEMP/out.txt"
+              flag=; [ "$profile" = release ] && flag=" --release"
+              echo "| $round | $profile | $threads | $seed | failed in \`$failed\` |" >> "$summary"
+              {
+                echo
+                echo "Replay: \`RUTIS_SEED=$seed RUSTC_BOOTSTRAP=1 cargo test -p rutis$flag --tests -- --test-threads=$threads -Z unstable-options --shuffle-seed $seed\`"
+              } >> "$summary"
+              echo "::error title=rutis stress::round $round of $ROUNDS failed in $failed ($profile build, --test-threads=$threads, seed $seed)"
+              status=1
+              break
             fi
+            echo "| $round | $profile | $threads | $seed | passed |" >> "$summary"
           done
-          echo "rutis tests passed $ROUNDS rounds." >> "$GITHUB_STEP_SUMMARY"
+          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          exit $status
 
   soak:
     runs-on: ubuntu-24.04
