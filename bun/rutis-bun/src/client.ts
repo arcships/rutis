@@ -14,7 +14,8 @@ export class Client {
   #exited: Promise<number>
   #session: Session
 
-  constructor(channel: string, { dispatch, settled, endpoint, token }: { dispatch: Dispatch, settled?: () => void, endpoint?: Endpoint, token?: string }) {
+  // `worker`: the I/O worker's script; tests give one that misbehaves.
+  constructor(channel: string, { dispatch, settled, endpoint, token, worker = new URL('./io-worker.ts', import.meta.url) }: { dispatch: Dispatch, settled?: () => void, endpoint?: Endpoint, token?: string, worker?: URL }) {
     const { port1, port2 } = new MessageChannel()
     this.#port = port1
     this.#session = new Session({
@@ -32,7 +33,7 @@ export class Client {
       },
     })
     this.#port.on('message', message => this.#receive(message))
-    this.#worker = new Worker(new URL('./io-worker.ts', import.meta.url), {
+    this.#worker = new Worker(worker, {
       workerData: { channel, token, port: port2, signal: this.#signal }, transferList: [port2],
     } as any)
     this.#worker.on('error', error => this.#session.close(error))

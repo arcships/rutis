@@ -443,3 +443,71 @@ async fn a_bun_too_old_for_the_package_is_refused() {
     // It says why on stderr, and exits before greeting.
     assert!(error.contains("exit status: 2"), "{error}");
 }
+
+/// The Bun runtime started from one of its test fixtures, in `project`.
+fn fixture_launcher(fixture: &str, project: &Path) -> Launcher {
+    Launcher::new("bun")
+        .arg("--no-install")
+        .arg("--no-env-file")
+        .arg(package().join("test/fixtures").join(fixture))
+        .cwd(project)
+        .inherit_fd()
+}
+
+/// A runtime that does not report what rows need fails when it starts, with
+/// one clear error, instead of every row failing later.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_runtime_without_the_row_contract_fails_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = rutis_bridge::runtime::LocalRuntime::launcher(
+        "old",
+        fixture_launcher("old-runtime.ts", dir.path()),
+        dir.path(),
+    );
+    let handle = runtime.handle();
+    let ctx = Ctx::root().unwrap();
+    let view = ctx.plugin(runtime);
+    let _ = (&view).await;
+    assert_eq!(view.state().state, rutis::FiberState::Failed);
+    match handle.state() {
+        rutis_bridge::runtime::RuntimeState::Down(message) => {
+            assert!(message.contains("lacks rows.v2 and hosts"), "{message}")
+        }
+        _ => panic!("the runtime should be down"),
+    }
+    ctx.shutdown().await.unwrap();
+}
+
+/// Unloading a row withdraws its services even when the runtime's
+/// withdrawal reaches the session late. Here it never comes: the runtime is
+/// made to drop it.
+#[tokio::test(flavor = "multi_thread")]
+async fn unloading_a_row_withdraws_its_services_without_waiting_for_the_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("weather.ts"), WEATHER).unwrap();
+    let process = mount(
+        fixture_launcher("dropping-runtime.ts", dir.path()),
+        dir.path(),
+    )
+    .await
+    .unwrap();
+    let lease = process
+        .lease_host("clock", Arc::new(Clock(Arc::default())), None)
+        .await
+        .unwrap();
+    let ctx = Ctx::root().unwrap();
+    let projection = load(&process, &ctx, "w", Path::new("./weather.ts"), json!({})).await;
+    process.unload_row("w").await.unwrap();
+    eventually(
+        || {
+            ctx.get_as::<dyn HostDispatch>(host_key("weather"))
+                .is_none()
+        },
+        "the withdrawal",
+    )
+    .await;
+    projection.close();
+    lease.release().await.unwrap();
+    process.dispose().await.unwrap();
+    ctx.shutdown().await.unwrap();
+}

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use rutis::{Ctx, FiberState};
+use rutis::{Ctx, FiberState, FiberView};
 use rutis_bridge::runtime::LocalRuntime;
 use rutis_bridge::session::{host_key, HostDispatch};
 use rutis_bridge::session::{Reply, Value as RpcValue};
@@ -100,6 +100,7 @@ struct Fixture {
     root: Ctx,
     loader: Loader,
     probe: Probe,
+    runtime: FiberView,
     dir: tempfile::TempDir,
 }
 
@@ -131,7 +132,8 @@ async fn fixture_with(install: impl FnOnce(&Path)) -> Fixture {
     }
     let bun = LocalRuntime::bun(repo().join("bun/rutis-bun"), dir.path());
     let rows = Arc::new(RuntimeResolver::modules(bun.handle()).with_catalog(&catalog));
-    root.plugin(bun).await.unwrap();
+    let runtime = root.plugin(bun);
+    (&runtime).await.unwrap();
     let plugin = LoaderPlugin::new(
         Chain::new().with_shared(rows.clone()),
         LoaderOptions {
@@ -146,6 +148,7 @@ async fn fixture_with(install: impl FnOnce(&Path)) -> Fixture {
         root,
         loader,
         probe,
+        runtime,
         dir,
     }
 }
@@ -274,5 +277,153 @@ async fn packages_report_versions_and_missing_modules_are_unresolved() {
         EntryStatus::Unresolved(LoaderError::NotFound { .. }) => {}
         other => panic!("a missing module is unresolved, got {other:?} ({report:?})"),
     }
+    fixture.root.shutdown().await.unwrap();
+}
+
+/// A plugin that ends the process takes the runtime's rows down with it:
+/// they wait for the runtime instead of holding a dead process, and run
+/// again once the runtime restarts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dead_process_stops_the_rows_until_restart() {
+    let fixture = fixture().await;
+    std::fs::write(
+        fixture.dir.path().join("exit.ts"),
+        "export function apply() { setTimeout(() => process.exit(3), 50) }\n",
+    )
+    .unwrap();
+    let loader = &fixture.loader;
+    let base = vec![row("p", "./provider.ts"), row("u", "./user.ts")];
+    loader.reconcile(layer(base.clone()), None).await.unwrap();
+    fixture.probe.wait_for("user: sunny (native)").await;
+
+    let mut dying = base.clone();
+    dying.push(row("x", "./exit.ts"));
+    loader.reconcile(layer(dying), None).await.unwrap();
+    until("rows waiting after the process ended", || {
+        ["p", "u"]
+            .iter()
+            .all(|id| state(loader, id) == Some(FiberState::Pending))
+    })
+    .await;
+
+    loader.reconcile(layer(base), None).await.unwrap();
+    fixture.probe.0.lock().unwrap().clear();
+    fixture.runtime.restart().await.unwrap();
+    fixture.probe.wait_for("user: sunny (native)").await;
+    until("rows running again", || {
+        state(loader, "u") == Some(FiberState::Active)
+    })
+    .await;
+    fixture.root.shutdown().await.unwrap();
+}
+
+/// A Bun runtime that cannot start (no runtime package here) fails, and
+/// resolving its rows does not wait for it: they wait as rows.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_runtime_that_cannot_start_does_not_block_resolution() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+    std::fs::write(dir.path().join("bystander.ts"), sdk_plugin(BYSTANDER)).unwrap();
+    let root = Ctx::root().unwrap();
+    let bun = LocalRuntime::bun(dir.path().join("no-runtime-here"), dir.path());
+    let resolver = Arc::new(RuntimeResolver::modules(bun.handle()));
+    let runtime = root.plugin(bun);
+    let _ = (&runtime).await;
+    assert_eq!(runtime.state().state, FiberState::Failed);
+    let plugin = LoaderPlugin::new(Chain::new().with_shared(resolver), LoaderOptions::default());
+    let loader = plugin.handle();
+    root.plugin(plugin).await.unwrap();
+    let report = tokio::time::timeout(
+        Duration::from_secs(10),
+        loader.reconcile(layer(vec![row("b", "./bystander.ts")]), None),
+    )
+    .await
+    .expect("resolution does not wait for a failed runtime")
+    .unwrap();
+    assert!(report.failures.is_empty(), "{report:?}");
+    assert_eq!(state(&loader, "b"), Some(FiberState::Pending));
+    root.shutdown().await.unwrap();
+}
+
+/// An edit that breaks the plugin fails the reload; the row runs again
+/// once the plugin is fixed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_broken_edit_fails_the_reload_and_a_fix_recovers() {
+    let fixture = fixture().await;
+    let module = fixture.dir.path().join("edited.ts");
+    let plugin = |version: &str| {
+        sdk_plugin(&format!(
+            "{{ inject: ['probe'], apply(ctx) {{ const probe = ctx.use('probe'); probe.record('{version}: start'); return () => probe.record('{version}: bye') }} }}"
+        ))
+    };
+    let touch = |text: String, ahead: u64| {
+        std::fs::write(&module, text).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&module)
+            .unwrap()
+            .set_modified(SystemTime::now() + Duration::from_secs(ahead))
+            .unwrap();
+    };
+    touch(plugin("v1"), 0);
+    fixture
+        .loader
+        .reconcile(layer(vec![row("e", "./edited.ts")]), None)
+        .await
+        .unwrap();
+    fixture.probe.wait_for("v1: start").await;
+
+    touch("export default {{ this is not TypeScript\n".into(), 5);
+    let reload = fixture.loader.reload("e").await;
+    let status = fixture.loader.get("e").unwrap().status;
+    assert!(
+        reload.is_err() || !matches!(status, EntryStatus::Running(_)),
+        "a broken plugin does not run: {reload:?} {status:?}"
+    );
+
+    touch(plugin("v2"), 10);
+    fixture.loader.reload("e").await.unwrap();
+    fixture.probe.wait_for("v2: start").await;
+    fixture.root.shutdown().await.unwrap();
+}
+
+/// A package linked into node_modules (`bun link`) reloads from its real
+/// files: an edit there is what the reload runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linked_package_reloads_from_its_real_files() {
+    let source = tempfile::tempdir().unwrap();
+    let plugin = |version: &str| {
+        sdk_plugin(&format!(
+            "{{ inject: ['probe'], apply(ctx) {{ ctx.use('probe').record('linked {version}') }} }}"
+        ))
+    };
+    std::fs::write(
+        source.path().join("package.json"),
+        r#"{ "name": "@acme/linked", "version": "1.0.0", "type": "module", "main": "index.ts" }"#,
+    )
+    .unwrap();
+    let index = source.path().join("index.ts");
+    std::fs::write(&index, plugin("v1")).unwrap();
+    let target = source.path().to_owned();
+    let fixture = fixture_with(move |dir| {
+        std::fs::create_dir_all(dir.join("node_modules/@acme")).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("node_modules/@acme/linked")).unwrap();
+    })
+    .await;
+    fixture
+        .loader
+        .reconcile(layer(vec![row("l", "@acme/linked")]), None)
+        .await
+        .unwrap();
+    fixture.probe.wait_for("linked v1").await;
+    std::fs::write(&index, plugin("v2")).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&index)
+        .unwrap()
+        .set_modified(SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
+    fixture.loader.reload("l").await.unwrap();
+    fixture.probe.wait_for("linked v2").await;
     fixture.root.shutdown().await.unwrap();
 }

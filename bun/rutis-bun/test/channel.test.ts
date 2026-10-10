@@ -83,3 +83,14 @@ test('a tcp channel without a token is refused before dialing', async () => {
   const error = await open('tcp:127.0.0.1:1', collect().handlers).catch(error => error)
   expect(error.category).toBe('auth-rejected')
 })
+
+test('ending this side half-closes: the far end ends, what was sent arrives', async () => {
+  const [a, b] = await pair()
+  const near = frame(a, collect().handlers)
+  const far = collect()
+  frame(b, far.handlers)
+  near.send('last')
+  near.end()
+  expect(await far.ended).toBeUndefined()
+  expect(far.messages).toEqual(['last'])
+})
