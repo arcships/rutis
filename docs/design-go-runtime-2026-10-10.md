@@ -439,6 +439,8 @@ G1、G2 由 #227 实现。与本文的出入：
 | 开发构建 | — | `GoBinaries::file_named`、`GoResolver::replace`、`read_go_manifest` |
 | 远程 npm 命名 | 拒绝 `go:` 与 `<Go 运行时名>:` | 拒绝任何 `<名字>:` 前缀 |
 | macOS 隔离属性 | 复用 dylib 的检查 | `rutis-host check` 用 `xattr` 检查并提示 |
+| 清单执行超时 | 5 秒 | 30 秒：macOS 上新二进制第一次运行要等系统评估，几个同时启动时超过 5 秒 |
+| 同一运行时的启动、重启、停止 | — | 同一时刻只有一个在进行（运行时标记为忙）；新进程在旧进程释放后才启动 |
 | 未做 | | Python `mount` 回复的 `implementation` / `engine` 与 `check` 打印它们（随 Bun B1）；G3 |
 
 ---

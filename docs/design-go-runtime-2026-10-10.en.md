@@ -439,6 +439,8 @@ G1 and G2 are implemented by #227. Where it differs from this document:
 | Development builds | — | `GoBinaries::file_named`, `GoResolver::replace`, `read_go_manifest` |
 | Remote npm naming | refuses `go:` and `<Go runtime name>:` | refuses any `<name>:` prefix |
 | macOS quarantine | reuse the dylib check | `rutis-host check` checks with `xattr` and says what to do |
+| Manifest timeout | 5 seconds | 30 seconds: on macOS a new binary's first run waits for the system's assessment, over 5 seconds when several start at once |
+| Starting, restarting, stopping one runtime | — | one at a time (the runtime is marked busy); a new process starts once the old one is gone |
 | Not done | | Python's `mount` reply `implementation` / `engine` and `check` printing them (with Bun B1); G3 |
 
 ---
