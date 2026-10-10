@@ -43,6 +43,8 @@ jobs:
               | jq -r 'select(.profile.test == true and .executable != null) | .executable' \
               > "$RUNNER_TEMP/tests-$profile.txt"
             echo "$profile:"; cat "$RUNNER_TEMP/tests-$profile.txt"
+            # No binaries would make every round pass without running anything.
+            [ -s "$RUNNER_TEMP/tests-$profile.txt" ] || { echo "::error::no $profile test binaries"; exit 1; }
           done
       - name: Repeat the rutis tests
         # The test binaries run from the package directory, as under
@@ -72,7 +74,7 @@ jobs:
             : > "$RUNNER_TEMP/out.txt"
             while read -r test; do
               if ! RUTIS_SEED=$seed RUSTC_BOOTSTRAP=1 "$test" -q --test-threads="$threads" \
-                  -Z unstable-options --shuffle-seed "$seed" >> "$RUNNER_TEMP/out.txt" 2>&1; then
+                  -Z unstable-options --shuffle-seed "$seed" < /dev/null >> "$RUNNER_TEMP/out.txt" 2>&1; then
                 failed=$(basename "$test")
                 break
               fi
