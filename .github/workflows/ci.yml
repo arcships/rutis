@@ -1,5 +1,9 @@
-# 常规 CI:push / PR 自动跑全量测试 + 编译检查。
+# 常规 CI:push / PR 自动跑测试 + 编译检查。
 # 防回归:任何改动(agent/cli/内核/bridge/rutis-dsh)引入的失败在此显式变红。
+#
+# Pull requests run only the jobs their change affects (docs/quality-status.md
+# §8.3, Q12.3); every push to main runs every job. The `changes` job decides,
+# and `ci-ok` is the one check a merge waits for (Q12.5).
 #
 # rutis-agent 的 rutui 依赖已从 crates.io 解析,无需额外 checkout。
 
@@ -20,7 +24,110 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # What the change touches. The mapping from paths to jobs is reviewed like
+  # code; a job skipped on a pull request that then fails on main means a
+  # path is missing here (Q12.3.3).
+  changes:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      all: ${{ steps.select.outputs.all }}
+      code: ${{ steps.select.outputs.code }}
+      dylib: ${{ steps.select.outputs.dylib }}
+      packaging: ${{ steps.select.outputs.packaging }}
+      docs: ${{ steps.select.outputs.docs }}
+    steps:
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        if: github.event_name == 'pull_request'
+        id: paths
+        with:
+          filters: |
+            # Changes whose reach cannot be told run everything (Q12.3.2,
+            # Q12.10).
+            all:
+              - Cargo.lock
+              - Cargo.toml
+              - rust-toolchain.toml
+              - .github/workflows/**
+            # The dylib SDK, its tools and fixtures, and what goes into the
+            # SDK (the kernel) or links it (rutis-cli).
+            dylib:
+              - crates/rutis/**
+              - crates/rutis-cli/**
+              - crates/rutis-dylib/**
+              - crates/rutis-dylib-meta/**
+              - crates/rutis-dylib-launcher/**
+              - crates/rutis-sdk/**
+              - crates/rutis-dev/**
+              - crates/rutis-xtask/**
+              - tools/*dylib*
+              - tools/test-sdk-bundle.sh
+              - tools/lib/**
+              - tests/dylib-fixtures/**
+            # What release.yml packages.
+            packaging:
+              - scripts/train.mjs
+              - '**/pyproject.toml'
+              - '**/package.json'
+              - crates/*/Cargo.toml
+              - node/rutis-host/scripts/**
+            docs:
+              - '**/*.md'
+      # Anything that is not documentation (every pattern must match).
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        if: github.event_name == 'pull_request'
+        id: code
+        with:
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '**'
+              - '!docs/**'
+              - '!**/*.md'
+      - id: select
+        env:
+          PUSH: ${{ github.event_name != 'pull_request' }}
+          ALL: ${{ steps.paths.outputs.all }}
+          CODE: ${{ steps.code.outputs.code }}
+          DYLIB: ${{ steps.paths.outputs.dylib }}
+          PACKAGING: ${{ steps.paths.outputs.packaging }}
+          DOCS: ${{ steps.paths.outputs.docs }}
+        run: |
+          all=false
+          if [ "$PUSH" = true ] || [ "$ALL" = true ]; then all=true; fi
+          pick() { if [ "$all" = true ] || [ "$1" = true ]; then echo true; else echo false; fi; }
+          {
+            echo "all=$all"
+            echo "code=$(pick "$CODE")"
+            echo "dylib=$(pick "$DYLIB")"
+            echo "packaging=$(pick "$PACKAGING")"
+            echo "docs=$(pick "$DOCS")"
+          } | tee -a "$GITHUB_OUTPUT" "$GITHUB_STEP_SUMMARY"
+
+  # Relative links in Markdown resolve. Links already broken on the base
+  # commit (old notes pointing at moved files) are listed, not failed.
+  links:
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: relative Markdown links
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -n "$BASE" ] && [ "$BASE" != 0000000000000000000000000000000000000000 ] \
+            && git fetch --quiet --depth=1 origin "$BASE"; then
+            node tools/check-md-links.mjs --base "$BASE"
+          else
+            node tools/check-md-links.mjs
+          fi
+
   test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -106,8 +213,11 @@ jobs:
 
   # The network stack and the runtimes on macOS: starting processes on an
   # inherited socket, Unix sockets, WebSocket links, the Node and Python
-  # runtimes, rutis-host. Elsewhere macOS is only checked.
+  # runtimes, rutis-host; and the static build of the whole workspace. The
+  # one macOS job of an ordinary change (Q12.6.2).
   network-macos:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -132,10 +242,16 @@ jobs:
           cargo test -p rutis-bridge --all-features
           cargo test -p rutis-loader --features node,python,peer
           cargo test -p rutis-host
+      - name: keep workspace static builds available
+        if: '!cancelled()'
+        run: cargo check --workspace --all-targets
 
-  # What a release publishes, packaged on every change: the crates build from
-  # their packages, the npm packages pack, the Python packages build.
+  # What a release publishes, packaged on main and when packaging changes
+  # (Q12.1): the crates build from their packages, the npm packages pack, the
+  # Python packages build.
   release-dry-run:
+    needs: changes
+    if: needs.changes.outputs.packaging == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -160,8 +276,10 @@ jobs:
           ls dist
 
   # The Windows artifacts of release.yml (binary, npm platform package,
-  # wheel), built before a tag needs them.
+  # wheel), built before a tag needs them; on main and when packaging changes.
   release-windows:
+    needs: changes
+    if: needs.changes.outputs.packaging == 'true'
     runs-on: windows-2025
     defaults:
       run:
@@ -191,8 +309,11 @@ jobs:
           target: x86_64-pc-windows-msvc
           args: --release --locked --manifest-path crates/rutis-host/Cargo.toml --out wheels
 
-  # The cross-compiled wheel of release.yml, built before a tag needs it.
+  # The cross-compiled wheel of release.yml, built before a tag needs it; on
+  # main and when packaging changes.
   release-wheel-aarch64:
+    needs: changes
+    if: needs.changes.outputs.packaging == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -207,6 +328,8 @@ jobs:
   # （0.x 允许在 minor 版本中破坏）。真正的拦截在 release.yml：版本号不允许的
   # 破坏性变更会使发布失败。
   semver-rutis:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -227,7 +350,11 @@ jobs:
             fi
           done
 
-  dylib-linux:
+  # The dylib checks on Linux, in three parallel jobs to shorten the critical
+  # path (Q12.6.1). Each script builds what it needs.
+  dylib-linux-launcher:
+    needs: changes
+    if: needs.changes.outputs.dylib == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -239,12 +366,38 @@ jobs:
         run: bash tools/test-dylib.sh
       - name: launcher pre-execution verification
         run: bash tools/test-dylib-launcher.sh
+
+  # The single-runner reproducibility check (two source and target paths on
+  # one runner); the two-runner comparison runs on main (sdk-repro).
+  dylib-linux-repro:
+    needs: changes
+    if: needs.changes.outputs.dylib == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      # The script builds offline from copies of the source.
+      - run: cargo fetch --locked
       - name: reproducible SDK across source and target paths
         run: bash tools/test-dylib-repro.sh
+
+  dylib-linux-sdk-bundle:
+    needs: changes
+    if: needs.changes.outputs.dylib == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
       - name: external plugin build against a prebuilt SDK
         run: bash tools/test-sdk-bundle.sh
 
+  # On macOS the same checks stay in one job: macOS runners are scarce, and a
+  # dylib change takes this second one (Q12.6.2).
   dylib-macos:
+    needs: changes
+    if: needs.changes.outputs.dylib == 'true'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -264,8 +417,11 @@ jobs:
         run: bash tools/test-sdk-bundle.sh
 
   # The runtimes on Windows: Node and Python processes on loopback
-  # channels, rows of both languages, peers and WebSocket links.
+  # channels, rows of both languages, peers and WebSocket links; and the
+  # static build of the whole workspace.
   runtimes-windows:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
@@ -287,26 +443,17 @@ jobs:
       - name: cargo test (rutis-host)
         if: '!cancelled()'
         run: cargo test -p rutis-host --no-fail-fast
-
-  static-platforms:
-    strategy:
-      matrix:
-        os: [macos-15, windows-2025]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
-        if: runner.os != 'Windows'
-        with:
-          node-version: '26'
-      - run: npm --prefix node/rutis-runtime ci
-        if: runner.os != 'Windows'
       - name: keep workspace static builds available
+        if: '!cancelled()'
         run: cargo check --workspace --all-targets
 
+  # Builds of the SDK on two separate runners compared by hash. The SDK
+  # cannot come from a cache, so this stays off pull requests (Q12.6.3) and
+  # runs on main and for changes that run everything; the dylib jobs keep the
+  # single-runner check for dylib changes.
   sdk-repro:
+    needs: changes
+    if: needs.changes.outputs.all == 'true'
     runs-on: ubuntu-24.04
     strategy:
       matrix:
@@ -342,6 +489,8 @@ jobs:
 
   # Same as sdk-repro, on two separate macOS runners.
   sdk-repro-macos:
+    needs: changes
+    if: needs.changes.outputs.all == 'true'
     runs-on: macos-15
     strategy:
       matrix:
@@ -378,7 +527,7 @@ jobs:
 
   sdk-repro-macos-compare:
     runs-on: ubuntu-24.04
-    needs: sdk-repro-macos
+    needs: [changes, sdk-repro-macos]
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -388,10 +537,45 @@ jobs:
 
   sdk-repro-compare:
     runs-on: ubuntu-24.04
-    needs: sdk-repro
+    needs: [changes, sdk-repro]
     steps:
       - uses: actions/download-artifact@v4
         with:
           pattern: sdk-hash-[ab]
           path: hashes
       - run: cmp hashes/sdk-hash-a/sdk.sha hashes/sdk-hash-b/sdk.sha
+
+  # The one check a merge waits for (Q12.5): it always runs, fails when a
+  # selected job failed or was cancelled, and counts jobs the change did not
+  # select (skipped) as passing.
+  ci-ok:
+    if: always()
+    needs:
+      - changes
+      - links
+      - test
+      - network-macos
+      - release-dry-run
+      - release-windows
+      - release-wheel-aarch64
+      - semver-rutis
+      - dylib-linux-launcher
+      - dylib-linux-repro
+      - dylib-linux-sdk-bundle
+      - dylib-macos
+      - runtimes-windows
+      - sdk-repro
+      - sdk-repro-macos
+      - sdk-repro-compare
+      - sdk-repro-macos-compare
+    runs-on: ubuntu-24.04
+    steps:
+      - name: every selected job passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          if echo "$NEEDS" | jq -e 'any(.[]; .result != "success" and .result != "skipped")' > /dev/null; then
+            echo "a selected job failed or was cancelled" >&2
+            exit 1
+          fi
