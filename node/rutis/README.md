@@ -26,6 +26,6 @@ assert.equal(await t.service('weather').today(), 'sunny in Oslo')
 await t.unload()
 ```
 
-This package has no dependencies; the host installs the runtime that runs the plugin (`@arcships/rutis-runtime`). Start a project with `npx @arcships/rutis-host new <name> --lang node`.
+This package has no dependencies; the host installs the runtime that runs the plugin (`@arcships/rutis-runtime` for Node, `@arcships/rutis-bun` for Bun). Start a project with `npx @arcships/rutis-host new <name> --lang node` (or `--lang bun`).
 
 Guide (Chinese): [docs/guide/typescript-plugin.md](https://github.com/arcships/rutis/blob/main/docs/guide/typescript-plugin.md).

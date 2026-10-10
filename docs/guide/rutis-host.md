@@ -20,7 +20,7 @@ npm 分发自带 Node 运行时（`@arcships/rutis-runtime`），PyPI 分发自�
 | `rutis-host run [rutis.json]` | 按配置运行，打印每一行状态的变化；Ctrl-C 结束 |
 | `rutis-host dev [目录]` | 在插件项目里运行这个插件（加上 `rutis.dev.json`），文件变化时重新加载 |
 | `rutis-host check [rutis.json]` | 解析每一行，打印版本、依赖、提供的服务、配置 Schema；有不能运行的行时以非零状态退出。在没有 rutis.json 的插件项目里检查这个项目 |
-| `rutis-host new <名字> --lang node\|python` | 创建插件项目 |
+| `rutis-host new <名字> --lang node\|bun\|python` | 创建插件项目 |
 
 ## rutis.json
 
@@ -57,6 +57,7 @@ npm 分发自带 Node 运行时（`@arcships/rutis-runtime`），PyPI 分发自�
 | 键 | 字段 | 作用 |
 | --- | --- | --- |
 | `node` | `project`（默认 `.`）、`runtime` | 启动 Node 运行时。插件包从 `project` 的 `package.json` 解析；`@arcships/rutis-runtime` 装在这里（或由 `runtime` 指定，或用 npm 版 rutis-host 自带的） |
+| `bun` | `project`（默认 `.`）、`runtime`、`program` | 启动 Bun 运行时，行名 `bun:<模块>`。模块从 `project` 解析（`node_modules` 里的包、`./相对路径`）；`@arcships/rutis-bun` 装在这里（或由 `runtime` 指定）；`program` 是 Bun 可执行文件，默认 `PATH` 上的 `bun`。见 [写一个 Bun 插件](bun-plugin.md) |
 | `py` | `project`（默认 `.`）、`python` | 启动 Python 运行时。解释器默认依次为 `$VIRTUAL_ENV/bin/python`、`<project>/.venv/bin/python`、`python3`（Windows 上为 `Scripts\python.exe` 和 `python`），它的环境里要装 `rutis` 和插件 |
 | `remote` | `name`、`language` | 别的机器上的运行时，经 `rows` 里 `"runtime": "<name>"` 的节点行连接，见 [连接节点](nodes.md) |
 
@@ -73,7 +74,7 @@ npm 分发自带 Node 运行时（`@arcships/rutis-runtime`），PyPI 分发自�
 | 字段 | 含义 |
 | --- | --- |
 | `id` | 行的名字，在本文件内唯一 |
-| `name` | 插件：npm 包名（或包的子路径）、`py:<名字>`（Python 入口点或模块）、`./相对路径`（插件文件）、`<远程运行时>:<模块>`、`rutis-bridge/peer`（节点，见 [连接节点](nodes.md)）、`peer:<节点>/<插件>`（在别的节点上运行的插件） |
+| `name` | 插件：npm 包名（或包的子路径）、`py:<名字>`（Python 入口点或模块）、`bun:<模块>`（Bun 运行时里的模块）、`./相对路径`（插件文件）、`<远程运行时>:<模块>`、`rutis-bridge/peer`（节点，见 [连接节点](nodes.md)）、`peer:<节点>/<插件>`（在别的节点上运行的插件） |
 | `config` | 插件的配置 |
 | `inject` | 额外要等的服务名 |
 | `isolate` | `{ "服务名": true }` 让这一行用自己的那份服务；`{ "服务名": "标签" }` 让同标签的行共用一份 |

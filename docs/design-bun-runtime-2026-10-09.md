@@ -25,7 +25,7 @@ Bun 是一个独立的 JS / TS 运行时，有自己的模块解析、包管理�
 | 能力 | Bun 的行为 | 对设计的影响 |
 | --- | --- | --- |
 | `worker_threads`、SharedArrayBuffer、主线程 `Atomics.wait`、`receiveMessageOnPort` | 实测可用。文档：`worker_threads` 部分实现（缺 `moveMessagePortToContext` 等），Web Worker 的终止标为 experimental | I/O 放在 worker，主线程阻塞等待（§3.4）。worker 的崩溃和退出路径要有测试 |
-| 继承的 socket（fd:3） | 文档写明 `new net.Socket({ fd })` 不能读已有的 fd；实测它静默失效。`net.connect({ fd })` 和 `Bun.connect({ fd, socket })` 实测可用 | 用 `Bun.connect({ fd })`；原生 socket 不带缓冲，背压由运行时自己处理（文档） |
+| 继承的 socket（fd:3） | 文档写明 `new net.Socket({ fd })` 不能读已有的 fd；实测它静默失效。`net.connect({ fd })` 和 `Bun.connect({ fd, socket })` 实测可用 | 用 `net.connect({ fd })`（实现时选择，见 §11） |
 | Unix socket、回环 TCP | 可用 | dial-back、loopback 交接 |
 | WebSocket 服务端（`Bun.serve`） | 可用。文档默认值：`maxPayloadLength` 16MB，`idleTimeout` 120s，`backpressureLimit` 16MB | 远程运行时监听用它；`idleTimeout` 必须关掉或大于心跳间隔，上限与 rutis 对齐（§4） |
 | 模块重新导入 | 实测：`file://` URL 带查询串返回旧模块；绝对路径带查询串得到新实例，但旧实例会一直留在缓存里。删除 `require.cache[realpath]` 后再导入可以得到新模块，并且只重载入口。文档：官方没有提供以编程方式让模块失效的接口（`--hot` 内部用的 `Loader.registry` 不对外暴露） | 用 `require.cache`（§3.8）。这是文档没有承诺的行为，nightly 跟踪最新版 Bun 时必须覆盖到 |
@@ -57,8 +57,8 @@ rutis-bun <通道> [--id <端点> --peer <端点>] <项目>          # 单文件
 
 | 通道 | 做法 |
 | --- | --- |
-| `fd:3`（Unix，宿主创建 socket 后交给子进程继承） | `Bun.connect({ fd: 3 })`。Rust 侧的启动器固定使用继承，和 Python 一样，不读包里的声明 |
-| socket 路径（dial-back，即运行时反过来去连宿主给的 socket） | `Bun.connect({ unix })` |
+| `fd:3`（Unix，宿主创建 socket 后交给子进程继承） | `net.connect({ fd: 3 })`。Rust 侧的启动器固定使用继承，和 Python 一样，不读包里的声明 |
+| socket 路径（dial-back，即运行时反过来去连宿主给的 socket） | `net.createConnection(path)` |
 | `tcp:<地址>`（loopback，Windows 默认使用；Unix 上设 `RUTIS_LOCAL_HANDOVER=loopback` 时使用） | 先发送 `RUTIS_CHANNEL_TOKEN`，**用完立即从 `process.env` 删除**，与 Python `__main__.py` 的做法一致 |
 | `listen:ws://…` / `listen:wss://…` | 远程运行时，见 §4 |
 | `ws://…`（主动拨出） | 启动时直接报错："the Bun runtime only listens"（远程插件设计 §4.4） |
@@ -288,3 +288,19 @@ RuntimeResolver::modules(handle)       // 现有：行名 "bun:<模块>"
 | B1 | `rutis-bun` npm 形式，包括：本机通道（fd、dial-back、loopback）、会话、全部控制操作、同步重入、实例作用域、取消与错误、热重载。Rust 侧：`bun` feature、启动器、`LocalRuntime::bun`、`RowSchema.version`、名字冲突检查；`runtimes.bun`。§8 中本机部分的测试；CI `runtimes-bun` |
 | B2 | 远程运行时：监听与租约（§4）；`remote` 的 `language: "bun"` 及租约测试 |
 | B3 | 单文件可执行程序与发布；`rutis-host new --lang bun` / `dev`；Windows；性能数据 |
+
+## 11. 实现时的调整（B1）
+
+| 本文原来的说法 | 实现 | 原因 |
+| --- | --- | --- |
+| 通道用 `Bun.connect` | `node:net`：fd 用 `net.connect({ fd })`，Unix socket 和回环 TCP 用 `createConnection`，按行分帧由运行时自己做（`src/channel.ts`） | `node:net` 的流自带缓冲与背压；三种通道一套分帧，单条消息上限 16 MiB（与 WebSocket 相同），超过时关闭通道 |
+| 启动参数含 `--no-orphans` | 未加 | 宿主结束时通道断开，运行时随之退出；`--no-orphans` 依赖较新的 Bun，版本判断留到确定最低版本之后 |
+| `mount` 回复的 `implementation.name` 为 `rutis-bun` | `@arcships/rutis-bun`（包名） | 与 npm 包一致，`check` 里能直接对应 |
+| 版本下限 | `engines.bun` 暂定 `>=1.2`；CI 矩阵为 1.2.x 与最新版 | 待 CI 结果确认，不通过就上调 |
+| 远程运行时监听（B2） | B1 收到 `listen:` 时以明确的错误退出 | 按分阶段 |
+| （新发现）Bun 的目录项缓存 | 插件文件一律按真实路径导入 | 进程启动后在工作目录里新建的文件，经由符号链接目录（macOS 的 `/var`）的路径导入会失败，真实路径可以；`src/plugin.ts` 的 `locate` |
+| （新发现）未捕获的错误 | 运行时注册 `uncaughtException` / `unhandledRejection`，打印后以状态 1 退出 | Bun 对定时器里抛出的错误只打印、不退出，不满足需求文档 §5 规则 8 |
+| Rust 侧的版本与引擎信息 | `RowSchema.version`（Python 入口点的版本也随之进入行的 meta）；`Process::about()` 返回 `mount` 回复里的 `implementation` 与 `engine`，`rutis-host check` 打印 | §3.3、§5.1 |
+| 远程 node 运行时接走带前缀的行名 | `Naming::Npm` 在远程运行时上不接受 `<运行时名>:` 开头的名字（`file:` 与单字母盘符除外） | §5.1 |
+| 运行时重名 | `HostConfig::check_runtime_names`：远程运行时名至少两个字符、只含 `a-z0-9-`，不能与本机运行时或 `file` 同名 | §5.1 |
+| 会话层专项测试（`cancellation.rs` 等） | 由会话契约（`runtime_conformance.rs` 的 Bun 端点）覆盖：取消、错误名、引用、重入都在契约内；`error_shape.rs` 等是 Cordis 挂载专用的 | §8 |

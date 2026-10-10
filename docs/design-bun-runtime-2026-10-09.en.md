@@ -25,7 +25,7 @@ Tested with Bun 1.3.14 on macOS and checked against Bun's official documentation
 | Capability | Under Bun | Consequence for the design |
 | --- | --- | --- |
 | `worker_threads`, SharedArrayBuffer, `Atomics.wait` on the main thread, `receiveMessageOnPort` | Tested: work. Docs: `worker_threads` is partial (`moveMessagePortToContext` and others are missing), and terminating a Web Worker is marked experimental | I/O lives in a worker and the main thread blocks (§3.4). Worker crash and exit paths need tests |
-| An inherited socket (fd:3) | Docs: `new net.Socket({ fd })` cannot read an existing fd; tested: it fails silently. Tested: `net.connect({ fd })` and `Bun.connect({ fd, socket })` work | Use `Bun.connect({ fd })`. Docs: native sockets do not buffer, so the runtime handles backpressure itself |
+| An inherited socket (fd:3) | Docs: `new net.Socket({ fd })` cannot read an existing fd; tested: it fails silently. Tested: `net.connect({ fd })` and `Bun.connect({ fd, socket })` work | Use `net.connect({ fd })` (chosen in implementation, see §11) |
 | Unix sockets, loopback TCP | Work | Dial-back and the loopback handover |
 | WebSocket server (`Bun.serve`) | Works. Docs, defaults: `maxPayloadLength` 16MB, `idleTimeout` 120s, `backpressureLimit` 16MB | Remote runtimes listen with it. `idleTimeout` must be off or longer than the heartbeat, and the limits must match rutis's (§4) |
 | Importing a module again | Tested: a `file://` URL with a query string returns the old module. An absolute path with a query string gives a new instance, but the old instances stay cached for good. Deleting `require.cache[realpath]` and importing again gives the new module, reloading only the entry. Docs: there is no public way to invalidate modules programmatically (`--hot` uses `Loader.registry` internally, which is not exposed) | Use `require.cache` (§3.8). The docs do not promise this behaviour, so the nightly job on the latest Bun must cover it |
@@ -57,8 +57,8 @@ rutis-bun <channel> [--id <endpoint> --peer <endpoint>] <project>          # sin
 
 | Channel | How |
 | --- | --- |
-| `fd:3` (Unix: the host creates the socket and the child inherits it) | `Bun.connect({ fd: 3 })`. The Rust launcher always uses inheritance, as for Python; it does not read a declaration in the package |
-| A socket path (dial-back: the runtime connects to a socket the host gives it) | `Bun.connect({ unix })` |
+| `fd:3` (Unix: the host creates the socket and the child inherits it) | `net.connect({ fd: 3 })`. The Rust launcher always uses inheritance, as for Python; it does not read a declaration in the package |
+| A socket path (dial-back: the runtime connects to a socket the host gives it) | `net.createConnection(path)` |
 | `tcp:<address>` (the loopback handover: the default on Windows, and on Unix with `RUTIS_LOCAL_HANDOVER=loopback`) | Sends `RUTIS_CHANNEL_TOKEN` first, then **deletes it from `process.env` at once**, as Python's `__main__.py` does |
 | `listen:ws://…` / `listen:wss://…` | A remote runtime; see §4 |
 | `ws://…` (dialing out) | Refused at startup with "the Bun runtime only listens" (remote plugins design §4.4) |
@@ -304,3 +304,19 @@ Nothing this design uses depends on a recent version: `Bun.connect({ fd })`, `wo
 | B1 | The npm form of `rutis-bun`: local channels (fd, dial-back, loopback), the session, every control operation, synchronous re-entry, instance scopes, cancellation and errors, hot reload. Rust: the `bun` feature, the launcher, `LocalRuntime::bun`, `RowSchema.version`, the name collision checks, and `runtimes.bun`. The local tests of §8; the CI job `runtimes-bun` |
 | B2 | Remote runtimes: listening and leases (§4); `language: "bun"` for `remote`, with the lease tests |
 | B3 | The single-file executable and its releases; `rutis-host new --lang bun` / `dev`; Windows; performance numbers |
+
+## 11. Changes in implementation (B1)
+
+| What this document said | Implementation | Why |
+| --- | --- | --- |
+| Channels use `Bun.connect` | `node:net`: `net.connect({ fd })` for the inherited socket, `createConnection` for Unix sockets and loopback TCP, with the runtime's own line framing (`src/channel.ts`) | `node:net` streams buffer and apply backpressure; one framing for all three channels, with a 16 MiB message limit (as on WebSocket) that closes the channel when exceeded |
+| `--no-orphans` among the launch flags | Not passed | The runtime exits when the host's channel ends; `--no-orphans` needs a recent Bun, so it waits until the minimum version is settled |
+| `implementation.name` in the `mount` reply is `rutis-bun` | `@arcships/rutis-bun` (the package name) | Matches the npm package, so `check` maps to it directly |
+| The minimum version | `engines.bun` is `>=1.2` for now; the CI matrix runs 1.2.x and the latest | To be confirmed by CI, and raised if 1.2 fails |
+| Listening as a remote runtime (B2) | B1 exits with a clear error on `listen:` | Per the phases |
+| (Found) Bun's directory entry cache | Plugin files are always imported by their real path | A file created in the working directory after the process started fails to import through a symlinked directory (macOS's `/var`), but imports by its real path; `locate` in `src/plugin.ts` |
+| (Found) Uncaught errors | The runtime registers `uncaughtException` / `unhandledRejection`, prints, and exits with status 1 | Bun prints an error thrown in a timer and carries on, which breaks requirements §5 rule 8 |
+| Version and engine on the Rust side | `RowSchema.version` (Python entry point versions now reach the row's meta too); `Process::about()` returns `implementation` and `engine` from the `mount` reply, printed by `rutis-host check` | §3.3, §5.1 |
+| A remote node runtime taking prefixed row names | On a remote runtime, `Naming::Npm` no longer accepts names starting with `<runtime name>:` (except `file:` and one-letter drives) | §5.1 |
+| Duplicate runtime names | `HostConfig::check_runtime_names`: remote runtime names have two or more of `a-z0-9-`, and are neither a local runtime's nor `file` | §5.1 |
+| Session-layer tests (`cancellation.rs` and the like) | Covered by the session contract (the Bun endpoint of `runtime_conformance.rs`): cancellation, error names, references and re-entry are in the contract; `error_shape.rs` and the like are about Cordis mounts | §8 |

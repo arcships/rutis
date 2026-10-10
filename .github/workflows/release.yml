@@ -4,7 +4,8 @@
 #   crates.io  rutis (the kernel), rutis-bridge, rutis-loader, rutis-host,
 #              and the dylib toolchain: rutis-sdk, rutis-dylib,
 #              rutis-dylib-meta, rutis-dylib-launcher
-#   npm        @arcships/rutis, @arcships/rutis-runtime, @arcships/rutis-host
+#   npm        @arcships/rutis, @arcships/rutis-runtime, @arcships/rutis-bun,
+#              @arcships/rutis-host
 #              (and its platform packages @arcships/rutis-host-<os>-<cpu>)
 #   PyPI       rutis, rutis-host (a wheel per platform)
 #   GitHub     rutis-host binaries
@@ -177,6 +178,7 @@ jobs:
           publish node/rutis
           (cd node/rutis-runtime && npm ci --ignore-scripts)
           publish node/rutis-runtime
+          publish bun/rutis-bun
           for platform in npm/*; do publish "$platform"; done
           publish node/rutis-host
         env:

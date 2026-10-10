@@ -2,7 +2,8 @@
 // services it uses (`inject`) and provides (`provides`), and `apply(ctx,
 // config)` uses and provides them through `ctx`; rutis decides when it
 // starts, stops and restarts. The runtime that runs it is installed by the
-// host (`@arcships/rutis-runtime`), not by the plugin.
+// host (`@arcships/rutis-runtime` in Node, `@arcships/rutis-bun` in Bun), not
+// by the plugin.
 //
 //   export default definePlugin({
 //     inject: ['llm'],

@@ -26,7 +26,8 @@
     "src"
   ],
   "engines": {
-    "node": ">=24"
+    "node": ">=24",
+    "bun": ">=1.2"
   },
   "publishConfig": {
     "access": "public"
