@@ -1,5 +1,7 @@
 # rutis 质量规范
 
+[English](quality-standard.en.md) · [质量执行现状](quality-status.md)
+
 状态：草案。适用范围：rutis 仓库内的全部代码、包、文档与发布产物。
 配套：[质量执行现状](quality-status.md)（本规范逐条对应到当前实现、缺口与计划，随代码更新）。
 
