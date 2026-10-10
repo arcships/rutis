@@ -19,7 +19,8 @@ export class Client {
     this.#port = port1
     this.#session = new Session({
       send: (frame: string) => this.#port.postMessage({ frame }),
-      abort: () => this.#port.postMessage({ abort: true }),
+      // A session fault (an invalid frame, say) ends the channel, saying why.
+      abort: (error: Error) => this.#port.postMessage({ abort: true, reason: `session fault: ${error?.message ?? error}` }),
       dispatch,
       settled,
       endpoint,
