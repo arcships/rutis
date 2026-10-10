@@ -85,6 +85,9 @@ type Options struct {
 	Implementation map[string]string
 	// Capabilities this side has (endpoint format).
 	Capabilities []string
+	// Host makes this side the host of a compat session (call ids `rust:`),
+	// for tests that drive a runtime.
+	Host bool
 }
 
 // Greeting is what the far end said of itself (endpoint format).
@@ -172,6 +175,9 @@ func New(channel Channel, opts Options) (*Peer, error) {
 			return nil, fmt.Errorf("invalid endpoint id %s", opts.Endpoint.Local)
 		}
 		p.local = opts.Endpoint.Local + ":"
+	} else if opts.Host {
+		p.local = "rust:"
+		p.remote = "node:"
 	} else {
 		p.local = "node:"
 		p.remote = "rust:"

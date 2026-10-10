@@ -107,6 +107,7 @@ async fn python_meets_the_session_contract() {
     run(far).await;
 }
 
+#[cfg(feature = "go")]
 /// Build the Go package `package` (a path under `go/rutis`) into a fresh
 /// directory, with the toolchain on PATH (`go`).
 fn go_binary(package: &str) -> PathBuf {
@@ -123,6 +124,7 @@ fn go_binary(package: &str) -> PathBuf {
     binary
 }
 
+#[cfg(feature = "go")]
 #[tokio::test(flavor = "multi_thread")]
 async fn go_meets_the_session_contract() {
     let command = tokio::process::Command::new(go_binary("./internal/fixtures/session"));
