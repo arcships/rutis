@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use crate::host::Host;
+use crate::host::{Host, Unfinished};
 
 /// How long cleanups may take after a signal, unless `--shutdown-timeout`
 /// or [`DEADLINE_VARIABLE`] says otherwise.
@@ -143,13 +143,13 @@ pub async fn stop(host: &Host, signal: &str, deadline: Duration, signals: &mut S
     );
     let ended = tokio::select! {
         result = host.shutdown(deadline) => result,
-        signal = signals.next() => Err(format!("{signal} again")),
+        signal = signals.next() => Err(Unfinished::Cleanups(format!("{signal} again"))),
     };
     let Err(why) = ended else {
         return Stopped::Done;
     };
     let (stopping, waiting) = host.still_running();
-    eprintln!("rutis-host: {why}: cleanups did not finish");
+    eprintln!("rutis-host: {why}");
     for plugin in stopping {
         eprintln!("  still stopping: {plugin}");
     }

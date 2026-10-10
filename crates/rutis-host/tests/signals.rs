@@ -35,12 +35,18 @@ fn file_url(path: &Path) -> String {
 
 /// A Python plugin: it prints its process when it starts and when its
 /// cleanup starts, and records each cleanup run in `<out>/<row>.cleanup`.
-/// With `hold`, its cleanup never ends.
+/// With `hold`, its cleanup never ends, and it starts a process of its own
+/// that never ends either (sharing the output, so the output ends only
+/// once it is gone).
 const PYTHON_PLUGIN: &str = r#"
-import os, threading
+import os, subprocess, sys, threading
 
 def apply(ctx, config):
     out, row = config["out"], config["row"]
+    if config.get("hold"):
+        # A process of its own that never ends, sharing the output.
+        child = subprocess.Popen([sys.executable, "-c", "import threading; threading.Event().wait()"])
+        print(f"plugin {row} started {child.pid}", flush=True)
     print(f"plugin {row} applied in {os.getpid()}", flush=True)
     def cleanup():
         print(f"plugin {row} cleanup started", flush=True)
@@ -49,6 +55,15 @@ def apply(ctx, config):
         with open(os.path.join(out, row + ".cleanup"), "a") as f:
             f.write("cleanup\n")
     ctx.effect(cleanup)
+"#;
+
+/// A Python plugin whose apply never ends.
+const HANGING_PLUGIN: &str = r#"
+import os, threading
+
+def apply(ctx, config):
+    print(f"plugin {config['row']} hangs in {os.getpid()}", flush=True)
+    threading.Event().wait()
 "#;
 
 /// The same in JavaScript.
@@ -186,6 +201,10 @@ impl Host {
             match self.lines.recv_timeout(HANG_GUARD) {
                 Ok(line) => {
                     let found = want(&line);
+                    // A plugin's own process, killed too if the test fails.
+                    if let Some((_, pid)) = line.split_once(" started ") {
+                        self.runtimes.extend(pid.trim().parse::<i32>().ok());
+                    }
                     self.seen.push(line);
                     if let Some(found) = found {
                         return found;
@@ -323,6 +342,74 @@ fn run_ends_on_sigterm_after_every_cleanup() {
     run_ends_cleanly(libc::SIGTERM, false);
 }
 
+/// The terminal closing: SIGHUP to the host.
+#[test]
+fn run_ends_on_sighup_after_every_cleanup() {
+    run_ends_cleanly(libc::SIGHUP, false);
+}
+
+/// A signal while the rows still start (one hangs in apply) ends the host
+/// too: the deadline passes, so 2, and the runtime process is gone.
+#[test]
+fn a_signal_while_starting_ends_the_host() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("hangs.py"), HANGING_PLUGIN).unwrap();
+    let mut py = json!({ "project": "." });
+    if let Some(python) = std::env::var_os("RUTIS_PYTHON") {
+        py["python"] = json!(python.to_str().unwrap());
+    }
+    let config = json!({
+        "runtimes": { "py": py },
+        "rows": [{ "id": "py-row", "name": "py:hangs", "config": { "row": "py-row" } }]
+    });
+    let file = dir.path().join("rutis.json");
+    std::fs::write(&file, config.to_string()).unwrap();
+    let mut host = Host::start(
+        &["run", "--shutdown-timeout", "1", file.to_str().unwrap()],
+        dir.path(),
+    );
+    let pid = host.until(|line| {
+        line.strip_prefix("plugin py-row hangs in ")
+            .and_then(|pid| pid.trim().parse::<i32>().ok())
+    });
+    host.runtimes.push(pid);
+    signal(&host, libc::SIGTERM, false);
+    let (status, stderr, output) = host.exit();
+    let context = format!("status {status:?}; output: {output:#?}; stderr: {stderr}");
+    assert_eq!(status.code(), Some(2), "{context}");
+    // Row states are printed only once the host has started.
+    assert!(
+        !output.iter().any(|line| line.starts_with("py-row:")),
+        "{context}"
+    );
+    assert!(
+        !alive(pid),
+        "runtime process {pid} outlived the host; {context}"
+    );
+}
+
+/// `dev` reloading a plugin whose new code hangs in apply still ends on
+/// Ctrl-C (past the deadline, so 2), and the runtime process with it.
+#[test]
+fn dev_ends_on_ctrl_c_while_a_reload_hangs() {
+    let dir = tempfile::tempdir().unwrap();
+    dev_project(dir.path());
+    let mut host = Host::start(&["dev", "--shutdown-timeout", "1", "."], dir.path());
+    let pids = host.started(&["marker"]);
+    std::fs::write(dir.path().join("marker.py"), HANGING_PLUGIN).unwrap();
+    host.until(|line| line.starts_with("plugin marker hangs in ").then_some(()));
+    signal(&host, libc::SIGINT, true);
+    let (status, stderr, output) = host.exit();
+    let context = format!("status {status:?}; output: {output:#?}; stderr: {stderr}");
+    assert_eq!(status.code(), Some(2), "{context}");
+    for pid in pids {
+        assert!(
+            !alive(pid),
+            "runtime process {pid} outlived the host; {context}"
+        );
+    }
+}
+
 #[test]
 fn dev_ends_on_ctrl_c_after_its_cleanup() {
     let dir = tempfile::tempdir().unwrap();
@@ -343,7 +430,8 @@ fn dev_ends_on_ctrl_c_after_its_cleanup() {
 }
 
 /// A cleanup that never ends: past the deadline the host exits 2, names
-/// what was still stopping, and ends the runtime processes anyway.
+/// what was still stopping, and ends the runtime processes anyway, with
+/// the processes they started (the output ends).
 #[test]
 fn run_past_the_cleanup_deadline_exits_2_and_ends_the_runtimes() {
     let dir = tempfile::tempdir().unwrap();

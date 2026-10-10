@@ -33,7 +33,7 @@ Cleanups have a deadline, 10 seconds by default. Change it with `--shutdown-time
 | --- | --- |
 | 0 | Ended normally, including after a signal once every cleanup finished. |
 | 1 | Could not start or run: invalid arguments or configuration, a runtime failed to start, a row failed to load; for `check`, a row cannot run. |
-| 2 | Cleanups did not finish: the deadline passed, or another signal arrived while stopping. |
+| 2 | Stopping did not finish: the deadline passed or another signal arrived while stopping, or every cleanup finished but the runtime processes did not exit in time (what is left of the deadline, at least 3 seconds). In these cases `rutis-host` ends the runtime processes and the processes they started. |
 
 Status 2 is separate from 1 so that process managers and scripts can tell a configuration problem from a plugin whose cleanup did not finish. It is also below 126; shells use 126 and above for a program that could not be executed and for one ended by signal n (128 + n).
 

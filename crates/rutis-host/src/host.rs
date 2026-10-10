@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use rutis::Ctx;
 use rutis_bridge::runtime::{LocalRuntime, RuntimeHandle, RuntimePlugin, RuntimeState};
@@ -41,6 +42,33 @@ pub struct GoHost {
 }
 
 pub type Error = String;
+
+/// How long the runtime processes may take to exit once every cleanup
+/// finished, however little of the deadline is left: longer than the
+/// local transport gives a process whose channel closed before killing it.
+pub const PROCESS_EXIT: Duration = Duration::from_secs(3);
+
+/// Why a shutdown did not finish.
+pub enum Unfinished {
+    /// The cleanups did not finish: why.
+    Cleanups(String),
+    /// Every cleanup finished, but the runtime processes did not exit in
+    /// this time.
+    Processes(Duration),
+}
+
+impl std::fmt::Display for Unfinished {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unfinished::Cleanups(why) => write!(f, "{why}: cleanups did not finish"),
+            Unfinished::Processes(time) => write!(
+                f,
+                "every cleanup finished, but the runtime processes did not exit within {}s",
+                time.as_secs_f64()
+            ),
+        }
+    }
+}
 
 impl Host {
     /// Start everything `config` names; the rows are not loaded yet.
@@ -190,24 +218,32 @@ impl Host {
     }
 
     /// Shut the root down: every row and runtime unloads, each cleanup
-    /// running once, and the runtime processes end. Waits up to `deadline`;
-    /// after it, the shutdown goes on and the error says so.
-    pub async fn shutdown(&self, deadline: std::time::Duration) -> Result<(), Error> {
+    /// running once, and the runtime processes end. Waits up to `deadline`
+    /// for the cleanups; after it, the shutdown goes on and the error says
+    /// so. The processes then get what is left of it, and at least
+    /// [`PROCESS_EXIT`].
+    pub async fn shutdown(&self, deadline: Duration) -> Result<(), Unfinished> {
         let started = std::time::Instant::now();
-        let passed = || format!("{}s passed", deadline.as_secs_f64());
         self.root
             .shutdown_with_timeout(deadline)
             .await
-            .map_err(|error| match error {
-                rutis::DisposeWaitError::TimedOut { .. } => passed(),
-                rutis::DisposeWaitError::Failed(error) => format!("the shutdown failed: {error}"),
-                error => error.to_string(),
+            .map_err(|error| {
+                Unfinished::Cleanups(match error {
+                    rutis::DisposeWaitError::TimedOut { .. } => {
+                        format!("{}s passed", deadline.as_secs_f64())
+                    }
+                    rutis::DisposeWaitError::Failed(error) => {
+                        format!("the shutdown failed: {error}")
+                    }
+                    error => error.to_string(),
+                })
             })?;
-        // Their channels closed: the processes end by themselves.
-        let left = deadline.saturating_sub(started.elapsed());
+        // Their channels closed: the processes end by themselves (or are
+        // killed after a grace period of their own).
+        let left = deadline.saturating_sub(started.elapsed()).max(PROCESS_EXIT);
         tokio::time::timeout(left, rutis_bridge::transport::local::processes_ended())
             .await
-            .map_err(|_| passed())
+            .map_err(|_| Unfinished::Processes(left))
     }
 
     /// End the runtime processes now, without their cleanups, and wait

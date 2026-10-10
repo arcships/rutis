@@ -38,7 +38,10 @@ pub const CHANNEL_TOKEN: &str = "RUTIS_CHANNEL_TOKEN";
 pub enum Stdio {
     /// None: no input to read, output discarded (the null device).
     Null,
-    /// This process's own stream: its terminal, when it runs in one.
+    /// This process's own stream: its terminal, when it runs in one. As
+    /// standard input on Unix, it keeps the process in this process's
+    /// group, so a Ctrl-C in the terminal reaches it as well (otherwise it
+    /// gets a group of its own, out of the terminal's reach).
     Inherit,
 }
 
@@ -119,9 +122,13 @@ impl Spawn {
             .kill_on_drop(true);
         // Out of the terminal's reach: Ctrl-C there signals this process,
         // which unloads the process's plugins over the channel, and not the
-        // process itself, which would end before its cleanups ran.
+        // process itself, which would end before its cleanups ran. Not when
+        // it reads the terminal: a background group reading it is stopped
+        // (SIGTTIN), so it stays in this one, and Ctrl-C reaches it too.
         #[cfg(unix)]
-        command.process_group(0);
+        if !matches!(self.stdin, Stdio::Inherit) {
+            command.process_group(0);
+        }
         #[cfg(windows)]
         command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
         if let Some(cwd) = &self.cwd {
@@ -605,9 +612,15 @@ pub fn kill_processes() {
 
 #[cfg(unix)]
 fn kill(pid: u32) {
-    // SAFETY: plain kill(2). The id is still this process's child: it is
-    // removed from RUNNING only once waited for, so it cannot be reused.
-    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    let pid = pid as libc::pid_t;
+    // SAFETY: plain getpgid(2) and kill(2). The id is still this process's
+    // child: it is removed from RUNNING only once waited for, so it cannot
+    // be reused, nor can the group it leads. A process in a group of its
+    // own takes what it started with it.
+    unsafe {
+        let target = if libc::getpgid(pid) == pid { -pid } else { pid };
+        libc::kill(target, libc::SIGKILL);
+    }
 }
 
 #[cfg(windows)]

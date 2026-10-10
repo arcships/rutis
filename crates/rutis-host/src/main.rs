@@ -45,8 +45,8 @@ RUTIS_CERT and RUTIS_KEY.
 
 Exit status: 0 when it ends normally (also on Ctrl-C or SIGTERM once every
 cleanup ran), 1 when it cannot start or run (configuration, loading, a row
-check fails), 2 when cleanups did not finish (past the deadline, or a second
-Ctrl-C).";
+check fails), 2 when stopping did not finish (past the deadline, a second
+Ctrl-C, or runtime processes that did not exit).";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -210,7 +210,7 @@ async fn start(
     };
     if let Err(error) = started {
         if let Err(why) = host.shutdown(deadline).await {
-            eprintln!("rutis-host: cleanups did not finish: {why}");
+            eprintln!("rutis-host: {why}");
         }
         return Err(error);
     }
@@ -291,7 +291,14 @@ async fn dev(args: &[String]) -> Result<Stopped, String> {
             .map(|entry| entry.id)
             .collect();
         for row in rows {
-            match host.loader.reload(&row).await {
+            // A plugin whose new code hangs does not keep a signal out.
+            let reloaded = tokio::select! {
+                reloaded = host.loader.reload(&row) => reloaded,
+                signal = signals.next() => {
+                    return Ok(stop::stop(&host, signal, deadline, &mut signals).await);
+                }
+            };
+            match reloaded {
                 Ok(_) => println!("{row}: reloaded"),
                 Err(error) => println!("{row}: cannot reload: {error}"),
             }
