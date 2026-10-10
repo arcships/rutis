@@ -36,6 +36,7 @@ The first job of `ci.yml`, `changes`, looks at the files the pull request change
 | `packaging` | `scripts/train.mjs`, every `pyproject.toml` and `package.json`, `crates/*/Cargo.toml`, `node/rutis-host/scripts/**` |
 | `docs` | Any `.md` file |
 | `bun` | `bun/**`, `node/rutis/**`, `crates/rutis-bridge`, `crates/rutis-loader`, `crates/rutis-host` |
+| `go` | `go/**`, `crates/rutis-bridge`, `crates/rutis-loader`, `crates/rutis-host` |
 | `repro` | `crates/rutis-sdk`, `crates/rutis-cli/build.rs`, `tools/test-dylib-repro.sh`, `tools/build-dylib-bundle.sh`, `tools/lib/**`. Kernel changes reach the SDK too, but its reproducibility check for them runs on main |
 
 ## 4. Jobs
@@ -44,9 +45,10 @@ The first job of `ci.yml`, `changes`, looks at the files the pull request change
 | --- | --- | --- | --- |
 | `links` | Linux | `docs` | Checks relative links in Markdown |
 | `test` | Linux | `code` | All Rust tests and build checks; the Node and Python packages' tests |
-| `network-macos` | macOS | `code` | Bridge, loader (Bun rows included) and rutis-host tests on macOS, with the latest Bun; a build check of the whole workspace |
+| `network-macos` | macOS | `code` | Bridge, loader (Bun and Go rows included) and rutis-host tests on macOS, with the latest Bun and Go stable; a build check of the whole workspace |
 | `runtimes-windows` | Windows | `code` | Bridge, loader and rutis-host tests on Windows; a build check of the whole workspace |
 | `runtimes-bun` | Pull requests: Linux, Bun 1.4.0 and latest; main adds macOS, Bun 1.4.0 | `bun` | All Bun runtime tests |
+| `runtimes-go` | Pull requests: Linux, Go oldstable and stable; main adds macOS, Go oldstable | `go` | All Go SDK and Go runtime tests |
 | `semver-rutis` | Linux | `code` | Whether the public API changed incompatibly since the last release (warning only) |
 | `dylib-linux-launcher`, `dylib-linux-sdk-bundle` | Linux | `dylib` | Dylib tests, split into two jobs that run at the same time |
 | `dylib-linux-repro` | Linux | `repro` | Reproducible SDK builds (built twice on one machine, in two directories) |

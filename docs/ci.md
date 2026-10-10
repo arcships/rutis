@@ -36,6 +36,7 @@
 | `packaging` | `scripts/train.mjs`、各个 `pyproject.toml` 和 `package.json`、`crates/*/Cargo.toml`、`node/rutis-host/scripts/**` |
 | `docs` | 任何 `.md` 文件 |
 | `bun` | `bun/**`、`node/rutis/**`、`crates/rutis-bridge`、`crates/rutis-loader`、`crates/rutis-host` |
+| `go` | `go/**`、`crates/rutis-bridge`、`crates/rutis-loader`、`crates/rutis-host` |
 | `repro` | `crates/rutis-sdk`、`crates/rutis-cli/build.rs`、`tools/test-dylib-repro.sh`、`tools/build-dylib-bundle.sh`、`tools/lib/**`。内核改动也会影响 SDK，但它的可复现检查放在 main 上 |
 
 ## 4. 每个任务
@@ -44,9 +45,10 @@
 | --- | --- | --- | --- |
 | `links` | Linux | `docs` | 检查 Markdown 里的相对链接 |
 | `test` | Linux | `code` | 全部 Rust 测试和编译检查，Node、Python 包的测试 |
-| `network-macos` | macOS | `code` | bridge、loader（含 Bun 的行）、rutis-host 在 macOS 上的测试，Bun 用最新版；整个工作区的编译检查 |
+| `network-macos` | macOS | `code` | bridge、loader（含 Bun、Go 的行）、rutis-host 在 macOS 上的测试，Bun 用最新版、Go 用 stable；整个工作区的编译检查 |
 | `runtimes-windows` | Windows | `code` | bridge、loader、rutis-host 在 Windows 上的测试；整个工作区的编译检查 |
 | `runtimes-bun` | PR：Linux，Bun 1.4.0 和最新版；main 上再加 macOS，Bun 1.4.0 | `bun` | Bun 运行时的全部测试 |
+| `runtimes-go` | PR：Linux，Go oldstable 和 stable；main 上再加 macOS，Go oldstable | `go` | Go SDK 与 Go 运行时的全部测试 |
 | `semver-rutis` | Linux | `code` | 公开 API 和上次发布相比有没有不兼容的改动（只提示） |
 | `dylib-linux-launcher`、`dylib-linux-sdk-bundle` | Linux | `dylib` | dylib 测试，分两个任务同时跑 |
 | `dylib-linux-repro` | Linux | `repro` | SDK 可复现构建（在一台机器上用两个目录各构建一次） |
