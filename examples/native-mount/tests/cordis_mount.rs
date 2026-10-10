@@ -6,7 +6,6 @@ async fn cordis_mounts_the_original_rust_plugin() {
     let mut child = tokio::process::Command::new("node")
         .args([
             "--test",
-            "--test-isolation=none",
             "test/fixtures/rust-mount.test.mjs",
         ])
         .current_dir(node)
