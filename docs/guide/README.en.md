@@ -28,6 +28,6 @@ Upgrading from 0.7: see [0.7 → 0.8](../migration-0.7-to-0.8.en.md). Projects t
 ## Requirements
 
 - Linux, macOS or Windows x64 (MSVC).
-- Node 24 or later, or Bun 1.3 or later, for TypeScript / JavaScript plugins.
+- Node 24 or later, or Bun 1.3.3 or later, for TypeScript / JavaScript plugins.
 - Python 3.12 or later for Python plugins.
 - Rust 1.85 or later, only when embedding rutis in Rust.

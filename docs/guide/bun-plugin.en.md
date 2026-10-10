@@ -76,4 +76,4 @@ As for TypeScript plugins: `npm publish` (the template's workflow publishes on a
 
 ## Environment
 
-Bun 1.3 or later (1.2 has no `--no-env-file`). This version of the Bun runtime runs on the host's machine; listening as a remote runtime (`listen:`) is not supported yet. Windows is not tested yet.
+Bun 1.3.3 or later (`--no-env-file` came in 1.3.3). This version of the Bun runtime runs on the host's machine; listening as a remote runtime (`listen:`) is not supported yet. Windows is not tested yet.

@@ -114,7 +114,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-15]
-        bun: ["1.3.0", latest]
+        bun: ["1.3.3", latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

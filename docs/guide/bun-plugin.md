@@ -76,4 +76,4 @@ bunx --bun rutis-host dev
 
 ## 环境
 
-Bun 1.3 或更高（1.2 没有 `--no-env-file`）。本版本的 Bun 运行时在宿主所在的机器上运行；作为远程运行时监听（`listen:`）尚不支持。Windows 尚未测试。
+Bun 1.3.3 或更高（`--no-env-file` 从 1.3.3 起才有）。本版本的 Bun 运行时在宿主所在的机器上运行；作为远程运行时监听（`listen:`）尚不支持。Windows 尚未测试。
