@@ -2,7 +2,7 @@
 
 [English](design-go-runtime-2026-10-10.en.md)
 
-状态：设计稿，未实现。日期：2026-10-10。基准：`main` `fafc595`。
+状态：G1、G2 已实现（#227，出入见 §十七）。日期：2026-10-10。基准：`main` `fafc595`。
 依据：[多语言总体稿](design-multilang-runtimes-2026-10-03.md)（下称"总体稿"，本文是其 M4，修订两点见附录 A.3）、[M1](design-multilang-m1-2026-10-04.md)、[M2](design-multilang-m2-2026-10-04.md)、[实例服务](design-instance-services-2026-10-08.md)、[插件 API](guide/plugin-api.md)、[Bun 运行时](design-bun-runtime-2026-10-09.md)（通道、`mount` 回复、远程监听、名字冲突、测试与之对齐）。
 
 范围外：Go 侧 Cordis；Go `plugin` 包；宿主运行时编译 Go 代码。
@@ -420,6 +420,26 @@ macOS 隔离属性：`check` 与启动时检查（复用 dylib 隔离检查）�
 | 函数字段外的类型化绑定 | 暂不做（备选 `go generate`） |
 | 接收对象引用 | G3 |
 | 调用链丢失检测 | 仅开发模式警告 |
+
+## 十七、实现说明
+
+G1、G2 由 #227 实现。与本文的出入：
+
+| 项 | 本文 | 实现 |
+| --- | --- | --- |
+| `async` 方法的回复 | 回复异步结果引用 | 方法返回时直接回复结果；`cancel` 帧取消方法的 ctx（Rust 侧对 async 方法的回复按值或 future 都能 settle） |
+| 清单 | §3.2 的字段 | 另有 `runtime: "rutis-go-runtime:1"`（SDK 标记，保证它在二进制里） |
+| `ServeArgs` | `ServeArgs(args []string) error` | `ServeArgs(args []string, defs ...*Definition) error`；另有 `ServeConn(net.Conn, defs...)`、`Manifest(defs...)` |
+| `*rutis.Service` | `Call`、`Methods` | 另有 `Local()`：服务是否由同进程的插件提供 |
+| 测试工具 | `rutistest.Load` | `Load(t, plugin, config, services) *Loaded`；`Service(name)` 的 `Call` / `Bind`；插件在真正的运行时里、经内存会话运行 |
+| §十四 的"Go 列" | `cancellation.rs` 等加 Go 列 | 这些文件只针对 Node；Go 的对应检查集中在 `rutis-bridge/tests/go_runtime.rs` |
+| 启动触发 | 解析出行时启动 | 另由每 100 ms 的检查补足：loader 复用解析结果时不再问解析器 |
+| 空闲停止后 | 已停 + 原因 | 回到"未启动" |
+| `runtimes.go` | `dir`、`binaries`、`start`、`idle` | 另有 `project`（运行时的工作目录） |
+| 开发构建 | — | `GoBinaries::file_named`、`GoResolver::replace`、`read_go_manifest` |
+| 远程 npm 命名 | 拒绝 `go:` 与 `<Go 运行时名>:` | 拒绝任何 `<名字>:` 前缀 |
+| macOS 隔离属性 | 复用 dylib 的检查 | `rutis-host check` 用 `xattr` 检查并提示 |
+| 未做 | | Python `mount` 回复的 `implementation` / `engine` 与 `check` 打印它们（随 Bun B1）；G3 |
 
 ---
 

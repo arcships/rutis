@@ -2,7 +2,7 @@
 
 [中文](design-go-runtime-2026-10-10.md)
 
-Status: design draft, not implemented. Date: 2026-10-10. Baseline: `main` `fafc595`.
+Status: G1 and G2 implemented (#227; differences in §17). Date: 2026-10-10. Baseline: `main` `fafc595`.
 Based on: [the multilingual design](design-multilang-runtimes-2026-10-03.en.md) ("the overall design"; this is its M4 and revises two points, see Appendix A.3), [M1](design-multilang-m1-2026-10-04.en.md), [M2](design-multilang-m2-2026-10-04.en.md), [instance services](design-instance-services-2026-10-08.en.md), [the plugin API](guide/plugin-api.en.md), [the Bun runtime](design-bun-runtime-2026-10-09.en.md) (aligned on channels, the `mount` reply, remote listening, name conflicts, tests).
 
 Out of scope: Cordis in Go; Go's `plugin` package; the host compiling Go code at run time.
@@ -420,6 +420,26 @@ macOS quarantine: checked by `check` and at startup (reusing the dylib quarantin
 | Typed binding beyond function fields | not now (alternative: `go generate`) |
 | Receiving object references | G3 |
 | Lost-chain detection | development-mode warning only |
+
+## 17. Implementation notes
+
+G1 and G2 are implemented by #227. Where it differs from this document:
+
+| Item | This document | Implementation |
+| --- | --- | --- |
+| `async` replies | an asynchronous result reference | the result itself, when the method returns; a `cancel` frame cancels the method's ctx (Rust settles an async method's reply whether it is a value or a future) |
+| Manifest | §3.2's fields | also `runtime: "rutis-go-runtime:1"` (the SDK marker, which keeps it in the binary) |
+| `ServeArgs` | `ServeArgs(args []string) error` | `ServeArgs(args []string, defs ...*Definition) error`; also `ServeConn(net.Conn, defs...)`, `Manifest(defs...)` |
+| `*rutis.Service` | `Call`, `Methods` | also `Local()`: whether a plugin in this process provides the service |
+| Test tool | `rutistest.Load` | `Load(t, plugin, config, services) *Loaded`; `Service(name)` with `Call` / `Bind`; the plugin runs in its real runtime across an in-memory session |
+| §14's "Go columns" | in `cancellation.rs` and the like | those files are Node-only; Go's checks are in `rutis-bridge/tests/go_runtime.rs` |
+| Start trigger | a row resolving | also a check every 100 ms: the loader may reuse a resolution without asking the resolver |
+| After an idle stop | stopped + reason | back to "not started" |
+| `runtimes.go` | `dir`, `binaries`, `start`, `idle` | also `project` (the runtimes' working directory) |
+| Development builds | — | `GoBinaries::file_named`, `GoResolver::replace`, `read_go_manifest` |
+| Remote npm naming | refuses `go:` and `<Go runtime name>:` | refuses any `<name>:` prefix |
+| macOS quarantine | reuse the dylib check | `rutis-host check` checks with `xattr` and says what to do |
+| Not done | | Python's `mount` reply `implementation` / `engine` and `check` printing them (with Bun B1); G3 |
 
 ---
 
