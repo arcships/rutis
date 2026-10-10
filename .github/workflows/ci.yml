@@ -271,8 +271,9 @@ jobs:
         env:
           RUTIS_LOCAL_HANDOVER: loopback
         run: cargo test -p rutis-loader --features node,python,go --test go_rows --test multilang_go --test instance_go
-      - name: cargo test (rutis-host)
-        run: cargo test -p rutis-host
+      # Only rutis-host's Go tests: the other runtimes run in their own jobs.
+      - name: cargo test (rutis-host, Go)
+        run: cargo test -p rutis-host go
 
   # The Bun runtime: its own tests, and the Rust tests that run it, on the
   # oldest Bun it supports (package.json engines.bun) and the latest, on
