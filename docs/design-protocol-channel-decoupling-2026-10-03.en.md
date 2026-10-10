@@ -129,8 +129,29 @@ Node channel exposes an equivalent API inside its I/O worker:
 |---|---|
 | Encoding | Compact JSON at protocol layer; escape newlines inside strings; codec is internal and not currently replaceable |
 | Byte stream | Unix sockets and inherited fds use newline-delimited framing; channel adds newline on send and removes separator on receive |
+| Byte stream size limit | At most 16 MiB per message (without its newline), the WebSocket default, the same in Rust, Node and Python. Sending over it: refused, and the channel closes. Receiving over it: once the limit is read with no newline the channel closes and reads no further, with "over the limit" as the reason. Line framing has no close code: the far end sees the connection end. A stream that ends inside a message is a failure, not a normal end |
 | WebSocket | One text message per UTF-8 JSON frame, without newline |
 | Future binary encoding | Length prefix on byte streams, binary message on WebSocket; connector determines both sides' encoding before session establishment; do not negotiate inside protocol frame |
+
+## Malformed Frames
+
+Every message a session receives must be a frame of this protocol, and the calls and references it names must exist on the receiving side. Otherwise the session **ends and closes the channel** (`Error::Transport` in Rust); calls in flight fail; nothing is replied:
+
+| Case | Example |
+| --- | --- |
+| Not JSON | `{"op":"invoke"` |
+| Not an object, or an unknown `op` | `42`, `{"op":"frobnicate"}` |
+| A missing field or one of the wrong type | `invoke` whose `target` is not a string, or without `method`; `cancel` whose `id` is not a string; `throw` whose `error.name`/`message` is not a string |
+| An unknown value tag | `{"type":"bogus"}` |
+| A reference that does not exist or was released | `call`, `get`, `await`, `release` of an unknown reference; a `release` count of 0 or more than was granted |
+| A reply to no call | `return`/`throw` for an unknown call id |
+| Out of handshake order | A request before the handshake, a second `hello` |
+
+There are two exceptions, both because a message can cross the other side's action: a late reply to a call this side cancelled is discarded (the reply can still arrive after the cancel); a `cancel` for a call this side does not have is ignored (it can cross that call's reply).
+
+Why: a malformed frame means the two sides no longer agree on the protocol, and going on would carry the error into reference tables and call chains; refusing frame by frame would need a reply defined for each error, and the call id to reply to may itself be what is broken. Rust also refuses unknown fields when parsing; Node and Python ignore them. That difference is not settled yet.
+
+The same cases check all three implementations: `rutis_bridge::session::testing::malformed` (Rust, and real Node and Python processes), besides each one's unit tests.
 
 ## Logical Channels and Physical Connections
 
@@ -262,7 +283,7 @@ Decorators wrap any Channel, independent of transport, and live in `rutis-channe
 | Test group | Must cover |
 |---|---|
 | Reusing Adapter contract | Two logical Channels share physical connection; isolate messages, flow control, identity; closing/revoking/replacing one does not affect the other; physical failure notifies every affected channel; terminated channel is not revived and calls are not replayed; only one retry owner per session attach. If no production reuse Adapter exists, use test Adapter to verify upper layers do not assume one-to-one |
-| Per-implementation channel contract | Concurrent send ordering after send-lock serialization; boundary preservation and near-limit large messages; backpressure; idempotent close; close wakes blocked send/recv; WebSocket close-reason forwarding; channel keeps progressing and can close while caller `current_thread` is blocked by synchronous call |
+| Per-implementation channel contract | Concurrent send ordering after send-lock serialization; boundary preservation and near-limit large messages; backpressure; idempotent close; close wakes blocked send/recv; WebSocket close-reason forwarding; channel keeps progressing and can close while caller `current_thread` is blocked by synchronous call; a transport with a size limit also runs `size_limit` (a message exactly at the limit arrives, one byte more is refused and closes). The in-memory transport crosses no process boundary and has no limit, so it does not run it; receiving over the limit needs the sender's own check bypassed, so each transport covers it in its own tests |
 | Session matrix | `rpc/tests.rs` uses memory; real Node process parameterized over path, inherited fd, loopback WebSocket; same session-semantic tests pass on every channel |
 | Node | In-memory session harness; framing tests for path and fd; worker continues send/receive and heartbeat while main thread synchronously waits |
 | Cross-implementation WebSocket | Rust listener ↔ JS dialer, JS listener ↔ Rust dialer; auth failure, cert validation, subprotocol mismatch, message too large, heartbeat timeout, half-open, takeover, close codes |
