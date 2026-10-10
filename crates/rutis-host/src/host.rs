@@ -88,11 +88,11 @@ impl Host {
             let runtime = RuntimePlugin::remote(&remote.name);
             let handle = runtime.handle();
             let rows = match remote.language.as_str() {
-                "python" | "py" | "bun" => RuntimeResolver::modules(handle.clone()),
+                "python" | "py" => RuntimeResolver::modules(handle.clone()),
                 "node" => RuntimeResolver::node(handle.clone()),
                 other => {
                     return Err(format!(
-                        "remote runtime {}: the language is python, node or bun, not {other}",
+                        "remote runtime {}: the language is python or node, not {other}",
                         remote.name
                     ))
                 }
@@ -248,7 +248,6 @@ fn bun_runtime(bun: &BunRuntime) -> Result<LocalRuntime, Error> {
     let candidates = [
         bun.runtime.clone(),
         Some(bun.project.join("node_modules/@arcships/rutis-bun")),
-        std::env::var_os("RUTIS_BUN_RUNTIME").map(PathBuf::from),
     ];
     let package = candidates
         .into_iter()

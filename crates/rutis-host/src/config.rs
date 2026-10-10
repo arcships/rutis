@@ -60,8 +60,8 @@ pub struct Runtimes {
 #[serde(deny_unknown_fields)]
 pub struct RemoteRuntime {
     pub name: String,
-    /// `python` and `bun`: rows `<name>:<module>`; `node`: npm names,
-    /// resolved there when no runtime before it has them.
+    /// `python`: rows `<name>:<module>`; `node`: npm names, resolved there
+    /// when no runtime before it has them.
     pub language: String,
 }
 
@@ -245,16 +245,12 @@ impl HostConfig {
             .collect();
         for remote in &self.runtimes.remote {
             let name = remote.name.as_str();
-            if name.len() < 2
-                || !name
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-            {
+            if !rutis_loader::is_runtime_name(name) {
                 return Err(format!(
-                    "remote runtime {name:?}: a runtime name is two or more of a-z, 0-9 and -"
+                    "remote runtime {name:?}: a runtime name is two or more of a-z, 0-9 and -, and not file"
                 ));
             }
-            if seen.contains(&name) || name == "file" {
+            if seen.contains(&name) {
                 return Err(format!(
                     "remote runtime {name}: the name is already a runtime's; rows `{name}:<module>` must name one"
                 ));

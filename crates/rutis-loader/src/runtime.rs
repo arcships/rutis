@@ -124,18 +124,24 @@ impl Naming {
     }
 }
 
-/// Whether `name` names a runtime before a colon (`py:weather`,
-/// `bun:@acme/weather`): another runtime's row, never an npm name, which has
-/// no colon. `file:` URLs and one-letter Windows drives are not prefixes.
+/// Whether `name` may name a runtime, and so prefix its rows
+/// (`py:weather`, `bun:@acme/weather`, `<remote>:<module>`): two or more of
+/// `a-z`, `0-9` and `-`, and not `file`, so that neither a `file:` URL nor a
+/// one-letter Windows drive reads as a runtime's row.
+pub fn is_runtime_name(name: &str) -> bool {
+    name.len() >= 2
+        && name != "file"
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Whether `name` names a runtime before a colon: another runtime's row,
+/// never an npm name, which has no colon.
 #[cfg(feature = "node")]
 fn runtime_prefixed(name: &str) -> bool {
-    name.split_once(':').is_some_and(|(prefix, _)| {
-        prefix.len() >= 2
-            && prefix != "file"
-            && prefix
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-    })
+    name.split_once(':')
+        .is_some_and(|(prefix, _)| is_runtime_name(prefix))
 }
 
 pub struct RuntimeResolver {
