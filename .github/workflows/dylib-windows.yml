@@ -1,17 +1,16 @@
 # Windows dylib plugin tests. They take about 25 minutes on pull requests
-# (40 with the reproducibility check), so they run only when a pull request
-# touches the dylib code, when a release tag is pushed, or by hand
-# (Actions → dylib-windows → Run workflow). Other Windows builds are still
-# checked on every change by ci.yml's static-platforms job.
+# (40 with the reproducibility check), so pull requests run them only when
+# they touch the dylib code. Every merge to main runs them, as do release
+# tags and manual runs (Actions → dylib-windows → Run workflow). Other
+# Windows builds are checked on every code change by ci.yml's
+# runtimes-windows job.
 #
 # The reproducible-SDK check builds the SDK twice from scratch (about 15
 # minutes) and rarely breaks from ordinary changes, so pull requests skip it;
-# release tags and manual runs keep it. ci.yml's dylib-linux and dylib-macos
-# jobs still run the same script on every change.
+# main, release tags and manual runs keep it.
 #
 # Changes elsewhere (the rutis kernel, dependency updates in Cargo.lock) can
-# also break Windows dylib plugins; those are caught at release time, or run
-# this workflow by hand before merging such a change.
+# also break Windows dylib plugins; main catches those after the merge.
 
 name: dylib-windows
 
@@ -23,15 +22,25 @@ on:
       - "crates/rutis-dylib-meta/**"
       - "crates/rutis-dylib-launcher/**"
       - "crates/rutis-xtask/**"
-      - "crates/rutis-cli/build.rs"
+      - "crates/rutis-dev/**"
+      # rutis-cli links the SDK and holds the dylib host tests.
+      - "crates/rutis-cli/**"
       - "tests/dylib-fixtures/**"
       - "tools/*dylib*"
+      - "tools/test-sdk-bundle.sh"
       - "tools/lib/**"
       - "rust-toolchain.toml"
       - ".github/workflows/dylib-windows.yml"
+  # Every merge to main (quality status §8.4), and release tags.
   push:
+    branches: ["main"]
     tags: ["v*"]
   workflow_dispatch:
+
+# A new push to a pull request cancels its run still in progress.
+concurrency:
+  group: dylib-windows-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -46,6 +55,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: plugin file checks
         run: cargo test -p rutis-dylib-meta
       - name: dylib host child environment
@@ -54,10 +65,15 @@ jobs:
         run: bash tools/test-dylib.sh
       # Also checks the release rutis_sdk.dll exports at most 30000 symbols
       # (in tools/build-dylib-bundle.sh) and that files are held while the host runs.
+      # One runtime bundle for the launcher and the external plugin checks,
+      # which only read it.
+      - name: the runtime bundle
+        id: bundle
+        run: echo "dir=$(bash tools/build-dylib-bundle.sh "$RUNNER_TEMP/bundle" | tail -n 1)" >> "$GITHUB_OUTPUT"
       - name: launcher pre-execution verification, file locks and job object
-        run: bash tools/test-dylib-launcher.sh
+        run: bash tools/test-dylib-launcher.sh "${{ steps.bundle.outputs.dir }}"
       - name: reproducible SDK across source and target paths
         if: github.event_name != 'pull_request'
         run: bash tools/test-dylib-repro.sh
       - name: external plugin build against a prebuilt SDK
-        run: bash tools/test-sdk-bundle.sh
+        run: bash tools/test-sdk-bundle.sh "${{ steps.bundle.outputs.dir }}"

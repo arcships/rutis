@@ -4,9 +4,12 @@
 #   crates.io  rutis (the kernel), rutis-bridge, rutis-loader, rutis-host,
 #              and the dylib toolchain: rutis-sdk, rutis-dylib,
 #              rutis-dylib-meta, rutis-dylib-launcher
-#   npm        @arcships/rutis, @arcships/rutis-runtime, @arcships/rutis-host
+#   npm        @arcships/rutis, @arcships/rutis-runtime, @arcships/rutis-bun,
+#              @arcships/rutis-host
 #              (and its platform packages @arcships/rutis-host-<os>-<cpu>)
 #   PyPI       rutis, rutis-host (a wheel per platform)
+#   Go         github.com/arcships/rutis/go/rutis (the tag go/rutis/vX.Y.Z;
+#              the Go module proxy serves it from there)
 #   GitHub     rutis-host binaries
 #
 # Each publish skips what its registry already has, so a release that fails
@@ -177,6 +180,7 @@ jobs:
           publish node/rutis
           (cd node/rutis-runtime && npm ci --ignore-scripts)
           publish node/rutis-runtime
+          publish bun/rutis-bun
           for platform in npm/*; do publish "$platform"; done
           publish node/rutis-host
         env:
@@ -216,6 +220,30 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
+
+  # A Go module in a subdirectory is released by a tag with its path.
+  go:
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: go/rutis/go.mod
+      - run: go test ./...
+        working-directory: go/rutis
+      - name: tag go/rutis
+        run: |
+          tag="go/rutis/$GITHUB_REF_NAME"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "$tag exists"
+          else
+            git tag "$tag" "$GITHUB_SHA"
+            git push origin "refs/tags/$tag"
+          fi
 
   github:
     needs: [crates, npm, pypi, pypi-host]

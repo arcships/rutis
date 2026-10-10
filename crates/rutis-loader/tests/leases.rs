@@ -3,7 +3,8 @@
 //! connection takes over only after the old lease is gone; a controller
 //! that reconnects gets a new lease. Each plugin start and cleanup is
 //! written to a log on the runtime's side. Python needs `websockets`
-//! (RUTIS_PYTHON, else python3; python on Windows).
+//! (RUTIS_PYTHON, else python3; python on Windows); Go (feature `go`) the
+//! Go toolchain.
 #![cfg(all(feature = "node", feature = "python"))]
 
 use std::path::{Path, PathBuf};
@@ -46,6 +47,8 @@ async fn eventually<T>(mut check: impl FnMut() -> Option<T>, what: &str) -> T {
 enum Language {
     Python,
     Node,
+    #[cfg_attr(not(feature = "go"), allow(dead_code))]
+    Go,
 }
 
 /// A runtime listening for controllers, and the log its plugin writes.
@@ -78,6 +81,7 @@ impl Remote {
         match self.language {
             Language::Python => "py:logger",
             Language::Node => "logger",
+            Language::Go => "edge:logger",
         }
     }
 
@@ -85,6 +89,7 @@ impl Remote {
         match self.language {
             Language::Python => "py",
             Language::Node => "node",
+            Language::Go => "edge",
         }
     }
 }
@@ -144,6 +149,27 @@ async fn remote_with_start_delay(language: Language, start_delay_ms: u64) -> Rem
                 .args(["--id", "remote", "--peer", "main"])
                 .arg(&anchor)
                 .current_dir(&runtime);
+            command
+        }
+        Language::Go => {
+            let binary = project.path().join(if cfg!(windows) {
+                "logger.exe"
+            } else {
+                "logger"
+            });
+            let status = std::process::Command::new("go")
+                .args(["build", "-o"])
+                .arg(&binary)
+                .arg("./cmd/logger")
+                .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/go"))
+                .status()
+                .expect("go is on PATH");
+            assert!(status.success(), "go build");
+            let mut command = tokio::process::Command::new(binary);
+            command
+                .arg("listen:ws://127.0.0.1:0/rutis")
+                .args(["--id", "remote", "--peer", "main"])
+                .arg(project.path());
             command
         }
     };
@@ -224,7 +250,7 @@ async fn controller_with_options(
     root.plugin(RuntimeAccessPlugin::new(id("remote"), remote.runtime()));
     let runtime = RuntimePlugin::remote(remote.runtime());
     let rows = Arc::new(match remote.language {
-        Language::Python => RuntimeResolver::modules(runtime.handle()),
+        Language::Python | Language::Go => RuntimeResolver::modules(runtime.handle()),
         Language::Node => RuntimeResolver::node(runtime.handle()),
     });
     root.plugin(runtime);
@@ -236,7 +262,7 @@ async fn controller_with_options(
     (&root.plugin(plugin)).await.unwrap();
     root.plugin(RuntimeRowsPlugin::new(rows));
     let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": [
-        { "id": "l", "name": remote.row(), "config": { "who": who, "stopDelayMs": stop_delay_ms } }
+        { "id": "l", "name": remote.row(), "config": { "who": who, "stopDelayMs": stop_delay_ms, "log": remote.log } }
     ] }]))
     .unwrap();
     loader
@@ -354,4 +380,28 @@ async fn node_takeover_with_slow_start_and_cleanup() {
 #[tokio::test(flavor = "multi_thread")]
 async fn node_reconnecting_controller_gets_a_new_lease() {
     a_reconnecting_controller_gets_a_new_lease(Language::Node).await;
+}
+
+#[cfg(feature = "go")]
+#[tokio::test(flavor = "multi_thread")]
+async fn go_successive_controllers_get_clean_leases() {
+    successive_controllers_get_clean_leases(Language::Go).await;
+}
+
+#[cfg(feature = "go")]
+#[tokio::test(flavor = "multi_thread")]
+async fn go_takeover_after_the_old_lease_is_gone() {
+    a_newer_controller_takes_over_after_the_old_lease_is_gone(Language::Go).await;
+}
+
+#[cfg(feature = "go")]
+#[tokio::test(flavor = "multi_thread")]
+async fn go_takeover_with_a_slow_cleanup() {
+    takeover(Language::Go, 400).await;
+}
+
+#[cfg(feature = "go")]
+#[tokio::test(flavor = "multi_thread")]
+async fn go_reconnecting_controller_gets_a_new_lease() {
+    a_reconnecting_controller_gets_a_new_lease(Language::Go).await;
 }

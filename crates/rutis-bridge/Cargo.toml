@@ -9,7 +9,7 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 readme = "README.md"
-keywords = ["rutis", "plugin", "python", "node", "websocket"]
+keywords = ["rutis", "plugin", "python", "node", "go"]
 categories = ["development-tools::ffi", "network-programming"]
 
 [dependencies]
@@ -51,6 +51,10 @@ default = ["node"]
 node = []
 # Local Python runtimes.
 python = []
+# Local Go runtimes: binaries built with the Go SDK (go/rutis).
+go = []
+# Local Bun runtimes.
+bun = []
 # The WebSocket transport.
 websocket = [
     "dep:futures-util",

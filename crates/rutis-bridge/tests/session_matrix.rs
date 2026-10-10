@@ -1,8 +1,9 @@
 #![cfg(all(unix, feature = "testing", feature = "websocket"))]
 //! The runtime conformance suite (`rutis_bridge::runtime::testing::runtime`) over
-//! every channel: the Node and the Python runtime, each connected on an
+//! every channel: the Node, the Python and (feature `go`) the Go runtime, each connected on an
 //! inherited socket (`fd:3`), on a socket path it dials back, and over a
-//! loopback WebSocket it listens on (dialed by Rust and attached).
+//! loopback WebSocket it listens on (dialed by Rust and attached); the Bun
+//! runtime (feature `bun`) on the first two.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +19,10 @@ fn repo() -> PathBuf {
 enum Runtime {
     Node,
     Python,
+    #[cfg_attr(not(feature = "go"), allow(dead_code))]
+    Go,
+    #[cfg(feature = "bun")]
+    Bun,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -67,6 +72,27 @@ async fn start(runtime: Runtime, via: Via, dir: &Path) -> (Arc<Process>, PathBuf
                 .arg("rutis")
                 .env("PYTHONPATH", path);
             (launcher, dir.to_owned(), PathBuf::from("weather_plugin"))
+        }
+        Runtime::Go => {
+            let binary = go_binary("./internal/fixtures/weather");
+            (
+                Launcher::new(binary),
+                dir.to_owned(),
+                PathBuf::from("weather"),
+            )
+        }
+        #[cfg(feature = "bun")]
+        Runtime::Bun => {
+            let entry = dir.join("weather.ts");
+            std::fs::copy(
+                repo().join("bun/rutis-bun/test/fixtures/conformance-weather.ts"),
+                &entry,
+            )
+            .unwrap();
+            let mut launcher = Launcher::bun(None, &repo().join("bun/rutis-bun"), dir);
+            // Inheriting fd:3 is the Bun launcher's default; `via` decides.
+            launcher.inherit_fd = false;
+            (launcher, dir.to_owned(), entry)
         }
     };
     if via == Via::WebSocket {
@@ -199,6 +225,40 @@ async fn python_listening_on_a_websocket() {
     semantics(Runtime::Python, Via::WebSocket).await;
 }
 
+/// The Go package `package` (under `go/rutis`), built into a fresh
+/// directory with the `go` on PATH.
+fn go_binary(package: &str) -> PathBuf {
+    let directory = tempfile::tempdir().unwrap().keep();
+    let binary = directory.join("runtime");
+    let status = std::process::Command::new("go")
+        .args(["build", "-o"])
+        .arg(&binary)
+        .arg(package)
+        .current_dir(repo().join("go/rutis"))
+        .status()
+        .expect("go is on PATH");
+    assert!(status.success(), "go build {package}");
+    binary
+}
+
+#[cfg(feature = "go")]
+#[tokio::test(flavor = "multi_thread")]
+async fn go_on_an_inherited_socket() {
+    semantics(Runtime::Go, Via::Inherit).await;
+}
+
+#[cfg(feature = "go")]
+#[tokio::test(flavor = "multi_thread")]
+async fn go_dialing_a_socket_path() {
+    semantics(Runtime::Go, Via::DialBack).await;
+}
+
+#[cfg(feature = "go")]
+#[tokio::test(flavor = "multi_thread")]
+async fn go_listening_on_a_websocket() {
+    semantics(Runtime::Go, Via::WebSocket).await;
+}
+
 /// A runtime package that does not list `fd` in `rutisChannels` is started
 /// the old way, dialing a socket path.
 #[tokio::test(flavor = "multi_thread")]
@@ -255,4 +315,16 @@ fn copy_dir(from: &Path, to: &Path) {
         let file = file.unwrap();
         std::fs::copy(file.path(), to.join(file.file_name())).unwrap();
     }
+}
+
+#[cfg(feature = "bun")]
+#[tokio::test(flavor = "multi_thread")]
+async fn bun_on_an_inherited_socket() {
+    semantics(Runtime::Bun, Via::Inherit).await;
+}
+
+#[cfg(feature = "bun")]
+#[tokio::test(flavor = "multi_thread")]
+async fn bun_dialing_a_socket_path() {
+    semantics(Runtime::Bun, Via::DialBack).await;
 }

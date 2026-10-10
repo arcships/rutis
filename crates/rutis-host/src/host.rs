@@ -13,11 +13,15 @@ use rutis_bridge::transport::websocket::{
 };
 use rutis_bridge::{Credential, IdentityPlugin, PeerId, StaticIdentity};
 use rutis_loader::{
-    register_peer_node, Builtins, Chain, Layer, Loader, LoaderOptions, LoaderPlugin, Patch,
-    PeerResolver, RuntimeResolver, RuntimeRowsPlugin, ServiceCatalog,
+    register_peer_node, Builtins, Chain, GoBinaries, GoResolver, GoRuntimes, GoRuntimesHandle,
+    Layer, Loader, LoaderOptions, LoaderPlugin, Patch, PeerResolver, RuntimeResolver,
+    RuntimeRowsPlugin, ServiceCatalog,
 };
 
-use crate::config::{token, venv_python, HostConfig, NodeRuntime, PythonRuntime, DEFAULT_PYTHON};
+use crate::config::{
+    token, venv_python, BunRuntime, GoRuntime, GoStart, HostConfig, NodeRuntime, PythonRuntime,
+    DEFAULT_PYTHON,
+};
 
 pub struct Host {
     /// The host runs while this lives.
@@ -26,6 +30,14 @@ pub struct Host {
     pub runtimes: Vec<(String, RuntimeHandle)>,
     /// The resolvers of the runtimes' rows, to invalidate after a change.
     pub resolvers: Vec<Arc<RuntimeResolver>>,
+    /// The Go binaries and their runtimes, when the configuration has them.
+    pub go: Option<GoHost>,
+}
+
+/// The Go side of a host.
+pub struct GoHost {
+    pub resolver: Arc<GoResolver>,
+    pub runtimes: GoRuntimesHandle,
 }
 
 pub type Error = String;
@@ -33,6 +45,7 @@ pub type Error = String;
 impl Host {
     /// Start everything `config` names; the rows are not loaded yet.
     pub async fn start(config: &HostConfig) -> Result<Self, Error> {
+        config.check_runtime_names()?;
         let root = Ctx::root().map_err(|error| error.to_string())?;
         let mut catalog = ServiceCatalog::new();
         catalog.share_by_name();
@@ -53,6 +66,14 @@ impl Host {
         let mut builtins = Builtins::new();
         register_peer_node(&mut builtins, peers.clone());
         let mut chain = Chain::new().with(builtins).with_shared(peers);
+        let go = match &config.runtimes.go {
+            Some(go) => {
+                let resolver = Arc::new(go_resolver(config, go, &catalog)?);
+                chain = chain.with_shared(resolver.clone());
+                Some((resolver, go))
+            }
+            None => None,
+        };
         if let Some(py) = &config.runtimes.py {
             let runtime = python(py)?;
             let handle = runtime.handle();
@@ -60,6 +81,15 @@ impl Host {
             root.plugin(runtime);
             chain = chain.with_shared(rows.clone());
             runtimes.push(("py".to_owned(), handle));
+            resolvers.push(rows);
+        }
+        if let Some(bun) = &config.runtimes.bun {
+            let runtime = bun_runtime(bun)?;
+            let handle = runtime.handle();
+            let rows = Arc::new(RuntimeResolver::modules(handle.clone()).with_catalog(&catalog));
+            root.plugin(runtime);
+            chain = chain.with_shared(rows.clone());
+            runtimes.push(("bun".to_owned(), handle));
             resolvers.push(rows);
         }
         if let Some(node) = &config.runtimes.node {
@@ -76,11 +106,11 @@ impl Host {
             let runtime = RuntimePlugin::remote(&remote.name);
             let handle = runtime.handle();
             let rows = match remote.language.as_str() {
-                "python" | "py" => RuntimeResolver::modules(handle.clone()),
+                "python" | "py" | "go" => RuntimeResolver::modules(handle.clone()),
                 "node" => RuntimeResolver::node(handle.clone()),
                 other => {
                     return Err(format!(
-                        "remote runtime {}: the language is python or node, not {other}",
+                        "remote runtime {}: the language is python, go or node, not {other}",
                         remote.name
                     ))
                 }
@@ -106,11 +136,29 @@ impl Host {
         for rows in &resolvers {
             root.plugin(RuntimeRowsPlugin::new(rows.clone()));
         }
+        let go = match go {
+            Some((resolver, settings)) => {
+                let mut plugin = GoRuntimes::new(resolver.clone(), &settings.project);
+                plugin = match settings.start {
+                    GoStart::Eager => plugin.eager(),
+                    GoStart::OnDemand => plugin.idle(Some(std::time::Duration::from_secs(
+                        settings.idle.unwrap_or(60),
+                    ))),
+                };
+                let runtimes = plugin.handle();
+                (&root.plugin(plugin))
+                    .await
+                    .map_err(|error| format!("the Go runtimes: {error}"))?;
+                Some(GoHost { resolver, runtimes })
+            }
+            None => None,
+        };
         Ok(Self {
             _root: root,
             loader,
             runtimes,
             resolvers,
+            go,
         })
     }
 
@@ -157,6 +205,38 @@ impl Host {
             rows.invalidate_all();
         }
     }
+}
+
+/// The resolver of the Go binaries `go` names. A Go runtime may not take
+/// another runtime's name.
+fn go_resolver(
+    config: &HostConfig,
+    go: &GoRuntime,
+    catalog: &ServiceCatalog,
+) -> Result<GoResolver, Error> {
+    go.validate()?;
+    let mut binaries = GoBinaries::new();
+    if let Some(dir) = &go.dir {
+        binaries = binaries.dir(dir);
+    }
+    for binary in &go.binaries {
+        binaries = binaries.file(binary);
+    }
+    if let Some((binary, name)) = &go.dev {
+        binaries = binaries.file_named(binary, name);
+    }
+    let reserved = ["node".to_owned(), "py".to_owned(), "bun".to_owned()]
+        .into_iter()
+        .chain(
+            config
+                .runtimes
+                .remote
+                .iter()
+                .map(|remote| remote.name.clone()),
+        );
+    Ok(GoResolver::new(binaries)
+        .with_catalog(catalog)
+        .reserve(reserved))
 }
 
 fn websocket(config: &HostConfig) -> Result<Config, Error> {
@@ -230,6 +310,37 @@ fn node_runtime(node: &NodeRuntime) -> Result<LocalRuntime, Error> {
     Ok(LocalRuntime::node(package, anchor))
 }
 
+/// The Bun runtime of `bun.project`, with the `@arcships/rutis-bun` package
+/// installed there (or given), run by a Bun that answers.
+fn bun_runtime(bun: &BunRuntime) -> Result<LocalRuntime, Error> {
+    let candidates = [
+        bun.runtime.clone(),
+        Some(bun.project.join("node_modules/@arcships/rutis-bun")),
+    ];
+    let package = candidates
+        .into_iter()
+        .flatten()
+        .find(|package| package.join("package.json").exists())
+        .ok_or_else(|| {
+            format!(
+                "the Bun runtime is not installed in {}: run `bun add -d @arcships/rutis-bun` there",
+                bun.project.display()
+            )
+        })?;
+    let program = bun.program.clone().unwrap_or_else(|| PathBuf::from("bun"));
+    let answers = std::process::Command::new(&program)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !answers {
+        return Err(format!(
+            "the Bun runtime needs Bun: {} does not run (install it from https://bun.com, or set `program`)",
+            program.display()
+        ));
+    }
+    Ok(LocalRuntime::bun(package, &bun.project).interpreter(program))
+}
+
 /// The Python runtime of `py.project`, with an interpreter that has the
 /// `rutis` package.
 fn python(py: &PythonRuntime) -> Result<LocalRuntime, Error> {
@@ -266,7 +377,7 @@ fn python(py: &PythonRuntime) -> Result<LocalRuntime, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{NodeRuntime, PythonRuntime, Runtimes};
+    use crate::config::{BunRuntime, NodeRuntime, PythonRuntime, RemoteRuntime, Runtimes};
     use rutis_bridge::session::{settle, Value};
     use serde_json::json;
     use std::time::Duration;
@@ -379,6 +490,68 @@ mod tests {
         assert_eq!(greeting(&host).await, "Welcome, Ada");
     }
 
+    /// Bun on Windows is not tested yet.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reloaded_bun_row_runs_the_edited_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let bun_plugin = |word: &str| {
+            format!(
+                "export const provides = {{ greeter: {{ hello: 'sync' }} }}\n\
+                 export function apply(ctx) {{ ctx.provide('greeter', {{ hello: name => '{word}, ' + name }}) }}\n"
+            )
+        };
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("greeter.ts"), bun_plugin("Hello")).unwrap();
+        let config = HostConfig {
+            id: "test".into(),
+            runtimes: Runtimes {
+                bun: Some(BunRuntime {
+                    project: dir.path().to_owned(),
+                    runtime: Some(repo().join("bun/rutis-bun")),
+                    program: None,
+                }),
+                ..Runtimes::default()
+            },
+            listen: Vec::new(),
+            rows: vec![json!({ "id": "greeter", "name": "bun:./greeter.ts" })],
+        };
+        let host = Host::start(&config).await.unwrap();
+        host.runtimes_ready().await.unwrap();
+        host.load(config.rows()).await.unwrap();
+        assert_eq!(greeting(&host).await, "Hello, Ada");
+        std::fs::write(dir.path().join("greeter.ts"), bun_plugin("Welcome")).unwrap();
+        host.loader.reload("greeter").await.unwrap();
+        assert_eq!(greeting(&host).await, "Welcome, Ada");
+    }
+
+    /// A runtime's name is its rows' prefix, so it names one runtime.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn runtime_names_are_unique() {
+        let config = |remote: &str| HostConfig {
+            id: "test".into(),
+            runtimes: Runtimes {
+                bun: Some(BunRuntime {
+                    project: PathBuf::from("."),
+                    runtime: None,
+                    program: None,
+                }),
+                remote: vec![RemoteRuntime {
+                    name: remote.into(),
+                    language: "python".into(),
+                }],
+                ..Runtimes::default()
+            },
+            listen: Vec::new(),
+            rows: Vec::new(),
+        };
+        for taken in ["bun", "file", "g", "GPU"] {
+            let error = Host::start(&config(taken)).await.err().expect(taken);
+            assert!(error.contains("remote runtime"), "{taken}: {error}");
+        }
+        assert!(config("gpu").check_runtime_names().is_ok());
+    }
+
     /// A runtime on another machine (here, a process listening on loopback):
     /// a peer row links to it, and its rows are `<runtime>:<module>`.
     #[tokio::test(flavor = "multi_thread")]
@@ -437,6 +610,132 @@ mod tests {
         let host = Host::start(&config).await.unwrap();
         host.load(config.rows()).await.unwrap();
         assert_eq!(greeting(&host).await, "Remote, Ada");
+        child.start_kill().unwrap();
+    }
+
+    /// Go binaries in a directory: a row names a plugin, and its binary's
+    /// runtime starts when the row is loaded.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_go_row_runs_in_its_binarys_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugins = dir.path().join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let status = std::process::Command::new("go")
+            .args(["build", "-o"])
+            .arg(plugins.join(if cfg!(windows) {
+                "netkit.exe"
+            } else {
+                "netkit"
+            }))
+            .arg("./cmd/netkit")
+            .current_dir(repo().join("crates/rutis-loader/tests/fixtures/go"))
+            .status()
+            .expect("go is on PATH");
+        assert!(status.success());
+        let mut config: HostConfig = serde_json::from_value(json!({
+            "id": "go-test",
+            "runtimes": { "go": { "dir": "plugins" } },
+            "rows": [{ "id": "ping", "name": "go:ping" }]
+        }))
+        .unwrap();
+        config.rebase(dir.path());
+        let host = Host::start(&config).await.unwrap();
+        host.load(config.rows()).await.unwrap();
+        let service = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(service) = host.service("ping") {
+                    return service;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the ping service");
+        let reply = tokio::task::spawn_blocking(move || {
+            service.invoke("echo", Value::List(vec![json!("go").into()]))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(reply.json().unwrap(), json!("netkit pong go"));
+        let go = host.go.as_ref().unwrap();
+        assert_eq!(go.runtimes.runtimes()[0].name, "go-netkit");
+    }
+
+    /// A Go binary on another machine (here, listening on loopback): a peer
+    /// row links to it, and its rows are `<runtime>:<plugin>`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_remote_go_runtime_runs_rows_named_after_it() {
+        use tokio::io::AsyncBufReadExt;
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join(if cfg!(windows) {
+            "netkit.exe"
+        } else {
+            "netkit"
+        });
+        let status = std::process::Command::new("go")
+            .args(["build", "-o"])
+            .arg(&binary)
+            .arg("./cmd/netkit")
+            .current_dir(repo().join("crates/rutis-loader/tests/fixtures/go"))
+            .status()
+            .expect("go is on PATH");
+        assert!(status.success());
+        let mut child = tokio::process::Command::new(&binary)
+            .args([
+                "listen:ws://127.0.0.1:0/rutis",
+                "--id",
+                "edge",
+                "--peer",
+                "remote-go",
+            ])
+            .arg(dir.path())
+            .env("RUTIS_TOKEN", "edge-token")
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
+        let address = loop {
+            let line = lines
+                .next_line()
+                .await
+                .unwrap()
+                .expect("the runtime's address");
+            if let Some(address) = line.strip_prefix("rutis: listening on ") {
+                break address.to_owned();
+            }
+        };
+        tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+        std::env::set_var("RUTIS_TOKEN_EDGE", "edge-token");
+        let config: HostConfig = serde_json::from_value(json!({
+            "id": "remote-go",
+            "runtimes": { "remote": [{ "name": "edge", "language": "go" }] },
+            "rows": [
+                { "id": "edge", "name": "rutis-bridge/peer", "config": { "peer": "edge", "dial": address, "runtime": "edge" } },
+                { "id": "ping", "name": "edge:ping" }
+            ]
+        }))
+        .unwrap();
+        let host = Host::start(&config).await.unwrap();
+        host.load(config.rows()).await.unwrap();
+        let service = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(service) = host.service("ping") {
+                    return service;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the ping service");
+        let reply = tokio::task::spawn_blocking(move || {
+            service.invoke("echo", Value::List(vec![json!("far").into()]))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(reply.json().unwrap(), json!("netkit pong far"));
         child.start_kill().unwrap();
     }
 }

@@ -1,5 +1,6 @@
 //! Language runtimes: processes that run plugins written in another
-//! language (Node with Cordis, feature `node`; Python, feature `python`),
+//! language (Node with Cordis, feature `node`; Python, feature `python`;
+//! Go, feature `go`; Bun, feature `bun`),
 //! whose plugins rutis-loader manages as rows.
 //!
 //! A runtime's session comes from a link, wherever the runtime runs:
@@ -54,8 +55,55 @@ pub trait RuntimeSession: Send + Sync + 'static {
     ) -> Result<Box<dyn std::any::Any + Send + Sync>, Error>;
 }
 
+/// The name of the Go runtime the binary at `path` runs as: its file name
+/// without `.exe`, lowercased, with every character outside `[a-z0-9-]` as
+/// `-`, after `go-` (`net.kit_v1.exe` -> `go-net-kit-v1`). It is the only
+/// name users see for it.
+#[cfg(feature = "go")]
+pub fn go_runtime_name(path: &std::path::Path) -> String {
+    let file = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    // By bytes: a name need not be ASCII, and `.exe` is.
+    let exe = file.len() > 4 && file.as_bytes()[file.len() - 4..].eq_ignore_ascii_case(b".exe");
+    let stem = match exe {
+        true => &file[..file.len() - 4],
+        false => &file[..],
+    };
+    let name: String = stem
+        .chars()
+        .map(|c| c.to_ascii_lowercase())
+        .map(|c| match c {
+            'a'..='z' | '0'..='9' | '-' => c,
+            _ => '-',
+        })
+        .collect();
+    format!("go-{name}")
+}
+
 /// The key the runtime session named `name` is provided under
 /// (`RuntimeSession#gpu`).
 pub fn runtime_session_key(name: &str) -> rutis::TypeKey {
     rutis::TypeKey::keyed_dynamic::<dyn RuntimeSession>(name.to_owned())
+}
+
+#[cfg(all(test, feature = "go"))]
+mod tests {
+    use super::go_runtime_name;
+    use std::path::Path;
+
+    #[test]
+    fn go_runtime_names_come_from_file_names() {
+        for (file, name) in [
+            ("netkit", "go-netkit"),
+            ("net.kit_v1.exe", "go-net-kit-v1"),
+            ("NetKit.EXE", "go-netkit"),
+            ("天气", "go---"),
+            ("天气.exe", "go---"),
+            ("a天", "go-a-"),
+        ] {
+            assert_eq!(go_runtime_name(Path::new(file)), name, "{file}");
+        }
+    }
 }

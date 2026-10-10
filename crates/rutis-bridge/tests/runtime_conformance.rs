@@ -1,5 +1,5 @@
 //! The session conformance suite against every implementation of the
-//! session: Rust, Node and Python, each serving `conformance` as endpoint
+//! session: Rust, Node, Python and Bun, each serving `conformance` as endpoint
 //! of an endpoint-format session.
 #![cfg(all(unix, feature = "testing"))]
 
@@ -104,5 +104,42 @@ async fn python_meets_the_session_contract() {
         .arg(repo().join("python/rutis/tests/conformance_session.py"))
         .env("PYTHONPATH", repo().join("python/rutis"));
     let (far, _child) = far_end(command, "python").await;
+    run(far).await;
+}
+
+#[cfg(feature = "go")]
+/// Build the Go package `package` (a path under `go/rutis`) into a fresh
+/// directory, with the toolchain on PATH (`go`).
+fn go_binary(package: &str) -> PathBuf {
+    let directory = tempfile::tempdir().unwrap().keep();
+    let binary = directory.join("conformance");
+    let status = std::process::Command::new("go")
+        .args(["build", "-o"])
+        .arg(&binary)
+        .arg(package)
+        .current_dir(repo().join("go/rutis"))
+        .status()
+        .expect("go is on PATH");
+    assert!(status.success(), "go build {package}");
+    binary
+}
+
+#[cfg(feature = "go")]
+#[tokio::test(flavor = "multi_thread")]
+async fn go_meets_the_session_contract() {
+    let command = tokio::process::Command::new(go_binary("./internal/fixtures/session"));
+    let (far, _child) = far_end(command, "go").await;
+    run(far).await;
+}
+
+#[cfg(feature = "bun")]
+#[tokio::test(flavor = "multi_thread")]
+async fn bun_meets_the_session_contract() {
+    let mut command = tokio::process::Command::new("bun");
+    command
+        .args(["--no-install", "--no-env-file"])
+        .arg(repo().join("bun/rutis-bun/test/fixtures/conformance-session.ts"))
+        .current_dir(repo().join("bun/rutis-bun"));
+    let (far, _child) = far_end(command, "bun").await;
     run(far).await;
 }

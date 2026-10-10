@@ -14,8 +14,8 @@ rutis-bridge = { version = "0.8", features = ["python", "websocket"] }   # node 
 | Crate / feature | Contents |
 | --- | --- |
 | `rutis` | Core: plugins, dependencies, and services. |
-| `rutis-loader` | Loads plugins from data rows. `node` / `python` enable rows for those languages; `peer` enables node rows and `peer:` rows. |
-| `rutis-bridge` | Connects processes, languages, and machines. `node` (default) and `python` enable local runtimes; `websocket` enables the WebSocket transport; `cordis` mounts Cordis plugins and generates Rust bindings (see [Cordis](cordis.en.md)); `testing` enables compatibility tests. |
+| `rutis-loader` | Loads plugins from data rows. `node` / `python` / `go` enable rows for those languages; `peer` enables node rows and `peer:` rows. |
+| `rutis-bridge` | Connects processes, languages, and machines. `node` (default), `python` and `go` enable local runtimes; `websocket` enables the WebSocket transport; `cordis` mounts Cordis plugins and generates Rust bindings (see [Cordis](cordis.en.md)); `testing` enables compatibility tests. |
 
 Enable only the language features you use so the application compiles and starts only the required components.
 
@@ -103,6 +103,28 @@ let tui = LocalRuntime::node("app/node_modules/@arcships/rutis-runtime", "app/pa
 let node = LocalRuntime::node("app/node_modules/@arcships/rutis-runtime", "app/package.json")
     .stdout(Stdio::Null);
 ```
+
+### Go runtimes
+
+Go plugins are compiled binaries, one runtime per binary (feature `go` of `rutis-loader`). `GoResolver` reads binaries' manifests (`<binary> --rutis-manifest`) and routes `go:<plugin>` to the binary that has it; `GoRuntimes` starts a binary's runtime when a row uses it and stops it once idle:
+
+```rust
+use rutis_loader::{GoBinaries, GoResolver, GoRuntimes};
+
+let go = Arc::new(
+    GoResolver::new(GoBinaries::new().dir("app/plugins/go").file("app/bin/netkit"))
+        .with_catalog(&catalog)
+        .reserve(["node", "py"]),              // other runtimes' names, which no Go runtime may take
+);
+// In the loader's Chain: Chain::new().with_shared(go.clone())…; after mounting the loader:
+let go_runtimes = GoRuntimes::new(go, "app").idle(Some(Duration::from_secs(60)));
+let control = go_runtimes.handle();            // restart("go-netkit"), runtimes()
+root.plugin(go_runtimes).await?;
+```
+
+- A runtime is named after its file (`netkit` → `go-netkit`); when two binaries have a plugin of the same name, the row is `go-netkit:<plugin>`.
+- While a process runs, rows resolve from the manifest it started with; a replaced binary takes effect after `control.restart("go-netkit")`. A crashed runtime is not restarted automatically.
+- To run one fixed binary, it also works as Python does: `LocalRuntime::go(binary, project)` with `RuntimeResolver::modules` (rows `<runtime name>:<plugin>`).
 
 ## Nodes
 

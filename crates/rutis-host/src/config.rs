@@ -5,7 +5,8 @@
 //!   "id": "main",
 //!   "runtimes": {
 //!     "node": { "project": "." },
-//!     "py": { "project": ".", "python": ".venv/bin/python" }
+//!     "py": { "project": ".", "python": ".venv/bin/python" },
+//!     "go": { "dir": "plugins/go", "start": "on-demand", "idle": 60 }
 //!   },
 //!   "listen": [{ "name": "public", "address": "0.0.0.0:7443", "cert": "server.pem", "key": "server.key" }],
 //!   "rows": [
@@ -49,6 +50,9 @@ fn default_id() -> String {
 pub struct Runtimes {
     pub node: Option<NodeRuntime>,
     pub py: Option<PythonRuntime>,
+    pub bun: Option<BunRuntime>,
+    /// Go binaries, one runtime each, started when a row uses them.
+    pub go: Option<GoRuntime>,
     /// Runtimes on other machines, reached through a `rutis-bridge/peer` row
     /// with `"runtime": "<name>"`.
     #[serde(default)]
@@ -59,8 +63,8 @@ pub struct Runtimes {
 #[serde(deny_unknown_fields)]
 pub struct RemoteRuntime {
     pub name: String,
-    /// `python`: rows `<name>:<module>`; `node`: npm names, resolved there
-    /// when no runtime before it has them.
+    /// `python`: rows `<name>:<module>`; `go`: rows `<name>:<plugin>`;
+    /// `node`: npm names, resolved there when no runtime before it has them.
     pub language: String,
 }
 
@@ -77,6 +81,21 @@ pub struct NodeRuntime {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct BunRuntime {
+    /// The project plugins are installed in (its package.json and
+    /// node_modules); rows `bun:<module>` resolve from here.
+    #[serde(default = "here")]
+    pub project: PathBuf,
+    /// The `@arcships/rutis-bun` package; by default the project's.
+    #[serde(default)]
+    pub runtime: Option<PathBuf>,
+    /// The Bun executable; by default `bun` on `PATH`.
+    #[serde(default)]
+    pub program: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PythonRuntime {
     /// Where plugin modules that are not installed are found.
     #[serde(default = "here")]
@@ -86,6 +105,54 @@ pub struct PythonRuntime {
     /// `Scripts\python.exe` in those environments, then `python`).
     #[serde(default)]
     pub python: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoRuntime {
+    /// Every Go binary in this directory (trusted as a whole: its files
+    /// that contain the Go SDK's marker are run to read their manifests).
+    #[serde(default)]
+    pub dir: Option<PathBuf>,
+    /// Go binaries, each a runtime named after its file (`go-<name>`).
+    #[serde(default)]
+    pub binaries: Vec<PathBuf>,
+    /// `on-demand` (the default): a runtime starts when a row uses it;
+    /// `eager`: every one starts with the host and keeps running.
+    #[serde(default)]
+    pub start: GoStart,
+    /// Seconds an on-demand runtime stays idle before it stops (60).
+    #[serde(default)]
+    pub idle: Option<u64>,
+    /// The directory the runtimes run in.
+    #[serde(default = "here")]
+    pub project: PathBuf,
+    /// A development build and its runtime's name (`rutis-host dev`).
+    #[serde(skip)]
+    pub dev: Option<(PathBuf, String)>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GoStart {
+    #[default]
+    OnDemand,
+    Eager,
+}
+
+impl GoRuntime {
+    /// Refuse settings that cannot work together.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.dir.is_none() && self.binaries.is_empty() && self.dev.is_none() {
+            return Err("runtimes.go needs a dir or binaries".into());
+        }
+        if self.start == GoStart::Eager && self.idle.is_some() {
+            return Err(
+                "runtimes.go: eager runtimes keep running, so idle does not apply to them".into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// The interpreter of the virtual environment `venv`.
@@ -148,6 +215,18 @@ impl HostConfig {
                 at(runtime);
             }
         }
+        if let Some(bun) = &mut self.runtimes.bun {
+            at(&mut bun.project);
+            if let Some(runtime) = &mut bun.runtime {
+                at(runtime);
+            }
+            // A bare program name is looked up on PATH, not under the base.
+            if let Some(program) = &mut bun.program {
+                if program.components().count() > 1 {
+                    at(program);
+                }
+            }
+        }
         if let Some(py) = &mut self.runtimes.py {
             at(&mut py.project);
             // A bare program name is looked up on PATH, not under the base.
@@ -156,6 +235,15 @@ impl HostConfig {
                     at(python);
                 }
             }
+        }
+        if let Some(go) = &mut self.runtimes.go {
+            if let Some(dir) = &mut go.dir {
+                at(dir);
+            }
+            for binary in &mut go.binaries {
+                at(binary);
+            }
+            at(&mut go.project);
         }
         for listener in &mut self.listen {
             for path in [&mut listener.cert, &mut listener.key]
@@ -193,9 +281,52 @@ impl HostConfig {
         if self.runtimes.py.is_none() {
             self.runtimes.py = other.runtimes.py;
         }
+        if self.runtimes.bun.is_none() {
+            self.runtimes.bun = other.runtimes.bun;
+        }
+        if self.runtimes.go.is_none() {
+            self.runtimes.go = other.runtimes.go;
+        }
         self.runtimes.remote.extend(other.runtimes.remote);
         self.listen.extend(other.listen);
         self.rows.extend(other.rows);
+    }
+
+    /// Each runtime's name, which is also the prefix of its rows
+    /// (`py:<module>`, `bun:<module>`, `<remote>:<module>`), names one
+    /// runtime only.
+    pub fn check_runtime_names(&self) -> Result<(), String> {
+        let local = [
+            ("node", self.runtimes.node.is_some()),
+            ("py", self.runtimes.py.is_some()),
+            ("bun", self.runtimes.bun.is_some()),
+        ];
+        let mut seen: Vec<&str> = local
+            .iter()
+            .filter(|(_, present)| *present)
+            .map(|(name, _)| *name)
+            .collect();
+        for remote in &self.runtimes.remote {
+            let name = remote.name.as_str();
+            if !rutis_loader::is_runtime_name(name) {
+                return Err(format!(
+                    "remote runtime {name:?}: a runtime name is two or more of a-z, 0-9 and -, and not file"
+                ));
+            }
+            if seen.contains(&name) {
+                return Err(format!(
+                    "remote runtime {name}: the name is already a runtime's; rows `{name}:<module>` must name one"
+                ));
+            }
+            // `go:<plugin>` and `go-<binary>:<plugin>` are the Go runtimes' rows.
+            if self.runtimes.go.is_some() && (name == "go" || name.starts_with("go-")) {
+                return Err(format!(
+                    "remote runtime {name}: go and names starting with go- are the local Go runtimes'"
+                ));
+            }
+            seen.push(name);
+        }
+        Ok(())
     }
 
     /// The rows as the loader takes them: `rutis-bridge/peer` rows get the
@@ -298,5 +429,32 @@ mod tests {
             Path::new("/srv/app/.venv/bin/python")
         );
         assert!(serde_json::from_value::<HostConfig>(json!({ "unknown": 1 })).is_err());
+    }
+
+    #[test]
+    fn go_runtimes_are_checked() {
+        let parse =
+            |value: serde_json::Value| -> GoRuntime { serde_json::from_value(value).unwrap() };
+        assert!(parse(json!({ "dir": "plugins/go" })).validate().is_ok());
+        assert!(
+            parse(json!({ "binaries": ["bin/netkit"], "start": "eager" }))
+                .validate()
+                .is_ok()
+        );
+        let none = parse(json!({})).validate().unwrap_err();
+        assert!(none.contains("needs a dir or binaries"), "{none}");
+        let both = parse(json!({ "dir": "d", "start": "eager", "idle": 30 }))
+            .validate()
+            .unwrap_err();
+        assert!(both.contains("idle does not apply"), "{both}");
+        let mut config: HostConfig = serde_json::from_value(json!({
+            "runtimes": { "go": { "dir": "plugins/go", "binaries": ["bin/netkit"] } }
+        }))
+        .unwrap();
+        config.rebase(Path::new("/srv/host"));
+        let go = config.runtimes.go.unwrap();
+        assert_eq!(go.dir.unwrap(), Path::new("/srv/host/plugins/go"));
+        assert_eq!(go.binaries[0], Path::new("/srv/host/bin/netkit"));
+        assert_eq!(go.project, Path::new("/srv/host/."));
     }
 }

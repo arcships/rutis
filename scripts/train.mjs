@@ -28,10 +28,15 @@ const versions = {
   ...Object.fromEntries(crates.map(name => [`crates/${name}`, cargo(manifest(name))])),
   'npm @arcships/rutis': json('node/rutis/package.json').version,
   'npm @arcships/rutis-runtime': json('node/rutis-runtime/package.json').version,
+  // The Bun runtime greets with this version too (its package.json).
+  'npm @arcships/rutis-bun': json('bun/rutis-bun/package.json').version,
   'npm @arcships/rutis-host': json('node/rutis-host/package.json').version,
   'pypi rutis': pyproject('python/rutis/pyproject.toml'),
   // What the Python runtime says it is when it greets.
   'pypi rutis (implementation)': read('python/rutis/rutis/peer.py').match(/^IMPLEMENTATION = \{"name": "rutis", "version": "([^"]+)"\}/m)?.[1],
+  // The Go SDK (module go/rutis, released by the tag go/rutis/v<version>):
+  // what its runtime and manifests say it is.
+  'go github.com/arcships/rutis/go/rutis': read('go/rutis/version.go').match(/^const Version = "([^"]+)"/m)?.[1],
 }
 const host = json('node/rutis-host/package.json')
 const references = {

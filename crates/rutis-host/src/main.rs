@@ -4,7 +4,8 @@
 //! rutis-host run [rutis.json]      run what the file names
 //! rutis-host dev                   run the plugin project here, reloading it as it changes
 //! rutis-host check [rutis.json]    describe every row, and fail on what cannot run
-//! rutis-host new <name> --lang node|python
+//! rutis-host new <name> --lang node|bun|python|go
+//! rutis-host go add <module>@<version> [rutis.json]
 //! ```
 
 mod config;
@@ -17,15 +18,20 @@ mod status;
 const PLUGIN_API: u32 = 1;
 
 const USAGE: &str = "\
-rutis-host: run rutis plugins written in TypeScript, JavaScript and Python
+rutis-host: run rutis plugins written in TypeScript, JavaScript, Python and Go
 
 usage:
-  rutis-host run [rutis.json]               run what the configuration names
-  rutis-host dev [dir]                      run the plugin project in dir (default .),
-                                            reloading it as its files change
-  rutis-host check [rutis.json]             describe every row; fail on what cannot run
-                                            (in a plugin project without rutis.json: the project)
-  rutis-host new <name> --lang node|python  create a plugin project
+  rutis-host run [rutis.json]                 run what the configuration names
+  rutis-host dev [dir]                        run the plugin project in dir (default .),
+                                              reloading (Go: rebuilding) it as its files change
+  rutis-host check [rutis.json]               describe every row and Go binary; fail on what
+                                              cannot run (in a plugin project without
+                                              rutis.json: the project)
+  rutis-host new <name> --lang node|bun|python|go
+                                              create a plugin project
+  rutis-host go add <module>@<version> [rutis.json]
+                                              install a Go plugin binary into runtimes.go.dir
+                                              (go install; needs the Go toolchain)
   rutis-host --version
 
 Credentials for links come from RUTIS_TOKEN (or RUTIS_TOKEN_<PEER>), RUTIS_CA,
@@ -35,6 +41,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("new") => new_project(&args[1..]),
+        Some("go") => go_command(&args[1..]),
         Some("--version" | "-V") => {
             println!("rutis-host {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -52,6 +59,27 @@ fn main() {
     }
 }
 
+/// On macOS, a downloaded binary carries the quarantine attribute, and the
+/// system refuses to run it unsigned: say so, and what to do.
+fn quarantine_hint(path: &std::path::Path) -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let quarantined = std::process::Command::new("xattr")
+        .args(["-p", "com.apple.quarantine"])
+        .arg(path)
+        .output()
+        .ok()?
+        .status
+        .success();
+    quarantined.then(|| {
+        format!(
+            "it was downloaded and is quarantined: once you trust it, run `xattr -d com.apple.quarantine {}`",
+            path.display()
+        )
+    })
+}
+
 fn new_project(args: &[String]) -> Result<(), String> {
     let mut name = None;
     let mut lang = None;
@@ -66,13 +94,15 @@ fn new_project(args: &[String]) -> Result<(), String> {
             other => return Err(format!("unexpected argument {other}")),
         }
     }
-    let name = name.ok_or("usage: rutis-host new <name> --lang node|python")?;
-    let lang = lang.ok_or("which language? --lang node or --lang python")?;
+    let name = name.ok_or("usage: rutis-host new <name> --lang node|bun|python|go")?;
+    let lang = lang.ok_or("which language? --lang node, --lang bun, --lang python or --lang go")?;
     new::create(std::path::Path::new("."), &name, &lang)?;
     let next = match lang.as_str() {
         "python" | "py" => {
             "uv sync && uv run python -m unittest discover -s tests && uv run rutis-host dev"
         }
+        "bun" => "bun install && bun test && bunx --bun rutis-host dev",
+        "go" | "golang" => "go mod tidy && go test ./... && rutis-host dev",
         _ => "npm install && npm test && npx rutis-host dev",
     };
     println!("created {name}/\nnext: cd {name} && {next}");
@@ -109,11 +139,56 @@ async fn run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// `rutis-host go add <module>@<version> [rutis.json]`: `go install` the
+/// binary into the configuration's Go plugin directory.
+fn go_command(args: &[String]) -> Result<(), String> {
+    let usage = "usage: rutis-host go add <module>@<version> [rutis.json]";
+    let (Some("add"), Some(module)) = (args.first().map(String::as_str), args.get(1)) else {
+        return Err(usage.into());
+    };
+    if !module.contains('@') {
+        return Err(format!("{module}: name a version, as {module}@latest"));
+    }
+    let config = config::HostConfig::read(&config_file(&args[2..]))?;
+    let dir = config
+        .runtimes
+        .go
+        .and_then(|go| go.dir)
+        .ok_or("the configuration has no runtimes.go.dir to install into")?;
+    std::fs::create_dir_all(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    let status = std::process::Command::new("go")
+        .args(["install", module.as_str()])
+        .env("GOBIN", &dir)
+        .status()
+        .map_err(|error| {
+            format!(
+                "cannot run go ({error}): install the Go toolchain, or download the plugin's binary \
+                 for this platform into {} yourself",
+                dir.display()
+            )
+        })?;
+    if !status.success() {
+        return Err(format!("go install {module} failed"));
+    }
+    println!("installed {module} into {}", dir.display());
+    Ok(())
+}
+
 async fn dev(args: &[String]) -> Result<(), String> {
     use std::time::Duration;
 
     let dir = std::path::PathBuf::from(args.first().map(String::as_str).unwrap_or("."));
+    // Go runtimes warn of calls that carry no call chain.
+    std::env::set_var("RUTIS_DEV", "1");
     let (config, id) = project::dev_config(&dir)?;
+    let go_project = match (
+        dir.join("package.json").exists(),
+        dir.join("pyproject.toml").exists(),
+    ) {
+        (false, false) => project::GoDev::of(&std::path::absolute(&dir).unwrap_or(dir.clone())),
+        _ => None,
+    };
+    let mut build = 1;
     let host = host::Host::start(&config).await?;
     host.runtimes_ready().await?;
     host.load(config.rows()).await?;
@@ -127,6 +202,30 @@ async fn dev(args: &[String]) -> Result<(), String> {
             continue;
         }
         seen = now;
+        if let (Some(go), Some(running)) = (&go_project, &host.go) {
+            // A Go plugin is a binary: build it again, then restart its
+            // runtime on the new build. A failed build keeps the old one.
+            match go.build(build + 1) {
+                Ok(binary) => {
+                    build += 1;
+                    running.resolver.replace(&go.runtime, &binary);
+                    match running.runtimes.restart(&go.runtime).await {
+                        Ok(()) => println!("{}: rebuilt and restarted", go.runtime),
+                        Err(error) => println!("{}: cannot restart: {error}", go.runtime),
+                    }
+                    let previous = go.dir.join(".rutis/go").join(match cfg!(windows) {
+                        true => format!("{}-{}.exe", go.name, build - 1),
+                        false => format!("{}-{}", go.name, build - 1),
+                    });
+                    let _ = std::fs::remove_file(previous);
+                }
+                Err(errors) => println!(
+                    "{}: the build failed; the last build keeps running\n{errors}",
+                    go.name
+                ),
+            }
+            continue;
+        }
         // Plugin rows load their new code; peer rows keep their sessions.
         host.invalidate();
         let rows: Vec<String> = host
@@ -154,6 +253,14 @@ async fn check(args: &[String]) -> Result<(), String> {
     let host = host::Host::start(&config).await?;
     host.runtimes_ready().await?;
     println!("plugin API: {PLUGIN_API} (supported by this host)");
+    // Each local runtime: what implements it and what it runs on.
+    for (name, runtime) in &host.runtimes {
+        if let Some(process) = runtime.ready().await {
+            if let Some(line) = runtime_line(name, process.about()) {
+                println!("{line}");
+            }
+        }
+    }
     let mut failed = 0;
     for row in config.rows() {
         let id = row["id"].as_str().unwrap_or("?");
@@ -170,7 +277,7 @@ async fn check(args: &[String]) -> Result<(), String> {
                     };
                     println!("  api: {api} ({compatible})");
                 }
-                for field in ["version", "inject", "provides"] {
+                for field in ["runtime", "binary", "version", "inject", "provides"] {
                     if let Some(value) = meta.get(field).filter(|value| !value.is_null()) {
                         println!("  {field}: {value}");
                     }
@@ -185,8 +292,100 @@ async fn check(args: &[String]) -> Result<(), String> {
             }
         }
     }
+    if let Some(go) = &host.go {
+        println!("go binaries:");
+        for binary in go.resolver.binaries() {
+            match &binary.manifest {
+                Ok(manifest) => {
+                    let plugins: Vec<String> = manifest
+                        .plugins
+                        .iter()
+                        .map(|(name, plugin)| match plugin.version.as_deref() {
+                            Some(version) => format!("{name} {version}"),
+                            None => name.clone(),
+                        })
+                        .collect();
+                    let api = match manifest.plugin_api <= PLUGIN_API as u64 {
+                        true => "compatible",
+                        false => "incompatible: upgrade the host",
+                    };
+                    println!(
+                        "  {} ({}): {}sdk {}, plugin API {} ({api}), plugins: {}",
+                        binary.runtime,
+                        binary.path.display(),
+                        manifest
+                            .platform
+                            .as_ref()
+                            .map(|platform| format!("{platform}, "))
+                            .unwrap_or_default(),
+                        manifest.sdk,
+                        manifest.plugin_api,
+                        plugins.join(", ")
+                    );
+                    if manifest.plugin_api > PLUGIN_API as u64 {
+                        failed += 1;
+                    }
+                }
+                Err(error) => {
+                    failed += 1;
+                    println!("  {} ({}): {error}", binary.runtime, binary.path.display());
+                    if let Some(hint) = quarantine_hint(&binary.path) {
+                        println!("    {hint}");
+                    }
+                }
+            }
+        }
+        for skipped in go.resolver.diagnostics() {
+            failed += 1;
+            println!("  skipped {skipped}");
+        }
+    }
     match failed {
         0 => Ok(()),
-        n => Err(format!("{n} row(s) cannot run")),
+        n => Err(format!("{n} row(s) or binaries cannot run")),
+    }
+}
+
+/// `check`'s line for the runtime `name`: what implements it and what it
+/// runs on, as it said when mounted (`Process::about`); none when it said
+/// neither.
+fn runtime_line(name: &str, about: &serde_json::Value) -> Option<String> {
+    let said = |field: &str| {
+        let part = &about[field];
+        part["name"]
+            .as_str()
+            .map(|name| match part["version"].as_str() {
+                Some(version) => format!("{name} {version}"),
+                None => name.to_owned(),
+            })
+    };
+    let described: Vec<String> = ["implementation", "engine"]
+        .iter()
+        .filter_map(|field| said(field))
+        .collect();
+    (!described.is_empty()).then(|| format!("runtime {name}: {}", described.join(", ")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_line;
+    use serde_json::json;
+
+    #[test]
+    fn check_says_what_runs_each_runtime() {
+        let about = json!({
+            "implementation": { "name": "@arcships/rutis-bun", "version": "0.8.0" },
+            "engine": { "name": "bun", "version": "1.4.3" },
+        });
+        assert_eq!(
+            runtime_line("bun", &about).as_deref(),
+            Some("runtime bun: @arcships/rutis-bun 0.8.0, bun 1.4.3")
+        );
+        let partial = json!({ "implementation": { "name": "rutis" } });
+        assert_eq!(
+            runtime_line("py", &partial).as_deref(),
+            Some("runtime py: rutis")
+        );
+        assert_eq!(runtime_line("node", &serde_json::Value::Null), None);
     }
 }
