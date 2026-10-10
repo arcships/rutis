@@ -22,7 +22,9 @@ on:
       - "crates/rutis-dylib-meta/**"
       - "crates/rutis-dylib-launcher/**"
       - "crates/rutis-xtask/**"
-      - "crates/rutis-cli/build.rs"
+      - "crates/rutis-dev/**"
+      # rutis-cli links the SDK and holds the dylib host tests.
+      - "crates/rutis-cli/**"
       - "tests/dylib-fixtures/**"
       - "tools/*dylib*"
       - "tools/test-sdk-bundle.sh"
