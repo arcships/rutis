@@ -68,6 +68,7 @@ A host's `rutis.json`:
 - **Re-entrant synchronous calls**: while a plugin's synchronous call into rutis waits, other calls into this runtime still run. A plugin's service may therefore be called during its own synchronous call: do not hold a lock across a call into rutis.
 - **An uncaught error ends the process**, withdrawing every service of the runtime.
 - **Reloading** imports the plugin module itself again; the modules it imports are replaced only by restarting the runtime.
+- **Packages installed while the runtime runs** (`bun add`) are found only after the runtime restarts: a Bun process remembers that a package was missing.
 
 ## 5. Publish
 

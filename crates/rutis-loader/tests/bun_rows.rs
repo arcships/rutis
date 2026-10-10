@@ -104,8 +104,16 @@ struct Fixture {
 }
 
 async fn fixture() -> Fixture {
+    fixture_with(|_| {}).await
+}
+
+/// `install` puts what the project has installed before the runtime starts:
+/// Bun does not see a package installed while it runs (it keeps that a
+/// package was missing), until the runtime restarts.
+async fn fixture_with(install: impl FnOnce(&Path)) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+    install(dir.path());
     for (name, body) in [
         ("provider", PROVIDER),
         ("user", USER),
@@ -238,15 +246,17 @@ async fn reloading_a_row_runs_the_edited_module() {
 /// the project lacks is unresolved, and the other rows run.
 #[tokio::test(flavor = "multi_thread")]
 async fn packages_report_versions_and_missing_modules_are_unresolved() {
-    let fixture = fixture().await;
-    let package = fixture.dir.path().join("node_modules/@acme/hello");
-    std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(
-        package.join("package.json"),
-        r#"{ "name": "@acme/hello", "version": "2.0.1", "type": "module", "main": "index.ts" }"#,
-    )
-    .unwrap();
-    std::fs::write(package.join("index.ts"), sdk_plugin(BYSTANDER)).unwrap();
+    let fixture = fixture_with(|dir| {
+        let package = dir.join("node_modules/@acme/hello");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            r#"{ "name": "@acme/hello", "version": "2.0.1", "type": "module", "main": "index.ts" }"#,
+        )
+        .unwrap();
+        std::fs::write(package.join("index.ts"), sdk_plugin(BYSTANDER)).unwrap();
+    })
+    .await;
     let report = fixture
         .loader
         .reconcile(

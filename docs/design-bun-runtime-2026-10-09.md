@@ -299,6 +299,7 @@ RuntimeResolver::modules(handle)       // 现有：行名 "bun:<模块>"
 | 版本下限 | `engines.bun` 暂定 `>=1.2`；CI 矩阵为 1.2.x 与最新版 | 待 CI 结果确认，不通过就上调 |
 | 远程运行时监听（B2） | B1 收到 `listen:` 时以明确的错误退出 | 按分阶段 |
 | （新发现）Bun 的目录项缓存 | 插件文件一律按真实路径导入 | 进程启动后在工作目录里新建的文件，经由符号链接目录（macOS 的 `/var`）的路径导入会失败，真实路径可以；`src/plugin.ts` 的 `locate` |
+| （新发现）运行期间新装的包 | 重启 Bun 运行时后才能解析；文档写明 | Bun 进程会记住某个包曾经不存在：一次解析失败之后，再安装的包（以及之后才出现在 `node_modules` 里的依赖）在同一进程里都解析不到，没有可用的失效接口；直接按真实路径导入文件不受影响。与 Node 运行时"代码改动后重启运行时"的约定一致 |
 | （新发现）未捕获的错误 | 运行时注册 `uncaughtException` / `unhandledRejection`，打印后以状态 1 退出 | Bun 对定时器里抛出的错误只打印、不退出，不满足需求文档 §5 规则 8 |
 | Rust 侧的版本与引擎信息 | `RowSchema.version`（Python 入口点的版本也随之进入行的 meta）；`Process::about()` 返回 `mount` 回复里的 `implementation` 与 `engine`，`rutis-host check` 打印 | §3.3、§5.1 |
 | 远程 node 运行时接走带前缀的行名 | `Naming::Npm` 在远程运行时上不接受 `<运行时名>:` 开头的名字（`file:` 与单字母盘符除外） | §5.1 |

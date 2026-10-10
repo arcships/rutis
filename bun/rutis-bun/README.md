@@ -20,6 +20,7 @@ A host starts it as one process and runs plugins in it as rows named `bun:<modul
 - **Synchronous calls are re-entrant**: while a plugin's synchronous call into rutis waits, calls into this runtime still run, so runtimes that call each other never wait for each other for ever. A plugin's service may therefore be called while that plugin is inside a synchronous call: do not hold a lock across a call into rutis.
 - **An uncaught error ends the process**, and with it every service of this runtime.
 - **Reloading** a row imports its module again when the file changed; the modules it imports stay loaded (restart the runtime to replace those).
+- **Packages installed while the runtime runs** are found after the runtime restarts: a Bun process remembers that a package was missing.
 
 Bun 1.2 or later. This version runs on the host's machine (local channels); listening as a remote runtime is not supported yet.
 
