@@ -125,6 +125,9 @@ struct Host {
     stderr: Receiver<String>,
     /// Every line read so far, for the failure message.
     seen: Vec<String>,
+    /// The runtime processes seen: in process groups of their own, they
+    /// are killed with the host when the test fails.
+    runtimes: Vec<i32>,
 }
 
 impl Host {
@@ -169,6 +172,7 @@ impl Host {
             lines,
             stderr,
             seen: Vec::new(),
+            runtimes: Vec::new(),
         }
     }
 
@@ -206,6 +210,7 @@ impl Host {
                 (applied.is_some() || ran).then_some((applied, ran))
             });
             pids.extend(pid);
+            self.runtimes.extend(pid);
             running += ran as usize;
         }
         pids
@@ -224,29 +229,41 @@ impl Host {
         let status = match exited.recv_timeout(HANG_GUARD) {
             Ok(status) => status.unwrap(),
             Err(_) => {
-                // SAFETY: plain kill(2) on the host's process group.
-                unsafe { libc::kill(-pid, libc::SIGKILL) };
+                kill_all(pid, &self.runtimes);
                 panic!("rutis-host did not exit; its output: {:#?}", self.seen);
             }
         };
-        let stderr = self.stderr.recv_timeout(HANG_GUARD).unwrap_or_default();
+        let stderr = self.stderr.recv_timeout(HANG_GUARD);
         loop {
             match self.lines.recv_timeout(HANG_GUARD) {
                 Ok(line) => self.seen.push(line),
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(error) => panic!("the output did not end: {error}; {:#?}", self.seen),
+                Err(error) => {
+                    kill_all(pid, &self.runtimes);
+                    panic!("the output did not end: {error}; {:#?}", self.seen)
+                }
             }
         }
-        (status, stderr, self.seen)
+        (status, stderr.unwrap_or_default(), self.seen)
     }
 
     fn fail(&mut self, what: &str) -> ! {
-        let pid = self.pid();
-        // SAFETY: plain kill(2) on the host's process group.
-        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        kill_all(self.pid(), &self.runtimes);
         let _ = self.child.wait();
         let stderr = self.stderr.recv_timeout(HANG_GUARD).unwrap_or_default();
         panic!("{what}; output: {:#?}; stderr: {stderr}", self.seen);
+    }
+}
+
+/// Kill the host's process group and the runtime processes, so a failing
+/// test leaves nothing behind.
+fn kill_all(host: i32, runtimes: &[i32]) {
+    // SAFETY: plain kill(2).
+    unsafe {
+        libc::kill(-host, libc::SIGKILL);
+        for pid in runtimes {
+            libc::kill(*pid, libc::SIGKILL);
+        }
     }
 }
 
@@ -286,7 +303,10 @@ fn run_ends_cleanly(sig: i32, group: bool) {
         assert_eq!(cleanups(dir.path(), row), 1, "{row}'s cleanup; {context}");
     }
     for pid in pids {
-        assert!(!alive(pid), "runtime process {pid} outlived the host; {context}");
+        assert!(
+            !alive(pid),
+            "runtime process {pid} outlived the host; {context}"
+        );
     }
 }
 
@@ -315,7 +335,10 @@ fn dev_ends_on_ctrl_c_after_its_cleanup() {
     assert_eq!(status.code(), Some(0), "{context}");
     assert_eq!(cleanups(dir.path(), "marker"), 1, "{context}");
     for pid in pids {
-        assert!(!alive(pid), "runtime process {pid} outlived the host; {context}");
+        assert!(
+            !alive(pid),
+            "runtime process {pid} outlived the host; {context}"
+        );
     }
 }
 
@@ -336,7 +359,10 @@ fn run_past_the_cleanup_deadline_exits_2_and_ends_the_runtimes() {
     assert_eq!(status.code(), Some(2), "{context}");
     assert!(stderr.contains("did not finish"), "{context}");
     for pid in pids {
-        assert!(!alive(pid), "runtime process {pid} outlived the host; {context}");
+        assert!(
+            !alive(pid),
+            "runtime process {pid} outlived the host; {context}"
+        );
     }
 }
 
@@ -353,12 +379,16 @@ fn a_second_ctrl_c_exits_at_once() {
     );
     let pids = host.started(&["py-row", "node-row"]);
     signal(&host, libc::SIGINT, true);
-    host.until(|line| (line == "plugin py-row cleanup started").then_some(()));
+    // Rows unload one after another: the first cleanup holds the others.
+    host.until(|line| line.ends_with(" cleanup started").then_some(()));
     signal(&host, libc::SIGINT, true);
     let (status, stderr, output) = host.exit();
     let context = format!("status {status:?}; output: {output:#?}; stderr: {stderr}");
     assert_eq!(status.code(), Some(2), "{context}");
     for pid in pids {
-        assert!(!alive(pid), "runtime process {pid} outlived the host; {context}");
+        assert!(
+            !alive(pid),
+            "runtime process {pid} outlived the host; {context}"
+        );
     }
 }

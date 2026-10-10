@@ -21,7 +21,7 @@ rutis-bridge = { path = "../rutis-bridge", version = "0.8.0", features = ["node"
 rutis-loader = { path = "../rutis-loader", version = "0.8.0", features = ["node", "python", "bun", "go", "peer"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal"] }
 url = "2"
 
 [dev-dependencies]
