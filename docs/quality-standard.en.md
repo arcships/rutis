@@ -89,7 +89,7 @@ rutis's behavior falls into four levels; the strength of verification depends on
 
 | Priority | Rule | Required verification |
 | --- | --- | --- |
-| P0 | High impact with medium or high likelihood; or involves a core guarantee | Automated; runs before every merge; covers every declared platform |
+| P0 | High impact with medium or high likelihood; or involves a core guarantee | Automated; runs before merging when the change affects it, and on every run on the main line (Q12.3); covers every declared platform |
 | P1 | High impact with low likelihood; or medium impact with medium or high likelihood | Automated; runs at least daily and before release |
 | P2 | Everything else | May rely on review, documentation or manual verification only |
 
@@ -317,7 +317,7 @@ E.g.: Rust bindings generated from another language's type declarations.
 2. every kind of refusal has a counterexample verified;
 3. when a replacement fails, the old version keeps working;
 4. builds are reproducible: the same source built at different paths and on different machines gives the same artifact;
-5. every supported platform is verified, not only when the relevant code changes.
+5. every supported platform is verified: before merging according to what the change affects, and on every run on the main line (Q12.3); not only when the relevant code changes.
 
 ### Q6.13 Distribution and network nodes
 
@@ -503,18 +503,44 @@ E.g.: packages on each channel, binaries, platform-specific packages.
 
 ---
 
-## 12. When verification runs
+## 12. Continuous integration
+
+Continuous integration is where quality control is carried out: it runs most of the verification this standard requires. It is also a system to be designed and measured: too slow, and developers bypass it or wait for a long time; too thin, and problems slip into the main line.
 
 **Q12.1** Verification runs at levels according to how soon a problem needs to be known:
 
 | When | What runs |
 | --- | --- |
-| Before every merge | All P0 verification; static checks; the cheaper parts on each platform |
-| After merging to the main line | All platforms, every cell of the support matrix; clean installation; versions meeting across releases |
+| Before every merge | P0 verification affected by the change (Q12.3); static checks; the cheaper parts on each platform |
+| After merging to the main line | All verification: all platforms, every cell of the support matrix; clean installation; versions meeting across releases; reproducible builds |
 | Daily | Longer P1 verification: long runs, fuzzing, large-scale model checking, real network conditions, new versions of external ecosystems |
 | Before release | §13 |
 
 **Q12.2** Verification before merging is kept within a reasonable time; when it grows beyond that, the expensive parts that find little are moved to a later level, not deleted.
+
+**Q12.3 Selection by change.** Before merging, only the verification affected by the change runs; on the main line, all verification runs every time.
+
+1. The mapping from what changed to what is verified lives in the CI configuration and is reviewed like code;
+2. changes whose impact cannot be determined (build configuration, dependency lock files, the CI configuration itself, widely shared parts) run all verification;
+3. when a verification skipped before merging fails on the main line, after the fix the mapping is checked for this kind of change and corrected (Q9.2.3).
+
+**Q12.4 Cancel superseded runs.** When a change gets a new commit, runs in progress for the older commit are cancelled at once. Runs on the main line are not cancelled; every merge gets a complete result.
+
+**Q12.5 One merge condition.** The merge condition is a single aggregate check: it passes when every selected verification passes; verifications skipped because they were not selected do not count as failures; the aggregate check itself always runs and cannot be skipped.
+
+**Q12.6 Time is measured as developers wait.** The time budget for verification before merging counts from pushing a commit to getting a result, including queueing, not only execution.
+
+1. Shorten the critical path (the longest item) first, then the rest; verification on the critical path may be split into parallel parts;
+2. on scarce execution resources (platforms or machines of limited number), each run takes as few jobs as possible; checks that can be done one after another on the same machine are merged into one job;
+3. checks that cannot use caches, such as build reproducibility, are kept off the critical path before merging unless the change directly affects them.
+
+**Q12.7 No duplication.** A kind of check runs in only one place at a given level (Q11.3.1).
+
+**Q12.8 Main line failures first.** A verification failure on the main line is a highest-priority defect: find the merge that introduced it, and do not merge changes it may affect until it is fixed.
+
+**Q12.9 Measure continuous integration itself.** Regularly record: time from push to result (including queueing), what makes up the critical path, the time of each job, the intermittent failure rate, main line failures and how many of them were not selected before merging. When over budget, adjust per Q12.2 and Q12.6.
+
+**Q12.10 CI configuration is code.** Changes to CI configuration are reviewed like code; a change to CI configuration runs all verification before merging.
 
 ---
 

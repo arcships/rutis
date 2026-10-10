@@ -74,7 +74,15 @@ Status: **met**, **partly**, **not met**, **n/a**. The gaps column refers to ris
 | Q9.4 | Guarantee register | Not met | No register (#181) |
 | Q10.2 | Minimum and latest versions in the support matrix | Partly | Node verified on 24 (Linux) and 26 (macOS), 22 to add once the minimum drops; Python on 3.12 only; the websockets lower bound never verified (#197); MSRV 1.85 never verified; on Windows loader rows are verified, the bridge's session and runtime conformance suites are not |
 | Q11.3.2 | No coverage gate | Met | — |
-| Q12.1 | Verification at levels | Partly | Before merge and daily; nothing extra after merging to main (full matrix, installation) |
+| Q12.1 | Verification at levels | Partly | Before merge and daily; the main line runs exactly what PRs run, with no extra full matrix or installation checks; packaging jobs run on every PR (§8.2) |
+| Q12.3 | Selection by change | Not met | Every PR runs every job (§8.2) |
+| Q12.4 | Cancel superseded runs | Not met | No `concurrency` |
+| Q12.5 | One merge condition | Not met | No aggregate check |
+| Q12.6 | Time as developers wait | Not met | 22–46 min from push to result; dylib on the critical path; 6–8 macOS jobs per run |
+| Q12.7 | No duplication | Not met | Build reproducibility checked in three places |
+| Q12.8 | Main line failures first | Partly | Done by habit, no written process |
+| Q12.9 | Measure CI | Not met | §8.1 is the first measurement |
+| Q12.10 | CI configuration is code | Partly | Reviewed; PRs that change CI already run everything |
 | Q13 | Release gate | Partly | Version consistency check, packaging, two-machine smoke test; missing clean installation, register check, persisted samples, post-release verification |
 
 ---
@@ -509,18 +517,79 @@ The two places selected by standard §11.2.
 
 ---
 
-## 8. Target CI layout
+## 8. Continuous integration: current state and changes
 
-Standard §12 on the current CI. Controls for P0 risks are all in the PR or merge level.
+Corresponds to standard §12.
 
-| When | Time budget | Content |
+### 8.1 Measurements (2026-10-10, last 30 runs of `ci.yml`)
+
+From push to result: 22–25 minutes without queueing, 35–46 minutes when busy, once over 2 hours.
+
+Execution time of each job in a run without queueing (#202, run `38024950688`):
+
+| Job | Execution | Breakdown |
+| --- | ---: | --- |
+| dylib-macos | 25.1 min | build reproducibility 9.8, external plugin build 7.6, launcher checks 5.3 |
+| dylib-linux | 20.9 min | build reproducibility 9.1, external plugin build 6.1, launcher checks 4.4 |
+| test (full Linux) | 7.7 min | `cargo test --workspace` 3.3 |
+| sdk-repro ×2, sdk-repro-macos ×2 | 3.6–4.9 min each | — |
+| runtimes-windows | 4.2 min | — |
+| network-macos | 2.2 min | — |
+| The other 8 | < 3 min each | — |
+
+With repeated pushes to one branch (`feat/bun-runtime` pushed 6 times between 02:10 and 02:52, 6 runs at once), macOS jobs queued (run `38016607150`): sdk-repro-macos 32 minutes, dylib-macos 23.5, static-platforms 14.7, network-macos 10.7.
+
+### 8.2 Problems
+
+| Clause | Current state |
+| --- | --- |
+| Q12.4 Cancel superseded runs | No `concurrency` setting; older runs of the same PR run to the end and occupy runners |
+| Q12.3 Selection by change | `ci.yml` selects nothing by path: a docs-only PR runs all 17 jobs and waits 20–25 minutes for dylib |
+| Q12.6.1 Critical path | dylib-macos / dylib-linux are the critical path, three times longer than any other job |
+| Q12.6.2 Scarce resources | Each run takes 6 macOS jobs (8 on the Bun branch); macOS runners are few, and queueing for them is the main wait when busy |
+| Q12.6.3, Q12.7 No duplication; uncacheable checks | Build reproducibility is checked in three places: `sdk-repro` (hashes from two Linux runners), `sdk-repro-macos` (two macOS runners), and `test-dylib-repro.sh` inside both dylib jobs; all before merging, none can use caches |
+| Q12.1 Levels | Packaging-only jobs (`release-windows`, `release-wheel-aarch64`, `release-dry-run`) run on every PR, though they can only fail when packaging files change |
+| Q12.5 Aggregate check | None; once jobs are selected by change, an aggregate check is needed as the required check in branch protection |
+| Q12.9 Measurement | None; this section is the first measurement |
+
+### 8.3 Mapping from change to verification
+
+Before merging, a first job determines what changed and later jobs run accordingly; on the main line everything runs (Q12.3).
+
+| Change | Runs before merging |
+| --- | --- |
+| Documentation only (`docs/**`, `*.md`) | Link check |
+| Core, bridge, loader, host, Node / Python packages | Full Linux tests; macOS networking and runtimes (with the static build check); Windows runtimes; static checks |
+| dylib: `rutis-dylib*`, `rutis-sdk`, `rutis-dev`, `rutis-xtask`, `tools/*dylib*`, `tools/test-sdk-bundle.sh`, `tests/dylib-fixtures/**`; and core changes that change the SDK's content | Also dylib-linux, dylib-macos |
+| Packaging: `release*.yml`, `scripts/train.mjs`, each `pyproject.toml` / `package.json`, `node/rutis-host/scripts/**` | Also the three packaging jobs |
+| `Cargo.lock`, root `Cargo.toml`, `rust-toolchain.toml`, `.github/workflows/**` | Everything (Q12.3.2, Q12.10) |
+
+### 8.4 Target layout
+
+| When | Budget (push to result, including queueing) | Content |
 | --- | --- | --- |
-| **PR** | Linux ≤ 25 min; macOS, Windows ≤ 20 min (in parallel) | ST; all U, K, X (except the nightly baseline); the conformance matrix (each platform runs its columns); E: S2 (three platforms), S3 (Linux, macOS), S4, S5 loopback (Linux); small SH; PT; minimum (Linux) and latest (macOS) Node, Python, websockets |
-| **Merge to main** | ≤ 60 min | Everything in PR + IN on three platforms + MX previous release's runtime vs current host + MSRV + `cargo deny` + DOC + dylib-windows + F6 |
+| **PR** | Docs only ≤ 2 min; ordinary changes ≤ 15 min; dylib changes ≤ 25 min | Selected per §8.3; `concurrency` cancels older runs; aggregate check `ci-ok`. At most 1 macOS job per run (2 when dylib changes). Added as tests are built: ST, U, K, X (except the daily baseline), the conformance matrix, E (S2 on three platforms; S3, S4, S5 loopback), small SH, PT, minimum and latest Node / Python / websockets |
+| **Merge to main** | ≤ 60 min | Every job: build reproducibility compared across two runners, packaging, dylib-windows, IN on three platforms, MX previous release's runtime vs current host, MSRV, `cargo deny`, DOC, F6 |
 | **Nightly** | ≤ 4 h | Core tests repeated with varying thread counts (seeded); SK (bridge level 600 s, host level 1 h); FZ 20 min per target; large SH; TLC; E: S5 with containers + netem, S6, S7, S8; X: latest Cordis plugin baseline |
-| **Weekly** | ≤ 8 h | Long host soaks; BM (fixed machine) |
+| **Weekly** | ≤ 8 h | Long host soaks; BM (fixed machine); CI measurement summary (Q12.9) |
 
-`cargo nextest`: each test in its own process, with timeouts, `retries = 0`.
+Tests run with `cargo nextest`: each test in its own process, with timeouts, `retries = 0`.
+
+### 8.5 Expected effect
+
+| PR | Now | After |
+| --- | --- | --- |
+| Docs only | 22–46 min | About 1 min |
+| Ordinary code change | 22–46 min | About 8 min (critical path: full Linux tests) |
+| dylib change | 22–46 min | About 22 min; about 10 min on Linux after splitting, macOS unchanged (reproducibility cannot be cached) |
+| Repeated pushes to one branch | Every run completes | Only the last completes |
+
+### 8.6 Steps
+
+1. Add `concurrency` and cancel older runs on PRs (Q12.4). A few lines, merged on their own, effective at once.
+2. Select jobs per §8.3; add the aggregate check `ci-ok` and update branch protection; merge `static-platforms (macos)` into `network-macos`; keep only the single-machine reproducibility check inside the dylib jobs, and move the two-runner `sdk-repro*` and the three packaging jobs to the main line (Q12.3, Q12.5, Q12.6, Q12.7).
+3. On Linux, split the dylib job into three parallel jobs: launcher, build reproducibility, external plugin build (Q12.6.1). macOS is not split.
+4. Weekly CI measurement: push to result, queueing, job times, intermittent failures, main line failures (Q12.9).
 
 ## 9. Plan
 
@@ -532,6 +601,7 @@ Ordered by risk level, P0 first; within a level, infrastructure others depend on
 | --- | --- | --- |
 | Fix the four known bugs with regression tests | P2, B2, C11, P11 | #173, #174, #184, #197 |
 | Determinism rules; nextest; seeds in `interleave.rs` | K10, P11 | #182 |
+| CI changes §8.6 steps 1–2: cancel superseded runs, select by change, aggregate check, merge macOS jobs, remove duplicates | Feedback speed for every risk | (new) ci: selection by change and cancelling superseded runs |
 | ST (fmt, clippy, deny, MSRV); minimum version matrix | All; MX | (new) ci: static checks and version matrix |
 | E2E harness + residue checks + S2 | A3–A5, A8, B2, B3, B10 | #175, #186 |
 | S9 installation smoke test | B1; acceptance of #195, #196 | #193 |
@@ -555,6 +625,7 @@ Ordered by risk level, P0 first; within a level, infrastructure others depend on
 
 | Item | Risks covered | Issue |
 | --- | --- | --- |
+| CI changes §8.6 steps 3–4: split dylib jobs on Linux; CI measurement | Critical path; Q12.9 | part of the CI issue |
 | Three FZ targets; three SH models | P2, E7, K2 | #179 |
 | Host-level soak (S8); S6, S7 | L1, L3, D3, F8, D5 | #192, #190, #191 |
 | Previous release's runtime vs current host | J2, E13 | (new) test: version combinations across releases |

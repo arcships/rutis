@@ -74,7 +74,15 @@
 | Q9.4 | 保证登记 | 未满足 | 没有登记表（#181） |
 | Q10.2 | 支持矩阵最低与最新版本 | 部分 | Node 验证了 24（Linux）和 26（macOS），降到 22 后需加 22；Python 只验证 3.12；websockets 下限从未验证（#197）；MSRV 1.85 从未验证；Windows 上 loader 行已验证，bridge 的会话与运行时一致性套件未验证 |
 | Q11.3.2 | 不以覆盖率为门槛 | 满足 | — |
-| Q12.1 | 分级运行 | 部分 | 有合入前与每日两级；合入主线后没有额外的全矩阵与安装验证 |
+| Q12.1 | 分级运行 | 部分 | 有合入前与每日两级；主线与合入前跑的完全一样，没有额外的全矩阵与安装验证；打包任务每个 PR 都跑（§8.2） |
+| Q12.3 | 按改动选择 | 未满足 | 每个 PR 跑全部任务（§8.2） |
+| Q12.4 | 取消被取代的运行 | 未满足 | 没有 `concurrency` |
+| Q12.5 | 统一的合入条件 | 未满足 | 没有汇总检查 |
+| Q12.6 | 时间以等待时间计 | 未满足 | 推送到结果 22–46 min；关键路径为 dylib；每次 6–8 个 macOS 任务 |
+| Q12.7 | 不重复 | 未满足 | 构建可重现检查三处 |
+| Q12.8 | 主线失败优先处理 | 部分 | 惯例上如此，没有写明的流程 |
+| Q12.9 | 度量 CI | 未满足 | §8.1 为第一次统计 |
+| Q12.10 | CI 配置是代码 | 部分 | 经评审；修改 CI 的 PR 目前本来就跑全部 |
 | Q13 | 发布门 | 部分 | 有版本一致检查、打包、两机冒烟；缺干净环境安装、登记表核对、持久化样本、发布后验证 |
 
 ---
@@ -509,18 +517,79 @@ CI：`ci.yml`（Linux 全量、macOS 网络与运行时、Windows 运行时、�
 
 ---
 
-## 8. CI 目标编排
+## 8. 持续集成：现状与改造
 
-规范 §12 在当前 CI 上的落实。P0 风险的控制都在 PR 或合并层。
+对应规范 §12。
 
-| 时机 | 时间预算 | 内容 |
+### 8.1 测量（2026-10-10，`ci.yml` 最近 30 次运行）
+
+从推送到得到结果：没有排队时 22–25 分钟，拥挤时 35–46 分钟，最长一次超过 2 小时。
+
+一次没有排队的运行（#202，run `38024950688`）各任务的执行时间：
+
+| 任务 | 执行时间 | 组成 |
+| --- | ---: | --- |
+| dylib-macos | 25.1 min | 构建可重现 9.8、外部插件构建 7.6、launcher 校验 5.3 |
+| dylib-linux | 20.9 min | 构建可重现 9.1、外部插件构建 6.1、launcher 校验 4.4 |
+| test（Linux 全量） | 7.7 min | `cargo test --workspace` 3.3 |
+| sdk-repro ×2、sdk-repro-macos ×2 | 3.6–4.9 min 各 | — |
+| runtimes-windows | 4.2 min | — |
+| network-macos | 2.2 min | — |
+| 其余 8 个 | < 3 min 各 | — |
+
+同一分支连续推送时（`feat/bun-runtime` 在 02:10–02:52 推了 6 次，6 次运行同时进行），macOS 任务的排队时间（run `38016607150`）：sdk-repro-macos 32 分钟，dylib-macos 23.5 分钟，static-platforms 14.7 分钟，network-macos 10.7 分钟。
+
+### 8.2 问题
+
+| 条款 | 现状 |
+| --- | --- |
+| Q12.4 取消被取代的运行 | 没有 `concurrency` 设置，同一 PR 的旧运行一直跑完，占满执行机 |
+| Q12.3 按改动选择 | `ci.yml` 没有任何按路径的选择：只改文档的 PR 也跑全部 17 个任务，等 dylib 的 20–25 分钟 |
+| Q12.6.1 关键路径 | dylib-macos / dylib-linux 是关键路径，比其他任务长 3 倍 |
+| Q12.6.2 稀缺资源 | 每次运行占 6 个 macOS 任务（Bun 分支上 8 个）；macOS 执行机数量少，排队是拥挤时的主要等待 |
+| Q12.6.3、Q12.7 不重复、不缓存的检查 | 构建可重现检查做了三处：`sdk-repro`（两台 Linux 比哈希）、`sdk-repro-macos`（两台 macOS 比哈希）、两个 dylib 任务里的 `test-dylib-repro.sh`；都在合入前，都不能用缓存 |
+| Q12.1 分级 | 只做打包的任务（`release-windows`、`release-wheel-aarch64`、`release-dry-run`）每个 PR 都跑，只有打包相关文件改动时才可能失败 |
+| Q12.5 汇总检查 | 没有；按改动选择之后需要一个汇总检查作为分支保护的必需检查 |
+| Q12.9 度量 | 没有；本节是第一次统计 |
+
+### 8.3 改动范围与验证的对应
+
+合入前由第一个任务判断改了哪些部分，后续任务按结果运行；主线上全部运行（Q12.3）。
+
+| 改动 | 合入前运行 |
+| --- | --- |
+| 只有文档（`docs/**`、`*.md`） | 链接检查 |
+| 内核、bridge、loader、host、Node / Python 包 | Linux 全量测试；macOS 网络与运行时（含静态构建检查）；Windows 运行时；静态检查 |
+| dylib 相关：`rutis-dylib*`、`rutis-sdk`、`rutis-dev`、`rutis-xtask`、`tools/*dylib*`、`tools/test-sdk-bundle.sh`、`tests/dylib-fixtures/**`；以及会改变 SDK 内容的内核 | 再加 dylib-linux、dylib-macos |
+| 打包：`release*.yml`、`scripts/train.mjs`、各 `pyproject.toml` / `package.json`、`node/rutis-host/scripts/**` | 再加三个打包任务 |
+| `Cargo.lock`、根 `Cargo.toml`、`rust-toolchain.toml`、`.github/workflows/**` | 全部（Q12.3.2、Q12.10） |
+
+### 8.4 目标编排
+
+| 时机 | 预算（推送到结果，含排队） | 内容 |
 | --- | --- | --- |
-| **PR** | Linux ≤ 25 min；macOS、Windows ≤ 20 min（并行） | ST；所有 U、K、X（不含 nightly 基线）；一致性矩阵（各平台跑自己支持的列）；E：S2（三平台）、S3（Linux、macOS）、S4、S5 loopback（Linux）；SH 小规模；PT；Node、Python、websockets 最低版本（Linux）和最新版本（macOS） |
-| **合并到 main** | ≤ 60 min | PR 全部 + IN 三平台 + MX 上一版运行时 vs 当前宿主 + MSRV + `cargo deny` + DOC + dylib-windows + F6 |
+| **PR** | 只改文档 ≤ 2 min；普通改动 ≤ 15 min；改 dylib ≤ 25 min | 按 §8.3 选择；`concurrency` 取消旧运行；汇总检查 `ci-ok`。macOS 每次最多 1 个任务（改 dylib 时 2 个）。随测试建设逐步加入：ST、U、K、X（不含每日基线）、一致性矩阵、E（S2 三平台，S3、S4、S5 loopback）、小规模 SH、PT、Node / Python / websockets 最低与最新版本 |
+| **合并到 main** | ≤ 60 min | 全部任务：两台机器比对的构建可重现、打包、dylib-windows、IN 三平台、MX 上一版运行时 vs 当前宿主、MSRV、`cargo deny`、DOC、F6 |
 | **nightly** | ≤ 4 h | 内核测试变换线程数重复多轮（带种子）；SK（bridge 层 600 s、宿主级 1 h）；FZ 每目标 20 min；SH 大规模；TLC；E：S5 容器 + netem、S6、S7、S8；X：最新 Cordis 插件基线 |
-| **每周** | ≤ 8 h | 长时间宿主浸泡；BM（固定机器） |
+| **每周** | ≤ 8 h | 长时间宿主浸泡；BM（固定机器）；CI 度量汇总（Q12.9） |
 
-使用 `cargo nextest`：每个测试单独进程，有超时，`retries = 0`。
+测试运行使用 `cargo nextest`：每个测试单独进程，有超时，`retries = 0`。
+
+### 8.5 预计效果
+
+| PR | 现在 | 改造后 |
+| --- | --- | --- |
+| 只改文档 | 22–46 min | 约 1 min |
+| 普通代码改动 | 22–46 min | 约 8 min（关键路径为 Linux 全量测试） |
+| 改 dylib | 22–46 min | 约 22 min；Linux 侧拆分后约 10 min，macOS 不变（复现检查不能缓存） |
+| 同一分支连续推送 | 每次都跑完 | 只有最后一次跑完 |
+
+### 8.6 步骤
+
+1. 加 `concurrency`，PR 上取消旧运行（Q12.4）。几行改动，单独合入，立即生效。
+2. 按 §8.3 选择任务；加汇总检查 `ci-ok` 并改分支保护；`static-platforms (macos)` 并入 `network-macos`；构建可重现只在 dylib 任务里保留单机检查，两台机器比对的 `sdk-repro*` 和三个打包任务移到主线（Q12.3、Q12.5、Q12.6、Q12.7）。
+3. Linux 上把 dylib 任务拆成 launcher、构建可重现、外部插件构建三个并行任务（Q12.6.1）。macOS 不拆。
+4. 每周汇总 CI 度量：推送到结果的时间、排队时间、各任务耗时、偶发失败、主线失败（Q12.9）。
 
 ## 9. 计划
 
@@ -532,6 +601,7 @@ CI：`ci.yml`（Linux 全量、macOS 网络与运行时、Windows 运行时、�
 | --- | --- | --- |
 | 四个已知 bug 修复并带回归测试 | P2、B2、C11、P11 | #173、#174、#184、#197 |
 | 确定性规则；nextest；`interleave.rs` 加种子 | K10、P11 | #182 |
+| CI 改造 §8.6 第 1–2 步：取消旧运行、按改动选择、汇总检查、合并 macOS 任务、去重 | 所有风险的反馈速度 | （新）ci: 按改动选择与取消被取代的运行 |
 | ST 补齐（fmt、clippy、deny、MSRV）；最低版本矩阵 | 全部；MX | （新）ci: 静态检查与版本矩阵 |
 | E2E 框架 + 残余检查 + S2 | A3–A5、A8、B2、B3、B10 | #175、#186 |
 | S9 安装冒烟 | B1；#195、#196 的验收 | #193 |
@@ -555,6 +625,7 @@ CI：`ci.yml`（Linux 全量、macOS 网络与运行时、Windows 运行时、�
 
 | 项 | 覆盖的风险 | issue |
 | --- | --- | --- |
+| CI 改造 §8.6 第 3–4 步：Linux 上拆分 dylib 任务；CI 度量 | 关键路径；Q12.9 | 并入 CI 改造 issue |
 | FZ 三个目标；SH 三个模型 | P2、E7、K2 | #179 |
 | 宿主级浸泡（S8）；S6、S7 | L1、L3、D3、F8、D5 | #192、#190、#191 |
 | 上一版运行时 vs 当前宿主 | J2、E13 | （新）test: 跨版本组合 |
