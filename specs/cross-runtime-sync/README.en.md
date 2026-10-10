@@ -104,6 +104,8 @@ TLC 2.19 (tla2tools v1.7.4), Temurin 21, 16 cores; `MaxRoots = 2`, `MaxDepth = 3
 
 ## Recommendation: policy B (with stack order)
 
+Adopted by the maintainer (written into §9 of the [multi-language design](../../docs/design-multilang-runtimes-2026-10-03.en.md); implementation in #228).
+
 - **A is not enough**: the combination A intends (one Cordis runtime, everything else reentrant) still deadlocks (counterexample 2); A refuses calls that cannot deadlock (counterexample 4); and it requires every future language runtime to be reentrant, pushing "do not hold a lock across a call into rutis" onto every plugin author.
 - **B removes the deadlocks within the model, without false positives**: every B configuration (mixed, all non-reentrant, larger scales) has no deadlock and `NoFalseCycle` holds. Only the call that would close a cycle is refused; its caller gets `SyncWaitCycle` and returns, and everything else continues.
 - **B uses only what Rust already has**: its forwarding records, rewritten `path`s (with session tags), frame order within each session, and whether each runtime is reentrant. Runtimes need not report their stacks; no existing wire field changes.
@@ -120,7 +122,7 @@ What an implementation of B must provide (the model's assumptions):
 
 ## Open questions
 
-- **Telling sync from async calls**: the model assumes every call is synchronous. `invoke`/`call` frames do not say whether the caller is blocked. For a service call Rust knows the method shape (`sync`/`async`); for a function reference the caller chooses. Counting an async call as a wait gives false positives. Either an optional marker on frames, or checking only calls known to be synchronous (which can miss cycles).
+- **Telling sync from async calls (decided)**: today's `invoke`/`call` frames do not say whether the caller waits synchronously, and counting an async call as a wait gives false errors. The maintainer decided to add a field to call frames marking that the caller waits synchronously; only calls carrying it count in the wait graph (#228, which also settles compatibility). The model assumes this field exists: every modelled call is synchronous and carries it, so Rust knows directly which calls are synchronous waits. Async calls are not modelled.
 - **Rust-originated synchronous calls** and **bounded Rust executors** (`current_thread`) can put Rust itself on a cycle; not covered.
 - **Cost of B**: a reachability check over the global table on every synchronous forward. The table holds the synchronous calls in progress, usually few; to be measured.
 - A caller that retries immediately after `SyncWaitCycle` may close the same cycle again; back-off is the caller's business and not modelled.
