@@ -68,6 +68,17 @@ impl LocalRuntime {
         Self::with("py", launcher, project)
     }
 
+    /// A Go runtime: `binary`, built with the Go SDK (`go/rutis`), serving
+    /// the plugins compiled into it, in `project`. It is named after the
+    /// file ([`crate::runtime::go_runtime_name`]: `go-<name>`); rows are
+    /// `<that name>:<plugin>` with `RuntimeResolver::modules`.
+    #[cfg(feature = "go")]
+    pub fn go(binary: impl Into<PathBuf>, project: impl Into<PathBuf>) -> Self {
+        let (binary, project) = (binary.into(), project.into());
+        let launcher = Launcher::go(&binary, &project);
+        Self::with(&crate::runtime::go_runtime_name(&binary), launcher, project)
+    }
+
     /// A Bun runtime named `"bun"`: the npm package `package` (`bun/rutis-bun`,
     /// or a deployed `@arcships/rutis-bun`) run by `bun`, importing plugin
     /// modules from `project` (its `package.json` and `node_modules`). Choose

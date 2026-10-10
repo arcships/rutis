@@ -5,7 +5,7 @@
 **为长期运行的程序准备的插件运行时**
 
 插件写下自己需要什么、提供什么；rutis 决定它们何时启动、何时停下、何时重来。<br>
-Rust 内核 · TypeScript 与 Python 插件 · 跨进程，跨机器
+Rust 内核 · TypeScript、Python 与 Go 插件 · 跨进程，跨机器
 
 [![crates.io](https://img.shields.io/crates/v/rutis.svg?label=crates.io)](https://crates.io/crates/rutis)
 [![npm](https://img.shields.io/npm/v/@arcships/rutis.svg?label=npm)](https://www.npmjs.com/package/@arcships/rutis)
@@ -31,7 +31,7 @@ rutis 把这些问题变成声明。插件写下它依赖哪些服务，剩下�
 - **依赖即生命周期** — 声明依赖，启动、停止和重载的时机交给运行时。类型化插件让声明的依赖和实际用到的依赖在编译期保持一致。
 - **清理有保证** — 每个插件运行在自己的 fiber 里。服务、监听器、子插件都登记在它名下，卸载时按 LIFO 恰好释放一次；装载失败时，已经注册的部分会回滚。
 - **不停机地变化** — 热更新配置、替换 provider、增删插件，只有依赖它的那部分会重启。
-- **多语言插件** — TypeScript、JavaScript、Python 插件使用同一套模型。服务可以跨语言调用，插件不必知道对方用什么写成、运行在哪里。
+- **多语言插件** — TypeScript、JavaScript、Python、Go 插件使用同一套模型。服务可以跨语言调用，插件不必知道对方用什么写成、运行在哪里。
 - **多节点** — 宿主之间通过 WebSocket 与 TLS 互联：共享服务、在另一台机器上运行插件、转发事件、断线后自动重连。
 - **数据驱动** — `rutis-loader` 用分层配置描述要运行的插件并持续调和；`rutis-host` 让你不写一行 Rust 就能运行插件。
 
@@ -110,7 +110,7 @@ cd weather && npm install
 npx rutis-host dev          # 运行插件，文件改动时自动重载
 ```
 
-Python 项目用 `uvx rutis-host new weather --lang python` 创建，再 `uv sync` 和 `uv run rutis-host dev`。
+Python 项目用 `uvx rutis-host new weather --lang python` 创建，再 `uv sync` 和 `uv run rutis-host dev`；Go 项目用 `rutis-host new weather --lang go`，再 `go mod tidy` 和 `rutis-host dev`。
 
 ```ts
 import { definePlugin } from '@arcships/rutis'
@@ -132,7 +132,7 @@ export default definePlugin<{ city?: string }>({
 })
 ```
 
-`llm` 可以来自同一进程里的另一个插件、一个 Python 插件，或者另一台机器，这个插件都不用改。完整流程见 [TypeScript 插件](docs/guide/typescript-plugin.md) 和 [Python 插件](docs/guide/python-plugin.md)。
+`llm` 可以来自同一进程里的另一个插件、一个 Python 插件，或者另一台机器，这个插件都不用改。完整流程见 [TypeScript 插件](docs/guide/typescript-plugin.md)、[Python 插件](docs/guide/python-plugin.md) 和 [Go 插件](docs/guide/go-plugin.md)。
 
 ## 工作方式
 
@@ -165,11 +165,13 @@ stateDiagram-v2
 | 在应用中运行插件 | [`rutis-loader`](https://crates.io/crates/rutis-loader)、[`rutis-bridge`](https://crates.io/crates/rutis-bridge)、[`rutis-dylib`](https://crates.io/crates/rutis-dylib)（dylib 插件） | [`@arcships/rutis-runtime`](https://www.npmjs.com/package/@arcships/rutis-runtime) | [`rutis`](https://pypi.org/project/rutis/) |
 | 不写 Rust 的宿主 | [`rutis-host`](https://crates.io/crates/rutis-host) | [`@arcships/rutis-host`](https://www.npmjs.com/package/@arcships/rutis-host) | [`rutis-host`](https://pypi.org/project/rutis-host/) |
 
+Go 插件用模块 [`github.com/arcships/rutis/go/rutis`](go/rutis)（SDK，以及插件二进制自带的运行时）。
+
 以上所有包（包括内核和 dylib 工具链）组成发布列车，一起发布、版本相同，当前为 0.8。各个 rutis 包请使用同一个版本。
 
 ## 文档
 
-- **[指南](docs/guide/README.md)** — 按任务组织：写 TypeScript / Python 插件、运行 rutis-host、连接节点、在 Rust 中嵌入、与 Cordis 互通。
+- **[指南](docs/guide/README.md)** — 按任务组织：写 TypeScript / Python / Go 插件、运行 rutis-host、连接节点、在 Rust 中嵌入、与 Cordis 互通。
 - **[应用设计指南](docs/development-guide.md)** — 如何拆分插件、画依赖图、设计重载与多实例。
 - **[开发手册](docs/development-handbook.md)** — API 用法、资源清理、事件、排障与验证。
 - **[内核能力一览](docs/core-features.md)** — 配置热更新、动态事件、拦截、诊断，以及各自的使用边界。
@@ -181,7 +183,7 @@ stateDiagram-v2
 
 | 项目 | |
 | --- | --- |
-| [rutis-host](crates/rutis-host) | 不写 Rust 的宿主：按 `rutis.json` 运行 TypeScript、JavaScript 和 Python 插件，开发时自动重载，连接多台机器。 |
+| [rutis-host](crates/rutis-host) | 不写 Rust 的宿主：按 `rutis.json` 运行 TypeScript、JavaScript、Python 和 Go 插件，开发时自动重载，连接多台机器。 |
 | [rutis-agent](crates/rutis-agent) · [rutis-cli](crates/rutis-cli) | 最小的 coding agent：模型服务、工具插件、流式驱动和 TUI 都是插件。`cargo run -p rutis-cli -- --scripted` 可以离线体验。 |
 | [rutis-dsh](crates/rutis-dsh) | 在 rutis 宿主里运行 dsh 的完整 web 界面，模型调用由同进程的 aimux 提供。 |
 | [aimux-llm](crates/aimux-llm) | 把 [aimux](https://crates.io/crates/aimux-core) 包装成一个 LLM 服务插件。 |
@@ -191,7 +193,7 @@ stateDiagram-v2
 rutis 仍处于 0.x，API 还会演进。不兼容的变化会写进发布说明，并附迁移指南。
 
 - **内核** 是纯 Rust，依赖只有 tokio、tokio-util 和 thiserror；需要 Rust 1.85 或更高。
-- **语言运行时与 rutis-host**（Node 与 Python 行、远程运行时、跨语言共享服务、节点、Cordis 挂载）支持 Linux、macOS 和 Windows x64（MSVC）；需要 Node 24+ 或 Python 3.12+。
+- **语言运行时与 rutis-host**（Node、Python 与 Go 行、远程运行时、跨语言共享服务、节点、Cordis 挂载）支持 Linux、macOS 和 Windows x64（MSVC）；需要 Node 24+ 或 Python 3.12+；Go 插件是编译好的二进制，构建时需要 Go 1.24+。
 - **dylib 插件** 支持 Linux、macOS 和 Windows x64（MSVC）。
 
 ## 参与

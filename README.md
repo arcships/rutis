@@ -5,7 +5,7 @@
 **A plugin runtime for programs that keep running**
 
 Plugins say what they need and what they provide; rutis decides when they start, when they stop, and when they start again.<br>
-A Rust core · plugins in TypeScript and Python · across processes and machines
+A Rust core · plugins in TypeScript, Python and Go · across processes and machines
 
 [![crates.io](https://img.shields.io/crates/v/rutis.svg?label=crates.io)](https://crates.io/crates/rutis)
 [![npm](https://img.shields.io/npm/v/@arcships/rutis.svg?label=npm)](https://www.npmjs.com/package/@arcships/rutis)
@@ -31,7 +31,7 @@ The model comes from [Cordis](https://github.com/shigma/cordis) in the TypeScrip
 - **Dependencies drive the lifecycle** — declare what you depend on; when to start, stop and reload is up to the runtime. Typed plugins keep the declared dependencies and the ones actually used in agreement at compile time.
 - **Cleanup you can rely on** — each plugin runs in its own fiber. Services, listeners and child plugins are registered under it and released exactly once, LIFO, on unload; a failed load rolls back what it had registered.
 - **Change without downtime** — hot-update configuration, swap providers, add and remove plugins; only what depends on the change restarts.
-- **Plugins in other languages** — TypeScript, JavaScript and Python plugins follow the same model. Services are called across languages, and a plugin need not know what its peers are written in or where they run.
+- **Plugins in other languages** — TypeScript, JavaScript, Python and Go plugins follow the same model. Services are called across languages, and a plugin need not know what its peers are written in or where they run.
 - **Many nodes** — hosts link over WebSocket and TLS to share services, run plugins on another machine, forward events, and reconnect after a drop.
 - **Data-driven** — `rutis-loader` describes the plugins to run as layered configuration and keeps reconciling it; `rutis-host` runs plugins without a line of Rust.
 
@@ -110,7 +110,7 @@ cd weather && npm install
 npx rutis-host dev          # run the plugin, reload when files change
 ```
 
-For Python, create the project with `uvx rutis-host new weather --lang python`, then `uv sync` and `uv run rutis-host dev`.
+For Python, create the project with `uvx rutis-host new weather --lang python`, then `uv sync` and `uv run rutis-host dev`; for Go, `rutis-host new weather --lang go`, then `go mod tidy` and `rutis-host dev`.
 
 ```ts
 import { definePlugin } from '@arcships/rutis'
@@ -132,7 +132,7 @@ export default definePlugin<{ city?: string }>({
 })
 ```
 
-`llm` can come from another plugin in the same process, from a Python plugin, or from another machine; this plugin stays the same. The full workflow is in [TypeScript plugins](docs/guide/typescript-plugin.en.md) and [Python plugins](docs/guide/python-plugin.en.md).
+`llm` can come from another plugin in the same process, from a Python plugin, or from another machine; this plugin stays the same. The full workflow is in [TypeScript plugins](docs/guide/typescript-plugin.en.md), [Python plugins](docs/guide/python-plugin.en.md) and [Go plugins](docs/guide/go-plugin.en.md).
 
 ## How it works
 
@@ -165,11 +165,13 @@ In one line: **declare dependencies → gated loading → provider changes → c
 | Running plugins in your app | [`rutis-loader`](https://crates.io/crates/rutis-loader), [`rutis-bridge`](https://crates.io/crates/rutis-bridge), [`rutis-dylib`](https://crates.io/crates/rutis-dylib) (dylib plugins) | [`@arcships/rutis-runtime`](https://www.npmjs.com/package/@arcships/rutis-runtime) | [`rutis`](https://pypi.org/project/rutis/) |
 | A host without Rust | [`rutis-host`](https://crates.io/crates/rutis-host) | [`@arcships/rutis-host`](https://www.npmjs.com/package/@arcships/rutis-host) | [`rutis-host`](https://pypi.org/project/rutis-host/) |
 
+Go plugins use the module [`github.com/arcships/rutis/go/rutis`](go/rutis) (the SDK and the runtime a plugin binary carries).
+
 All of these, the core and the dylib toolchain included, form a release train: released together at one version, currently 0.8. Use the same version for every rutis package.
 
 ## Documentation
 
-- **[Guides](docs/guide/README.en.md)** — organized by task: TypeScript and Python plugins, running rutis-host, linking nodes, embedding in Rust, working with Cordis.
+- **[Guides](docs/guide/README.en.md)** — organized by task: TypeScript, Python and Go plugins, running rutis-host, linking nodes, embedding in Rust, working with Cordis.
 - **[Application design guide](docs/development-guide.en.md)** — splitting an app into plugins, drawing the dependency graph, designing reloads and multiple instances.
 - **[Development handbook](docs/development-handbook.en.md)** — API usage, resource cleanup, events, troubleshooting and verification.
 - **[Core features](docs/core-features.en.md)** — config hot update, dynamic events, interception, diagnostics, and the boundaries of each.
@@ -181,7 +183,7 @@ All of these, the core and the dylib toolchain included, form a release train: r
 
 | Project | |
 | --- | --- |
-| [rutis-host](crates/rutis-host) | A host without Rust: runs TypeScript, JavaScript and Python plugins from a `rutis.json`, reloads them during development, links machines. |
+| [rutis-host](crates/rutis-host) | A host without Rust: runs TypeScript, JavaScript, Python and Go plugins from a `rutis.json`, reloads them during development, links machines. |
 | [rutis-agent](crates/rutis-agent) · [rutis-cli](crates/rutis-cli) | A minimal coding agent in which the model service, tools, streaming driver and TUI are all plugins. Try it offline with `cargo run -p rutis-cli -- --scripted`. |
 | [rutis-dsh](crates/rutis-dsh) | Runs the full dsh web interface inside a rutis host, with model calls served by aimux in the same process. |
 | [aimux-llm](crates/aimux-llm) | Wraps [aimux](https://crates.io/crates/aimux-core) as an LLM service plugin. |
@@ -191,7 +193,7 @@ All of these, the core and the dylib toolchain included, form a release train: r
 rutis is at 0.x and its API is still evolving. Breaking changes are listed in the release notes and come with a migration guide.
 
 - **The core** is pure Rust with tokio, tokio-util and thiserror as its only dependencies; it needs Rust 1.85 or later.
-- **Language runtimes and rutis-host** (Node and Python rows, remote runtimes, shared services, peers, Cordis mounts) run on Linux, macOS and Windows x64 (MSVC); they need Node 24+ or Python 3.12+.
+- **Language runtimes and rutis-host** (Node, Python and Go rows, remote runtimes, shared services, peers, Cordis mounts) run on Linux, macOS and Windows x64 (MSVC); they need Node 24+ or Python 3.12+; Go plugins are compiled binaries, built with Go 1.24+.
 - **dylib plugins** load on Linux, macOS and Windows x64 (MSVC).
 
 ## Contributing

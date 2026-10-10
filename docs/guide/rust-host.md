@@ -14,8 +14,8 @@ rutis-bridge = { version = "0.8", features = ["python", "websocket"] }   # node 
 | crate / feature | 内容 |
 | --- | --- |
 | `rutis` | 内核：插件、依赖、服务 |
-| `rutis-loader` | 按数据（行）加载插件。`node` / `python`：这两种语言的行；`peer`：节点行和 `peer:` 行 |
-| `rutis-bridge` | 连接其他进程、语言、机器。`node`（默认）、`python`：本机运行时；`websocket`：WebSocket 承载；`cordis`：挂载 Cordis 插件并生成 Rust 绑定（见 [Cordis](cordis.md)）；`testing`：一致性测试 |
+| `rutis-loader` | 按数据（行）加载插件。`node` / `python` / `go`：这几种语言的行；`peer`：节点行和 `peer:` 行 |
+| `rutis-bridge` | 连接其他进程、语言、机器。`node`（默认）、`python`、`go`：本机运行时；`websocket`：WebSocket 承载；`cordis`：挂载 Cordis 插件并生成 Rust 绑定（见 [Cordis](cordis.md)）；`testing`：一致性测试 |
 
 只用其中一种语言时只开那一个 feature，应用只编译、只启动它用到的部分。
 
@@ -103,6 +103,28 @@ let tui = LocalRuntime::node("app/node_modules/@arcships/rutis-runtime", "app/pa
 let node = LocalRuntime::node("app/node_modules/@arcships/rutis-runtime", "app/package.json")
     .stdout(Stdio::Null);
 ```
+
+### Go 运行时
+
+Go 插件是编译好的二进制，一个二进制一个运行时（features：`rutis-loader` 的 `go`）。`GoResolver` 读二进制的清单（`<二进制> --rutis-manifest`），把 `go:<插件>` 路由到含有它的二进制；`GoRuntimes` 在有行用到时启动它，空闲后停下：
+
+```rust
+use rutis_loader::{GoBinaries, GoResolver, GoRuntimes};
+
+let go = Arc::new(
+    GoResolver::new(GoBinaries::new().dir("app/plugins/go").file("app/bin/netkit"))
+        .with_catalog(&catalog)
+        .reserve(["node", "py"]),              // 其他运行时的名字，Go 运行时不能用
+);
+// 放进加载器的 Chain：Chain::new().with_shared(go.clone())…，加载器挂载之后：
+let go_runtimes = GoRuntimes::new(go, "app").idle(Some(Duration::from_secs(60)));
+let control = go_runtimes.handle();            // restart("go-netkit")、runtimes()
+root.plugin(go_runtimes).await?;
+```
+
+- 运行时名由文件名得出（`netkit` → `go-netkit`），两个二进制有同名插件时行写 `go-netkit:<插件>`。
+- 进程运行期间按它启动时的清单解析；换了二进制，`control.restart("go-netkit")` 后生效。崩溃的运行时不自动重启。
+- 只运行一个固定的二进制时，也可以像 Python 一样：`LocalRuntime::go(binary, project)` 加 `RuntimeResolver::modules`（行名 `<运行时名>:<插件>`）。
 
 ## 节点
 

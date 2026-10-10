@@ -173,20 +173,26 @@ jobs:
       - run: python3 -m pip install "websockets>=13"
       - run: python3 -m unittest discover -s tests
         working-directory: python/rutis
+      # The Go runtime: its tests build Go plugins (rutis-host, the bridge
+      # and loader tests with feature go).
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: go/rutis/go.mod
 
       - name: cargo test (workspace)
         run: cargo test --workspace
 
       # Plugins of other languages and of other nodes as rutis-loader rows.
       - name: cargo test (rutis-loader, every row kind)
-        run: cargo test -p rutis-loader --features node,python,peer
+        run: cargo test -p rutis-loader --features node,python,go,peer
 
       # The same rows with the runtimes started as on Windows: a loopback
       # channel and a one-time token instead of an inherited socket.
       - name: cargo test (rutis-loader runtimes, loopback channels)
         env:
           RUTIS_LOCAL_HANDOVER: loopback
-        run: cargo test -p rutis-loader --features node,python,peer --test runtime_rows --test python_rows --test multilang --test leases --test instance_runtimes
+        run: cargo test -p rutis-loader --features node,python,go,peer --test runtime_rows --test python_rows --test multilang --test leases --test instance_runtimes --test go_rows --test multilang_go --test instance_go
 
       # Both runtimes, every transport, and the conformance suites.
       - name: cargo test (rutis-bridge, all features)
@@ -202,10 +208,12 @@ jobs:
           cargo check -p rutis-bridge --no-default-features --features python --all-targets
           cargo check -p rutis-bridge --no-default-features --features websocket --all-targets
           cargo check -p rutis-bridge --no-default-features --features bun --all-targets
+          cargo check -p rutis-bridge --no-default-features --features go --all-targets
           cargo check -p rutis-bridge --features cordis --all-targets
           cargo check -p rutis-loader --features node --all-targets
           cargo check -p rutis-loader --features python --all-targets
           cargo check -p rutis-loader --no-default-features --features bun --all-targets
+          cargo check -p rutis-loader --features go --all-targets
           cargo check -p rutis-loader --features peer --all-targets
 
       # The loader test targets compile under each single feature.
@@ -217,6 +225,59 @@ jobs:
 
       - name: cargo test --no-run (rutis-loader, peer)
         run: cargo test -p rutis-loader --features peer --no-run
+
+      - name: cargo test --no-run (rutis-loader, go)
+        run: cargo test -p rutis-loader --features go --no-run
+
+  # The Go SDK and runtime: the SDK's own tests (race detector on), then
+  # the Go runtime against the conformance suites, the loader's Go rows and
+  # rutis-host, with the two current stable Go releases.
+  runtimes-go:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        go: [stable, oldstable]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: go/rutis/go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm --prefix node/rutis-runtime ci
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install "websockets>=13"
+      - name: gofmt
+        run: test -z "$(gofmt -l go crates/rutis-loader/tests/fixtures/go)"
+      - name: go vet and test (SDK, fixtures)
+        run: |
+          (cd go/rutis && go vet ./... && go test -race ./...)
+          (cd crates/rutis-loader/tests/fixtures/go && go vet ./...)
+      - name: cargo test (the Go runtime in the bridge)
+        run: cargo test -p rutis-bridge --features testing,go --test go_runtime
+      # Only the Go tests of the contract suites: the other runtimes run in
+      # their own jobs.
+      - name: cargo test (the contract suites with Go)
+        run: cargo test -p rutis-bridge --features testing,websocket,go --test session_matrix --test runtime_conformance go_
+      - name: cargo test (Go rows)
+        run: cargo test -p rutis-loader --features node,python,go --test go_rows --test multilang_go --test instance_go --test leases
+      - name: cargo test (Go rows on loopback channels)
+        env:
+          RUTIS_LOCAL_HANDOVER: loopback
+        run: cargo test -p rutis-loader --features node,python,go --test go_rows --test multilang_go --test instance_go
+      # Only rutis-host's Go tests: the other runtimes run in their own jobs.
+      - name: cargo test (rutis-host, Go)
+        run: cargo test -p rutis-host go
 
   # The Bun runtime: its own tests, and the Rust tests that run it, on the
   # oldest Bun it supports (package.json engines.bun) and the latest, on
@@ -295,10 +356,14 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: go/rutis/go.mod
       - name: cargo test (network stack, runtimes, host)
         run: |
           cargo test -p rutis-bridge --all-features
-          cargo test -p rutis-loader --features node,python,peer
+          cargo test -p rutis-loader --features node,python,go,peer
           cargo test -p rutis-host
       - name: keep workspace static builds available
         if: '!cancelled()'
@@ -474,8 +539,8 @@ jobs:
       - name: external plugin build against a prebuilt SDK
         run: bash tools/test-sdk-bundle.sh
 
-  # The runtimes on Windows: Node and Python processes on loopback
-  # channels, rows of both languages, peers and WebSocket links; and the
+  # The runtimes on Windows: Node, Python and Go processes on loopback
+  # channels, rows of every language, peers and WebSocket links; and the
   # static build of the whole workspace.
   runtimes-windows:
     needs: changes
@@ -493,8 +558,15 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install "websockets>=13"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: go/rutis/go.mod
+      - name: go test (the Go SDK)
+        run: go test ./...
+        working-directory: go/rutis
       - name: cargo test (rutis-loader, every row kind)
-        run: cargo test -p rutis-loader --features node,python,peer --no-fail-fast
+        run: cargo test -p rutis-loader --features node,python,go,peer --no-fail-fast
       - name: cargo test (rutis-bridge, all features)
         if: '!cancelled()'
         run: cargo test -p rutis-bridge --all-features --no-fail-fast
@@ -622,6 +694,7 @@ jobs:
       - dylib-linux-sdk-bundle
       - dylib-macos
       - runtimes-windows
+      - runtimes-go
       - sdk-repro
       - sdk-repro-macos
       - sdk-repro-compare

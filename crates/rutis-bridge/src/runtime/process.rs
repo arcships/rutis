@@ -256,6 +256,14 @@ impl Launcher {
             .inherit_fd()
     }
 
+    /// A Go runtime: `binary`, built with the Go SDK (`go/rutis`), serving
+    /// the plugins compiled into it; in `project`, on an inherited socket
+    /// (on Windows, a loopback address).
+    #[cfg(feature = "go")]
+    pub fn go(binary: &std::path::Path, project: &std::path::Path) -> Self {
+        Launcher::new(binary).cwd(project).inherit_fd()
+    }
+
     /// The Bun runtime of the npm package `package` (`bun/rutis-bun`, or a
     /// deployed `@arcships/rutis-bun`), run by the Bun executable `program`
     /// (`bun` on `PATH` when `None`), in `project`, on an inherited socket
@@ -276,6 +284,7 @@ impl Launcher {
             .inherit_fd()
     }
 }
+
 /// `first` ahead of the search path `rest` (`PATH` syntax for the
 /// platform: `:` or `;` between entries).
 pub(crate) fn search_path(
@@ -446,8 +455,8 @@ pub struct RowSchema {
     /// The services it provides to rutis: `{ name: { method: "sync" | "async" } }`.
     #[serde(default)]
     pub provides: serde_json::Map<String, Value>,
-    /// The version of the package the plugin comes from, when the runtime
-    /// knows it (an installed package, not a file of the project).
+    /// The plugin's version, when the runtime knows it (a package version,
+    /// a module version, a VCS revision).
     #[serde(default)]
     pub version: Option<String>,
 }

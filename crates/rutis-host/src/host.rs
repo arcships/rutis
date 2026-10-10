@@ -13,12 +13,14 @@ use rutis_bridge::transport::websocket::{
 };
 use rutis_bridge::{Credential, IdentityPlugin, PeerId, StaticIdentity};
 use rutis_loader::{
-    register_peer_node, Builtins, Chain, Layer, Loader, LoaderOptions, LoaderPlugin, Patch,
-    PeerResolver, RuntimeResolver, RuntimeRowsPlugin, ServiceCatalog,
+    register_peer_node, Builtins, Chain, GoBinaries, GoResolver, GoRuntimes, GoRuntimesHandle,
+    Layer, Loader, LoaderOptions, LoaderPlugin, Patch, PeerResolver, RuntimeResolver,
+    RuntimeRowsPlugin, ServiceCatalog,
 };
 
 use crate::config::{
-    token, venv_python, BunRuntime, HostConfig, NodeRuntime, PythonRuntime, DEFAULT_PYTHON,
+    token, venv_python, BunRuntime, GoRuntime, GoStart, HostConfig, NodeRuntime, PythonRuntime,
+    DEFAULT_PYTHON,
 };
 
 pub struct Host {
@@ -28,6 +30,14 @@ pub struct Host {
     pub runtimes: Vec<(String, RuntimeHandle)>,
     /// The resolvers of the runtimes' rows, to invalidate after a change.
     pub resolvers: Vec<Arc<RuntimeResolver>>,
+    /// The Go binaries and their runtimes, when the configuration has them.
+    pub go: Option<GoHost>,
+}
+
+/// The Go side of a host.
+pub struct GoHost {
+    pub resolver: Arc<GoResolver>,
+    pub runtimes: GoRuntimesHandle,
 }
 
 pub type Error = String;
@@ -56,6 +66,14 @@ impl Host {
         let mut builtins = Builtins::new();
         register_peer_node(&mut builtins, peers.clone());
         let mut chain = Chain::new().with(builtins).with_shared(peers);
+        let go = match &config.runtimes.go {
+            Some(go) => {
+                let resolver = Arc::new(go_resolver(config, go, &catalog)?);
+                chain = chain.with_shared(resolver.clone());
+                Some((resolver, go))
+            }
+            None => None,
+        };
         if let Some(py) = &config.runtimes.py {
             let runtime = python(py)?;
             let handle = runtime.handle();
@@ -88,11 +106,11 @@ impl Host {
             let runtime = RuntimePlugin::remote(&remote.name);
             let handle = runtime.handle();
             let rows = match remote.language.as_str() {
-                "python" | "py" => RuntimeResolver::modules(handle.clone()),
+                "python" | "py" | "go" => RuntimeResolver::modules(handle.clone()),
                 "node" => RuntimeResolver::node(handle.clone()),
                 other => {
                     return Err(format!(
-                        "remote runtime {}: the language is python or node, not {other}",
+                        "remote runtime {}: the language is python, go or node, not {other}",
                         remote.name
                     ))
                 }
@@ -118,11 +136,29 @@ impl Host {
         for rows in &resolvers {
             root.plugin(RuntimeRowsPlugin::new(rows.clone()));
         }
+        let go = match go {
+            Some((resolver, settings)) => {
+                let mut plugin = GoRuntimes::new(resolver.clone(), &settings.project);
+                plugin = match settings.start {
+                    GoStart::Eager => plugin.eager(),
+                    GoStart::OnDemand => plugin.idle(Some(std::time::Duration::from_secs(
+                        settings.idle.unwrap_or(60),
+                    ))),
+                };
+                let runtimes = plugin.handle();
+                (&root.plugin(plugin))
+                    .await
+                    .map_err(|error| format!("the Go runtimes: {error}"))?;
+                Some(GoHost { resolver, runtimes })
+            }
+            None => None,
+        };
         Ok(Self {
             _root: root,
             loader,
             runtimes,
             resolvers,
+            go,
         })
     }
 
@@ -169,6 +205,38 @@ impl Host {
             rows.invalidate_all();
         }
     }
+}
+
+/// The resolver of the Go binaries `go` names. A Go runtime may not take
+/// another runtime's name.
+fn go_resolver(
+    config: &HostConfig,
+    go: &GoRuntime,
+    catalog: &ServiceCatalog,
+) -> Result<GoResolver, Error> {
+    go.validate()?;
+    let mut binaries = GoBinaries::new();
+    if let Some(dir) = &go.dir {
+        binaries = binaries.dir(dir);
+    }
+    for binary in &go.binaries {
+        binaries = binaries.file(binary);
+    }
+    if let Some((binary, name)) = &go.dev {
+        binaries = binaries.file_named(binary, name);
+    }
+    let reserved = ["node".to_owned(), "py".to_owned(), "bun".to_owned()]
+        .into_iter()
+        .chain(
+            config
+                .runtimes
+                .remote
+                .iter()
+                .map(|remote| remote.name.clone()),
+        );
+    Ok(GoResolver::new(binaries)
+        .with_catalog(catalog)
+        .reserve(reserved))
 }
 
 fn websocket(config: &HostConfig) -> Result<Config, Error> {
@@ -542,6 +610,132 @@ mod tests {
         let host = Host::start(&config).await.unwrap();
         host.load(config.rows()).await.unwrap();
         assert_eq!(greeting(&host).await, "Remote, Ada");
+        child.start_kill().unwrap();
+    }
+
+    /// Go binaries in a directory: a row names a plugin, and its binary's
+    /// runtime starts when the row is loaded.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_go_row_runs_in_its_binarys_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugins = dir.path().join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let status = std::process::Command::new("go")
+            .args(["build", "-o"])
+            .arg(plugins.join(if cfg!(windows) {
+                "netkit.exe"
+            } else {
+                "netkit"
+            }))
+            .arg("./cmd/netkit")
+            .current_dir(repo().join("crates/rutis-loader/tests/fixtures/go"))
+            .status()
+            .expect("go is on PATH");
+        assert!(status.success());
+        let mut config: HostConfig = serde_json::from_value(json!({
+            "id": "go-test",
+            "runtimes": { "go": { "dir": "plugins" } },
+            "rows": [{ "id": "ping", "name": "go:ping" }]
+        }))
+        .unwrap();
+        config.rebase(dir.path());
+        let host = Host::start(&config).await.unwrap();
+        host.load(config.rows()).await.unwrap();
+        let service = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(service) = host.service("ping") {
+                    return service;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the ping service");
+        let reply = tokio::task::spawn_blocking(move || {
+            service.invoke("echo", Value::List(vec![json!("go").into()]))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(reply.json().unwrap(), json!("netkit pong go"));
+        let go = host.go.as_ref().unwrap();
+        assert_eq!(go.runtimes.runtimes()[0].name, "go-netkit");
+    }
+
+    /// A Go binary on another machine (here, listening on loopback): a peer
+    /// row links to it, and its rows are `<runtime>:<plugin>`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_remote_go_runtime_runs_rows_named_after_it() {
+        use tokio::io::AsyncBufReadExt;
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join(if cfg!(windows) {
+            "netkit.exe"
+        } else {
+            "netkit"
+        });
+        let status = std::process::Command::new("go")
+            .args(["build", "-o"])
+            .arg(&binary)
+            .arg("./cmd/netkit")
+            .current_dir(repo().join("crates/rutis-loader/tests/fixtures/go"))
+            .status()
+            .expect("go is on PATH");
+        assert!(status.success());
+        let mut child = tokio::process::Command::new(&binary)
+            .args([
+                "listen:ws://127.0.0.1:0/rutis",
+                "--id",
+                "edge",
+                "--peer",
+                "remote-go",
+            ])
+            .arg(dir.path())
+            .env("RUTIS_TOKEN", "edge-token")
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
+        let address = loop {
+            let line = lines
+                .next_line()
+                .await
+                .unwrap()
+                .expect("the runtime's address");
+            if let Some(address) = line.strip_prefix("rutis: listening on ") {
+                break address.to_owned();
+            }
+        };
+        tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+        std::env::set_var("RUTIS_TOKEN_EDGE", "edge-token");
+        let config: HostConfig = serde_json::from_value(json!({
+            "id": "remote-go",
+            "runtimes": { "remote": [{ "name": "edge", "language": "go" }] },
+            "rows": [
+                { "id": "edge", "name": "rutis-bridge/peer", "config": { "peer": "edge", "dial": address, "runtime": "edge" } },
+                { "id": "ping", "name": "edge:ping" }
+            ]
+        }))
+        .unwrap();
+        let host = Host::start(&config).await.unwrap();
+        host.load(config.rows()).await.unwrap();
+        let service = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(service) = host.service("ping") {
+                    return service;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the ping service");
+        let reply = tokio::task::spawn_blocking(move || {
+            service.invoke("echo", Value::List(vec![json!("far").into()]))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(reply.json().unwrap(), json!("netkit pong far"));
         child.start_kill().unwrap();
     }
 }
