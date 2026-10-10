@@ -1,7 +1,9 @@
 //! `rutis-host dev`: the plugin project in the current directory as a host
 //! configuration. A Node or Bun project (package.json) or a Python project
-//! (pyproject.toml) becomes one row, the plugin itself; `rutis.dev.json`
-//! adds what it needs to run (fake services, config, other plugins).
+//! (pyproject.toml) becomes one row, the plugin itself; a Go project
+//! (go.mod) is built, and each plugin of its binary becomes a row;
+//! `rutis.dev.json` adds what it needs to run (fake services, config, other
+//! plugins).
 //!
 //! A package.json project runs in Bun when `rutis.dev.json` configures
 //! `runtimes.bun`, when Bun manages it (`bun.lock`), or when it depends on
@@ -11,7 +13,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::config::{BunRuntime, HostConfig, NodeRuntime, PythonRuntime, Runtimes};
+use crate::config::{
+    BunRuntime, GoRuntime, GoStart, HostConfig, NodeRuntime, PythonRuntime, Runtimes,
+};
 
 /// The configuration that runs the plugin project in `dir`, and the id of
 /// its row.
@@ -22,36 +26,43 @@ pub fn dev_config(dir: &Path) -> Result<(HostConfig, String), String> {
         .ok()
         .filter(|dir| dir.is_dir())
         .ok_or_else(|| format!("{}: not a directory", dir.display()))?;
-    let (row, runtimes) = if dir.join("package.json").exists() && is_bun(&dir) {
-        bun_row(&dir)?
+    let (rows, runtimes) = if dir.join("package.json").exists() && is_bun(&dir) {
+        let (row, runtimes) = bun_row(&dir)?;
+        (vec![row], runtimes)
     } else if dir.join("package.json").exists() {
-        node_row(&dir)?
+        let (row, runtimes) = node_row(&dir)?;
+        (vec![row], runtimes)
     } else if dir.join("pyproject.toml").exists() {
-        python_row(&dir)?
+        let (row, runtimes) = python_row(&dir)?;
+        (vec![row], runtimes)
+    } else if let Some(go) = GoDev::of(&dir) {
+        go_rows(&go)?
     } else {
         return Err(format!(
-            "{} has neither a package.json nor a pyproject.toml: run rutis-host dev in a plugin project",
+            "{} has no package.json, pyproject.toml or go.mod: run rutis-host dev in a plugin project",
             dir.display()
         ));
     };
-    let id = row["id"].as_str().unwrap_or("plugin").to_owned();
+    let id = rows[0]["id"].as_str().unwrap_or("plugin").to_owned();
+    let own_ids: Vec<Value> = rows.iter().map(|row| row["id"].clone()).collect();
     let mut config = HostConfig {
         id: "dev".into(),
         runtimes,
         listen: Vec::new(),
-        rows: vec![row],
+        rows,
     };
     let extra = dir.join("rutis.dev.json");
     if extra.exists() {
         let extra = HostConfig::read(&extra)?;
-        // The dev file may configure the plugin's own row.
+        // The dev file may configure the plugin's own rows.
         let (own, others): (Vec<Value>, Vec<Value>) = extra
             .rows
             .iter()
             .cloned()
-            .partition(|row| row["id"] == id.as_str());
-        if let Some(own) = own.into_iter().next() {
-            if let Some(object) = config.rows[0].as_object_mut() {
+            .partition(|row| own_ids.contains(&row["id"]));
+        for own in own {
+            let target = config.rows.iter_mut().find(|row| row["id"] == own["id"]);
+            if let Some(object) = target.and_then(Value::as_object_mut) {
                 for (key, value) in own.as_object().into_iter().flatten() {
                     if key != "name" {
                         object.insert(key.clone(), value.clone());
@@ -69,6 +80,105 @@ pub fn dev_config(dir: &Path) -> Result<(HostConfig, String), String> {
         });
     }
     Ok((config, id))
+}
+
+/// A Go plugin project as `rutis-host dev` builds it: its main package and
+/// the runtime its binary runs as. Builds go to `.rutis/go/<name>-<n>`, a
+/// new file each time (a running binary cannot be overwritten on Windows).
+#[derive(Debug, Clone)]
+pub struct GoDev {
+    pub dir: PathBuf,
+    pub name: String,
+    /// The main package (`./cmd/<name>`, or `.`).
+    pub package: String,
+    pub runtime: String,
+}
+
+impl GoDev {
+    /// The Go project in `dir`, if it is one (a go.mod).
+    pub fn of(dir: &Path) -> Option<Self> {
+        let module = std::fs::read_to_string(dir.join("go.mod")).ok()?;
+        let path = module
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("module "))?
+            .trim()
+            .trim_matches('"');
+        let name = id_of(path).to_lowercase();
+        let package = if dir.join("cmd").join(&name).is_dir() {
+            format!("./cmd/{name}")
+        } else {
+            std::fs::read_dir(dir.join("cmd"))
+                .ok()
+                .and_then(|entries| {
+                    let mut commands: Vec<String> = entries
+                        .flatten()
+                        .filter(|entry| entry.path().join("main.go").exists())
+                        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                        .collect();
+                    commands.sort();
+                    commands.into_iter().next()
+                })
+                .map(|command| format!("./cmd/{command}"))
+                .unwrap_or_else(|| ".".into())
+        };
+        let runtime = rutis_bridge::runtime::go_runtime_name(Path::new(&name));
+        Some(Self {
+            dir: dir.to_owned(),
+            name,
+            package,
+            runtime,
+        })
+    }
+
+    /// Build #`n`: its binary, or the compiler's errors.
+    pub fn build(&self, n: u32) -> Result<PathBuf, String> {
+        let builds = self.dir.join(".rutis").join("go");
+        std::fs::create_dir_all(&builds).map_err(|error| error.to_string())?;
+        let file = match cfg!(windows) {
+            true => format!("{}-{n}.exe", self.name),
+            false => format!("{}-{n}", self.name),
+        };
+        let binary = builds.join(file);
+        let output = std::process::Command::new("go")
+            .args(["build", "-o"])
+            .arg(&binary)
+            .arg(&self.package)
+            .current_dir(&self.dir)
+            .output()
+            .map_err(|error| format!("cannot run go (is the Go toolchain on PATH?): {error}"))?;
+        match output.status.success() {
+            true => Ok(binary),
+            false => Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
+        }
+    }
+}
+
+/// The rows of a Go project: build it, then one row per plugin of its
+/// binary, named with its runtime (`go-<name>:<plugin>`).
+fn go_rows(go: &GoDev) -> Result<(Vec<Value>, Runtimes), String> {
+    let binary = go.build(1)?;
+    let manifest = rutis_loader::read_go_manifest(&binary)
+        .map_err(|error| format!("{}: {error}", binary.display()))?;
+    let rows: Vec<Value> = manifest
+        .plugins
+        .keys()
+        .map(|plugin| json!({ "id": id_of(plugin), "name": format!("{}:{plugin}", go.runtime), "config": {} }))
+        .collect();
+    if rows.is_empty() {
+        return Err(format!("{} serves no plugins", go.package));
+    }
+    let runtimes = Runtimes {
+        go: Some(GoRuntime {
+            dir: None,
+            binaries: Vec::new(),
+            start: GoStart::OnDemand,
+            idle: None,
+            project: go.dir.clone(),
+            dev: Some((binary, go.runtime.clone())),
+        }),
+        ..Runtimes::default()
+    };
+    Ok((rows, runtimes))
 }
 
 /// Whether the package.json project in `dir` runs in Bun.
@@ -357,5 +467,58 @@ mod tests {
             dev_config(dir.path()).unwrap().0.rows[0]["name"],
             "py:weather_plugin"
         );
+    }
+
+    /// A project `rutis-host new --lang go` makes builds, passes its own
+    /// test, and becomes one row per plugin of its binary.
+    #[test]
+    fn a_go_project_is_built_into_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::new::create(dir.path(), "net-probe", "go").unwrap();
+        let project = dir.path().join("net-probe");
+        // The SDK of this checkout, not a published one.
+        let sdk = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../go/rutis");
+        let module = std::fs::read_to_string(project.join("go.mod")).unwrap();
+        std::fs::write(
+            project.join("go.mod"),
+            format!(
+                "{module}\nreplace github.com/arcships/rutis/go/rutis => {}\n",
+                sdk.display()
+            ),
+        )
+        .unwrap();
+        for check in [&["vet", "./..."][..], &["test", "./..."][..]] {
+            let output = std::process::Command::new("go")
+                .args(check)
+                .current_dir(&project)
+                .output()
+                .expect("go is on PATH");
+            assert!(
+                output.status.success(),
+                "go {check:?}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let (config, id) = dev_config(&project).unwrap();
+        assert_eq!(id, "net-probe");
+        assert_eq!(config.rows[0]["name"], "go-net-probe:net-probe");
+        assert_eq!(
+            config.rows[0]["config"]["greeting"], "Hello",
+            "rutis.dev.json configures it"
+        );
+        let go = config.runtimes.go.unwrap();
+        let (binary, runtime) = go.dev.unwrap();
+        assert_eq!(runtime, "go-net-probe");
+        assert!(binary.starts_with(project.join(".rutis/go")));
+        // A failed build says why.
+        std::fs::write(
+            project.join("plugin.go"),
+            "package netprobe\nfunc broken(\n",
+        )
+        .unwrap();
+        let go = GoDev::of(&project).unwrap();
+        let error = go.build(2).unwrap_err();
+        assert!(error.contains("plugin.go"), "{error}");
     }
 }

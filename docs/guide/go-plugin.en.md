@@ -1,0 +1,143 @@
+# Write a Go Plugin
+
+From creating a project to publishing it, and to a host using it. Needs Go 1.24 or later.
+
+Go plugins follow the same conventions as TypeScript and Python plugins (see the [plugin API](plugin-api.en.md)); what differs is how they are distributed: **a Go plugin is compiled into a binary, and a binary is one runtime process in the host**. A binary holds one or several plugins; a host can run many binaries at once, starting each only when a row uses it.
+
+## 1. Create the project
+
+```bash
+rutis-host new weather --lang go
+cd weather
+go mod tidy
+```
+
+The project:
+
+| File | What it is |
+| --- | --- |
+| `plugin.go` | The plugin (package `weather`, exporting `Plugin`) |
+| `plugin_test.go` | Unit tests, no host needed |
+| `cmd/weather/main.go` | The binary: `rutis.Serve(weather.Plugin)` |
+| `rutis.dev.json` | Configuration of the local runtime and other plugins for testing |
+| `go.mod` | The module path (change it to yours); depends on `github.com/arcships/rutis/go/rutis` |
+| `.github/workflows/release.yml` | On a `v*` tag: tests, then binaries for every platform on a GitHub release |
+
+## 2. Write the plugin
+
+```go
+package weather
+
+import (
+	"context"
+
+	"github.com/arcships/rutis/go/rutis"
+)
+
+// The configuration: the SDK derives its JSON Schema from this type.
+type Config struct {
+	City string `json:"city,omitempty" doc:"the city to report on"`
+}
+
+// A service it uses: a struct of function fields, named after the methods (Ask -> ask).
+type LLM struct {
+	Ask func(ctx context.Context, question string) (string, error)
+}
+
+// The service it provides: its exported methods are the service's methods.
+type Weather struct {
+	llm  LLM
+	city string
+}
+
+func (w *Weather) Today(ctx context.Context) (string, error) {
+	answer, err := w.llm.Ask(ctx, "weather in "+w.city) // pass ctx on
+	if err != nil {
+		return "", err
+	}
+	return answer + " in " + w.city, nil
+}
+
+func (w *Weather) Unit() string { return "celsius" }
+
+var Plugin = rutis.Define(rutis.Plugin[Config]{
+	Name:     "weather",
+	Inject:   []string{"llm"},                                                       // runs only while all are there
+	Provides: rutis.Provides{"weather": rutis.MethodsOf[*Weather](rutis.Sync("Unit"))}, // methods are async by default
+	Apply: func(ctx *rutis.Ctx, config Config) error {
+		var llm LLM
+		if err := ctx.Use("llm", &llm); err != nil {
+			return err
+		}
+		ctx.Provide("weather", &Weather{llm: llm, city: config.City})
+		ctx.Effect(func(context.Context) error { return nil }) // a cleanup, optional
+		return nil
+	},
+})
+```
+
+In short:
+
+| Topic | Rule |
+| --- | --- |
+| Method names | An exported method's wire name has its first letter lowercased (`Today` → `today`, `URLFor` → `urlFor`, `HTTPServer` → `httpServer`); `rutis.Rename` overrides it |
+| Sync or async | `async` by default; `rutis.Sync("Unit")` marks synchronous ones. A sync method blocks a Node caller's event loop: keep methods that do I/O `async` |
+| Signatures | `func (T) M([ctx context.Context,] params...) ([result,] [error])` |
+| Using services | A struct of function fields may list only the methods it uses; or call by name with `*rutis.Service`: `svc.Call(ctx, "ask", &answer, "q")` |
+| `ctx` | `*rutis.Ctx` is a `context.Context` cancelled when the plugin unloads; goroutines the plugin starts use `ctx.Go(...)` or watch `ctx.Done()` |
+| Concurrency | Every incoming call runs on its own goroutine: provided objects must be safe for concurrent use; do not hold a lock while calling another service |
+| Values | Data (numbers, strings, slices, maps, structs) is copied as JSON; functions cross by reference; an object crosses by reference only as `rutis.Ref(v)` |
+| Errors | A returned `error` crosses with its type name (`*QuotaError` → `QuotaError`; `Name() string` overrides); a panic becomes an error named `Panic` |
+
+**Always pass ctx on.** The call chain (`path`) lives in `context.Context`: when Node calls your method synchronously and your method calls back into Node synchronously, Node recognizes the chain it is waiting on only if the call carries the ctx you received; with `context.Background()` both sides wait for each other. Under `rutis-host dev`, a call that lost its chain is reported once on stderr.
+
+## 3. Test
+
+`rutistest` needs no host, but the plugin runs in its real runtime and values cross a real session:
+
+```go
+func TestToday(t *testing.T) {
+	loaded := rutistest.Load(t, Plugin, Config{City: "Oslo"}, map[string]any{"llm": fakeLLM{}})
+	var today string
+	if err := loaded.Service("weather").Call(context.Background(), "today", &today); err != nil {
+		t.Fatal(err)
+	}
+}
+```
+
+```bash
+go test ./...
+```
+
+`Load` checks what a host would: the plugin uses only the services `Inject` declares; provided services are of the type `Provides` declares; cleanups succeed on unload. What works only within one process (passing a struct as an object, relying on shared memory) fails here.
+
+## 4. Run it in a local host
+
+```bash
+rutis-host dev
+```
+
+`dev` builds `cmd/weather` and runs each of its plugins as the runtime `go-weather`; a change to `.go` files, `go.mod` or `go.sum` rebuilds it and restarts only that runtime, and a failed build keeps the old one running. Other services the plugin needs go in `rutis.dev.json`; they may be Python or TypeScript plugins (with their `runtimes`). `rutis-host check` lists every row and every Go binary with its plugins, versions and plugin API.
+
+## 5. Publish
+
+Push a tag such as `v0.1.0`: the template's workflow runs the tests and `rutis-host check`, builds binaries for Linux and macOS (x64 / arm64) and Windows x64, and publishes them with `SHA256SUMS` on a GitHub release.
+
+Whoever wants your plugin in a binary of their own imports your package: `rutis.Serve(weather.Plugin, other.Plugin)`.
+
+## 6. Used by a host
+
+A host names a Go plugin directory in `rutis.json` and puts binaries there:
+
+```json
+{
+  "runtimes": { "go": { "dir": "plugins/go" } },
+  "rows": [{ "id": "weather", "name": "go:weather", "config": { "city": "Oslo" } }]
+}
+```
+
+```bash
+rutis-host go add example.com/weather/cmd/weather@v0.1.0   # go install, with the machine's Go toolchain
+```
+
+Or download the binary for the platform from a release into the directory (on macOS a downloaded binary is quarantined; `rutis-host check` says so). The host finds `go:<plugin>` in all binaries; when two binaries have a plugin of the same name, write `go-<binary name>:<plugin>`. A binary in the directory starts when a row first uses it and stops after 60 s idle (`"start": "eager"` starts all and keeps them running); a replaced binary takes effect when the host restarts. See [rutis-host and rutis.json](rutis-host.en.md); for Rust hosts, [embedding in a Rust application](rust-host.en.md) (`GoResolver`, `GoRuntimes`).

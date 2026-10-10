@@ -9,6 +9,7 @@
 //! only afterwards provides [`RuntimeRows`], which every row depends
 //! on. Rows waiting for it do not start while they are reloaded.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, TypeKey};
@@ -16,6 +17,26 @@ use rutis_bridge::runtime::Runtime;
 
 use super::RuntimeResolver;
 use crate::Loader;
+
+/// Where a [`RuntimeRowsPlugin`] learns which rows of its runtime to
+/// resolve again before they may start.
+pub trait RowsSource: Send + Sync + 'static {
+    /// The runtime's name.
+    fn runtime_name(&self) -> &str;
+    /// The row names whose resolution lacks the runtime's current
+    /// declarations. A name is returned again until it is resolved anew.
+    fn take_stale(&self) -> HashSet<String>;
+}
+
+impl RowsSource for RuntimeResolver {
+    fn runtime_name(&self) -> &str {
+        RuntimeResolver::runtime_name(self)
+    }
+
+    fn take_stale(&self) -> HashSet<String> {
+        RuntimeResolver::take_stale(self)
+    }
+}
 
 /// The service rows of a runtime depend on: the runtime, once the
 /// rows' declarations are complete.
@@ -38,12 +59,12 @@ impl RuntimeRows {
 /// uses (`Chain::with_shared`).
 pub struct RuntimeRowsPlugin {
     name: String,
-    resolver: Arc<RuntimeResolver>,
+    resolver: Arc<dyn RowsSource>,
     injects: [TypeKey; 2],
 }
 
 impl RuntimeRowsPlugin {
-    pub fn new(resolver: Arc<RuntimeResolver>) -> Self {
+    pub fn new(resolver: Arc<impl RowsSource>) -> Self {
         let name = resolver.runtime_name().to_owned();
         Self {
             injects: [Runtime::key(&name), TypeKey::of::<Loader>()],
