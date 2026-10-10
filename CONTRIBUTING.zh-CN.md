@@ -42,7 +42,7 @@ npm --prefix node/rutis-runtime ci && npm --prefix node/rutis-runtime test
 (cd bun/rutis-bun && bun test)
 ```
 
-只改了一部分时，跑相关的那几项即可，完整的检查由 CI 完成。
+只改了一部分时，跑相关的那几项即可。CI 在 PR 上运行受改动影响的检查，在 main 上运行全部检查；怎样选择、怎样修改 CI，见 [docs/ci.md](docs/ci.md)。
 
 ## 提交改动
 

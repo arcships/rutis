@@ -42,7 +42,7 @@ npm --prefix node/rutis-runtime ci && npm --prefix node/rutis-runtime test
 (cd bun/rutis-bun && bun test)
 ```
 
-When you change one part, running the related tests is enough; CI runs the full set.
+When you change one part, running the related tests is enough. CI runs the checks your change affects on the pull request, and every check on main; how it chooses them, and how to change CI, is in [docs/ci.en.md](docs/ci.en.md).
 
 ## Sending a change
 

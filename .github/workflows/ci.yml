@@ -17,6 +17,27 @@ on:
 permissions:
   contents: read
 
+env:
+  # The tests that depend on the platform: starting processes, local
+  # channels (Unix sockets, an inherited socket, loopback handover), the
+  # runtime processes, WebSocket links. Pull requests run these on macOS and
+  # Windows (and every test on Linux); full runs run every test everywhere.
+  # A new test file that starts processes or opens channels goes here.
+  PLATFORM_TESTS_BRIDGE: >-
+    --lib
+    --test local_loopback --test local_plugin --test local_runtime
+    --test local_spawn --test local_stdio --test process_exit
+    --test rpc_callbacks --test python_runtime --test go_runtime
+    --test bun_runtime --test bun_channel --test runtime_conformance
+    --test session_matrix --test websocket --test websocket_link
+    --test websocket_cross --test websocket_conformance
+  PLATFORM_TESTS_LOADER: >-
+    --lib
+    --test runtime_rows --test python_rows --test multilang --test leases
+    --test instance_runtimes --test go_rows --test multilang_go
+    --test instance_go --test remote_rows --test cordis_node
+    --test bun_rows --test bun_instances --test bun_multilang
+
 # A new push to a pull request cancels its run still in progress; on main
 # every merge runs to the end (Q12.4).
 concurrency:
@@ -38,6 +59,11 @@ jobs:
       dylib: ${{ steps.select.outputs.dylib }}
       packaging: ${{ steps.select.outputs.packaging }}
       docs: ${{ steps.select.outputs.docs }}
+      bun: ${{ steps.select.outputs.bun }}
+      bun-matrix: ${{ steps.select.outputs.bun-matrix }}
+      go: ${{ steps.select.outputs.go }}
+      go-matrix: ${{ steps.select.outputs.go-matrix }}
+      repro: ${{ steps.select.outputs.repro }}
     steps:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         if: github.event_name == 'pull_request'
@@ -51,10 +77,12 @@ jobs:
               - Cargo.toml
               - rust-toolchain.toml
               - .github/workflows/**
-            # The dylib SDK, its tools and fixtures, and what goes into the
-            # SDK (the kernel) or links it (rutis-cli).
+            # The dylib crates, their tools and fixtures, and rutis-cli, which
+            # links the SDK and holds the dylib host tests. Kernel changes
+            # reach the SDK too, but main runs the dylib jobs after them
+            # (Q12.1): kernel pull requests would otherwise wait 20 minutes
+            # on jobs that have not failed in 88 runs.
             dylib:
-              - crates/rutis/**
               - crates/rutis-cli/**
               - crates/rutis-dylib/**
               - crates/rutis-dylib-meta/**
@@ -63,6 +91,7 @@ jobs:
               - crates/rutis-dev/**
               - crates/rutis-xtask/**
               - tools/*dylib*
+              - tools/build-dylib-bundle.sh
               - tools/test-sdk-bundle.sh
               - tools/lib/**
               - tests/dylib-fixtures/**
@@ -75,6 +104,27 @@ jobs:
               - node/rutis-host/scripts/**
             docs:
               - '**/*.md'
+            # The Bun runtime, and the Rust crates that start and run it.
+            bun:
+              - bun/**
+              - node/rutis/**
+              - crates/rutis-bridge/**
+              - crates/rutis-loader/**
+              - crates/rutis-host/**
+            # The Go runtime and SDK, and the Rust crates that start and run it.
+            go:
+              - go/**
+              - crates/rutis-bridge/**
+              - crates/rutis-loader/**
+              - crates/rutis-host/**
+            # What decides whether the SDK builds reproducibly. Kernel
+            # changes reach the SDK too, but are checked on main (Q12.6.3).
+            repro:
+              - crates/rutis-sdk/**
+              - crates/rutis-cli/build.rs
+              - tools/test-dylib-repro.sh
+              - tools/build-dylib-bundle.sh
+              - tools/lib/**
       # Anything that is not documentation (every pattern must match).
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         if: github.event_name == 'pull_request'
@@ -94,6 +144,9 @@ jobs:
           DYLIB: ${{ steps.paths.outputs.dylib }}
           PACKAGING: ${{ steps.paths.outputs.packaging }}
           DOCS: ${{ steps.paths.outputs.docs }}
+          BUN: ${{ steps.paths.outputs.bun }}
+          GO: ${{ steps.paths.outputs.go }}
+          REPRO: ${{ steps.paths.outputs.repro }}
         run: |
           all=false
           if [ "$PUSH" = true ] || [ "$ALL" = true ]; then all=true; fi
@@ -104,6 +157,19 @@ jobs:
             echo "dylib=$(pick "$DYLIB")"
             echo "packaging=$(pick "$PACKAGING")"
             echo "docs=$(pick "$DOCS")"
+            echo "bun=$(pick "$BUN")"
+            echo "repro=$(pick "$REPRO")"
+            echo "go=$(pick "$GO")"
+            # Pull requests: the oldest supported Bun and Go, on Linux only
+            # (the minimum must be verified; network-macos runs the latest).
+            # Full runs: also the latest on Linux and the oldest on macOS.
+            if [ "$all" = true ]; then
+              echo 'bun-matrix=[{"os":"ubuntu-24.04","bun":"1.4.0"},{"os":"ubuntu-24.04","bun":"latest"},{"os":"macos-15","bun":"1.4.0"}]'
+              echo 'go-matrix=[{"os":"ubuntu-24.04","go":"oldstable"},{"os":"ubuntu-24.04","go":"stable"},{"os":"macos-15","go":"oldstable"}]'
+            else
+              echo 'bun-matrix=[{"os":"ubuntu-24.04","bun":"1.4.0"}]'
+              echo 'go-matrix=[{"os":"ubuntu-24.04","go":"oldstable"}]'
+            fi
           } | tee -a "$GITHUB_OUTPUT" "$GITHUB_STEP_SUMMARY"
 
   # Relative links in Markdown resolve. Links already broken on the base
@@ -125,7 +191,15 @@ jobs:
             node tools/check-md-links.mjs
           fi
 
-  test:
+  # The Linux tests of an ordinary change, in parallel jobs so that the
+  # longest one sets the time (Q12.6.1): `rust` (every Rust test once),
+  # `js-py` (the Node and Python packages), and `checks` (compile checks of
+  # feature combinations: on main and for changes that run everything, as
+  # they catch rare errors and run no tests).
+  #
+  # Versions: the oldest each package supports, so that the minimum is
+  # verified; network-macos runs the newest.
+  rust:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
@@ -139,8 +213,13 @@ jobs:
         uses: dtolnay/rust-toolchain@1.98.1
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Saved on main only: pull requests read main's caches, and their
+          # own would crowd main's out of the repository's 10 GB.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # The oldest Node the packages support; network-macos runs the newest.
+      # The oldest Node the packages support (node/rutis engines.node).
+      # Lower to 22 when #219 lands.
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -149,23 +228,77 @@ jobs:
             node/rutis-runtime/package-lock.json
             node/baseline/package-lock.json
             crates/rutis-dsh/dsh/package-lock.json
+      # The Node runtime the Rust tests start.
+      - run: npm --prefix node/rutis-runtime ci
+      # Real published Cordis plugins for the Cordis mount baseline test
+      # (rutis-bridge dsh_baseline).
+      - run: npm --prefix node/baseline ci
+      # dsh, for rutis-dsh's web tests (built only when it is installed).
+      - run: npm --prefix crates/rutis-dsh/dsh ci
+      # The oldest Bun (node/rutis engines.bun); runtimes-bun has the rest.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      # Python 3.12 until #196 lands. websockets: pin the oldest supported
+      # (15.*) when #218 lands.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install "websockets>=13"
+      # The older of the two Go releases supported.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: oldstable
+          cache-dependency-path: go/rutis/go.mod
+
+      # rutis-bridge and rutis-loader run once each, below, with all their
+      # features (Q12.7).
+      - name: cargo test (workspace but rutis-bridge and rutis-loader)
+        run: cargo test --workspace --exclude rutis-bridge --exclude rutis-loader
+
+      # Plugins of other languages and of other nodes as rutis-loader rows.
+      - name: cargo test (rutis-loader, every row kind)
+        run: cargo test -p rutis-loader --features node,python,go,peer
+
+      # Both runtimes, every transport, and the conformance suites.
+      - name: cargo test (rutis-bridge, all features)
+        run: cargo test -p rutis-bridge --all-features
+
+      # The same rows with the runtimes started as on Windows: a loopback
+      # channel and a one-time token instead of an inherited socket. Pull
+      # requests run these tests in runtimes-windows, where loopback is how
+      # processes start; main also runs them here.
+      - name: cargo test (rutis-loader runtimes, loopback channels)
+        if: needs.changes.outputs.all == 'true'
+        env:
+          RUTIS_LOCAL_HANDOVER: loopback
+        run: cargo test -p rutis-loader --features node,python,go,peer --test runtime_rows --test python_rows --test multilang --test leases --test instance_runtimes --test go_rows --test multilang_go --test instance_go
+
+  js-py:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # The oldest Node the packages support; lower to 22 when #219 lands.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            node/rutis-runtime/package-lock.json
+            crates/rutis-dsh/dsh/package-lock.json
       # The release train: one version for every package released together.
       - run: node scripts/train.mjs
       - run: npm --prefix node/rutis test
       - run: npm --prefix node/rutis-runtime ci
       - run: npm --prefix node/rutis-runtime test
       - run: npm --prefix node/rutis-host test
-      # Real published Cordis plugins for the Cordis mount baseline test.
-      - run: npm --prefix node/baseline ci
       # dsh (web UI and agent loop) served by aimux in the rutis-dsh host.
       - run: npm --prefix crates/rutis-dsh/dsh ci
       - run: npm --prefix crates/rutis-dsh/dsh test
-      # The Bun runtime runs in the Rust tests too (rutis-bridge with every
-      # feature, rutis-host); runtimes-bun tests it across Bun versions.
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      # The Python package (the runtime runs in the Rust tests too).
+      # The Python package. Python 3.12 until #196 lands; websockets: the
+      # oldest supported (15.*) when #218 lands.
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -173,30 +306,27 @@ jobs:
       - run: python3 -m pip install "websockets>=13"
       - run: python3 -m unittest discover -s tests
         working-directory: python/rutis
-      # The Go runtime: its tests build Go plugins (rutis-host, the bridge
-      # and loader tests with feature go).
-      - uses: actions/setup-go@v5
+
+  checks:
+    needs: changes
+    if: needs.changes.outputs.all == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
         with:
-          go-version: stable
-          cache-dependency-path: go/rutis/go.mod
-
-      - name: cargo test (workspace)
-        run: cargo test --workspace
-
-      # Plugins of other languages and of other nodes as rutis-loader rows.
-      - name: cargo test (rutis-loader, every row kind)
-        run: cargo test -p rutis-loader --features node,python,go,peer
-
-      # The same rows with the runtimes started as on Windows: a loopback
-      # channel and a one-time token instead of an inherited socket.
-      - name: cargo test (rutis-loader runtimes, loopback channels)
-        env:
-          RUTIS_LOCAL_HANDOVER: loopback
-        run: cargo test -p rutis-loader --features node,python,go,peer --test runtime_rows --test python_rows --test multilang --test leases --test instance_runtimes --test go_rows --test multilang_go --test instance_go
-
-      # Both runtimes, every transport, and the conformance suites.
-      - name: cargo test (rutis-bridge, all features)
-        run: cargo test -p rutis-bridge --all-features
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # rutis-dsh compiles its web host only when dsh is installed.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            node/rutis-runtime/package-lock.json
+            crates/rutis-dsh/dsh/package-lock.json
+      - run: npm --prefix node/rutis-runtime ci
+      - run: npm --prefix crates/rutis-dsh/dsh ci
 
       - name: cargo check (all targets)
         run: cargo check --workspace --all-targets
@@ -231,20 +361,23 @@ jobs:
 
   # The Go SDK and runtime: the SDK's own tests (race detector on), then
   # the Go runtime against the conformance suites, the loader's Go rows and
-  # rutis-host, with the two current stable Go releases.
+  # rutis-host. Pull requests: oldstable (the older of the two supported
+  # releases) on Linux; full runs add stable on Linux and oldstable on macOS
+  # (`go-matrix`); network-macos and runtimes-windows run stable.
   runtimes-go:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.go == 'true'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
-        go: [stable, oldstable]
+        include: ${{ fromJSON(needs.changes.outputs.go-matrix) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go }}
@@ -271,7 +404,10 @@ jobs:
         run: cargo test -p rutis-bridge --features testing,websocket,go --test session_matrix --test runtime_conformance go_
       - name: cargo test (Go rows)
         run: cargo test -p rutis-loader --features node,python,go --test go_rows --test multilang_go --test instance_go --test leases
+      # Pull requests run these rows on Windows (runtimes-windows), where
+      # loopback is how processes start; full runs also run them here.
       - name: cargo test (Go rows on loopback channels)
+        if: needs.changes.outputs.all == 'true'
         env:
           RUTIS_LOCAL_HANDOVER: loopback
         run: cargo test -p rutis-loader --features node,python,go --test go_rows --test multilang_go --test instance_go
@@ -280,20 +416,24 @@ jobs:
         run: cargo test -p rutis-host go
 
   # The Bun runtime: its own tests, and the Rust tests that run it, on the
-  # oldest Bun it supports (package.json engines.bun) and the latest, on
-  # Linux and macOS. Also on loopback channels, as processes start on
-  # Windows.
+  # oldest Bun it supports (package.json engines.bun); also on loopback
+  # channels, as processes start on Windows (no Bun job runs on Windows).
+  # Pull requests: the oldest Bun on Linux; full runs add the latest on Linux
+  # and the oldest on macOS (`bun-matrix`); network-macos runs the latest.
   runtimes-bun:
+    needs: changes
+    if: needs.changes.outputs.bun == 'true'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
-        bun: ["1.4.0", latest]
+        include: ${{ fromJSON(needs.changes.outputs.bun-matrix) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ matrix.bun }}
@@ -328,9 +468,11 @@ jobs:
         run: cargo test -p rutis-host bun
 
   # The network stack and the runtimes on macOS: starting processes on an
-  # inherited socket, Unix sockets, WebSocket links, the Node and Python
-  # runtimes, rutis-host; and the static build of the whole workspace. The
-  # one macOS job of an ordinary change (Q12.6.2).
+  # inherited socket, Unix sockets, WebSocket links, the Node, Python, Bun and
+  # Go runtimes (latest versions), rutis-host; and the static build of the
+  # whole workspace. The one macOS job of an ordinary change (Q12.6.2).
+  # Pull requests run only the tests that depend on the platform
+  # (PLATFORM_TESTS_*, top of this file); full runs run the whole suites.
   network-macos:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -339,12 +481,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v4
         with:
           node-version: '26'
           cache: npm
           cache-dependency-path: node/rutis-runtime/package-lock.json
+      # The SDK's own tests do not depend on the platform: full runs only.
       - run: npm --prefix node/rutis test
+        if: needs.changes.outputs.all == 'true'
+      # The runtime's channels, handshake and WebSocket.
       - run: npm --prefix node/rutis-runtime ci
       - run: npm --prefix node/rutis-runtime test
       - uses: actions/setup-python@v5
@@ -361,9 +508,12 @@ jobs:
           go-version: stable
           cache-dependency-path: go/rutis/go.mod
       - name: cargo test (network stack, runtimes, host)
+        env:
+          BRIDGE_TESTS: ${{ needs.changes.outputs.all != 'true' && env.PLATFORM_TESTS_BRIDGE || '' }}
+          LOADER_TESTS: ${{ needs.changes.outputs.all != 'true' && env.PLATFORM_TESTS_LOADER || '' }}
         run: |
-          cargo test -p rutis-bridge --all-features
-          cargo test -p rutis-loader --features node,python,go,peer
+          cargo test -p rutis-bridge --all-features $BRIDGE_TESTS
+          cargo test -p rutis-loader --features node,python,go,peer,bun $LOADER_TESTS
           cargo test -p rutis-host
       - name: keep workspace static builds available
         if: '!cancelled()'
@@ -380,6 +530,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -411,6 +563,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -450,9 +604,11 @@ jobs:
   # 时给出警告，并在 job 摘要中列出，提示发布时需要提升的版本；不使 CI 失败
   # （0.x 允许在 minor 版本中破坏）。真正的拦截在 release.yml：版本号不允许的
   # 破坏性变更会使发布失败。
+  # On main and when packaging changes: it only warns, and what it reports
+  # matters when the train is released (Q12.1).
   semver-rutis:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.packaging == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -483,6 +639,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: dylib host child environment
         run: cargo test -p rutis-cli --features dylib-plugins --bin rutis-cli
       - name: plugin swap and pre-dlopen rejection
@@ -494,12 +652,14 @@ jobs:
   # one runner); the two-runner comparison runs on main (sdk-repro).
   dylib-linux-repro:
     needs: changes
-    if: needs.changes.outputs.dylib == 'true'
+    if: needs.changes.outputs.repro == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # The script builds offline from copies of the source.
       - run: cargo fetch --locked
       - name: reproducible SDK across source and target paths
@@ -513,6 +673,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: external plugin build against a prebuilt SDK
         run: bash tools/test-sdk-bundle.sh
 
@@ -526,30 +688,46 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: plugin file checks
         run: cargo test -p rutis-dylib-meta
       - name: dylib host child environment
         run: cargo test -p rutis-cli --features dylib-plugins --bin rutis-cli
       - name: plugin swap, pre-dlopen rejection, quarantine and hardened host
         run: bash tools/test-dylib.sh
+      # One runtime bundle for the launcher and the external plugin checks,
+      # which only read it.
+      - name: the runtime bundle
+        id: bundle
+        run: echo "dir=$(bash tools/build-dylib-bundle.sh "$RUNNER_TEMP/bundle" | tail -n 1)" >> "$GITHUB_OUTPUT"
       - name: launcher pre-execution verification
-        run: bash tools/test-dylib-launcher.sh
+        run: bash tools/test-dylib-launcher.sh "${{ steps.bundle.outputs.dir }}"
       - name: reproducible SDK across source and target paths
+        if: needs.changes.outputs.repro == 'true'
         run: bash tools/test-dylib-repro.sh
       - name: external plugin build against a prebuilt SDK
-        run: bash tools/test-sdk-bundle.sh
+        run: bash tools/test-sdk-bundle.sh "${{ steps.bundle.outputs.dir }}"
 
   # The runtimes on Windows: Node, Python and Go processes on loopback
   # channels, rows of every language, peers and WebSocket links; and the
-  # static build of the whole workspace.
+  # static build of the whole workspace. Pull requests run only the tests
+  # that depend on the platform (PLATFORM_TESTS_*, top of this file),
+  # among them the runtime rows on loopback channels, which full runs also
+  # rerun on Linux; full runs run the whole suites.
   runtimes-windows:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -566,10 +744,14 @@ jobs:
         run: go test ./...
         working-directory: go/rutis
       - name: cargo test (rutis-loader, every row kind)
-        run: cargo test -p rutis-loader --features node,python,go,peer --no-fail-fast
+        env:
+          LOADER_TESTS: ${{ needs.changes.outputs.all != 'true' && env.PLATFORM_TESTS_LOADER || '' }}
+        run: cargo test -p rutis-loader --features node,python,go,peer --no-fail-fast $LOADER_TESTS
       - name: cargo test (rutis-bridge, all features)
         if: '!cancelled()'
-        run: cargo test -p rutis-bridge --all-features --no-fail-fast
+        env:
+          BRIDGE_TESTS: ${{ needs.changes.outputs.all != 'true' && env.PLATFORM_TESTS_BRIDGE || '' }}
+        run: cargo test -p rutis-bridge --all-features --no-fail-fast $BRIDGE_TESTS
       - name: cargo test (rutis-host)
         if: '!cancelled()'
         run: cargo test -p rutis-host --no-fail-fast
@@ -683,8 +865,11 @@ jobs:
     needs:
       - changes
       - links
-      - test
+      - rust
+      - js-py
+      - checks
       - network-macos
+      - runtimes-bun
       - release-dry-run
       - release-windows
       - release-wheel-aarch64
