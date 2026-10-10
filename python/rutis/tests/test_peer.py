@@ -3,6 +3,7 @@
 import asyncio
 import json
 import socket
+import threading
 import unittest
 
 from rutis.peer import Peer
@@ -86,6 +87,76 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply["op"], "return", reply)
         self.assertEqual(reply["value"]["type"], "reference")
         self.assertEqual(reply["value"]["value"]["kind"], "object")
+
+
+class ScriptedChannel:
+    """A channel whose far end already sent `incoming` and then ended. It
+    notes whether this side had sent anything when it first read; with
+    `ended`, sending fails as on a channel the far end closed."""
+
+    def __init__(self, incoming, ended=False):
+        self.incoming = list(incoming)
+        self.ended = ended
+        self.sent = []
+        self.sent_before_first_read = None
+        self.lock = threading.Lock()
+
+    def send(self, message):
+        if self.ended:
+            raise BrokenPipeError("the far end closed the channel")
+        with self.lock:
+            self.sent.append(json.loads(message))
+
+    def recv(self):
+        with self.lock:
+            if self.sent_before_first_read is None:
+                self.sent_before_first_read = bool(self.sent)
+        return self.incoming.pop(0) if self.incoming else None
+
+    def close(self, reason=""):
+        pass
+
+
+class HandshakeOrderTests(unittest.IsolatedAsyncioTestCase):
+    """#239: a session greets before it reads, so a far end it refuses
+    still reads its greeting; and a far end's greeting decides the
+    handshake even when the channel ended before this side greeted."""
+
+    async def ready_error(self, peer):
+        with self.assertRaises(Exception) as raised:
+            # The timeout only stops a hang.
+            await asyncio.wait_for(peer.ready, 10)
+        return raised.exception
+
+    async def test_issue_239_a_session_greets_before_it_reads_the_far_greeting(self):
+        far = json.dumps({"op": "hello", "version": 3, "endpoint": "main"}).encode()
+        channel = ScriptedChannel([far])
+        peer = Peer(channel, lambda target, method, args: None)
+        self.addCleanup(peer.close)
+        peer.start()
+        error = await self.ready_error(peer)
+        self.assertIs(channel.sent_before_first_read, True)
+        self.assertEqual(channel.sent[0]["op"], "hello")
+        # Incompatible (ValueError), not the channel end (ConnectionError).
+        self.assertIsInstance(error, ValueError)
+        self.assertNotIsInstance(error, ConnectionError)
+
+    async def test_issue_239_a_greeting_followed_by_the_channel_end_is_incompatible(self):
+        far = json.dumps({"op": "hello", "version": 2}).encode()
+        channel = ScriptedChannel([far], ended=True)
+        peer = Peer(channel, lambda target, method, args: None, endpoint={"local": "py"})
+        self.addCleanup(peer.close)
+        peer.start()
+        error = await self.ready_error(peer)
+        self.assertIsInstance(error, ValueError)
+        self.assertNotIsInstance(error, ConnectionError)
+
+    async def test_a_channel_end_before_any_greeting_is_a_connection_error(self):
+        channel = ScriptedChannel([], ended=True)
+        peer = Peer(channel, lambda target, method, args: None, endpoint={"local": "py"})
+        self.addCleanup(peer.close)
+        peer.start()
+        self.assertIsInstance(await self.ready_error(peer), ConnectionError)
 
 
 if __name__ == "__main__":
