@@ -10,7 +10,6 @@ use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -30,9 +29,33 @@ pub const CHANNEL_FD: i32 = 3;
 /// environment once read.
 pub const CHANNEL_TOKEN: &str = "RUTIS_CHANNEL_TOKEN";
 
+/// Where a process's standard input, output or error goes. The process
+/// that starts a runtime owns it, so there is no pipe to read: a stream is
+/// either this process's own or nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Stdio {
+    /// None: no input to read, output discarded (the null device).
+    Null,
+    /// This process's own stream: its terminal, when it runs in one.
+    Inherit,
+}
+
+impl Stdio {
+    pub(crate) fn process(self) -> std::process::Stdio {
+        match self {
+            Stdio::Null => std::process::Stdio::null(),
+            Stdio::Inherit => std::process::Stdio::inherit(),
+        }
+    }
+}
+
 /// A process `spawn:<name>` starts: `program args… <channel> trailing…`,
 /// where `<channel>` is `fd:3` or the socket path to dial.
+///
+/// Build one with [`Spawn::new`] and set its fields.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Spawn {
     pub program: OsString,
     pub args: Vec<OsString>,
@@ -40,6 +63,12 @@ pub struct Spawn {
     /// The working directory; the application's by default.
     pub cwd: Option<PathBuf>,
     pub handover: Handover,
+    /// Standard input: [`Stdio::Null`] by default.
+    pub stdin: Stdio,
+    /// Standard output: [`Stdio::Inherit`] by default.
+    pub stdout: Stdio,
+    /// Standard error: [`Stdio::Inherit`] by default.
+    pub stderr: Stdio,
     /// Arguments after the channel.
     pub trailing: Vec<OsString>,
     /// The endpoint the process is: whoever starts a process names it.
@@ -70,6 +99,9 @@ impl Spawn {
             env: Vec::new(),
             cwd: None,
             handover: Handover::Inherit,
+            stdin: Stdio::Null,
+            stdout: Stdio::Inherit,
+            stderr: Stdio::Inherit,
             trailing: Vec::new(),
             peer,
         }
@@ -80,9 +112,9 @@ impl Spawn {
         command
             .args(&self.args)
             .envs(self.env.iter().map(|(name, value)| (name, value)))
-            .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
+            .stdin(self.stdin.process())
+            .stdout(self.stdout.process())
+            .stderr(self.stderr.process())
             .kill_on_drop(true);
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
