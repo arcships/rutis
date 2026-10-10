@@ -138,6 +138,24 @@ test('sending over the limit closes the channel instead', async () => {
   assert.equal((await lines.next()).done, true)
 })
 
+// A loopback child's socket comes paused, with what followed its token put
+// back (serve.mjs): the framing must start it and read that first.
+test('a loopback socket handed over after its token is framed from where the token ended', async () => {
+  const { loopback } = await import('../src/serve.mjs')
+  const listener = await loopback('secret')
+  const port = Number(listener.address.split(':').at(-1))
+  const dialed = createConnection({ host: '127.0.0.1', port })
+  dialed.write('secret\n{"op":"hello"}\n')
+  const socket = await listener.accepted
+  const received = []
+  let closed
+  const ended = new Promise(resolve => { closed = resolve })
+  frame(socket, { message: text => { received.push(text); if (received.length === 2) dialed.end() }, closed })
+  dialed.write('{"op":"after"}\n')
+  assert.equal(await ended, undefined)
+  assert.deepEqual(received, ['{"op":"hello"}', '{"op":"after"}'])
+})
+
 test('a line split across reads, even inside a character; a truncated last line fails', async () => {
   const { theirs, received, ended } = await framedPair({ maxMessage: 10 })
   const bytes = Buffer.from('{"a":"é"}\n{"b"')

@@ -36,6 +36,9 @@ export function frame(stream, { message, closed }, { maxMessage = MAX_MESSAGE } 
   })
   stream.once('end', () => { if (size) failure ??= 'stream ended inside a message' })
   stream.once('close', () => closed(failure))
+  // A stream paused by whoever read before us (a loopback child's token)
+  // stays paused when a 'data' listener is added: start it.
+  stream.resume()
   return {
     send(text) {
       if (stream.destroyed) return
