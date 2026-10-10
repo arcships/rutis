@@ -312,3 +312,4 @@ RuntimeResolver::modules(handle)       // 现有：行名 "bun:<模块>"
 | §8 一致性夹具 `conformance-greeter` | 未写 | 只用于 Cordis 节点与远程运行时（B2） |
 | §8 E2E S2 / S3 的 Bun 变体 | 未在本次实现 | 随 #186 / #187 的 E2E 框架一起加入 |
 | §8 `new --lang bun` 生成的项目能通过 `check` | 只测试了生成的文件 | 运行 `check` 需要从 npm 安装 `@arcships/rutis-bun`，归 S2（#186）的端到端测试 |
+| §5.2 `runtime` 默认还在 `PATH` 上找 `rutis-bun` 可执行程序 | B1 只找项目里的 `@arcships/rutis-bun` | 可执行程序在 B3 才有 |

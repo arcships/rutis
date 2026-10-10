@@ -328,3 +328,4 @@ Nothing this design uses depends on a recent version: `Bun.connect({ fd })`, `wo
 | §8 conformance fixture `conformance-greeter` | Not written | Only Cordis nodes and remote runtimes (B2) use it |
 | §8 Bun variants of E2E S2 / S3 | Not in this change | They come with the E2E framework of #186 / #187 |
 | §8 a project from `new --lang bun` passes `check` | Only the generated files are tested | Running `check` needs `@arcships/rutis-bun` installed from npm; it belongs to S2's end-to-end test (#186) |
+| §5.2: `runtime` also looks for a `rutis-bun` executable on `PATH` by default | B1 looks only for the project's `@arcships/rutis-bun` | The executable comes in B3 |
