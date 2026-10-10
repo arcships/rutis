@@ -5,6 +5,7 @@
 | 我要… | 读 |
 | --- | --- |
 | 用 TypeScript / JavaScript 写插件 | [写一个 TypeScript 插件](typescript-plugin.md) |
+| 用 TypeScript / JavaScript 写插件，在 Bun 里运行 | [写一个 Bun 插件](bun-plugin.md) |
 | 用 Python 写插件 | [写一个 Python 插件](python-plugin.md) |
 | 查插件能做什么、值怎样传递 | [插件 API](plugin-api.md) |
 | 不写 Rust，直接运行插件 | [rutis-host 与 rutis.json](rutis-host.md) |
@@ -17,7 +18,7 @@
 | 谁装 | Rust（crates.io） | Node（npm） | Python（PyPI） |
 | --- | --- | --- | --- |
 | 插件作者 | `rutis-sdk`（dylib 插件） | `@arcships/rutis` | `rutis` |
-| 宿主（运行插件） | `rutis`、`rutis-loader`、`rutis-bridge`、`rutis-dylib` | `@arcships/rutis-runtime` | `rutis` |
+| 宿主（运行插件） | `rutis`、`rutis-loader`、`rutis-bridge`、`rutis-dylib` | `@arcships/rutis-runtime`（Node）、`@arcships/rutis-bun`（Bun） | `rutis` |
 | 不写 Rust 的宿主 | `rutis-host` | `@arcships/rutis-host` | `rutis-host` |
 
 这些包（包括内核 `rutis` 和 dylib 工具链）一起发布、版本号相同（发布列车，当前为 0.8）。各个 rutis 包请使用同一个版本。
@@ -27,6 +28,6 @@
 ## 环境
 
 - Linux、macOS 或 Windows x64（MSVC）。
-- Node 24 或更高（TypeScript / JavaScript 插件）。
+- Node 24 或更高，或 Bun 1.4 或更高（TypeScript / JavaScript 插件）。
 - Python 3.12 或更高（Python 插件）。
 - Rust 1.85 或更高（只在 Rust 里嵌入时需要）。

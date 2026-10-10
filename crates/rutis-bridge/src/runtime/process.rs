@@ -255,6 +255,26 @@ impl Launcher {
             .cwd(project)
             .inherit_fd()
     }
+
+    /// The Bun runtime of the npm package `package` (`bun/rutis-bun`, or a
+    /// deployed `@arcships/rutis-bun`), run by the Bun executable `program`
+    /// (`bun` on `PATH` when `None`), in `project`, on an inherited socket
+    /// (on Windows, a loopback address). Auto-install and `.env` files are
+    /// always off: plugins resolve only what the project has installed, and
+    /// the environment is only what this process gives.
+    #[cfg(feature = "bun")]
+    pub fn bun(
+        program: Option<&std::ffi::OsStr>,
+        package: &std::path::Path,
+        project: &std::path::Path,
+    ) -> Self {
+        Launcher::new(program.unwrap_or(std::ffi::OsStr::new("bun")))
+            .arg("--no-install")
+            .arg("--no-env-file")
+            .arg(package.join("src/main.ts"))
+            .cwd(project)
+            .inherit_fd()
+    }
 }
 /// `first` ahead of the search path `rest` (`PATH` syntax for the
 /// platform: `:` or `;` between entries).
@@ -399,6 +419,8 @@ pub struct Process {
     child: Option<crate::runtime::spawn::Child>,
     /// Reported by the runner when mounting.
     features: std::sync::OnceLock<Vec<String>>,
+    /// What the runtime said of itself when mounted (see [`Process::about`]).
+    about: std::sync::OnceLock<Value>,
     /// The services each loaded row exports, by row key (ids, see
     /// [`scoped_id`]).
     exports: Mutex<HashMap<String, Vec<String>>>,
@@ -424,6 +446,10 @@ pub struct RowSchema {
     /// The services it provides to rutis: `{ name: { method: "sync" | "async" } }`.
     #[serde(default)]
     pub provides: serde_json::Map<String, Value>,
+    /// The version of the package the plugin comes from, when the runtime
+    /// knows it (an installed package, not a file of the project).
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 /// One row's use of a host service (see [`Process::lease_host`]). Give it
@@ -631,6 +657,7 @@ impl Process {
             runtime: tokio::runtime::Handle::current(),
             child,
             features: std::sync::OnceLock::new(),
+            about: std::sync::OnceLock::new(),
             exports: Mutex::default(),
             host_changes: tokio::sync::Mutex::new(()),
             _directory: directory,
@@ -652,6 +679,11 @@ impl Process {
         let features: Vec<String> =
             crate::runtime::decode(mounted.get("features").cloned().unwrap_or(json!([])))?;
         let _ = process.features.set(features);
+        let about: serde_json::Map<String, Value> = ["implementation", "engine"]
+            .into_iter()
+            .filter_map(|field| Some((field.to_owned(), mounted.get(field)?.clone())))
+            .collect();
+        let _ = process.about.set(Value::Object(about));
         Ok(process)
     }
 
@@ -783,6 +815,14 @@ impl Process {
     pub async fn describe_row(&self, entry: &Path) -> Result<RowSchema, Error> {
         self.require("rows.v2")?;
         crate::runtime::decode(self.call_async("", "rows.schema", json!([entry])).await?)
+    }
+
+    /// What the runtime reported of itself when mounted, for diagnostics:
+    /// `implementation` (`{ name, version }`) and `engine` (`{ name,
+    /// version }`, such as the Bun that runs it), each when it said.
+    pub fn about(&self) -> &Value {
+        static NOTHING: Value = Value::Null;
+        self.about.get().unwrap_or(&NOTHING)
     }
 
     /// Whether the Node runtime supports `feature` (reported when mounting).

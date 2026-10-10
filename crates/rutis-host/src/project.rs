@@ -1,13 +1,17 @@
 //! `rutis-host dev`: the plugin project in the current directory as a host
-//! configuration. A Node project (package.json) or a Python project
+//! configuration. A Node or Bun project (package.json) or a Python project
 //! (pyproject.toml) becomes one row, the plugin itself; `rutis.dev.json`
 //! adds what it needs to run (fake services, config, other plugins).
+//!
+//! A package.json project runs in Bun when `rutis.dev.json` configures
+//! `runtimes.bun`, when Bun manages it (`bun.lock`), or when it depends on
+//! `@arcships/rutis-bun`; in Node otherwise.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::config::{HostConfig, NodeRuntime, PythonRuntime, Runtimes};
+use crate::config::{BunRuntime, HostConfig, NodeRuntime, PythonRuntime, Runtimes};
 
 /// The configuration that runs the plugin project in `dir`, and the id of
 /// its row.
@@ -18,7 +22,9 @@ pub fn dev_config(dir: &Path) -> Result<(HostConfig, String), String> {
         .ok()
         .filter(|dir| dir.is_dir())
         .ok_or_else(|| format!("{}: not a directory", dir.display()))?;
-    let (row, runtimes) = if dir.join("package.json").exists() {
+    let (row, runtimes) = if dir.join("package.json").exists() && is_bun(&dir) {
+        bun_row(&dir)?
+    } else if dir.join("package.json").exists() {
         node_row(&dir)?
     } else if dir.join("pyproject.toml").exists() {
         python_row(&dir)?
@@ -53,6 +59,10 @@ pub fn dev_config(dir: &Path) -> Result<(HostConfig, String), String> {
                 }
             }
         }
+        // What the dev file says of the plugin's own runtime wins.
+        if let (Some(_), Some(bun)) = (&config.runtimes.bun, &extra.runtimes.bun) {
+            config.runtimes.bun = Some(bun.clone());
+        }
         config.merge(HostConfig {
             rows: others,
             ..extra
@@ -61,14 +71,31 @@ pub fn dev_config(dir: &Path) -> Result<(HostConfig, String), String> {
     Ok((config, id))
 }
 
-fn node_row(dir: &Path) -> Result<(Value, Runtimes), String> {
+/// Whether the package.json project in `dir` runs in Bun.
+fn is_bun(dir: &Path) -> bool {
+    let read = |file: &str| -> Option<Value> {
+        serde_json::from_str(&std::fs::read_to_string(dir.join(file)).ok()?).ok()
+    };
+    let configured = read("rutis.dev.json").is_some_and(|dev| !dev["runtimes"]["bun"].is_null());
+    let managed = ["bun.lock", "bun.lockb"]
+        .iter()
+        .any(|lock| dir.join(lock).exists());
+    let depends = read("package.json").is_some_and(|manifest| {
+        ["dependencies", "devDependencies"]
+            .iter()
+            .any(|field| !manifest[field]["@arcships/rutis-bun"].is_null())
+    });
+    configured || managed || depends
+}
+
+/// The package's name and the source file of its plugin while developing:
+/// src/index.ts or .js, else what the package exports.
+fn package_entry(dir: &Path) -> Result<(String, PathBuf), String> {
     let manifest: Value = serde_json::from_str(
         &std::fs::read_to_string(dir.join("package.json")).map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("package.json: {error}"))?;
-    let name = manifest["name"].as_str().unwrap_or("plugin");
-    // The source while developing: src/index.ts or .js, else what the
-    // package exports.
+    let name = manifest["name"].as_str().unwrap_or("plugin").to_owned();
     let entry = [
         "src/index.ts",
         "src/index.mts",
@@ -87,11 +114,31 @@ fn node_row(dir: &Path) -> Result<(Value, Runtimes), String> {
         Some(dir.join(exported))
     })
     .ok_or("package.json names no entry, and there is no src/index.ts")?;
-    let row = json!({ "id": id_of(name), "name": file_url(&entry), "config": {} });
+    Ok((name, entry))
+}
+
+fn node_row(dir: &Path) -> Result<(Value, Runtimes), String> {
+    let (name, entry) = package_entry(dir)?;
+    let row = json!({ "id": id_of(&name), "name": file_url(&entry), "config": {} });
     let runtimes = Runtimes {
         node: Some(NodeRuntime {
             project: dir.to_owned(),
             runtime: None,
+        }),
+        ..Runtimes::default()
+    };
+    Ok((row, runtimes))
+}
+
+fn bun_row(dir: &Path) -> Result<(Value, Runtimes), String> {
+    let (name, entry) = package_entry(dir)?;
+    let row =
+        json!({ "id": id_of(&name), "name": format!("bun:{}", entry.display()), "config": {} });
+    let runtimes = Runtimes {
+        bun: Some(BunRuntime {
+            project: dir.to_owned(),
+            runtime: None,
+            program: None,
         }),
         ..Runtimes::default()
     };
@@ -230,6 +277,37 @@ pub fn sources(dir: &Path) -> Vec<(PathBuf, std::time::SystemTime)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A package.json project Bun manages runs in Bun, its source as the
+    /// row; the dev file may name the Bun to use.
+    #[test]
+    fn a_bun_project_runs_in_bun() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), r#"{ "name": "greeter" }"#).unwrap();
+        std::fs::write(dir.path().join("bun.lock"), "").unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/index.ts"), "").unwrap();
+        let (config, id) = dev_config(dir.path()).unwrap();
+        assert_eq!(id, "greeter");
+        let name = config.rows[0]["name"].as_str().unwrap();
+        assert!(
+            name.starts_with("bun:") && name.ends_with("index.ts"),
+            "{name}"
+        );
+        assert!(config.runtimes.bun.is_some() && config.runtimes.node.is_none());
+
+        std::fs::remove_file(dir.path().join("bun.lock")).unwrap();
+        assert!(dev_config(dir.path()).unwrap().0.runtimes.node.is_some());
+        std::fs::write(
+            dir.path().join("rutis.dev.json"),
+            r#"{ "runtimes": { "bun": { "program": "/opt/bun/bin/bun" } } }"#,
+        )
+        .unwrap();
+        let (config, _) = dev_config(dir.path()).unwrap();
+        let bun = config.runtimes.bun.unwrap();
+        // On Windows `/opt/...` is relative to the drive, and rebased as such.
+        assert!(bun.program.unwrap().ends_with("opt/bun/bin/bun"));
+    }
 
     #[test]
     fn a_node_project_runs_its_source() {

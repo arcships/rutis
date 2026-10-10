@@ -1,5 +1,6 @@
 //! Language runtimes: processes that run plugins written in another
-//! language (Node with Cordis, feature `node`; Python, feature `python`),
+//! language (Node with Cordis, feature `node`; Python, feature `python`;
+//! Bun, feature `bun`),
 //! whose plugins rutis-loader manages as rows.
 //!
 //! A runtime's session comes from a link, wherever the runtime runs:

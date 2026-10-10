@@ -2,7 +2,8 @@
 //! The runtime conformance suite (`rutis_bridge::runtime::testing::runtime`) over
 //! every channel: the Node and the Python runtime, each connected on an
 //! inherited socket (`fd:3`), on a socket path it dials back, and over a
-//! loopback WebSocket it listens on (dialed by Rust and attached).
+//! loopback WebSocket it listens on (dialed by Rust and attached); the Bun
+//! runtime (feature `bun`) on the first two.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +19,8 @@ fn repo() -> PathBuf {
 enum Runtime {
     Node,
     Python,
+    #[cfg(feature = "bun")]
+    Bun,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -67,6 +70,19 @@ async fn start(runtime: Runtime, via: Via, dir: &Path) -> (Arc<Process>, PathBuf
                 .arg("rutis")
                 .env("PYTHONPATH", path);
             (launcher, dir.to_owned(), PathBuf::from("weather_plugin"))
+        }
+        #[cfg(feature = "bun")]
+        Runtime::Bun => {
+            let entry = dir.join("weather.ts");
+            std::fs::copy(
+                repo().join("bun/rutis-bun/test/fixtures/conformance-weather.ts"),
+                &entry,
+            )
+            .unwrap();
+            let mut launcher = Launcher::bun(None, &repo().join("bun/rutis-bun"), dir);
+            // Inheriting fd:3 is the Bun launcher's default; `via` decides.
+            launcher.inherit_fd = false;
+            (launcher, dir.to_owned(), entry)
         }
     };
     if via == Via::WebSocket {
@@ -255,4 +271,16 @@ fn copy_dir(from: &Path, to: &Path) {
         let file = file.unwrap();
         std::fs::copy(file.path(), to.join(file.file_name())).unwrap();
     }
+}
+
+#[cfg(feature = "bun")]
+#[tokio::test(flavor = "multi_thread")]
+async fn bun_on_an_inherited_socket() {
+    semantics(Runtime::Bun, Via::Inherit).await;
+}
+
+#[cfg(feature = "bun")]
+#[tokio::test(flavor = "multi_thread")]
+async fn bun_dialing_a_socket_path() {
+    semantics(Runtime::Bun, Via::DialBack).await;
 }

@@ -20,7 +20,7 @@ The npm distribution includes the Node runtime (`@arcships/rutis-runtime`), and 
 | `rutis-host run [rutis.json]` | Runs the configuration and prints each row's status changes. Press Ctrl-C to stop. |
 | `rutis-host dev [directory]` | Runs a plugin project with its `rutis.dev.json` file and reloads it when files change. |
 | `rutis-host check [rutis.json]` | Resolves each row and prints its version, dependencies, provided services, and configuration schema. Exits with a nonzero status if a row cannot run. Without `rutis.json`, checks the plugin project in the current directory. |
-| `rutis-host new <name> --lang node\|python` | Creates a plugin project. |
+| `rutis-host new <name> --lang node\|bun\|python` | Creates a plugin project. |
 
 ## `rutis.json`
 
@@ -57,6 +57,7 @@ The endpoint ID of this node. Connected nodes see this name. Defaults to `host`.
 | Key | Fields | Purpose |
 | --- | --- | --- |
 | `node` | `project` (default `.`), `runtime` | Starts the Node runtime. Plugin packages are resolved from `project`'s `package.json`. Install `@arcships/rutis-runtime` there, specify it with `runtime`, or use the copy included with the npm distribution of rutis-host. |
+| `bun` | `project` (default `.`), `runtime`, `program` | Starts the Bun runtime, with rows named `bun:<module>`. Modules resolve from `project` (packages in `node_modules`, `./relative-paths`). Install `@arcships/rutis-bun` there or specify it with `runtime`; `program` is the Bun executable, by default `bun` on `PATH`. See [Write a Bun plugin](bun-plugin.en.md). |
 | `py` | `project` (default `.`), `python` | Starts the Python runtime. The interpreter defaults to `$VIRTUAL_ENV/bin/python`, then `<project>/.venv/bin/python`, then `python3` (on Windows, `Scripts\python.exe` and `python`). Its environment must contain `rutis` and the plugins. |
 | `remote` | `name`, `language` | A runtime on another machine, connected through a node row with `"runtime": "<name>"`; see [Connect nodes](nodes.en.md). |
 
@@ -73,7 +74,7 @@ Each row runs a plugin:
 | Field | Meaning |
 | --- | --- |
 | `id` | Row name, unique within this file. |
-| `name` | Plugin identifier: an npm package (or package subpath), `py:<name>` (Python entry point or module), `./relative-path` (plugin file), `<remote-runtime>:<module>`, `rutis-bridge/peer` (a node; see [Connect nodes](nodes.en.md)), or `peer:<node>/<plugin>` (a plugin running on another node). |
+| `name` | Plugin identifier: an npm package (or package subpath), `py:<name>` (Python entry point or module), `bun:<module>` (a module in the Bun runtime), `./relative-path` (plugin file), `<remote-runtime>:<module>`, `rutis-bridge/peer` (a node; see [Connect nodes](nodes.en.md)), or `peer:<node>/<plugin>` (a plugin running on another node). |
 | `config` | Plugin configuration. |
 | `inject` | Additional service names to wait for. |
 | `isolate` | `{ "service": true }` gives this row its own instance of the service; `{ "service": "label" }` shares one instance among rows with that label. |

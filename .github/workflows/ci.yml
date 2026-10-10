@@ -160,6 +160,11 @@ jobs:
       # dsh (web UI and agent loop) served by aimux in the rutis-dsh host.
       - run: npm --prefix crates/rutis-dsh/dsh ci
       - run: npm --prefix crates/rutis-dsh/dsh test
+      # The Bun runtime runs in the Rust tests too (rutis-bridge with every
+      # feature, rutis-host); runtimes-bun tests it across Bun versions.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
       # The Python package (the runtime runs in the Rust tests too).
       - uses: actions/setup-python@v5
         with:
@@ -196,9 +201,11 @@ jobs:
           cargo check -p rutis-bridge --no-default-features --all-targets
           cargo check -p rutis-bridge --no-default-features --features python --all-targets
           cargo check -p rutis-bridge --no-default-features --features websocket --all-targets
+          cargo check -p rutis-bridge --no-default-features --features bun --all-targets
           cargo check -p rutis-bridge --features cordis --all-targets
           cargo check -p rutis-loader --features node --all-targets
           cargo check -p rutis-loader --features python --all-targets
+          cargo check -p rutis-loader --no-default-features --features bun --all-targets
           cargo check -p rutis-loader --features peer --all-targets
 
       # The loader test targets compile under each single feature.
@@ -210,6 +217,54 @@ jobs:
 
       - name: cargo test --no-run (rutis-loader, peer)
         run: cargo test -p rutis-loader --features peer --no-run
+
+  # The Bun runtime: its own tests, and the Rust tests that run it, on the
+  # oldest Bun it supports (package.json engines.bun) and the latest, on
+  # Linux and macOS. Also on loopback channels, as processes start on
+  # Windows.
+  runtimes-bun:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        bun: ["1.4.0", latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ matrix.bun }}
+      # Node and Python for the rows that use Bun's services and back.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm --prefix node/rutis-runtime ci
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: bun --version
+      - run: bun test
+        working-directory: bun/rutis-bun
+      - name: cargo test (rutis-bridge, the Bun runtime and its channel)
+        run: cargo test -p rutis-bridge --features bun,testing --test bun_runtime --test bun_channel
+      # Only the Bun tests of the contract suites: the other runtimes run
+      # in their own jobs.
+      - name: cargo test (rutis-bridge, the contract suites with Bun)
+        run: cargo test -p rutis-bridge --features bun,testing,websocket --test runtime_conformance --test session_matrix bun
+      - name: cargo test (rutis-bridge, the runtime contract with Bun on loopback channels)
+        env:
+          RUTIS_LOCAL_HANDOVER: loopback
+        run: cargo test -p rutis-bridge --features bun,testing,websocket --test session_matrix bun
+      - name: cargo test (rutis-loader, Bun rows)
+        run: cargo test -p rutis-loader --features bun,node,python --test bun_rows --test bun_instances --test bun_multilang
+      - name: cargo test (rutis-loader, Bun rows on loopback channels)
+        env:
+          RUTIS_LOCAL_HANDOVER: loopback
+        run: cargo test -p rutis-loader --features bun,node,python --test bun_rows --test bun_instances --test bun_multilang
+      - name: cargo test (rutis-host, Bun)
+        run: cargo test -p rutis-host bun
 
   # The network stack and the runtimes on macOS: starting processes on an
   # inherited socket, Unix sockets, WebSocket links, the Node and Python
@@ -237,6 +292,9 @@ jobs:
       - run: python3 -m pip install "websockets>=13"
       - run: python3 -m unittest discover -s tests
         working-directory: python/rutis
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
       - name: cargo test (network stack, runtimes, host)
         run: |
           cargo test -p rutis-bridge --all-features
@@ -266,7 +324,7 @@ jobs:
         run: cargo package --locked $(node scripts/train.mjs --crates | sed 's/[^ ]*/-p &/g')
       - name: npm pack
         run: |
-          for package in node/rutis node/rutis-runtime node/rutis-host; do
+          for package in node/rutis node/rutis-runtime bun/rutis-bun node/rutis-host; do
             (cd "$package" && npm pack --dry-run)
           done
       - name: Python packages

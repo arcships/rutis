@@ -51,6 +51,8 @@ default = ["node"]
 node = []
 # Local Python runtimes.
 python = []
+# Local Bun runtimes.
+bun = []
 # The WebSocket transport.
 websocket = [
     "dep:futures-util",

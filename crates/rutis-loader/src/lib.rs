@@ -36,5 +36,5 @@ pub use resolver::{Build, Builtins, Chain, Resolved, Resolver, ScopedFactory};
 #[cfg(feature = "node")]
 pub use runtime::resolve_entry;
 #[cfg(feature = "runtimes")]
-pub use runtime::{RuntimeResolver, RuntimeRows, RuntimeRowsPlugin};
+pub use runtime::{is_runtime_name, RuntimeResolver, RuntimeRows, RuntimeRowsPlugin};
 pub use volatile::{volatile_key, volatile_paths, VolatileUpdate};

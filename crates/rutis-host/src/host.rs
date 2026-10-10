@@ -17,7 +17,9 @@ use rutis_loader::{
     PeerResolver, RuntimeResolver, RuntimeRowsPlugin, ServiceCatalog,
 };
 
-use crate::config::{token, venv_python, HostConfig, NodeRuntime, PythonRuntime, DEFAULT_PYTHON};
+use crate::config::{
+    token, venv_python, BunRuntime, HostConfig, NodeRuntime, PythonRuntime, DEFAULT_PYTHON,
+};
 
 pub struct Host {
     /// The host runs while this lives.
@@ -33,6 +35,7 @@ pub type Error = String;
 impl Host {
     /// Start everything `config` names; the rows are not loaded yet.
     pub async fn start(config: &HostConfig) -> Result<Self, Error> {
+        config.check_runtime_names()?;
         let root = Ctx::root().map_err(|error| error.to_string())?;
         let mut catalog = ServiceCatalog::new();
         catalog.share_by_name();
@@ -60,6 +63,15 @@ impl Host {
             root.plugin(runtime);
             chain = chain.with_shared(rows.clone());
             runtimes.push(("py".to_owned(), handle));
+            resolvers.push(rows);
+        }
+        if let Some(bun) = &config.runtimes.bun {
+            let runtime = bun_runtime(bun)?;
+            let handle = runtime.handle();
+            let rows = Arc::new(RuntimeResolver::modules(handle.clone()).with_catalog(&catalog));
+            root.plugin(runtime);
+            chain = chain.with_shared(rows.clone());
+            runtimes.push(("bun".to_owned(), handle));
             resolvers.push(rows);
         }
         if let Some(node) = &config.runtimes.node {
@@ -230,6 +242,37 @@ fn node_runtime(node: &NodeRuntime) -> Result<LocalRuntime, Error> {
     Ok(LocalRuntime::node(package, anchor))
 }
 
+/// The Bun runtime of `bun.project`, with the `@arcships/rutis-bun` package
+/// installed there (or given), run by a Bun that answers.
+fn bun_runtime(bun: &BunRuntime) -> Result<LocalRuntime, Error> {
+    let candidates = [
+        bun.runtime.clone(),
+        Some(bun.project.join("node_modules/@arcships/rutis-bun")),
+    ];
+    let package = candidates
+        .into_iter()
+        .flatten()
+        .find(|package| package.join("package.json").exists())
+        .ok_or_else(|| {
+            format!(
+                "the Bun runtime is not installed in {}: run `bun add -d @arcships/rutis-bun` there",
+                bun.project.display()
+            )
+        })?;
+    let program = bun.program.clone().unwrap_or_else(|| PathBuf::from("bun"));
+    let answers = std::process::Command::new(&program)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !answers {
+        return Err(format!(
+            "the Bun runtime needs Bun: {} does not run (install it from https://bun.com, or set `program`)",
+            program.display()
+        ));
+    }
+    Ok(LocalRuntime::bun(package, &bun.project).interpreter(program))
+}
+
 /// The Python runtime of `py.project`, with an interpreter that has the
 /// `rutis` package.
 fn python(py: &PythonRuntime) -> Result<LocalRuntime, Error> {
@@ -266,7 +309,7 @@ fn python(py: &PythonRuntime) -> Result<LocalRuntime, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{NodeRuntime, PythonRuntime, Runtimes};
+    use crate::config::{BunRuntime, NodeRuntime, PythonRuntime, RemoteRuntime, Runtimes};
     use rutis_bridge::session::{settle, Value};
     use serde_json::json;
     use std::time::Duration;
@@ -377,6 +420,68 @@ mod tests {
         std::fs::write(dir.path().join("greeter.py"), python_plugin("Welcome")).unwrap();
         host.loader.reload("greeter").await.unwrap();
         assert_eq!(greeting(&host).await, "Welcome, Ada");
+    }
+
+    /// Bun on Windows is not tested yet.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reloaded_bun_row_runs_the_edited_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let bun_plugin = |word: &str| {
+            format!(
+                "export const provides = {{ greeter: {{ hello: 'sync' }} }}\n\
+                 export function apply(ctx) {{ ctx.provide('greeter', {{ hello: name => '{word}, ' + name }}) }}\n"
+            )
+        };
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("greeter.ts"), bun_plugin("Hello")).unwrap();
+        let config = HostConfig {
+            id: "test".into(),
+            runtimes: Runtimes {
+                bun: Some(BunRuntime {
+                    project: dir.path().to_owned(),
+                    runtime: Some(repo().join("bun/rutis-bun")),
+                    program: None,
+                }),
+                ..Runtimes::default()
+            },
+            listen: Vec::new(),
+            rows: vec![json!({ "id": "greeter", "name": "bun:./greeter.ts" })],
+        };
+        let host = Host::start(&config).await.unwrap();
+        host.runtimes_ready().await.unwrap();
+        host.load(config.rows()).await.unwrap();
+        assert_eq!(greeting(&host).await, "Hello, Ada");
+        std::fs::write(dir.path().join("greeter.ts"), bun_plugin("Welcome")).unwrap();
+        host.loader.reload("greeter").await.unwrap();
+        assert_eq!(greeting(&host).await, "Welcome, Ada");
+    }
+
+    /// A runtime's name is its rows' prefix, so it names one runtime.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn runtime_names_are_unique() {
+        let config = |remote: &str| HostConfig {
+            id: "test".into(),
+            runtimes: Runtimes {
+                bun: Some(BunRuntime {
+                    project: PathBuf::from("."),
+                    runtime: None,
+                    program: None,
+                }),
+                remote: vec![RemoteRuntime {
+                    name: remote.into(),
+                    language: "python".into(),
+                }],
+                ..Runtimes::default()
+            },
+            listen: Vec::new(),
+            rows: Vec::new(),
+        };
+        for taken in ["bun", "file", "g", "GPU"] {
+            let error = Host::start(&config(taken)).await.err().expect(taken);
+            assert!(error.contains("remote runtime"), "{taken}: {error}");
+        }
+        assert!(config("gpu").check_runtime_names().is_ok());
     }
 
     /// A runtime on another machine (here, a process listening on loopback):

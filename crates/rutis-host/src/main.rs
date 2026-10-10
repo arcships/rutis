@@ -4,7 +4,7 @@
 //! rutis-host run [rutis.json]      run what the file names
 //! rutis-host dev                   run the plugin project here, reloading it as it changes
 //! rutis-host check [rutis.json]    describe every row, and fail on what cannot run
-//! rutis-host new <name> --lang node|python
+//! rutis-host new <name> --lang node|bun|python
 //! ```
 
 mod config;
@@ -25,7 +25,8 @@ usage:
                                             reloading it as its files change
   rutis-host check [rutis.json]             describe every row; fail on what cannot run
                                             (in a plugin project without rutis.json: the project)
-  rutis-host new <name> --lang node|python  create a plugin project
+  rutis-host new <name> --lang node|bun|python
+                                            create a plugin project
   rutis-host --version
 
 Credentials for links come from RUTIS_TOKEN (or RUTIS_TOKEN_<PEER>), RUTIS_CA,
@@ -66,13 +67,14 @@ fn new_project(args: &[String]) -> Result<(), String> {
             other => return Err(format!("unexpected argument {other}")),
         }
     }
-    let name = name.ok_or("usage: rutis-host new <name> --lang node|python")?;
-    let lang = lang.ok_or("which language? --lang node or --lang python")?;
+    let name = name.ok_or("usage: rutis-host new <name> --lang node|bun|python")?;
+    let lang = lang.ok_or("which language? --lang node, --lang bun or --lang python")?;
     new::create(std::path::Path::new("."), &name, &lang)?;
     let next = match lang.as_str() {
         "python" | "py" => {
             "uv sync && uv run python -m unittest discover -s tests && uv run rutis-host dev"
         }
+        "bun" => "bun install && bun test && bunx --bun rutis-host dev",
         _ => "npm install && npm test && npx rutis-host dev",
     };
     println!("created {name}/\nnext: cd {name} && {next}");
@@ -154,6 +156,14 @@ async fn check(args: &[String]) -> Result<(), String> {
     let host = host::Host::start(&config).await?;
     host.runtimes_ready().await?;
     println!("plugin API: {PLUGIN_API} (supported by this host)");
+    // Each local runtime: what implements it and what it runs on.
+    for (name, runtime) in &host.runtimes {
+        if let Some(process) = runtime.ready().await {
+            if let Some(line) = runtime_line(name, process.about()) {
+                println!("{line}");
+            }
+        }
+    }
     let mut failed = 0;
     for row in config.rows() {
         let id = row["id"].as_str().unwrap_or("?");
@@ -188,5 +198,49 @@ async fn check(args: &[String]) -> Result<(), String> {
     match failed {
         0 => Ok(()),
         n => Err(format!("{n} row(s) cannot run")),
+    }
+}
+
+/// `check`'s line for the runtime `name`: what implements it and what it
+/// runs on, as it said when mounted (`Process::about`); none when it said
+/// neither.
+fn runtime_line(name: &str, about: &serde_json::Value) -> Option<String> {
+    let said = |field: &str| {
+        let part = &about[field];
+        part["name"]
+            .as_str()
+            .map(|name| match part["version"].as_str() {
+                Some(version) => format!("{name} {version}"),
+                None => name.to_owned(),
+            })
+    };
+    let described: Vec<String> = ["implementation", "engine"]
+        .iter()
+        .filter_map(|field| said(field))
+        .collect();
+    (!described.is_empty()).then(|| format!("runtime {name}: {}", described.join(", ")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_line;
+    use serde_json::json;
+
+    #[test]
+    fn check_says_what_runs_each_runtime() {
+        let about = json!({
+            "implementation": { "name": "@arcships/rutis-bun", "version": "0.8.0" },
+            "engine": { "name": "bun", "version": "1.4.3" },
+        });
+        assert_eq!(
+            runtime_line("bun", &about).as_deref(),
+            Some("runtime bun: @arcships/rutis-bun 0.8.0, bun 1.4.3")
+        );
+        let partial = json!({ "implementation": { "name": "rutis" } });
+        assert_eq!(
+            runtime_line("py", &partial).as_deref(),
+            Some("runtime py: rutis")
+        );
+        assert_eq!(runtime_line("node", &serde_json::Value::Null), None);
     }
 }
