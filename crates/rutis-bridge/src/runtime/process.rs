@@ -115,8 +115,8 @@ pub struct Mount<'a> {
 /// when it takes an inherited socket ([`Launcher::inherit_fd`]), otherwise
 /// a socket path to dial.
 ///
-/// Build one with [`Launcher::new`] (or [`Launcher::node`],
-/// [`Launcher::python`]) and its builders.
+/// Build one with [`Launcher::new`] (or `Launcher::node` with the `node`
+/// feature, `Launcher::python` with `python`) and its builders.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Launcher {
