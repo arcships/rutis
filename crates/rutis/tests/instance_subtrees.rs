@@ -1,4 +1,6 @@
-use std::future::{Future, IntoFuture};
+mod common;
+
+use std::future::IntoFuture;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -9,18 +11,9 @@ use rutis::{
 };
 use tokio::sync::{oneshot, Semaphore};
 
-struct Capture(Arc<Mutex<Option<Ctx>>>);
+use common::still_pending;
 
-/// Whether `f` is still unfinished after every other task has run as far
-/// as it can. Only for tests on the paused clock (`start_paused`): the
-/// runtime moves that clock forward only once every task is waiting, so
-/// the timeout fires only after `f` had every chance to finish. Unlike a
-/// short real-time wait, this does not get weaker on a faster machine.
-async fn still_pending<F: Future + Unpin>(f: &mut F) -> bool {
-    tokio::time::timeout(Duration::from_secs(3600), f)
-        .await
-        .is_err()
-}
+struct Capture(Arc<Mutex<Option<Ctx>>>);
 
 struct PanicMetadata;
 impl Plugin for PanicMetadata {
