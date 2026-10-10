@@ -32,6 +32,9 @@ const versions = {
   'pypi rutis': pyproject('python/rutis/pyproject.toml'),
   // What the Python runtime says it is when it greets.
   'pypi rutis (implementation)': read('python/rutis/rutis/peer.py').match(/^IMPLEMENTATION = \{"name": "rutis", "version": "([^"]+)"\}/m)?.[1],
+  // The Go SDK (module go/rutis, released by the tag go/rutis/v<version>):
+  // what its runtime and manifests say it is.
+  'go github.com/arcships/rutis/go/rutis': read('go/rutis/version.go').match(/^const Version = "([^"]+)"/m)?.[1],
 }
 const host = json('node/rutis-host/package.json')
 const references = {
