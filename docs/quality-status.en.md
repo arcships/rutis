@@ -360,7 +360,7 @@ Each scenario first says what it is, which parts it goes through and under what 
 
 | # | What can go wrong | Dimension | Impact | Likelihood | Pri | Control | Stage | Current |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| G1 | Implementations of the same service in different languages return differently shaped data (field names, optional fields, error types); consumers break after the switch | Correctness | High | High | P0 | Service contract test tool (new): a plugin author writes a service's calls and expectations once; the SDK test tool and the real host can run them against an implementation in any language. Design philosophy §8 lists "evolution of contracts" as an open question | Design, PR | No |
+| G1 | Implementations of the same service in different languages return differently shaped data (field names, optional fields, error types); consumers break after the switch | Correctness | High | High | P0 | Service contract test tool (#211): a plugin author writes a service's calls and expectations once; the SDK test tool and the real host can run them against an implementation in any language. Design philosophy §8 lists "evolution of contracts" as an open question | Design, PR | No |
 | G2 | Calls hang during the switch | Faults | Medium | Medium | P1 | E (S4: continuous calls during the switch, each succeeds or fails explicitly) | PR | No |
 | G3 | The old implementation leaves residue after the switch (processes, links) | Residue | Medium | Medium | P1 | E + R | PR | No |
 | G4 | Consumers do not restart and keep the old implementation | Correctness | High | Low | P1 | K (core eviction) | PR | Yes |
@@ -601,11 +601,11 @@ Ordered by risk level, P0 first; within a level, infrastructure others depend on
 | --- | --- | --- |
 | Fix the four known bugs with regression tests | P2, B2, C11, P11 | #173, #174, #184, #197 |
 | Determinism rules; nextest; seeds in `interleave.rs` | K10, P11 | #182 |
-| CI changes §8.6 steps 1–2: cancel superseded runs, select by change, aggregate check, merge macOS jobs, remove duplicates | Feedback speed for every risk | (new) ci: selection by change and cancelling superseded runs |
-| ST (fmt, clippy, deny, MSRV); minimum version matrix | All; MX | (new) ci: static checks and version matrix |
+| CI changes §8.6 steps 1–2: cancel superseded runs, select by change, aggregate check, merge macOS jobs, remove duplicates | Feedback speed for every risk | #203 |
+| ST (fmt, clippy, deny, MSRV); minimum version matrix | All; MX | #204 |
 | E2E harness + residue checks + S2 | A3–A5, A8, B2, B3, B10 | #175, #186 |
 | S9 installation smoke test | B1; acceptance of #195, #196 | #193 |
-| Unit tests for rutis-host configuration and assembly; snapshots of common errors | B5, B6, A6, A7 | (new) test(host): configuration, assembly and error output |
+| Unit tests for rutis-host configuration and assembly; snapshots of common errors | B5, B6, A6, A7 | #205 |
 
 ### 9.2 Step two (0.10): P0s across processes and platforms
 
@@ -615,23 +615,23 @@ Ordered by risk level, P0 first; within a level, infrastructure others depend on
 | `fault` wired into sessions and links; negative TLS; missing protocol cases; SDK parity | C4, E1, E6, E8, E9, P3, P6, P8, F3 | #178 |
 | Windows columns; missing cells | C10 | #176 |
 | Cross-language value round-trip property tests | P7, C5, P4 | part of #178 |
-| Test tools vs real runtimes | A1 | (new) test(sdk): test tool and runtime agreement |
-| Persisted samples | J3 | (new) test: persisted formats readable by later versions |
+| Test tools vs real runtimes | A1 | #206 |
+| Persisted samples | J3 | #207 |
 | Core guarantees completed | K3–K8 | #177 |
 | Guarantee register | All | #181 |
-| TLA+ Spec 1 | P10, C6 | (new) spec: cross-runtime synchronous calls and the deadlock policy |
+| TLA+ Spec 1 | P10, C6 | #208 |
 
 ### 9.3 Step three (0.11): long runs, fuzzing, concurrency models, undecided designs
 
 | Item | Risks covered | Issue |
 | --- | --- | --- |
-| CI changes §8.6 steps 3–4: split dylib jobs on Linux; CI measurement | Critical path; Q12.9 | part of the CI issue |
+| CI changes §8.6 steps 3–4: split dylib jobs on Linux; CI measurement | Critical path; Q12.9 | #203 |
 | Three FZ targets; three SH models | P2, E7, K2 | #179 |
 | Host-level soak (S8); S6, S7 | L1, L3, D3, F8, D5 | #192, #190, #191 |
-| Previous release's runtime vs current host | J2, E13 | (new) test: version combinations across releases |
+| Previous release's runtime vs current host | J2, E13 | #209 |
 | Nightly baseline with the latest Cordis plugins | F4 | part of #190 |
-| TLA+ Spec 2 | E4, E5 | (new) spec: remote leases, reconnection and registration revocation |
-| Service contract test tool (design first) | G1 | (new) design: service contracts and agreement across implementations |
+| TLA+ Spec 2 | E4, E5 | #210 |
+| Service contract test tool (design first) | G1 | #211 |
 | Bun columns | Bun variant of C10 | #194 (after Spec 1) |
 
 ### 9.4 Waiting for design
