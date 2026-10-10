@@ -428,7 +428,7 @@ G1、G2 由 #227 实现。与本文的出入：
 | 项 | 本文 | 实现 |
 | --- | --- | --- |
 | `async` 方法的回复 | 回复异步结果引用 | 方法返回时直接回复结果；`cancel` 帧取消方法的 ctx（Rust 侧对 async 方法的回复按值或 future 都能 settle） |
-| 清单 | §3.2 的字段 | 另有 `runtime: "rutis-go-runtime:1"`（SDK 标记，保证它在二进制里） |
+| 清单 | §3.2 的字段 | 另有 `runtime: "rutis-go-runtime:1"`（SDK 标记，保证它在二进制里）和 `platform`（`GOOS/GOARCH`，`check` 打印） |
 | `ServeArgs` | `ServeArgs(args []string) error` | `ServeArgs(args []string, defs ...*Definition) error`；另有 `ServeConn(net.Conn, defs...)`、`Manifest(defs...)` |
 | `*rutis.Service` | `Call`、`Methods` | 另有 `Local()`：服务是否由同进程的插件提供 |
 | 测试工具 | `rutistest.Load` | `Load(t, plugin, config, services) *Loaded`；`Service(name)` 的 `Call` / `Bind`；插件在真正的运行时里、经内存会话运行 |
@@ -441,6 +441,8 @@ G1、G2 由 #227 实现。与本文的出入：
 | macOS 隔离属性 | 复用 dylib 的检查 | `rutis-host check` 用 `xattr` 检查并提示 |
 | 清单执行超时 | 5 秒 | 30 秒：macOS 上新二进制第一次运行要等系统评估，几个同时启动时超过 5 秒 |
 | 同一运行时的启动、重启、停止 | — | 同一时刻只有一个在进行（运行时标记为忙）；新进程在旧进程释放后才启动 |
+| `rows.load` 的 `inject` | 签名里有 | 忽略，与 Python 相同：行配置的 `inject` 是 Cordis 行在 Cordis 里等待用的，叶子运行时的门控由 rutis 按插件声明的 inject 做 |
+| `check` | 打印实现与引擎 | 不打印：`implementation` / `engine` 在 mount 回复里，`check` 不启动 Go 运行时；随 Bun B1 统一 |
 | 未做 | | Python `mount` 回复的 `implementation` / `engine` 与 `check` 打印它们（随 Bun B1）；G3 |
 
 ---
