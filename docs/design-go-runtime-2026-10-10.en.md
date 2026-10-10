@@ -3,7 +3,7 @@
 [中文](design-go-runtime-2026-10-10.md)
 
 Status: design draft, not implemented. Date: 2026-10-10.
-Based on [Multilingual Plugins: One Runtime Plugin per Language](design-multilang-runtimes-2026-10-03.en.md) ("the overall design"; this document is its §11 M4, and revises one point it makes about Go, see §3.4), [M1](design-multilang-m1-2026-10-04.en.md), [M2: the Python runtime](design-multilang-m2-2026-10-04.en.md), [instance services](design-instance-services-2026-10-08.en.md), the [plugin API](guide/plugin-api.en.md) and [the Bun runtime](design-bun-runtime-2026-10-09.en.md) (#198; this document follows it on channels, the `mount` reply, remote listening, name conflicts and tests).
+Based on [Multilingual Plugins: One Runtime Plugin per Language](design-multilang-runtimes-2026-10-03.en.md) ("the overall design"; this document is its §11 M4, and revises two points it makes about Go, see §3.4), [M1](design-multilang-m1-2026-10-04.en.md), [M2: the Python runtime](design-multilang-m2-2026-10-04.en.md), [instance services](design-instance-services-2026-10-08.en.md), the [plugin API](guide/plugin-api.en.md) and [the Bun runtime](design-bun-runtime-2026-10-09.en.md) (#198; this document follows it on channels, the `mount` reply, remote listening, name conflicts and tests).
 Baseline: `main` `fafc595`.
 
 ## 1. The problem
@@ -23,12 +23,12 @@ Out of scope: a full Cordis in Go (Go plugins are leaves, as Python's are); Go's
 
 ## 2. Conclusions first
 
-1. **One runtime per binary; the host runs several.** A binary holds one or more plugins (usually one author's or one project's set), as decided by its `main.go` calling `rutis.Serve(...)`. The host configuration lists binaries (or a directory); each binary is a runtime process of its own, named after the binary (`go-weather`).
-2. **Rows name only the plugin: `go:<plugin name>`.** A `GoResolver` manages all Go binaries and finds the one containing the plugin. When two binaries have a plugin of the same name it reports the ambiguity, and `go:<binary name>/<plugin name>` picks one.
-3. **A binary says what it contains without being started.** `<binary> --rutis-manifest` prints a manifest (plugin names, `inject`, `provides`, configuration schemas, versions, SDK and plugin API versions) and exits. Rows resolve from the manifest, so they have their complete declarations before the runtime starts; manifests are cached by the binary's size and modification time.
+1. **One runtime per binary; the host runs several.** A binary holds one or more plugins (usually one author's or one project's set), as decided by its `main.go` calling `rutis.Serve(...)`. The host configuration lists binaries (or a directory); each binary is a runtime process of its own, named after the binary's file name (`go-weather`); that name is the only one users see, in row names, commands and diagnostics (§8.2).
+2. **Rows name only the plugin: `go:<plugin name>`.** A `GoResolver` manages all Go binaries and finds the one containing the plugin. When two binaries have a plugin of the same name it reports the ambiguity, and `<runtime name>:<plugin name>` (`go-netkit:ping`) picks one, the same form Python and remote runtimes' rows use.
+3. **A binary says what it contains without being started.** `<binary> --rutis-manifest` prints a manifest (plugin names, `inject`, `provides`, configuration schemas, versions, SDK and plugin API versions) and exits. Rows resolve from the manifest, so they have their complete declarations before the runtime starts; manifests are cached by file state. A running process goes by the manifest it started with; a replaced file takes effect on restart (§8.2).
 4. **Started when used, stopped when not.** A binary's runtime starts when a row resolves to one of its plugins; once all its rows are unloaded and no loader entry refers to it any more, it stops after an idle period. List ten binaries and use two, and there are two processes.
 5. **Plugins in the same binary call each other without IPC**; between binaries, and between Go and other languages, calls go through rutis by name, the same path as across languages.
-6. **The Go runtime is reentrant, without effort.** Every incoming call runs on its own goroutine, and a synchronous call blocks only the goroutine that made it. So synchronous calls between Go runtimes, and between Go and Node or Python, cannot deadlock. This answers the overall design's §9: the leaf runtimes (Python, Go) are reentrant, only the Cordis runtime is not.
+6. **The Go runtime is reentrant, without effort.** Every incoming call runs on its own goroutine, and a synchronous call blocks only the goroutine that made it. So synchronous calls between Go runtimes, and between Go and Node or Python, cannot deadlock. That is the question the overall design's §9 asks every new language; Go's answer is yes (§6.5).
 7. **The call chain and cancellation travel in `context.Context`.** Go has no goroutine-local state; a service method may take a `context.Context` first, the SDK puts the chain and cancellation in it, and a plugin passes it on when it calls other services.
 8. **Plugins are leaves, written as in the other languages**: `Inject`, `Provides`, `Config`, `Apply(ctx, config)`; `ctx.Use`, `ctx.Provide`, `ctx.Effect`. The plugin API version stays 1. Configuration is a Go struct whose JSON Schema the SDK derives from the type. Service methods are `async` by default; `rutis.Sync(...)` marks synchronous ones. Services are used through a struct of function fields.
 9. **New code = replace one binary + restart its runtime**, leaving other Go runtimes alone. `rutis-host dev` rebuilds and restarts the project's own binary for the developer. The host does not compile other people's plugins.
@@ -86,7 +86,7 @@ So a plugin author distributes two things: a Go package (exporting `Plugin`, for
 The overall design's §2.7 says "a group of plugins is compiled into one executable launched as one runtime process", and its §8 that "the process count equals the runtime instances used: one per language by default, one per group for Go". This document keeps "the binary is the runtime" and revises two points:
 
 - for Go, the "group" is decided by **the binary's author or composer**, not by the host; running several Go runtimes at once is the normal case, not "more only when isolation is needed";
-- Go row names do not carry a runtime name (`go:<plugin name>`); `GoResolver` routes them to a runtime through the manifests.
+- Go row names usually do not carry a runtime name (`go:<plugin name>`); `GoResolver` routes them to a runtime through the manifests, and `<runtime name>:<plugin name>` is written only to pick one.
 
 ## 4. Writing Go plugins
 
@@ -201,7 +201,7 @@ type LLM struct {
 
 - field names map to method names by the rule in §5.2 (`Ask` → `ask`); a `rutis:"…"` tag overrides it;
 - a function may take a `context.Context` first (recommended everywhere); its last result must be `error`, with at most one result before it;
-- `Use` checks the struct against the service's declared methods: a field naming a method the service does not have fails `Use`, not the first call;
+- the struct may list only the methods it uses, not all of the service's; but every field must correspond to a method the service declares, and one that does not fails `Use`, not the first call;
 - when the provider is **in the same process**, the fields call the provider object's methods directly: no rutis, no copying. When the signatures do not match exactly (say, a parameter is a struct of the same shape from another package), the arguments are converted once in-process by the rules of §5.1, still without IPC;
 - without a struct, use `*rutis.Service`: `svc.Call(ctx, "ask", &answer, "weather in Oslo")`.
 
@@ -244,7 +244,7 @@ Received values decode into the target type: where a parameter, result or struct
 
 ### 5.2 Method names and shapes
 
-A service's methods are the **exported methods** of the type in `Provides`, named on the wire by a rule: the first letter lowercased, and a leading run of capitals (an acronym) lowercased as a whole (`Today` → `today`, `URLFor` → `urlFor`, `ID` → `id`). `rutis.Rename("Today", "today_v2")` overrides it. Two methods mapping to the same name make `Define` fail.
+A service's methods are the **exported methods** of the type in `Provides`, named on the wire by a rule: the first letter lowercased; a leading run of capitals (an acronym) lowercased as a whole, except that when a lowercase letter follows the run, its last capital starts the next word and stays (`Today` → `today`, `ID` → `id`, `URLFor` → `urlFor`, `HTTPServer` → `httpServer`, `GetURL` → `getURL`). `rutis.Rename("Today", "today_v2")` overrides it. Two methods mapping to the same name make `Define` fail.
 
 Method signatures:
 
@@ -304,13 +304,13 @@ Go has no event loop and never produces `SyncWaitCycle` itself. Received from el
 
 ### 6.5 The overall design's §9
 
-The overall design asks, before a new language joins: is its runtime reentrant? For Go the answer is yes, with nothing special to do. So the direction is settled: **every leaf runtime is reentrant; only the Cordis runtime is not.** The one remaining risk is crossing synchronous calls between two Cordis runtimes, which does not involve Go. Whether Rust should detect synchronous calls between two non-reentrant runtimes stays in the overall design's §9; this document does not decide it.
+The overall design asks, before a new language joins: is its runtime reentrant? For Go the answer is yes, with nothing special to do. So far every leaf runtime integrated or designed (Python, the Bun design's §3.4, Go) is reentrant, so this document **proposes** the rule "every leaf runtime is reentrant; only the Cordis runtime is not". Swift (M3) has not answered yet, and its design confirms or overturns the proposal, which is recorded in the overall design's §9. The remaining risk is crossing synchronous calls between two Cordis runtimes, which does not involve Go. Whether Rust should detect synchronous calls between two non-reentrant runtimes stays in the overall design's §9; this document does not decide it.
 
 ## 7. The runtime process
 
 ### 7.1 Starting
 
-`<binary> <channel> <project>`, as `python -m rutis` (`<binary> --rutis-manifest` only prints the manifest, see §8.1):
+`<binary> <channel> [--id <endpoint>] [--peer <endpoint>] <project>`, as `python -m rutis`; `--id` and `--peer` are for network channels only (§7.5). `<binary> --rutis-manifest` only prints the manifest (§8.1):
 
 | channel | used for | in Go |
 | --- | --- | --- |
@@ -332,14 +332,14 @@ The one the Python runtime implements now (`runner.py`), declaring the features 
 
 | Control operation | What the Go runtime does |
 | --- | --- |
-| `mount` | replies `{ services: {}, features, implementation: { name: "rutis-go", version }, engine: { name: "go", version: runtime.Version() } }`. The last two fields are as in the Bun runtime; `rutis-host check` prints them |
+| `mount` | replies `{ services: {}, features, implementation: { name, version }, engine: { name: "go", version: runtime.Version() } }`. `implementation` and `engine` are the fields Bun B1 (#200) adds to the `mount` reply, which Rust reads as loose JSON; they land with Bun B1. The Python runtime does not reply with them now and adds them at the same time (`engine` being `python` and `platform.python_version()`). The implementation name is **the name of the package the runtime is published as**: Python `rutis` (PyPI, the same as `IMPLEMENTATION` in its endpoint handshake), Bun `@arcships/rutis-bun` (npm, as #200 has it), Go `github.com/arcships/rutis/go/rutis` (the module path). `rutis-host check` prints them in one format for all three |
 | `rows.schema(entry)` | looks `entry` up in the plugin table: `{ config, inject, provides, version }`. When it is not there, an error listing the plugins there are |
 | `rows.load(key, entry, config, isolate, inject, exports)` | creates the row and its export slots, decodes the configuration, runs `Apply`. On failure, unloads the row and reports the error |
 | `rows.update(key, config)` | unloads and loads again with the new configuration (leaf plugins have no volatile fields) |
 | `rows.unload(key)` | first withdraws what the row provided (rutis hears the withdrawals first), then cancels the row's ctx, then runs the cleanups in reverse order of registration |
 | `hosts.provide(name, methods, label)` / `hosts.withdraw(id)` | registers / withdraws a proxy for a rutis service, labelled by the `scopes` rules |
 | `release` / `get` | releases an exported service object; reads a property (an exported field in Go) |
-| `dispose` | unloads every row and waits for calls in progress |
+| `dispose` | unloads every row and waits for calls in progress. No limit, as in Python: how long to wait is rutis's decision (`dispose_with_timeout`, process management); see §7.4 |
 
 `isolate`, instance labels, service ids (the name, a NUL and the label) and export handles follow the Python runtime; there is no second set of rules.
 
@@ -355,7 +355,8 @@ Goroutines a plugin started that ignore `ctx.Done()` keep running after unload. 
 
 - panics in incoming calls, `Apply` and cleanups are recovered and become errors;
 - an unrecovered panic in a goroutine the plugin started exits the whole process (Go's rule; the SDK cannot change it; also the requirements document's §5 rule 8): all rows of this runtime stop, and rutis reports how the process exited. Plugins needing isolation go into another binary. The SDK offers `ctx.Go(func(context.Context) error)`: it runs the function on a goroutine, recovers a panic and writes it to stderr, and at unload cancels its ctx and waits for it to return;
-- when the session ends (rutis closes the channel or exits), the runtime unloads every row (giving each cleanup at most 5 seconds) and then calls `os.Exit(0)`, so stray goroutines cannot keep the process alive while rutis waits for it to exit.
+- how long cleanups may take: `rows.unload` and `dispose` are operations rutis sends and waits on, so the runtime sets no limit, as Python does, and rutis decides how long to wait;
+- once the session has ended (rutis closed the channel or exited), nobody waits for a reply: the runtime unloads every row with **5 seconds in total** for all cleanups; after that it abandons the cleanups not yet done, logs which rows they belonged to on stderr, and calls `os.Exit(0)`, so stray goroutines cannot keep the process alive. The guide says so: cleanups may be cut short when a session ends, so nothing that must happen should rely on cleanup alone.
 
 ### 7.5 Remote (G2)
 
@@ -389,21 +390,24 @@ Since the SDK depends on no third-party module, its WebSocket server is written 
 ```
 
 - each plugin's entry is exactly the reply to `rows.schema` (§7.2), produced by the same code, so the manifest and the running process always agree;
-- reading the manifest executes the binary: Go packages' `init` functions run, the same trust as starting it as a runtime. The host does this only for binaries its configuration lists;
+- reading the manifest executes the binary: Go packages' `init` functions run, the same trust as starting it as a runtime. The host does this only for the sources its configuration gives: files listed in `binaries`, and the `dir` directory. **The `dir` directory as a whole is trusted** and should be one dedicated to Go plugins; scanning it executes only files containing the SDK's marker string (§8.2);
 - execution has a timeout (5 seconds). A binary for another platform fails here, with an error saying it was "not built for <os>/<arch>";
 - a `pluginApi` above what the host supports fails every plugin of the binary, with an error saying what to upgrade;
-- manifests are cached by (path, file size, modification time); while none of them changes, the binary is not executed again.
+- `sdk` is the SDK's version constant `rutis.Version` (§11); a plugin's `version` comes from `debug.ReadBuildInfo()`: its version in `Deps` when the plugin's module is a dependency, `Main.Version` when it is the main module (derived from VCS tags or a pseudo-version since Go 1.24); when a local build gives `(devel)`, `vcs.revision` is reported instead (with `+dirty` for uncommitted changes), and `null` when there is neither;
+- manifests are cached by (path, file size, modification time, plus ctime on Unix); while none of them changes, the binary is not executed again. A file replaced in place keeping size and modification time (`rsync -t`, unpacking, CI caches) still changes ctime on Unix; Windows has no ctime to use, so **starting a runtime, `GoRuntimes::restart` and `rutis-host check` always bypass the cache and read the manifest again**; the cache serves ordinary resolution only.
 
 ### 8.2 `GoResolver`
 
 In rutis-loader (feature `go`), implementing `Resolver`, managing all local Go binaries:
 
-- **Sources**: files and directories. Every executable file in a directory counts (except names starting with `.`). A plugin name it does not know makes it scan its directories again, once, so a binary dropped into the directory is usable at the next reconcile;
-- **Runtime names** come from file names: the extension removed (`.exe` on Windows), lowercased, characters outside `[a-z0-9-]` replaced by `-`, prefixed with `go-` (`netkit` → `go-netkit`). The name keys `Runtime#…` and `RuntimeRows#…` and is the session's endpoint id. A runtime name may not repeat another runtime's (`node`, `py`, `bun`, remote runtimes), the rule of the Bun design's §5.1. Two files listed in `binaries` giving the same name, or a name another runtime has, is a configuration error; a file found by scanning a directory that conflicts this way is skipped and reported in the diagnostics;
-- **Resolving `go:<plugin name>`** looks the plugin up in every manifest. Not found: `NotFound` (the `Chain` asks the next resolver). Found in two or more binaries: an ambiguity error listing the binaries and suggesting `go:<binary name>/<plugin name>`;
+- **Sources**: files and directories. A plugin name it does not know makes it scan its directories again, once, so a binary dropped into the directory is usable at the next reconcile;
+- **Which files in a directory count**: executable, not starting with `.`, and containing the SDK's marker string (a referenced constant in the SDK, such as `rutis-go-runtime:1`, which linking always keeps). Only such files are executed for a manifest, so scripts and other tools in the directory are never run. A file with the marker whose manifest cannot be read (timeout, non-zero exit, output that is not a manifest, a binary for another platform) is skipped and reported in the diagnostics, not a configuration error; `rutis-host check` lists it and exits non-zero. A file **listed explicitly** in `binaries` that fails the same way does not fail the configuration either, but all its plugins fail to resolve, with the reason;
+- **Runtime names** come from file names: the extension removed (`.exe` on Windows), lowercased, characters outside `[a-z0-9-]` replaced by `-`, prefixed with `go-` (`netkit` → `go-netkit`, `net.kit_v1.exe` → `go-net-kit-v1`). The name keys `Runtime#…` and `RuntimeRows#…`, is the session's endpoint id, and is **the only name users see**: qualified row names `go-netkit:ping`, `GoRuntimes::restart("go-netkit")`, `runtimes()`, `rutis-host check` output and ambiguity messages all use it, and what a message suggests can be written back into the configuration as is. The file name itself appears only in the meta's `binary`. A runtime name may not repeat another runtime's (`node`, `py`, `bun`, remote runtimes), the rule of the Bun design's §5.1. Two files listed in `binaries` giving the same name, or a name another runtime has, is a configuration error; a file found by scanning a directory that conflicts this way is skipped and reported in the diagnostics;
+- **Resolving `go:<plugin name>`** looks the plugin up in every manifest. Not found: `NotFound` (the `Chain` asks the next resolver). Found in two or more binaries: an ambiguity error listing the runtimes and suggesting `<runtime name>:<plugin name>` (`go-netkit:ping`);
+- **Resolving `<runtime name>:<plugin name>`**: `GoResolver` claims names starting with one of its runtime names and `:`, and looks only in that binary's manifest;
 - **The resolution** is what `RuntimeResolver` produces for a leaf runtime (the row depends on `RuntimeRows#<runtime name>` and every injected name, `provides` are published at `host_key`, instance and `isolate` rules unchanged). In code, the part of `RuntimeResolver::resolve` that builds `Resolved` from declarations moves out and both use it;
 - **meta**: `{ source: "go", binary, runtime, version, sdk }`, shown by `rutis-host check`;
-- **Caching and staleness**: resolutions are cached with the manifest, by file state. When the file changes, the next resolution gets the new manifest; the old process still running is §10's business.
+- **A file replaced while its process runs**: a runtime records the manifest it started with (its launch manifest). While the process runs, **resolution always goes by the launch manifest**, whatever the file on disk now is, so newly resolved rows and the running process always agree. After the file is replaced, plugins only the new binary has fail to resolve with an error saying "the binary of go-netkit was replaced; restart the runtime for it to take effect: `GoRuntimes::restart(\"go-netkit\")`"; `check` and `runtimes()` show "replaced, restart pending". The host does not restart a runtime because its file changed (§10). When the process is not running, resolution uses the manifest on disk.
 
 When `GoResolver` resolves a row, it tells `GoRuntimes` that the row's runtime is in use (§8.3).
 
@@ -424,9 +428,9 @@ root.plugin(GoRuntimes::new(go, project).idle(Duration::from_secs(60)));
 
 - each running Go runtime is a child `Ctx` of `GoRuntimes`, holding `LocalRuntime::go(binary, project).named(runtime name)` and its `RuntimeRowsPlugin`. Stopping a runtime disposes that child `Ctx` and touches no other runtime;
 - **Start**: when `GoResolver` resolves a row whose runtime is not running, the runtime starts. The row is waiting for `RuntimeRows#<runtime name>` meanwhile, and starts as usual once the runtime is up. Runtimes starting cold start in parallel;
-- **Stop**: when a runtime's last row unloads, wait `idle`; then, if no enabled entry in `Loader::entries()` resolves to the runtime, stop it. A row resolving to it in the meantime cancels the stop;
+- **Stop** (runtimes started on demand only): when a runtime's last row unloads, wait `idle`; then, if no enabled entry in `Loader::entries()` resolves to the runtime, stop it. A row resolving to it in the meantime cancels the stop;
 - **Crashes**: when a process exits unexpectedly, its rows stop and the runtime's state records why, as now, and **it is not restarted automatically**. Rows resolving to it later do not restart it either, until the application calls `GoRuntimes::restart(name)` or the binary file changes (a new build is worth another try);
-- **All at once**: `GoRuntimes::eager()` starts every listed binary when mounted, for deployments that do not want a first use to wait for a process start;
+- **All at once**: `GoRuntimes::eager()` starts every listed binary when mounted, for deployments that do not want a first use to wait for a process start. Runtimes started this way keep running; there is no idle stop for them, and `idle` does not apply;
 - **State**: `GoRuntimes::runtimes()` lists each binary's runtime name, state (not started / starting / running / stopped + why), plugins and versions.
 
 ### 8.4 rutis-bridge
@@ -435,9 +439,9 @@ root.plugin(GoRuntimes::new(go, project).idle(Duration::from_secs(60)));
 | --- | --- |
 | `Launcher::go(binary, project)`: the program is the binary itself, `cwd` is `project`, `inherit_fd` on Unix | `rutis-bridge/src/runtime/process.rs` |
 | `LocalRuntime::go(binary, project)`, named after the file by default (§8.2) | `rutis-bridge/src/runtime/local.rs` |
-| Cargo feature `go` (rutis-bridge, rutis-loader); `interop` includes it; CI checks a build with only `go` | both `Cargo.toml`s, `ci.yml` |
+| Cargo feature `go`, next to `node` and `python`: `go = []` in rutis-bridge, `go = ["runtimes", "rutis-bridge/go"]` in rutis-loader; rutis-host adds `go` to its dependency features on both; CI checks a build with only `go` | three `Cargo.toml`s, `ci.yml` |
 | `RowSchema` carries `version`, written into the row's meta | the Bun design's B1 needs this too; whichever lands first does it |
-| the remote node runtime's `Naming::Npm` refuses names with a known runtime prefix: `go:` joins the known prefixes | `rutis-loader/src/runtime.rs` |
+| the remote node runtime's `Naming::Npm` refuses names with a known runtime prefix: `go:` and each Go runtime name followed by `:` join the known prefixes | `rutis-loader/src/runtime.rs` |
 
 A Rust application running one fixed binary can skip `GoResolver` and use `LocalRuntime::go` with `RuntimeResolver::modules` (rows `<runtime name>:<plugin name>`), as for Python.
 
@@ -462,7 +466,7 @@ A Go runtime on another machine has no local file to read a manifest from, so it
 ```
 
 - `dir`, `binaries`: where binaries are found; at least one;
-- `start`: `on-demand` (default) or `eager`; `idle`: seconds idle before stopping;
+- `start`: `on-demand` (default) or `eager`; `idle`: seconds an on-demand runtime stays idle before stopping. `eager` runtimes are not idle-stopped, so `"start": "eager"` together with `idle` is a configuration error rather than `idle` silently ignored;
 - `remote` accepts `language: "go"`.
 
 Commands:
@@ -484,7 +488,7 @@ On macOS, binaries downloaded from the network carry the quarantine attribute, a
 | Case | How it takes effect |
 | --- | --- |
 | Development (`rutis-host dev`) | watches the project's `.go` files, `go.mod` and `go.sum`; on a change, builds the project's `cmd/<name>` to a **new file** in a cache directory (`<name>-<n>`), and once that succeeds, has `GoResolver` replace the old file with it and restarts that one runtime; the old file is deleted afterwards. A failed build prints the compiler errors and the old process keeps running. Other Go runtimes are not affected |
-| Deployment | the deployer puts the new binary in place of the old one and calls `GoRuntimes::restart(name)` (with rutis-host, restarts the host). rutis does not watch binaries |
+| Deployment | the deployer puts the new binary in place of the old one (on Unix by renaming over it: a running file cannot be overwritten in place) and calls `GoRuntimes::restart("go-netkit")` (with rutis-host, restarts the host). rutis does not watch binaries; until the restart, resolution goes by the running process's launch manifest (§8.2) |
 
 Builds go to new file names because Windows does not allow overwriting a running executable.
 
@@ -493,6 +497,7 @@ Restarting one runtime has the effect of its process exiting: its rows stop, and
 ## 11. Repository and release
 
 - The SDK lives in `go/rutis`, module path `github.com/arcships/rutis/go/rutis`, next to `python/rutis` and `node/rutis`. It follows the release train with tags like `go/rutis/v0.9.0` (Go's rule for modules in subdirectories); releasing is pushing the tag, and the Go module proxy fetches it;
+- the SDK's version is a constant, `const Version = "0.9.0"` in `go/rutis/version.go`, used by `implementation.version` and the manifest's `sdk`; `scripts/train.mjs` reads it with a regular expression as it does Python's `IMPLEMENTATION`, so the release train checks `go/rutis` too;
 - standard library only. Go versions: the two current stable releases (stated in `go.mod`);
 - packages: `rutis` (plugin API, `Serve`, manifest) and `rutis/rutistest` (testing without a host); the session layer is `internal/peer`, with no promises outside;
 - **Compatibility**: between a host and a binary there are only the wire protocol, the manifest format and the plugin API version. Within one protocol version, a binary built with any Go SDK version runs on any host version, as long as its plugin API is not above what the host supports. This matters more for Go than for Node or Python: a published binary does not upgrade along with the host;
@@ -507,7 +512,7 @@ Restarting one runtime has the effect of its process exiting: its rows stop, and
 | Runtime contract × channels | `rutis-bridge/tests/session_matrix.rs`: `Runtime` gains `Go` | the runtime conformance suite (`runtime::testing::runtime`) passes over `fd:3` and a dialed-back socket; WebSocket in G2 |
 | Plugin tests without a host | `rutistest.Load(t, weather.Plugin, config, services)` | as `rutis.testing`: only services in `Inject` are used; provided services carry their declared methods; cleanups ran when the test ends; in strict mode values are encoded and decoded per §5.1 |
 | Manifest | `go/rutis` + `rutis-loader/tests/go_rows.rs` | the manifest matches the running process's `rows.schema`; an unchanged file is not executed again; a too-new plugin API and a platform mismatch give clear errors |
-| Several binaries | `rutis-loader/tests/go_rows.rs` | two binaries: rows find their binary by plugin name; a plugin name in both is ambiguous and `go:<binary name>/<plugin name>` works; plugins in the two binaries call each other synchronously and asynchronously; one process crashing stops only its rows and their users, the other runs on |
+| Several binaries | `rutis-loader/tests/go_rows.rs` | two binaries: rows find their binary by plugin name; a plugin name in both is ambiguous and the suggested `<runtime name>:<plugin name>`, written back into the configuration, works; executables in the directory without the marker are not executed, and files whose manifest fails are skipped and reported; a file replaced while its process runs: resolution still goes by the launch manifest, a new plugin reports "restart pending", and works after `restart`; replaced in place keeping size and modification time, `restart` still reads the new manifest; plugins in the two binaries call each other synchronously and asynchronously; one process crashing stops only its rows and their users, the other runs on |
 | Start on demand | same | a binary no row uses is not started; after the last row is removed and the idle period passes, the process exits; a row added meanwhile keeps it; no automatic restart after a crash, but a changed file starts it at the next resolution |
 | Runtime conformance | `crates/rutis-loader/tests/multilang.rs`, with feature `go` | the same leaf plugins once more in Go; three languages start cold together and call each other; removing a provider stops only its users; `inject` gates |
 | Go versions of the Python runtime tests | in `rutis-bridge/tests`, a Go version of `python_runtime.rs`, and a Go column in `cancellation.rs`, `error_shape.rs`, `rpc_callbacks.rs`, `process_exit.rs`, `live_objects.rs` | features complete; cancellation reaches the method's ctx; error shapes round-trip (Go error type names, `Panic`); services withdrawn when a panic exits the process; references and release. The conformance fixtures `conformance-session`, `conformance-weather`, `conformance-greeter` get Go versions, `crash()` exiting with status 17 |
@@ -518,7 +523,7 @@ Restarting one runtime has the effect of its process exiting: its rows stop, and
 
 The Go test plugins live in `crates/rutis-loader/tests/fixtures/go` and are built into two or more binaries when the tests start.
 
-CI: a `runtimes-go` job on Linux and macOS installs the two current stable Go releases with `actions/setup-go` and runs `go test ./...`, `cargo test -p rutis-bridge --features go,…` and `cargo test -p rutis-loader --features go,…`; a single-feature build check `cargo check --no-default-features --features go`; Windows joins the existing `runtimes-windows`.
+CI: a `runtimes-go` job on Linux and macOS installs the two current stable Go releases with `actions/setup-go` and runs `go test ./...`, `cargo test -p rutis-bridge --features go,…`, `cargo test -p rutis-loader --features go,…` and `cargo test -p rutis-host`; a single-feature build check `cargo check --no-default-features --features go`; Windows joins the existing `runtimes-windows`, with `cargo test -p rutis-host` too. Once rutis-host's dependencies enable `go`, feature unification makes `cargo test --workspace` (the `test` job) and `-p rutis-host` (the `network-macos` job) run tests that build Go fixtures, so those two jobs and `runtimes-windows` need `actions/setup-go` as well.
 
 E2E: S2 ([#186](https://github.com/arcships/rutis/issues/186)) gains the `new --lang go` development loop; S3 ([#187](https://github.com/arcships/rutis/issues/187)) Go rows in cross-language composition and crash recovery; S9 ([#193](https://github.com/arcships/rutis/issues/193)) "a downloaded Go binary runs in a clean environment with no Go toolchain".
 

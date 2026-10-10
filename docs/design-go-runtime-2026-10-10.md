@@ -3,7 +3,7 @@
 [English](design-go-runtime-2026-10-10.en.md)
 
 状态：设计稿，未实现。日期：2026-10-10。
-依据：[多语言插件：每种语言一个运行时插件](design-multilang-runtimes-2026-10-03.md)（下称"总体稿"，本文是它 §十一 的 M4，并修订其中关于 Go 的一处，见 §3.4）、[M1](design-multilang-m1-2026-10-04.md)、[M2：Python 运行时](design-multilang-m2-2026-10-04.md)、[实例服务](design-instance-services-2026-10-08.md)、[插件 API](guide/plugin-api.md)、[Bun 运行时](design-bun-runtime-2026-10-09.md)（#198，本文在通道、`mount` 回复、远程监听、名字冲突和测试上与它对齐）。
+依据：[多语言插件：每种语言一个运行时插件](design-multilang-runtimes-2026-10-03.md)（下称"总体稿"，本文是它 §十一 的 M4，并修订其中关于 Go 的两点，见 §3.4）、[M1](design-multilang-m1-2026-10-04.md)、[M2：Python 运行时](design-multilang-m2-2026-10-04.md)、[实例服务](design-instance-services-2026-10-08.md)、[插件 API](guide/plugin-api.md)、[Bun 运行时](design-bun-runtime-2026-10-09.md)（#198，本文在通道、`mount` 回复、远程监听、名字冲突和测试上与它对齐）。
 基准：`main` `fafc595`。
 
 ## 一、要解决什么
@@ -23,12 +23,12 @@ Go 和 Node、Python 有两处根本不同：
 
 ## 二、结论先说
 
-1. **一个二进制一个运行时，宿主同时跑多个。** 一个二进制里可以有一个或多个插件（通常是同一个作者、同一个项目的一组插件），由它的 `main.go` 调用 `rutis.Serve(...)` 决定。宿主配置里列出若干二进制（或一个目录），每个二进制是一个独立的运行时进程，运行时名由二进制名得出（`go-weather`）。
-2. **行名只写插件名：`go:<插件名>`。** 一个 `GoResolver` 管理全部 Go 二进制，按插件名找到包含它的那个二进制；两个二进制都有同名插件时报歧义，可以写成 `go:<二进制名>/<插件名>` 指定。
-3. **二进制自己说明它有什么，不必先跑起来。** `<二进制> --rutis-manifest` 打印清单（插件名、`inject`、`provides`、配置 Schema、版本、SDK 和插件 API 版本）后退出。解析行时读清单，所以行在运行时启动前就有完整的依赖声明；清单按二进制文件的大小和修改时间缓存。
+1. **一个二进制一个运行时，宿主同时跑多个。** 一个二进制里可以有一个或多个插件（通常是同一个作者、同一个项目的一组插件），由它的 `main.go` 调用 `rutis.Serve(...)` 决定。宿主配置里列出若干二进制（或一个目录），每个二进制是一个独立的运行时进程，运行时名由二进制的文件名得出（`go-weather`），它也是用户在行名、命令和诊断里看到的唯一名字（§8.2）。
+2. **行名只写插件名：`go:<插件名>`。** 一个 `GoResolver` 管理全部 Go 二进制，按插件名找到包含它的那个二进制；两个二进制都有同名插件时报歧义，可以写成 `<运行时名>:<插件名>`（`go-netkit:ping`）指定，和 Python、远程运行时的行名是同一种写法。
+3. **二进制自己说明它有什么，不必先跑起来。** `<二进制> --rutis-manifest` 打印清单（插件名、`inject`、`provides`、配置 Schema、版本、SDK 和插件 API 版本）后退出。解析行时读清单，所以行在运行时启动前就有完整的依赖声明；清单按文件状态缓存。运行中的进程以它启动时的清单为准，文件换了要重启才生效（§8.2）。
 4. **用到才启动，不用就停。** 某个二进制的插件被一行解析到时才启动它的运行时；它的行全部卸载、而且 loader 里已经没有条目指向它时，空闲一段时间后停下。列出十个二进制、只用两个，就只有两个进程。
 5. **同一个二进制里的插件互相调用不走 IPC**；不同二进制之间、Go 和其他语言之间，经 rutis 按名字转发，和跨语言是同一条路径。
-6. **Go 运行时可重入，而且是天然的。** 每个进来的调用在自己的 goroutine 上执行，同步调用只阻塞发出它的那个 goroutine。所以多个 Go 运行时之间、Go 和 Node、Python 之间互相同步调用都不会卡死。这回答了总体稿 §九：叶子运行时（Python、Go）都可重入，只有 Cordis 运行时不可重入。
+6. **Go 运行时可重入，而且是天然的。** 每个进来的调用在自己的 goroutine 上执行，同步调用只阻塞发出它的那个 goroutine。所以多个 Go 运行时之间、Go 和 Node、Python 之间互相同步调用都不会卡死。这是总体稿 §九 要求每种新语言回答的问题；Go 的回答是可重入（§6.5）。
 7. **调用链和取消都放在 `context.Context` 里。** Go 没有 goroutine 局部变量，服务方法的第一个参数可以是 `context.Context`，SDK 把调用链和取消放进去；插件调用别的服务时把它传下去。
 8. **插件写法和其他语言一样是叶子**：`Inject`、`Provides`、`Config`、`Apply(ctx, config)`；`ctx.Use`、`ctx.Provide`、`ctx.Effect`。插件 API 版本仍是 1。配置用 Go 结构体，JSON Schema 由 SDK 从类型生成。服务方法默认 `async`，用 `rutis.Sync(...)` 标出同步方法。使用服务时用"函数字段的结构体"绑定。
 9. **换代码 = 换掉一个二进制 + 重启它这一个运行时**，其他 Go 运行时不受影响。`rutis-host dev` 替开发者重建并重启项目自己的二进制。宿主不编译别人的插件。
@@ -86,7 +86,7 @@ rutis 宿主
 总体稿 §二.7 说"一组插件编译进一个可执行文件，作为一个运行时进程拉起"，§八说"进程数等于用到的运行时实例数：一种语言默认一个，Go 是一组一个"。本文保留"二进制就是运行时"，修订两点：
 
 - Go 的"一组"由**二进制的作者或组合者**决定，不由宿主决定；宿主同时运行多个 Go 运行时是常态，不是"需要隔离时才多开"；
-- Go 的行名不带运行时名（`go:<插件名>`），由 `GoResolver` 按清单路由到具体的运行时。
+- Go 的行名通常不带运行时名（`go:<插件名>`），由 `GoResolver` 按清单路由到具体的运行时；需要指定时才写 `<运行时名>:<插件名>`。
 
 ## 四、Go 侧写法
 
@@ -200,7 +200,7 @@ type LLM struct {
 
 - 字段名按 §5.2 的规则对应到方法名（`Ask` → `ask`），`rutis:"…"` 标签可以改；
 - 函数的第一个参数可以是 `context.Context`（建议都写），最后一个返回值必须是 `error`，最多再有一个结果；
-- `Use` 时检查：服务声明的每个方法里，结构体用到的都在；结构体里有、服务没有的方法，`Use` 报错，而不是调用时才报；
+- 结构体可以只写用到的方法，不必列全服务的方法；但每个字段都必须对应服务声明的一个方法，对不上的在 `Use` 时就报错，而不是调用时才报；
 - 提供者在**同一个进程**里时，字段直接接到提供者对象的方法上，调用不经过 rutis，也不复制参数；签名不完全一致时（例如参数是不同包里同形的结构体），在进程内按 §5.1 的规则转换一次，不走 IPC；
 - 不想写结构体时用 `*rutis.Service`：`svc.Call(ctx, "ask", &answer, "weather in Oslo")`。
 
@@ -243,7 +243,7 @@ Go 和 Python、JS 不同的一点：**结构体既可以是数据也可以是�
 
 ### 5.2 方法名和方法形状
 
-服务的方法是 `Provides` 里那个类型的**导出方法**，名字按规则转成线上的名字：首字母小写，开头连续的大写缩写整体小写（`Today` → `today`，`URLFor` → `urlFor`，`ID` → `id`）。`rutis.Rename("Today", "today_v2")` 可以改。两个方法转出同一个名字时 `Define` 直接报错。
+服务的方法是 `Provides` 里那个类型的**导出方法**，名字按规则转成线上的名字：首字母小写；开头是连续的大写字母（缩写）时整体小写，但如果后面紧跟小写字母，最后一个大写字母属于下一个词，保留大写（`Today` → `today`，`ID` → `id`，`URLFor` → `urlFor`，`HTTPServer` → `httpServer`，`GetURL` → `getURL`）。`rutis.Rename("Today", "today_v2")` 可以改。两个方法转出同一个名字时 `Define` 直接报错。
 
 方法签名：
 
@@ -303,13 +303,13 @@ Go 没有事件循环，自己不会产生 `SyncWaitCycle`。从别处收到时�
 
 ### 6.5 与总体稿 §九 的关系
 
-总体稿要求接入新语言前回答"它的运行时是否可重入"。Go 的回答是可重入，而且不需要特殊处理，所以选定的方向是：**所有叶子运行时都可重入，只有 Cordis 运行时不可重入**。剩下的唯一风险仍是两个 Cordis 运行时之间的交叉同步调用，与 Go 无关。是否在 Rust 侧检测"两个不可重入运行时之间的同步调用"，留在总体稿 §九，不在本文决定。
+总体稿要求接入新语言前回答"它的运行时是否可重入"。Go 的回答是可重入，而且不需要特殊处理。到目前为止，已接入或已设计的叶子运行时（Python、Bun 设计 §3.4、Go）都可重入，所以本文**建议**把"叶子运行时都可重入、只有 Cordis 运行时不可重入"定为规则；Swift（M3）还没有回答这个问题，由它的设计确认或推翻。这个建议记在总体稿 §九。剩下的风险仍是两个 Cordis 运行时之间的交叉同步调用，与 Go 无关。是否在 Rust 侧检测"两个不可重入运行时之间的同步调用"，留在总体稿 §九，不在本文决定。
 
 ## 七、运行时进程
 
 ### 7.1 启动
 
-`<二进制> <channel> <project>`，和 `python -m rutis` 相同（`<二进制> --rutis-manifest` 只打印清单，见 §8.1）：
+`<二进制> <channel> [--id <endpoint>] [--peer <endpoint>] <project>`，和 `python -m rutis` 相同；`--id`、`--peer` 只用于网络通道（§7.5）。`<二进制> --rutis-manifest` 只打印清单（§8.1）：
 
 | channel | 用在 | Go 的实现 |
 | --- | --- | --- |
@@ -331,14 +331,14 @@ Go 没有事件循环，自己不会产生 `SyncWaitCycle`。从别处收到时�
 
 | 控制操作 | Go 运行时做的事 |
 | --- | --- |
-| `mount` | 回复 `{ services: {}, features, implementation: { name: "rutis-go", version }, engine: { name: "go", version: runtime.Version() } }`。后两个字段与 Bun 运行时相同，`rutis-host check` 打印它们 |
+| `mount` | 回复 `{ services: {}, features, implementation: { name, version }, engine: { name: "go", version: runtime.Version() } }`。`implementation`、`engine` 是 Bun B1（#200）加进 `mount` 回复的字段，Rust 侧按松散 JSON 读取，随 Bun B1 落地；Python 运行时现在不回这两个字段，在同一时间补上（`engine` 为 `python` 和 `platform.python_version()`）。实现名统一为**发布这个运行时的包名**：Python `rutis`（PyPI，与它端点握手里的 `IMPLEMENTATION` 相同）、Bun `@arcships/rutis-bun`（npm，#200 已是这样）、Go `github.com/arcships/rutis/go/rutis`（模块路径）。`rutis-host check` 对三种运行时用同一种格式打印它们 |
 | `rows.schema(entry)` | 在插件表里查 `entry`：`{ config, inject, provides, version }`。查不到时报错，列出已有的插件名 |
 | `rows.load(key, entry, config, isolate, inject, exports)` | 建行和导出槽位，解码配置，执行 `Apply`。失败时卸载这一行再报错 |
 | `rows.update(key, config)` | 卸载后用新配置装载（叶子插件没有 volatile 字段） |
 | `rows.unload(key)` | 先撤销这一行提供的服务（rutis 先听到撤销），再取消行的 ctx，再按注册的相反顺序运行清理 |
 | `hosts.provide(name, methods, label)` / `hosts.withdraw(id)` | 登记、撤销 rutis 服务的代理，按 `scopes` 规则带标签 |
 | `release` / `get` | 释放导出的服务对象；读属性（Go 里读导出字段） |
-| `dispose` | 卸载全部行，等进行中的调用结束 |
+| `dispose` | 卸载全部行，等进行中的调用结束。和 Python 一样不设上限：等多久由 rutis 一侧决定（`dispose_with_timeout`、进程管理），见 §7.4 |
 
 `isolate`、实例的标签、服务 id（名字 + NUL + 标签）、导出句柄的规则都照 Python 运行时，不另起一套。
 
@@ -354,7 +354,8 @@ Go 不能卸载代码。行卸载后，插件的代码仍在二进制里，只�
 
 - 进来的调用、`Apply`、清理里的 panic 都被接住，变成错误；
 - 插件自己起的 goroutine 里没接住的 panic 会让整个进程退出（Go 的规则，SDK 改不了；也与需求文档 §5 规则 8 一致）：这个运行时的行全部停下，rutis 报告进程退出的状态。需要隔离的插件编进另一个二进制。SDK 提供 `ctx.Go(func(context.Context) error)`：在 goroutine 里运行函数、接住 panic、写到 stderr，行卸载时取消它的 ctx 并等它返回；
-- 会话结束（rutis 关闭通道或进程退出）时，卸载全部行（每个清理最多等 5 秒），然后 `os.Exit(0)`：不让残留的 goroutine 拖住进程，rutis 在等它退出。
+- 清理的等待时间：`rows.unload` 和 `dispose` 是 rutis 发来的操作，rutis 在等回复，所以运行时不设上限，和 Python 一样，由 rutis 一侧决定等多久；
+- 会话已经结束（rutis 关闭了通道或已退出）时，没有人在等回复，运行时卸载全部行，所有清理**合计**最多 5 秒；超时后放弃还没完成的清理，在 stderr 记下是哪些行，然后 `os.Exit(0)`，不让残留的 goroutine 拖住进程。指南里写明：会话结束时清理可能被截断，必须完成的事不要只放在清理里。
 
 ### 7.5 远程（G2）
 
@@ -388,21 +389,24 @@ SDK 不依赖第三方模块，所以 WebSocket 服务端在 SDK 里用 `net/htt
 ```
 
 - 每个插件的部分和 `rows.schema` 的回复完全相同（§7.2），由同一段代码生成，所以清单和运行中的进程说的一定一致；
-- 读清单要执行这个二进制：Go 包的 `init` 会运行，和把它当运行时启动是同样的信任。宿主只对配置里列出的二进制这样做；
+- 读清单要执行这个二进制：Go 包的 `init` 会运行，和把它当运行时启动是同样的信任。宿主只对配置里给出的来源这样做：`binaries` 里列出的文件，以及 `dir` 目录。**`dir` 目录整体被视为受信任**，应当是专门放 Go 插件的目录；扫描时只执行含有 SDK 标记字符串的文件（§8.2）；
 - 执行有超时（5 秒）。不是本平台的二进制会在这里失败，错误写明"不是为 <os>/<arch> 构建的"；
 - `pluginApi` 高于宿主支持的版本时，这个二进制的插件都解析失败，错误写明要升级什么；
-- 清单按（路径、文件大小、修改时间）缓存，三者都没变就不再执行二进制。
+- `sdk` 是 SDK 里的版本常量 `rutis.Version`（§十一）；插件的 `version` 来自 `debug.ReadBuildInfo()`：插件所在模块是依赖时取它在 `Deps` 里的版本，是主模块时取 `Main.Version`（Go 1.24 起从 VCS 标签或伪版本得出）；本地构建拿到 `(devel)` 时，改报 `vcs.revision`（有未提交的修改时加 `+dirty`），都没有时为 `null`；
+- 清单按（路径、文件大小、修改时间，Unix 上再加 ctime）缓存，都没变就不再执行二进制。原位替换并保留大小和修改时间（`rsync -t`、解包、CI 缓存）时，Unix 上 ctime 仍会变；Windows 上没有 ctime 可用，所以**启动运行时、`GoRuntimes::restart` 和 `rutis-host check` 总是绕过缓存重读清单**，缓存只用于平时的解析。
 
 ### 8.2 `GoResolver`
 
 放在 rutis-loader（feature `go`），实现 `Resolver`，管理全部本地 Go 二进制：
 
-- **来源**：若干文件和若干目录。目录里的每个可执行文件都算（跳过以 `.` 开头的）。解析到不认识的插件名时重新扫描一次目录，所以往目录里放进新二进制后，下一次 reconcile 就能用到；
-- **运行时名**：由文件名得出：去掉扩展名（Windows 的 `.exe`）、转小写、非 `[a-z0-9-]` 的字符换成 `-`，加前缀 `go-`（`netkit` → `go-netkit`）。它同时是 `Runtime#…`、`RuntimeRows#…` 的键和会话的端点 id。运行时名不能与其他运行时（`node`、`py`、`bun`、远程运行时）重名（Bun 设计 §5.1 的规则）。`binaries` 里列出的两个文件得出同一个名字，或者与其他运行时重名，是配置错误；目录扫描到的文件这样冲突时，跳过它并在诊断里报出来；
-- **解析 `go:<插件名>`**：在所有清单里找这个插件。找不到，返回 `NotFound`（`Chain` 继续问下一个解析器）；在两个及以上二进制里，报歧义，列出这些二进制，提示改写成 `go:<二进制名>/<插件名>`；
+- **来源**：若干文件和若干目录。解析到不认识的插件名时重新扫描一次目录，所以往目录里放进新二进制后，下一次 reconcile 就能用到；
+- **目录里哪些文件算**：可执行、不以 `.` 开头、而且文件内容里含有 SDK 的标记字符串（SDK 里一个被引用的常量，例如 `rutis-go-runtime:1`，链接时一定保留）的文件。只有这样的文件才会被执行去取清单，所以目录里的脚本和其他工具不会被运行。含有标记、但取清单失败（超时、非零退出、输出不是清单、不是本平台的二进制）的文件，跳过并在诊断里报出，不是配置错误；`rutis-host check` 列出它们并以非零状态退出。`binaries` 里**明确列出**的文件取清单失败，同样不让整个配置失败，但它的插件都解析失败，错误写明原因；
+- **运行时名**：由文件名得出：去掉扩展名（Windows 的 `.exe`）、转小写、非 `[a-z0-9-]` 的字符换成 `-`，加前缀 `go-`（`netkit` → `go-netkit`，`net.kit_v1.exe` → `go-net-kit-v1`）。它同时是 `Runtime#…`、`RuntimeRows#…` 的键和会话的端点 id，也是**用户看到的唯一名字**：限定的行名 `go-netkit:ping`、`GoRuntimes::restart("go-netkit")`、`runtimes()`、`rutis-host check` 的输出和歧义提示里出现的都是它，提示里给出的写法可以原样写回配置。文件名本身只出现在 meta 的 `binary` 里。运行时名不能与其他运行时（`node`、`py`、`bun`、远程运行时）重名（Bun 设计 §5.1 的规则）。`binaries` 里列出的两个文件得出同一个名字，或者与其他运行时重名，是配置错误；目录扫描到的文件这样冲突时，跳过它并在诊断里报出来；
+- **解析 `go:<插件名>`**：在所有清单里找这个插件。找不到，返回 `NotFound`（`Chain` 继续问下一个解析器）；在两个及以上二进制里，报歧义，列出这些运行时，提示改写成 `<运行时名>:<插件名>`（`go-netkit:ping`）；
+- **解析 `<运行时名>:<插件名>`**：`GoResolver` 认领以它管理的某个运行时名加 `:` 开头的行名，只在那个二进制的清单里找；
 - **解析结果**：与 `RuntimeResolver` 对叶子运行时的结果相同（行依赖 `RuntimeRows#<运行时名>` 和 `inject` 的全部名字，`provides` 投到 `host_key`，实例和 `isolate` 规则不变）。实现上把 `RuntimeResolver::resolve` 里"由声明构造 `Resolved`"的部分提出来，两者共用；
 - **meta**：`{ source: "go", binary, runtime, version, sdk }`，`rutis-host check` 显示它们；
-- **缓存与过期**：解析结果随清单一起按文件状态缓存。文件变了，下一次解析得到新清单；正在运行的旧进程由 §十 处理。
+- **进程运行中文件变了**：运行时启动时记下它用的清单（启动清单）。进程在运行期间，**解析一律以启动清单为准**，不管磁盘上的文件是否已经换了：新解析的行和运行中的进程说的一定一致。文件换了以后，新二进制才有的插件解析失败，错误写明"go-netkit 的二进制已更换，重启这个运行时后生效：`GoRuntimes::restart("go-netkit")`"；`check` 和 `runtimes()` 显示"已更换，待重启"。宿主不因为文件变了自动重启运行时（§十）。进程没在运行时，解析用磁盘上的清单。
 
 `GoResolver` 解析出一行时，告诉 `GoRuntimes` 这个运行时被用到了（§8.3）。
 
@@ -423,9 +427,9 @@ root.plugin(GoRuntimes::new(go, project).idle(Duration::from_secs(60)));
 
 - 每个运行中的 Go 运行时是 `GoRuntimes` 下面的一个子 `Ctx`，里面挂 `LocalRuntime::go(binary, project).named(运行时名)` 和它的 `RuntimeRowsPlugin`。停下一个运行时就是释放这个子 `Ctx`，不影响其他运行时；
 - **启动**：`GoResolver` 解析出一行时，如果这一行的运行时没有在运行，就启动它。行此时在等 `RuntimeRows#<运行时名>`，运行时起来后照常启动。冷启动的多个运行时并行启动；
-- **停止**：一个运行时的最后一行卸载后，等 `idle` 时长；到时检查 `Loader::entries()` 里是否还有未禁用的条目解析到这个运行时，没有就停下。期间又有行解析到它，就取消这次停止；
+- **停止**（只对按需启动的运行时）：一个运行时的最后一行卸载后，等 `idle` 时长；到时检查 `Loader::entries()` 里是否还有未禁用的条目解析到这个运行时，没有就停下。期间又有行解析到它，就取消这次停止；
 - **崩溃**：进程意外退出时，和现在一样，它的行停下，运行时状态记下退出原因，**不自动重启**。之后有行再解析到它也不重启，直到应用调用 `GoRuntimes::restart(名字)`，或者二进制文件变了（换上了新构建，值得再试一次）；
-- **全部启动**：`GoRuntimes::eager()` 在挂载时启动所有列出的二进制，给不想在第一次使用时等进程启动的部署；
+- **全部启动**：`GoRuntimes::eager()` 在挂载时启动所有列出的二进制，给不想在第一次使用时等进程启动的部署。这样启动的运行时一直运行，不做空闲停止，`idle` 对它不起作用；
 - **状态**：`GoRuntimes::runtimes()` 列出每个二进制的运行时名、状态（未启动 / 启动中 / 运行中 / 已停 + 原因）、插件和版本。
 
 ### 8.4 rutis-bridge
@@ -434,9 +438,9 @@ root.plugin(GoRuntimes::new(go, project).idle(Duration::from_secs(60)));
 | --- | --- |
 | `Launcher::go(binary, project)`：程序是二进制本身，`cwd` 为 `project`，Unix 上 `inherit_fd` | `rutis-bridge/src/runtime/process.rs` |
 | `LocalRuntime::go(binary, project)`，名字默认由文件名得出（§8.2） | `rutis-bridge/src/runtime/local.rs` |
-| Cargo feature `go`（rutis-bridge、rutis-loader）；`interop` 包含它；CI 加一项"只开 `go`"的编译检查 | 两个 `Cargo.toml`、`ci.yml` |
+| Cargo feature `go`，与 `node`、`python` 并列：rutis-bridge 加 `go = []`，rutis-loader 加 `go = ["runtimes", "rutis-bridge/go"]`；rutis-host 对两者的依赖 features 里加上 `go`；CI 加一项"只开 `go`"的编译检查 | 三个 `Cargo.toml`、`ci.yml` |
 | `RowSchema` 带上 `version`，写进行的 meta | Bun 设计 B1 也要做这件事，先落地的一方做 |
-| 远程 node 运行时的 `Naming::Npm` 不接收带已知运行时前缀的名字：已知前缀加上 `go:` | `rutis-loader/src/runtime.rs` |
+| 远程 node 运行时的 `Naming::Npm` 不接收带已知运行时前缀的名字：已知前缀加上 `go:` 和每个 Go 运行时名加 `:` | `rutis-loader/src/runtime.rs` |
 
 只想跑一个固定二进制的 Rust 应用，也可以不用 `GoResolver`，直接 `LocalRuntime::go` + `RuntimeResolver::modules`（行名 `<运行时名>:<插件名>`），和 Python 一样。
 
@@ -461,7 +465,7 @@ root.plugin(GoRuntimes::new(go, project).idle(Duration::from_secs(60)));
 ```
 
 - `dir`、`binaries`：二进制从哪里找，至少给一个；
-- `start`：`on-demand`（默认）或 `eager`；`idle`：空闲多少秒后停下；
+- `start`：`on-demand`（默认）或 `eager`；`idle`：按需启动的运行时空闲多少秒后停下。`eager` 的运行时不做空闲停止，所以同时写 `"start": "eager"` 和 `idle` 是配置错误，而不是悄悄忽略 `idle`；
 - `remote` 的 `language` 加 `go`。
 
 命令：
@@ -483,7 +487,7 @@ macOS 上从网络下载的二进制带隔离属性，没有签名时系统会�
 | 场景 | 怎样生效 |
 | --- | --- |
 | 开发（`rutis-host dev`） | 监视项目里的 `.go`、`go.mod`、`go.sum`；有变化时把项目的 `cmd/<name>` 构建到缓存目录里的**新文件**（`<name>-<序号>`），成功后让 `GoResolver` 用新文件替换旧的、重启这一个运行时，旧文件随后删除。构建失败时打印编译错误，旧进程继续运行。其他 Go 运行时不受影响 |
-| 部署 | 部署方把新二进制放到原来的位置，然后调用 `GoRuntimes::restart(名字)`（rutis-host 里重启宿主）。rutis 不监视二进制 |
+| 部署 | 部署方把新二进制放到原来的位置（Unix 上用改名替换，正在运行的文件不能原地覆盖写入），然后调用 `GoRuntimes::restart("go-netkit")`（rutis-host 里重启宿主）。rutis 不监视二进制；在重启之前，解析以运行中进程的启动清单为准（§8.2） |
 
 每次构建到新文件名，是因为 Windows 不允许覆盖正在运行的可执行文件。
 
@@ -492,6 +496,7 @@ macOS 上从网络下载的二进制带隔离属性，没有签名时系统会�
 ## 十一、仓库与发布
 
 - SDK 放在 `go/rutis`，模块路径 `github.com/arcships/rutis/go/rutis`，和 `python/rutis`、`node/rutis` 并列。版本随发布列车，tag 为 `go/rutis/v0.9.0` 这样的形式（Go 对子目录模块的要求）；发布就是推 tag，由 Go 模块代理拉取；
+- SDK 的版本写在一个常量里：`go/rutis/version.go` 的 `const Version = "0.9.0"`，`implementation.version` 和清单的 `sdk` 都用它；`scripts/train.mjs` 照 Python 的 `IMPLEMENTATION` 用正则读出它，发布列车逐包校验时包括 `go/rutis`；
 - 只依赖标准库。Go 版本要求：当前的两个稳定版本（写在 `go.mod` 里）；
 - 包结构：`rutis`（插件 API、`Serve`、清单）、`rutis/rutistest`（不需要宿主的测试工具）；会话层放在 `internal/peer`，不对外承诺；
 - **兼容承诺**：宿主和二进制之间只有线协议、清单格式和插件 API 版本三样东西。同一个协议版本内，任何版本的 Go SDK 构建的二进制都能被任何版本的宿主运行，只要插件 API 不高于宿主支持的版本。这一点对 Go 比对 Node、Python 更重要：二进制发布出去就不会再随宿主升级；
@@ -506,7 +511,7 @@ macOS 上从网络下载的二进制带隔离属性，没有签名时系统会�
 | 运行时契约 × 通道 | `rutis-bridge/tests/session_matrix.rs`：`Runtime` 加 `Go` | 运行时一致性测试（`runtime::testing::runtime`）在 `fd:3`、拨回的 socket 上通过；G2 加 WebSocket |
 | 不需要宿主的插件测试 | `rutistest.Load(t, weather.Plugin, config, services)` | 和 `rutis.testing` 一样：只用 `Inject` 里的服务；提供的服务带着声明的方法；测试结束时清理都运行了；严格模式下值按 §5.1 编码再解码 |
 | 清单 | `go/rutis` + `rutis-loader/tests/go_rows.rs` | 清单与运行中进程的 `rows.schema` 一致；文件不变时不再执行二进制；插件 API 过高、平台不匹配时给出明确错误 |
-| 多个二进制 | `rutis-loader/tests/go_rows.rs` | 两个二进制：行按插件名找到各自的二进制；同名插件报歧义，`go:<二进制名>/<插件名>` 可用；两个二进制的插件互相同步、异步调用；一个进程崩溃只停它的行和它们的使用者，另一个照常 |
+| 多个二进制 | `rutis-loader/tests/go_rows.rs` | 两个二进制：行按插件名找到各自的二进制；同名插件报歧义，提示里的 `<运行时名>:<插件名>` 写回配置后可用；目录里不含标记的可执行文件不被执行，取清单失败的文件被跳过并报出；进程运行中换了文件：解析仍按启动清单，新插件报"待重启"，`restart` 后可用；原位替换且保留大小和修改时间时，`restart` 仍读到新清单；两个二进制的插件互相同步、异步调用；一个进程崩溃只停它的行和它们的使用者，另一个照常 |
 | 按需启动 | 同上 | 没有行用到的二进制不启动；最后一行移除、空闲时间过后进程退出；期间新加一行则不退出；崩溃后不自动重启，换了文件后再解析会启动 |
 | 运行时一致性 | `crates/rutis-loader/tests/multilang.rs`，加 feature `go` | 同一组叶子插件再写一份 Go；三种语言同时冷启动，互相调用；提供者移除时只停它的使用者；`inject` 门控 |
 | Python 运行时专项的 Go 版 | `rutis-bridge/tests` 下 `python_runtime.rs` 的 Go 版，加 Go 列：`cancellation.rs`、`error_shape.rs`、`rpc_callbacks.rs`、`process_exit.rs`、`live_objects.rs` | features 齐全；取消到达方法的 ctx；错误形状往返（Go 错误的类型名、`Panic`）；进程因 panic 退出时服务撤回；引用与 release。一致性夹具 `conformance-session`、`conformance-weather`、`conformance-greeter` 写 Go 版，`crash()` 以状态码 17 退出 |
@@ -517,7 +522,7 @@ macOS 上从网络下载的二进制带隔离属性，没有签名时系统会�
 
 测试用的 Go 插件放在 `crates/rutis-loader/tests/fixtures/go`，测试开始时构建成两个以上的二进制。
 
-CI：`runtimes-go` job，在 Linux 和 macOS 上用 `actions/setup-go` 装上当前的两个稳定版本，运行 `go test ./...`、`cargo test -p rutis-bridge --features go,…`、`cargo test -p rutis-loader --features go,…`；单一 feature 编译检查 `cargo check --no-default-features --features go`；Windows 加进现有的 `runtimes-windows`。
+CI：`runtimes-go` job，在 Linux 和 macOS 上用 `actions/setup-go` 装上当前的两个稳定版本，运行 `go test ./...`、`cargo test -p rutis-bridge --features go,…`、`cargo test -p rutis-loader --features go,…` 和 `cargo test -p rutis-host`；单一 feature 编译检查 `cargo check --no-default-features --features go`；Windows 加进现有的 `runtimes-windows`，同样带 `cargo test -p rutis-host`。rutis-host 的依赖开了 `go` 之后，`cargo test --workspace`（`test` job）和 `-p rutis-host`（`network-macos` job）会因 feature 统一跑到需要构建 Go 夹具的测试，所以这两个 job 和 `runtimes-windows` 也要加 `actions/setup-go`。
 
 E2E：S2（[#186](https://github.com/arcships/rutis/issues/186)）加 `new --lang go` 的开发循环；S3（[#187](https://github.com/arcships/rutis/issues/187)）加 Go 行参与跨语言组合与崩溃恢复；S9（[#193](https://github.com/arcships/rutis/issues/193)）加"下载的 Go 二进制在没有 Go 工具链的干净环境里运行"。
 

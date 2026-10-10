@@ -169,6 +169,8 @@ This is the same two-stage release (`Peer` / `PeerRows`) used by the remote desi
 
 Before integrating each new language (Swift, Go), decide if its runtime is reentrant and what happens to sync calls between non-reentrant runtimes. Options include making every leaf runtime reentrant while Cordis alone is not, forbidding/detecting sync calls between non-reentrant runtimes, or detecting cross-session wait cycles in Rust and returning `SyncWaitCycle`. Decide before adding a third language.
 
+  Progress (2026-10-10): every leaf runtime integrated or designed so far chose reentrancy: Python (M2), Bun ([the Bun runtime](design-bun-runtime-2026-10-09.en.md) §3.4) and Go ([the Go plugin runtime](design-go-runtime-2026-10-10.en.md) §6.5, a goroutine per call). On that basis the Go design **proposes** the rule "every leaf runtime is reentrant; only the Cordis runtime is not". It is not decided yet: Swift (M3) has not answered, and its design confirms or overturns the proposal, recorded here then. Crossing synchronous calls between two Cordis runtimes, and whether Rust detects wait cycles, stay open in this item.
+
 ## 10. Relationship to decision #107
 
 | #107 conclusion | This design |
