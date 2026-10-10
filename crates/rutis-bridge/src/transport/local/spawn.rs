@@ -16,7 +16,8 @@ use std::time::Duration;
 use crate::channel::{
     Channel, ChannelError, ChannelInfo, Closer, ConnectError, PeerId, Receiver, Sender,
 };
-use tokio::sync::oneshot;
+use std::collections::BTreeSet;
+use tokio::sync::{oneshot, watch};
 
 use crate::transport::local::lines;
 
@@ -116,6 +117,13 @@ impl Spawn {
             .stdout(self.stdout.process())
             .stderr(self.stderr.process())
             .kill_on_drop(true);
+        // Out of the terminal's reach: Ctrl-C there signals this process,
+        // which unloads the process's plugins over the channel, and not the
+        // process itself, which would end before its cleanups ran.
+        #[cfg(unix)]
+        command.process_group(0);
+        #[cfg(windows)]
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
         }
@@ -567,6 +575,59 @@ impl Exit {
 /// How long a process whose channel closed may take to end by itself.
 const GRACE: Duration = Duration::from_secs(2);
 
+/// The processes started here that have not been waited for yet.
+static RUNNING: std::sync::LazyLock<watch::Sender<BTreeSet<u32>>> =
+    std::sync::LazyLock::new(|| watch::channel(BTreeSet::new()).0);
+
+/// The ids of the processes the local transport started, in this process,
+/// that have not ended yet.
+pub fn running_processes() -> Vec<u32> {
+    RUNNING.borrow().iter().copied().collect()
+}
+
+/// Wait until every process the local transport started has ended and been
+/// waited for: what a host that is ending does once its root has shut down
+/// (the processes end when their channels close, or are killed after a
+/// grace period). Needs the async runtime that started them to keep running.
+pub async fn processes_ended() {
+    let mut running = RUNNING.subscribe();
+    let _ = running.wait_for(|running| running.is_empty()).await;
+}
+
+/// Kill every process the local transport started that has not ended yet,
+/// without waiting for its cleanups: for a host that exits before they
+/// finish. [`processes_ended`] then waits for them to be gone.
+pub fn kill_processes() {
+    for pid in running_processes() {
+        kill(pid);
+    }
+}
+
+#[cfg(unix)]
+fn kill(pid: u32) {
+    // SAFETY: plain kill(2). The id is still this process's child: it is
+    // removed from RUNNING only once waited for, so it cannot be reused.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+}
+
+#[cfg(windows)]
+fn kill(pid: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    // SAFETY: plain Win32 calls on a handle opened and closed here. The
+    // process is not waited for yet, so its id still names it.
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if !handle.is_null() {
+            let _ = TerminateProcess(handle, 1);
+            let _ = CloseHandle(handle);
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn kill(_pid: u32) {}
+
 /// The process, owned by a task that records how it ended. Dropped, it
 /// kills the process; [`Child::end`] gives it [`GRACE`] first.
 struct Child {
@@ -578,7 +639,11 @@ impl Child {
     fn watch(mut child: tokio::process::Child) -> Self {
         let (kill, killed) = oneshot::channel::<()>();
         let ended = Arc::new(Exit::default());
-        if let Some(pid) = child.id() {
+        let pid = child.id();
+        if let Some(pid) = pid {
+            RUNNING.send_modify(|running| {
+                running.insert(pid);
+            });
             let record = ended.clone();
             let _ = std::thread::Builder::new()
                 .name("rutis-spawn-exit".into())
@@ -594,17 +659,26 @@ impl Child {
                 status = child.wait() => status,
                 ended = killed => {
                     // Its channel closed: it may end by itself.
-                    if ended.is_ok() {
-                        if let Ok(status) = tokio::time::timeout(GRACE, child.wait()).await {
-                            record.record(describe(status));
-                            return;
+                    let by_itself = match ended {
+                        Ok(()) => tokio::time::timeout(GRACE, child.wait()).await.ok(),
+                        Err(_) => None,
+                    };
+                    match by_itself {
+                        Some(status) => status,
+                        None => {
+                            let _ = child.start_kill();
+                            child.wait().await
                         }
                     }
-                    let _ = child.start_kill();
-                    child.wait().await
                 }
             };
             record.record(describe(status));
+            // Waited for: the process is gone, its id free for reuse.
+            if let Some(pid) = pid {
+                RUNNING.send_modify(|running| {
+                    running.remove(&pid);
+                });
+            }
         });
         Self {
             ended,

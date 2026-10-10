@@ -45,7 +45,10 @@ pub(crate) mod spawn;
 #[cfg(unix)]
 mod unix;
 
-pub use spawn::{Handover, Spawn, Stdio, CHANNEL_FD, CHANNEL_TOKEN, HANDOVER_VARIABLE};
+pub use spawn::{
+    kill_processes, processes_ended, running_processes, Handover, Spawn, Stdio, CHANNEL_FD,
+    CHANNEL_TOKEN, HANDOVER_VARIABLE,
+};
 
 /// Provides `Transport#local`.
 #[derive(Default)]
