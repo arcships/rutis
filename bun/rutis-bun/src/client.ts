@@ -27,11 +27,11 @@ export class Client {
       pump: (done: () => boolean) => {
         const sequence = Atomics.load(this.#signal, 0)
         let packet
-        while ((packet = receiveMessageOnPort(this.#port))) this.#take(packet.message)
+        while ((packet = receiveMessageOnPort(this.#port))) this.#receive(packet.message)
         if (!done()) Atomics.wait(this.#signal, 0, sequence)
       },
     })
-    this.#port.on('message', message => this.#take(message))
+    this.#port.on('message', message => this.#receive(message))
     this.#worker = new Worker(new URL('./io-worker.ts', import.meta.url), {
       workerData: { channel, token, port: port2, signal: this.#signal }, transferList: [port2],
     } as any)
@@ -45,21 +45,6 @@ export class Client {
   }
   // Why the channel ended, once it did.
   reason?: string
-  // Messages from the worker arrive two ways: the port's 'message' event,
-  // and receiveMessageOnPort while a synchronous call waits. Older Bun
-  // (1.3.3) may hand them over out of order, or twice, across the two, so
-  // they are taken by the number the worker gave them.
-  #next = 1
-  #early = new Map<number, any>()
-  #take({ sequence, message }: { sequence: number, message: unknown }) {
-    if (sequence < this.#next || this.#early.has(sequence)) return
-    this.#early.set(sequence, message)
-    let ready
-    while ((ready = this.#early.get(this.#next)) !== undefined) {
-      this.#early.delete(this.#next++)
-      this.#receive(ready)
-    }
-  }
   #receive(message: any) {
     if (message?.ready) { this.#session.start(); return }
     if (message?.closed) { this.reason ??= message.closed; this.#session.close(new Error(message.closed)); return }

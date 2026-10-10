@@ -6,11 +6,8 @@ import { open, type Channel } from './channel.ts'
 import { decode } from './codec.ts'
 
 const { channel: spec, token, port, signal } = workerData
-// Every message is numbered: the main thread takes them in order (see
-// client.ts).
-let sequence = 0
 function send(message: unknown) {
-  port.postMessage({ sequence: ++sequence, message })
+  port.postMessage(message)
   Atomics.add(signal, 0, 1)
   Atomics.notify(signal, 0)
 }
