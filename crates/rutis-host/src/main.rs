@@ -159,22 +159,8 @@ async fn check(args: &[String]) -> Result<(), String> {
     // Each local runtime: what implements it and what it runs on.
     for (name, runtime) in &host.runtimes {
         if let Some(process) = runtime.ready().await {
-            let about = process.about();
-            let said = |field: &str| {
-                let part = &about[field];
-                part["name"]
-                    .as_str()
-                    .map(|name| match part["version"].as_str() {
-                        Some(version) => format!("{name} {version}"),
-                        None => name.to_owned(),
-                    })
-            };
-            let described: Vec<String> = ["implementation", "engine"]
-                .iter()
-                .filter_map(|f| said(f))
-                .collect();
-            if !described.is_empty() {
-                println!("runtime {name}: {}", described.join(", "));
+            if let Some(line) = runtime_line(name, process.about()) {
+                println!("{line}");
             }
         }
     }
@@ -212,5 +198,49 @@ async fn check(args: &[String]) -> Result<(), String> {
     match failed {
         0 => Ok(()),
         n => Err(format!("{n} row(s) cannot run")),
+    }
+}
+
+/// `check`'s line for the runtime `name`: what implements it and what it
+/// runs on, as it said when mounted (`Process::about`); none when it said
+/// neither.
+fn runtime_line(name: &str, about: &serde_json::Value) -> Option<String> {
+    let said = |field: &str| {
+        let part = &about[field];
+        part["name"]
+            .as_str()
+            .map(|name| match part["version"].as_str() {
+                Some(version) => format!("{name} {version}"),
+                None => name.to_owned(),
+            })
+    };
+    let described: Vec<String> = ["implementation", "engine"]
+        .iter()
+        .filter_map(|field| said(field))
+        .collect();
+    (!described.is_empty()).then(|| format!("runtime {name}: {}", described.join(", ")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_line;
+    use serde_json::json;
+
+    #[test]
+    fn check_says_what_runs_each_runtime() {
+        let about = json!({
+            "implementation": { "name": "@arcships/rutis-bun", "version": "0.8.0" },
+            "engine": { "name": "bun", "version": "1.4.3" },
+        });
+        assert_eq!(
+            runtime_line("bun", &about).as_deref(),
+            Some("runtime bun: @arcships/rutis-bun 0.8.0, bun 1.4.3")
+        );
+        let partial = json!({ "implementation": { "name": "rutis" } });
+        assert_eq!(
+            runtime_line("py", &partial).as_deref(),
+            Some("runtime py: rutis")
+        );
+        assert_eq!(runtime_line("node", &serde_json::Value::Null), None);
     }
 }
