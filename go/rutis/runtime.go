@@ -668,6 +668,10 @@ type Service struct {
 // Methods maps the service's methods to "sync" or "async".
 func (s *Service) Methods() map[string]string { return s.methods }
 
+// Local reports whether a plugin in this process provides the service:
+// then calls reach the provider's object directly, without the session.
+func (s *Service) Local() bool { return s.local != nil }
+
 // Call calls `method` with `args` and decodes its result into `result` (a
 // pointer, or nil).
 func (s *Service) Call(ctx context.Context, method string, result any, args ...any) error {

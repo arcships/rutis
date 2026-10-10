@@ -373,6 +373,10 @@ pub struct RowSchema {
     /// The services it provides to rutis: `{ name: { method: "sync" | "async" } }`.
     #[serde(default)]
     pub provides: serde_json::Map<String, Value>,
+    /// The plugin's version, when the runtime knows it (a package version,
+    /// a module version, a VCS revision).
+    #[serde(default)]
+    pub version: Option<Value>,
 }
 
 /// One row's use of a host service (see [`Process::lease_host`]). Give it

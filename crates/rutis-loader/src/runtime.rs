@@ -22,6 +22,9 @@
 //!   to the plugin, as dsh's loader does.
 //! - **Python** (feature `python`, [`RuntimeResolver::modules`]): a row named
 //!   `py:<module>` loads that module as a leaf plugin.
+//! - **Go** (feature `go`, [`GoResolver`], [`GoRuntimes`]): a row named
+//!   `go:<plugin>` runs the plugin in the Go binary that has it, one runtime
+//!   per binary, started when a row uses it.
 //!
 //! Services cross between the rows and the rest of rutis by name, as
 //! `dyn HostDispatch` at `host_key(name)`:
@@ -57,8 +60,15 @@ use crate::{
     volatile_key, Loader, LoaderError, Resolved, Resolver, ServiceCatalog, VolatileUpdate,
 };
 
+#[cfg(feature = "go")]
+mod go;
 mod rows;
-pub use rows::{RuntimeRows, RuntimeRowsPlugin};
+#[cfg(feature = "go")]
+pub use go::{
+    GoBinaries, GoBinary, GoManifest, GoResolver, GoRuntimeInfo, GoRuntimeState, GoRuntimes,
+    GoRuntimesHandle, GO_MARKER,
+};
+pub use rows::{RowsSource, RuntimeRows, RuntimeRowsPlugin};
 
 #[cfg(doc)]
 use rutis_bridge::runtime::RuntimePlugin;
@@ -89,7 +99,7 @@ impl Naming {
             #[cfg(feature = "node")]
             Naming::Npm if runtime.is_remote() => {
                 let local = name.starts_with("file:") || Path::new(name).is_absolute();
-                (!local).then(|| PathBuf::from(name))
+                (!local && !runtime_prefixed(name)).then(|| PathBuf::from(name))
             }
             #[cfg(feature = "node")]
             Naming::Npm => resolve_entry(runtime.anchor(), name),
@@ -122,6 +132,19 @@ impl Naming {
             }
         }
     }
+}
+
+/// Whether `name` starts with a runtime's name and `:` (`py:x`, `bun:x`,
+/// `go:x`, `go-netkit:x`), which no npm package name does.
+#[cfg_attr(not(feature = "node"), allow(dead_code))]
+fn runtime_prefixed(name: &str) -> bool {
+    let head = name.split('/').next().unwrap_or(name);
+    head.split_once(':').is_some_and(|(prefix, _)| {
+        !prefix.is_empty()
+            && prefix
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    })
 }
 
 pub struct RuntimeResolver {
@@ -298,33 +321,27 @@ impl Resolver for RuntimeResolver {
                 .cloned()
                 .collect();
             self.offline.lock().unwrap().remove(name);
-            let module = JsModule {
-                name: name.to_owned(),
-                runtime: self.runtime.name().to_owned(),
-                entry: entry.clone(),
-                gated: gated.clone(),
-                provides: described.provides.clone(),
-                catalog: self.catalog.clone(),
-            };
-            let resolved = Arc::new(Resolved {
-                factory: Arc::new(JsFactory::new(
-                    name,
-                    self.runtime.name(),
-                    entry.clone(),
-                    gated,
-                    described.provides.clone(),
-                )),
-                schema: described.config,
-                meta: json!({
+            // What staleness compares against (a package version) first;
+            // else what the runtime says (a Python entry point's version).
+            let version = (!self.runtime.is_remote())
+                .then(|| self.naming.version(&entry))
+                .flatten()
+                .or_else(|| described.version.clone());
+            let resolved = Arc::new(leaf_resolved(
+                name,
+                self.runtime.name(),
+                entry.clone(),
+                gated,
+                &described,
+                &self.catalog,
+                json!({
                     "source": "runtime",
                     "entry": entry,
-                    "version": (!self.runtime.is_remote()).then(|| self.naming.version(&entry)).flatten(),
+                    "version": version,
                     "inject": described.inject,
                     "provides": described.provides,
                 }),
-                foreign_scope: true,
-                scoped: Some(module.scoped()),
-            });
+            ));
             if caches {
                 self.resolved
                     .lock()
@@ -333,6 +350,41 @@ impl Resolver for RuntimeResolver {
             }
             Ok(resolved)
         })
+    }
+}
+
+/// The resolution of a row `name` whose plugin `entry` runs in the runtime
+/// named `runtime` and declares `described`; `gated` are the injected names
+/// rutis gates it on.
+pub(crate) fn leaf_resolved(
+    name: &str,
+    runtime: &str,
+    entry: PathBuf,
+    gated: Vec<String>,
+    described: &rutis_bridge::runtime::RowSchema,
+    catalog: &ServiceCatalog,
+    meta: Value,
+) -> Resolved {
+    let module = JsModule {
+        name: name.to_owned(),
+        runtime: runtime.to_owned(),
+        entry: entry.clone(),
+        gated: gated.clone(),
+        provides: described.provides.clone(),
+        catalog: catalog.clone(),
+    };
+    Resolved {
+        factory: Arc::new(JsFactory::new(
+            name,
+            runtime,
+            entry,
+            gated,
+            described.provides.clone(),
+        )),
+        schema: described.config.clone(),
+        meta,
+        foreign_scope: true,
+        scoped: Some(module.scoped()),
     }
 }
 

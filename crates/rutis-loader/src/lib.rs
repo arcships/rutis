@@ -35,6 +35,11 @@ pub use persist::{NoPersist, Persist, Version};
 pub use resolver::{Build, Builtins, Chain, Resolved, Resolver, ScopedFactory};
 #[cfg(feature = "node")]
 pub use runtime::resolve_entry;
+#[cfg(feature = "go")]
+pub use runtime::{
+    GoBinaries, GoBinary, GoManifest, GoResolver, GoRuntimeInfo, GoRuntimeState, GoRuntimes,
+    GoRuntimesHandle, GO_MARKER,
+};
 #[cfg(feature = "runtimes")]
-pub use runtime::{RuntimeResolver, RuntimeRows, RuntimeRowsPlugin};
+pub use runtime::{RowsSource, RuntimeResolver, RuntimeRows, RuntimeRowsPlugin};
 pub use volatile::{volatile_key, volatile_paths, VolatileUpdate};
