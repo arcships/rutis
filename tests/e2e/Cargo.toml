@@ -1,0 +1,16 @@
+[package]
+name = "rutis-e2e"
+description = "Black-box end-to-end scenarios: real rutis-host processes, project directories, probe plugins, residue checks"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Black box (quality standard Q7.6): no rutis crate here, only what a user
+# has — the rutis-host program, the packages and the files it reads.
+[dependencies]
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
