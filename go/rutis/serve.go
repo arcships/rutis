@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	goruntime "runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -230,14 +229,4 @@ func serveChannel(channel peer.Channel, endpoint *peer.Endpoint, defs []*Definit
 	<-s.peer.Closed()
 	s.end(nil)
 	return nil
-}
-
-// names lists the plugins of `defs`, sorted.
-func names(defs []*Definition) []string {
-	out := make([]string, 0, len(defs))
-	for _, def := range defs {
-		out = append(out, def.name)
-	}
-	sort.Strings(out)
-	return out
 }
