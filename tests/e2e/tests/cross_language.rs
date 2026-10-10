@@ -75,7 +75,7 @@ fn start(s: &Scenario) -> (Host, Probe, Probe) {
     );
     // An absolute path: with a relative one (`rutis-host run`, `run
     // rutis.json`), `./` rows become `file://./report.ts` and do not
-    // resolve today (see PR #221).
+    // resolve today (#226).
     let mut host = s.host(["run".as_ref(), s.path("rutis.json").as_os_str()]);
     host.expect("report: running");
     ts.started(&mut host);
@@ -115,9 +115,9 @@ fn a_ts_row_uses_a_python_service() {
 /// risk: C6, C7 (nested cross-runtime calls). Python → Node → Python: the
 /// Node runtime exits (status 0) while Python awaits `report.summary`, and
 /// the call fails with `BindingError: the process exited normally`. Found
-/// by this harness; reported in PR #221, no issue yet.
+/// by this harness: #225.
 #[test]
-#[ignore = "the Node runtime exits on a Python → Node → Python call (PR #221)"]
+#[ignore = "the Node runtime exits on a Python → Node → Python call (#225)"]
 fn a_python_call_through_ts_back_to_python() {
     let s = Scenario::new("py-ts-py");
     let (mut host, _ts, py) = start(&s);

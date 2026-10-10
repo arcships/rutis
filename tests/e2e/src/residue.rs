@@ -4,11 +4,18 @@
 //! - every process a host started has exited: Linux, the host's process
 //!   group in /proc, and, with this process a child subreaper, orphans that
 //!   left the group; macOS (other Unix), the group in `ps`; Windows: not
-//!   yet (a Job Object around each host), reported as skipped;
+//!   yet (a Job Object around each host, #232), reported as skipped;
 //! - no socket file is left in the scenario directory;
 //! - every port the scenario reserved can be bound again;
 //! - the hosts' temporary directory is empty;
 //! - no captured output contains a credential of the scenario.
+//!
+//! Orphans that left their host's group carry nothing that ties them to a
+//! scenario: they are found as children of this test process that are no
+//! host (nor the `cargo build` of the host). A scenario reports every such
+//! orphan, also another scenario's when scenarios of one test binary run in
+//! parallel: the failure is real, its attribution may not be. Run one
+//! scenario per binary, or `--test-threads=1`, to attribute it.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -70,6 +77,7 @@ pub(crate) fn watch_orphans() {
 
 pub(crate) fn check(dir: &Path, hosts: &[Started], ports: &[u16], secrets: &[String]) -> Residue {
     let mut residue = Residue::default();
+    stop_running(hosts, &mut residue);
     processes(hosts, crate::hang_guard(), &mut residue);
     sockets(dir, &mut residue);
     for port in ports {
@@ -102,13 +110,36 @@ struct Process {
     command: String,
 }
 
+/// A host still running at the end is residue; kill its group now rather
+/// than wait out the hang guard for it (Unix; on Windows `Host`'s drop
+/// kills it).
+fn stop_running(hosts: &[Started], residue: &mut Residue) {
+    let Some(processes) = list() else { return };
+    for host in hosts {
+        let running = processes
+            .iter()
+            .any(|process| process.pid == host.pid && !process.zombie);
+        if running {
+            residue.found.push(format!(
+                "{} (pid {}) still ran when the scenario finished; killed",
+                host.name, host.pid
+            ));
+            // SAFETY: killpg(2) on the group the scenario made for the host.
+            #[cfg(unix)]
+            unsafe {
+                libc::killpg(host.pid as i32, libc::SIGKILL);
+            }
+        }
+    }
+}
+
 /// Wait, up to `wait`, until no process of the hosts' groups (and no
 /// orphan reparented here) runs; then list those still running.
 fn processes(hosts: &[Started], wait: Duration, residue: &mut Residue) {
     let Some(_) = list() else {
         residue.skipped.push(
             "processes: not implemented on this platform; on Windows each host goes into a \
-             Job Object whose process list must end empty (TODO #175)"
+             Job Object whose process list must end empty (#232)"
                 .into(),
         );
         return;
@@ -252,6 +283,8 @@ fn sockets(dir: &Path, residue: &mut Residue) {
             };
             #[cfg(unix)]
             let socket = std::os::unix::fs::FileTypeExt::is_socket(&kind);
+            // Windows: by name only, until #232 looks at the processes'
+            // handles.
             #[cfg(not(unix))]
             let socket = entry.path().extension().is_some_and(|ext| ext == "sock");
             if socket {
@@ -309,6 +342,24 @@ mod tests {
         let mut residue = Residue::default();
         processes(&[started], crate::hang_guard(), &mut residue);
         assert!(residue.found.is_empty(), "{residue:?}");
+    }
+
+    #[test]
+    fn a_host_still_running_is_residue_and_is_killed() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (mut host, started) = shell("sleep 60 & echo started; wait");
+        host.expect("started");
+        let dir = crate::root().join(format!("residue-running-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let begun = Instant::now();
+        let residue = check(&dir, std::slice::from_ref(&started), &[], &[]);
+        // Killed, not waited out: well within the hang guard.
+        assert!(begun.elapsed() < crate::hang_guard(), "{residue:?}");
+        assert_eq!(residue.found.len(), 1, "{residue:?}");
+        assert!(residue.found[0].contains("still ran"), "{residue:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[cfg(target_os = "linux")]

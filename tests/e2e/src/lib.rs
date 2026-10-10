@@ -93,12 +93,16 @@ pub fn host_program() -> PathBuf {
 
 fn build_host() -> PathBuf {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let output = std::process::Command::new(cargo)
+    let cargo = std::process::Command::new(cargo)
         .args(["build", "-p", "rutis-host", "--message-format=json"])
         .current_dir(repo())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
-        .output()
+        .spawn()
         .expect("cargo build -p rutis-host");
+    // A child of this process, but no scenario's residue.
+    residue::started(cargo.id());
+    let output = cargo.wait_with_output().expect("cargo build -p rutis-host");
     assert!(output.status.success(), "cargo build -p rutis-host failed");
     String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -252,6 +256,11 @@ impl Scenario {
 
     /// A free loopback port for the project to listen on; after the
     /// scenario it must be free again.
+    ///
+    /// The port is free when returned, not reserved: another process may
+    /// take it before the host binds it (the usual bind-0-and-release race).
+    /// A scenario that cannot afford that lets the host pick the port (`:0`)
+    /// and reads it from the host's output instead.
     pub fn port(&self) -> u16 {
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .and_then(|listener| listener.local_addr())
@@ -329,8 +338,10 @@ impl Scenario {
     }
 
     /// End the scenario: the residue checks (Q5.4.2) must find nothing.
-    /// Stop the hosts first. On success the directory is removed; otherwise
-    /// it stays, with the hosts' output and the residue in `logs/`.
+    /// Stop the hosts first: a host still running is residue, and is killed
+    /// with its process group (Unix) before the other checks. On success the
+    /// directory is removed; otherwise it stays, with the hosts' output and
+    /// the residue in `logs/`.
     pub fn finish(self) {
         self.finished.set(true);
         let residue = self.residue();
@@ -430,9 +441,13 @@ impl Probe {
         let what = format!("probe {} answering {service}.{method} (#{seq})", self.id);
         let line = host.wait_for(&what, |line| {
             let record = parse(line);
-            record["probe"] == self.id.as_str() && record["seq"] == seq
+            record["probe"] == self.id.as_str()
+                && (record["seq"] == seq || record.get("failed").is_some())
         });
         let mut record = parse(&line);
+        if let Some(failed) = record.get("failed") {
+            panic!("probe {} failed while {what}: {failed}", self.id);
+        }
         match record.get("error") {
             Some(error) => Err(error.as_str().unwrap_or_default().to_owned()),
             None => Ok(record["ok"].take()),

@@ -6,6 +6,8 @@
 // probe answers `{"probe":"<id>","seq":<seq>,"ok":<result>}` or
 // `{"probe":"<id>","seq":<seq>,"error":"<message>"}`, and reports
 // `{"probe":"<id>","event":"started"}` / `"stopped"` as it loads and unloads.
+// A request it cannot read is reported as `{"probe":"<id>","failed":"<message>"}`,
+// and it goes on polling.
 // The harness writes one copy per probe, with the services it calls in
 // place of `INJECT` (a plugin declares what it uses), so it starts once they
 // run.
@@ -50,6 +52,9 @@ export default definePlugin<Config>({
             say({ seq, error: String((error as Error)?.message ?? error) })
           }
         }
+      } catch (error) {
+        // The harness fails the scenario on it.
+        say({ failed: String((error as Error)?.message ?? error) })
       } finally {
         busy = false
       }

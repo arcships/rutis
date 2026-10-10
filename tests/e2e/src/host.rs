@@ -86,8 +86,10 @@ pub(crate) struct Started {
     pub output: Arc<Output>,
 }
 
-/// A running `rutis-host`. Dropping it kills its process group (Unix) or
-/// it (Windows), so a failing scenario leaves nothing behind.
+/// A running `rutis-host`. Dropping it kills its process group (Unix), so
+/// a failing scenario leaves nothing behind; on Windows only the host
+/// itself, its runtimes ending with its job (a Job Object of the harness's
+/// own is #232).
 pub struct Host {
     name: String,
     child: Child,
@@ -183,7 +185,10 @@ impl Host {
     #[cfg(unix)]
     pub fn signal(&self, signal: i32) {
         // SAFETY: kill(2) on a pid this scenario started and has not reaped.
-        assert_eq!(unsafe { libc::kill(self.pid() as i32, signal) }, 0);
+        if unsafe { libc::kill(self.pid() as i32, signal) } != 0 {
+            let error = std::io::Error::last_os_error();
+            self.fail(&format!("kill({signal}) failed: {error}"));
+        }
     }
 
     /// Send `signal` to the host's process group, as a terminal does for
@@ -191,14 +196,19 @@ impl Host {
     #[cfg(unix)]
     pub fn signal_group(&self, signal: i32) {
         // SAFETY: killpg(2) on the group this scenario made for the host.
-        assert_eq!(unsafe { libc::killpg(self.pid() as i32, signal) }, 0);
+        if unsafe { libc::killpg(self.pid() as i32, signal) } != 0 {
+            let error = std::io::Error::last_os_error();
+            self.fail(&format!("killpg({signal}) failed: {error}"));
+        }
     }
 
     /// Kill the host process alone (SIGKILL; TerminateProcess on Windows):
     /// what it started has to end by itself.
     pub fn kill(&mut self) {
         if self.status.is_none() {
-            let _ = self.child.kill();
+            if let Err(error) = self.child.kill() {
+                self.fail(&format!("kill failed: {error}"));
+            }
         }
     }
 

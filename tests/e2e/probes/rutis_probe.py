@@ -6,7 +6,8 @@ The harness writes a request as `<seq>.json` into `config["dir"]`:
 probe answers `{"probe": "<id>", "seq": <seq>, "ok": <result>}` or
 `{"probe": "<id>", "seq": <seq>, "error": "<message>"}`, and reports
 `{"probe": "<id>", "event": "started"}` / `"stopped"` as it loads and
-unloads. The harness writes one copy per probe, with the services it calls
+unloads. A request it cannot read is reported as
+`{"probe": "<id>", "failed": "<message>"}`, and it goes on polling. The harness writes one copy per probe, with the services it calls
 in place of `INJECT` (a plugin declares what it uses), so it starts once
 they run.
 """
@@ -38,16 +39,19 @@ async def apply(ctx, config):
 
     async def poll():
         while True:
-            names = sorted(
-                (name for name in os.listdir(folder) if name.endswith(".json")),
-                key=lambda name: int(name[: -len(".json")]),
-            )
-            for name in names:
-                path = os.path.join(folder, name)
-                with open(path, encoding="utf-8") as file:
-                    request = json.load(file)
-                os.remove(path)
-                await call(int(name[: -len(".json")]), request)
+            try:
+                names = sorted(
+                    (name for name in os.listdir(folder) if name.endswith(".json")),
+                    key=lambda name: int(name[: -len(".json")]),
+                )
+                for name in names:
+                    path = os.path.join(folder, name)
+                    with open(path, encoding="utf-8") as file:
+                        request = json.load(file)
+                    os.remove(path)
+                    await call(int(name[: -len(".json")]), request)
+            except Exception as error:  # the harness fails the scenario on it
+                say(id, failed=f"{type(error).__name__}: {error}")
             await asyncio.sleep(0.05)
 
     task = asyncio.get_running_loop().create_task(poll())
