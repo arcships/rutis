@@ -36,6 +36,7 @@ export class Client {
     } as any)
     this.#worker.on('error', error => this.#session.close(error))
     this.#exited = new Promise(resolve => this.#worker.once('exit', code => {
+      this.reason ??= `the communication worker exited (${code}) before its channel ended`
       this.#session.close(new Error(`communication worker exited (${code})`))
       this.#port.close()
       resolve(code)

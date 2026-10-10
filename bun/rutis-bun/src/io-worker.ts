@@ -25,6 +25,10 @@ port.on('message', (message: any) => {
   if (message.frame) channel?.send(message.frame)
 })
 
+// The worker lives until the channel ends. Its socket should keep it alive,
+// but older Bun lets a worker whose only pending work is an inherited
+// socket end (normally, mid-session); a timer keeps it.
+const alive = setInterval(() => {}, 1 << 30)
 try {
   let ended!: () => void
   const done = new Promise<void>(resolve => { ended = resolve })
@@ -45,6 +49,7 @@ try {
 } catch (error: any) {
   failure = error.message
 } finally {
+  clearInterval(alive)
   channel?.close()
   send({ closed: failure })
   port.close()
