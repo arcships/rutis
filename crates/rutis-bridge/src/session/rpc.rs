@@ -791,6 +791,21 @@ impl Connection {
                 changed: Notify::new(),
             }),
         }));
+        // Greet before reading (#239). A side that finds the far end's
+        // greeting incompatible closes the channel; had it not greeted yet,
+        // the far end would see only the channel end, not which protocol
+        // this side speaks. Greeting first, the far end always reads this
+        // side's greeting, which the channel delivers before its end.
+        //
+        // A far end that does not greet first may have greeted and closed
+        // before this side greets. Its greeting is still on the channel, so
+        // a failed greeting does not end the session here: the reader reads
+        // what the far end sent, and `ready` reports its greeting as
+        // incompatible, or else the channel end.
+        {
+            let mut writer = peer.0.writer.lock().unwrap();
+            let _ = peer.write_locked(&mut writer, hello);
+        }
         let weak = Arc::downgrade(&peer.0);
         std::thread::Builder::new()
             .name("rutis-reader".into())
@@ -811,13 +826,7 @@ impl Connection {
                 }
             })
             .map_err(transport)?;
-        // The far end's greeting can fail the handshake before this side
-        // greets (it is incompatible): `ready` reports that, as it would
-        // have a moment later.
-        match peer.write(hello) {
-            Err(error) if !matches!(error, Error::Handshake(_)) => Err(error),
-            _ => Ok(peer),
-        }
+        Ok(peer)
     }
 
     /// What ended the session, once it ended.

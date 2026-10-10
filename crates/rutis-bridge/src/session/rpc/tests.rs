@@ -775,13 +775,142 @@ mod endpoint_format {
         )
         .unwrap();
         let compat = Connection::open(b, Arc::new(NoExports)).unwrap();
-        assert!(matches!(
-            endpoint.ready().await,
-            Err(Error::Handshake(Handshake::Incompatible(_)))
-        ));
-        assert!(matches!(
-            compat.ready().await,
-            Err(Error::Handshake(Handshake::Incompatible(_)))
-        ));
+        let result = endpoint.ready().await;
+        assert!(
+            matches!(result, Err(Error::Handshake(Handshake::Incompatible(_)))),
+            "endpoint side: {result:?}"
+        );
+        let result = compat.ready().await;
+        assert!(
+            matches!(result, Err(Error::Handshake(Handshake::Incompatible(_)))),
+            "compat side: {result:?}"
+        );
+    }
+
+    /// What a session did on its channel, in order: whether it had tried
+    /// to greet, and had greeted, by the time it first read.
+    #[derive(Default)]
+    struct Order {
+        state: Mutex<(bool, bool, Option<bool>)>,
+        changed: std::sync::Condvar,
+    }
+    /// `channel`, noting the [`Order`] of its first send and first read.
+    /// With `greet_first`, the first read waits until a send was tried,
+    /// fixing the order of a session that greets and reads at once.
+    fn ordered(channel: Channel, greet_first: bool) -> (Channel, Arc<Order>) {
+        struct Sending(Box<dyn Sender>, Arc<Order>);
+        impl Sender for Sending {
+            fn send(&mut self, message: &[u8]) -> Result<(), crate::channel::ChannelError> {
+                self.1.state.lock().unwrap().0 = true;
+                self.1.changed.notify_all();
+                let result = self.0.send(message);
+                if result.is_ok() {
+                    self.1.state.lock().unwrap().1 = true;
+                }
+                result
+            }
+        }
+        struct Reading(Box<dyn Receiver>, Arc<Order>, bool);
+        impl Receiver for Reading {
+            fn recv(&mut self) -> Result<Option<Vec<u8>>, crate::channel::ChannelError> {
+                let mut state = self.1.state.lock().unwrap();
+                while self.2 && !state.0 {
+                    state = self.1.changed.wait(state).unwrap();
+                }
+                let sent = state.1;
+                state.2.get_or_insert(sent);
+                drop(state);
+                self.0.recv()
+            }
+        }
+        let order = Arc::new(Order::default());
+        let Channel {
+            sender,
+            receiver,
+            closer,
+            info,
+        } = channel;
+        (
+            Channel {
+                sender: Box::new(Sending(sender, order.clone())),
+                receiver: Box::new(Reading(receiver, order.clone(), greet_first)),
+                closer,
+                info,
+            },
+            order,
+        )
+    }
+
+    // #239: the far end's greeting is waiting when the compat side opens.
+    // The compat side finds it incompatible and closes at once; it must
+    // have greeted before reading it, or the endpoint side sees only the
+    // channel end (`peer disconnected`) and the compat side's `open` fails
+    // writing to the channel it closed itself.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn issue_239_an_incompatible_side_greets_before_it_reads_the_far_greeting() {
+        let (a, b) = crate::transport::memory::pair();
+        let endpoint = Connection::open_with(
+            a,
+            Arc::new(NoExports),
+            Format::Endpoint(Endpoint::rust(id("main"))),
+        )
+        .unwrap();
+        let (b, order) = ordered(b, false);
+        let compat = Connection::open(b, Arc::new(NoExports));
+        let compat = compat.unwrap_or_else(|error| panic!("compat side open: {error:?}"));
+        let result = compat.ready().await;
+        assert!(
+            matches!(result, Err(Error::Handshake(Handshake::Incompatible(_)))),
+            "compat side: {result:?}"
+        );
+        assert_eq!(
+            order.state.lock().unwrap().2,
+            Some(true),
+            "read before greeting"
+        );
+        let result = endpoint.ready().await;
+        assert!(
+            matches!(result, Err(Error::Handshake(Handshake::Incompatible(_)))),
+            "endpoint side: {result:?}"
+        );
+    }
+
+    // #239, from the other side: a far end that does not greet first may
+    // greet and close the channel before this side greets. Its greeting
+    // still decides the handshake, not the channel end.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn issue_239_a_greeting_followed_by_the_channel_end_is_incompatible() {
+        let (local, mut far) = far_pair();
+        send(&mut far, hello(VERSION));
+        far._closer.close("incompatible");
+        // This side tries to greet (and fails: the channel ended) before it
+        // reads the far end's greeting.
+        let (local, _) = ordered(local, true);
+        let endpoint = Connection::open_with(
+            local,
+            Arc::new(NoExports),
+            Format::Endpoint(Endpoint::rust(id("main"))),
+        )
+        .unwrap_or_else(|error| panic!("open: {error:?}"));
+        let result = endpoint.ready().await;
+        assert!(
+            matches!(result, Err(Error::Handshake(Handshake::Incompatible(_)))),
+            "{result:?}"
+        );
+    }
+
+    // Without a greeting, a channel that ended is a channel end.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_channel_end_before_any_greeting_is_a_transport_error() {
+        let (local, far) = far_pair();
+        far._closer.close("gone");
+        let endpoint = Connection::open_with(
+            local,
+            Arc::new(NoExports),
+            Format::Endpoint(Endpoint::rust(id("main"))),
+        )
+        .unwrap_or_else(|error| panic!("open: {error:?}"));
+        let result = endpoint.ready().await;
+        assert!(matches!(result, Err(Error::Transport(_))), "{result:?}");
     }
 }
