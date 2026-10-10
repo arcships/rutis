@@ -161,6 +161,7 @@ struct Fixture {
     root: Ctx,
     loader: Loader,
     probe: Probe,
+    go: rutis_loader::GoRuntimesHandle,
     js: PathBuf,
     _dir: tempfile::TempDir,
 }
@@ -225,15 +226,46 @@ async fn fixture() -> Fixture {
     root.plugin(plugin).await.unwrap();
     root.plugin(RuntimeRowsPlugin::new(node_rows));
     root.plugin(RuntimeRowsPlugin::new(python_rows));
-    root.plugin(GoRuntimes::new(go, dir.path()).idle(None))
-        .await
-        .unwrap();
+    let runtimes = GoRuntimes::new(go, dir.path()).idle(None);
+    let go = runtimes.handle();
+    root.plugin(runtimes).await.unwrap();
     Fixture {
         root,
         loader,
         probe,
+        go,
         js,
         _dir: dir,
+    }
+}
+
+impl Fixture {
+    /// Wait for `line`; on a timeout, say where every row and Go runtime is.
+    async fn expect(&self, line: &str) {
+        let waited = tokio::time::timeout(Duration::from_secs(30), async {
+            while self.probe.position(line).is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if waited.is_err() {
+            let rows: Vec<String> = self
+                .loader
+                .entries()
+                .into_iter()
+                .map(|entry| format!("{}: {:?}", entry.id, entry.status))
+                .collect();
+            let runtimes: Vec<String> = self
+                .go
+                .runtimes()
+                .into_iter()
+                .map(|runtime| format!("{}: {:?}", runtime.name, runtime.state))
+                .collect();
+            panic!(
+                "{line:?} not recorded: {:?}\nrows: {rows:#?}\ngo runtimes: {runtimes:?}",
+                self.probe.lines()
+            );
+        }
     }
 }
 
@@ -294,19 +326,18 @@ async fn three_runtimes_start_cold_and_use_each_other() {
         .await
         .unwrap();
     assert!(report.failures.is_empty(), "{report:?}");
-    let probe = &fixture.probe;
-    probe.wait_for("go provider: start").await;
-    probe
-        .wait_for("go consumer: js sunny / js later / py sunny / py later")
+    fixture.expect("go provider: start").await;
+    fixture
+        .expect("go consumer: js sunny / js later / py sunny / py later")
         .await;
-    probe
-        .wait_for("js go consumer: go sunny / go later / MON,TUE")
+    fixture
+        .expect("js go consumer: go sunny / go later / MON,TUE")
         .await;
-    probe
-        .wait_for("py go consumer: go sunny / go later / MON,TUE")
+    fixture
+        .expect("py go consumer: go sunny / go later / MON,TUE")
         .await;
     // Within one process, a service is the provider's own object.
-    probe.wait_for("go local: native").await;
+    fixture.expect("go local: native").await;
     fixture.root.shutdown().await.unwrap();
 }
 

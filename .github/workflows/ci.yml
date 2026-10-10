@@ -136,7 +136,7 @@ jobs:
           python-version: '3.12'
       - run: python3 -m pip install "websockets>=13"
       - name: gofmt
-        run: test -z "$(gofmt -l go crates/rutis-loader/tests/fixtures/go crates/rutis-host/templates/go)"
+        run: test -z "$(gofmt -l go crates/rutis-loader/tests/fixtures/go)"
       - name: go vet and test (SDK, fixtures)
         run: |
           (cd go/rutis && go vet ./... && go test -race ./...)

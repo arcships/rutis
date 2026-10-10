@@ -399,6 +399,9 @@ async fn an_idle_runtime_stops_and_starts_again_when_used() {
     fixture.root.shutdown().await.unwrap();
 }
 
+/// A binary replaced in place (renamed over: Windows refuses to replace a
+/// running executable, so there a new build goes to a new file, below).
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_replaced_binary_takes_effect_when_its_runtime_restarts() {
     let fixture = fixture(None, &[("netkit", "netkit")]).await;
@@ -457,6 +460,41 @@ async fn a_replaced_binary_takes_effect_when_its_runtime_restarts() {
             == Some(json!("netkit2 pong new"))
     })
     .await;
+    fixture.root.shutdown().await.unwrap();
+}
+
+/// A new build in a new file, as `rutis-host dev` makes on every platform:
+/// the runtime keeps its name, and the build takes effect on restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_build_takes_effect_when_its_runtime_restarts() {
+    let fixture = fixture(None, &[("netkit", "netkit")]).await;
+    fixture
+        .loader
+        .reconcile(layer(vec![row("ping", "go:ping")]), None)
+        .await
+        .unwrap();
+    let loader = fixture.loader.clone();
+    until("the row", || {
+        state(&loader, "ping") == Some(FiberState::Active)
+    })
+    .await;
+    let builds = fixture.dir.path().join("builds");
+    std::fs::create_dir_all(&builds).unwrap();
+    let build = install(&builds, "netkit2", "netkit-2");
+    fixture.resolver.replace("go-netkit", &build);
+    fixture.runtimes.restart("go-netkit").await.unwrap();
+    until("the new build", || {
+        service(&fixture.root, "ping")
+            .and_then(|service| service.invoke("echo", json!(["new"]).into()).ok())
+            .and_then(|value| value.json().ok())
+            == Some(json!("netkit2 pong new"))
+    })
+    .await;
+    assert_eq!(
+        fixture.loader.get("ping").unwrap().meta["runtime"],
+        json!("go-netkit"),
+        "the runtime keeps its name"
+    );
     fixture.root.shutdown().await.unwrap();
 }
 

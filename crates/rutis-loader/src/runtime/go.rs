@@ -42,8 +42,10 @@ const PLUGIN_API: u64 = 1;
 /// How often [`GoRuntimes`] looks for runtimes to start or stop.
 const SWEEP: Duration = Duration::from_millis(100);
 
-/// How long a binary may take to print its manifest.
-const MANIFEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a binary may take to print its manifest. Generous: the first
+/// run of a new binary on macOS waits for the system to assess it, which
+/// takes seconds when several start at once.
+const MANIFEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ── Binaries ─────────────────────────────────────────────────────
 
@@ -146,7 +148,7 @@ pub struct GoBinary {
 }
 
 /// What the Go binary at `path` serves: it runs `path --rutis-manifest`
-/// (within 5 s).
+/// (within 30 s).
 pub fn read_go_manifest(path: &Path) -> Result<GoManifest, String> {
     read_manifest(path)
 }
@@ -808,9 +810,23 @@ struct Inner {
     idle: Option<Duration>,
     eager: bool,
     ctx: Mutex<Option<Ctx>>,
-    slots: Mutex<HashMap<String, Slot>>,
+    slots: Mutex<Slots>,
     /// Wanted before the plugin ran.
     early: Mutex<HashSet<String>>,
+}
+
+#[derive(Default)]
+struct Slots {
+    running: HashMap<String, Slot>,
+    /// Runtimes being started, restarted or stopped: nothing else starts
+    /// one of them meanwhile, so no two processes run under one name.
+    busy: HashSet<String>,
+}
+
+/// What [`Inner::want`] decided to do for a runtime.
+enum Transition {
+    Start,
+    Restart,
 }
 
 /// Starts the Go runtimes rows use, one per binary, and stops them once
@@ -888,12 +904,21 @@ impl GoRuntimesHandle {
     /// Stop the runtime `name` and start it again from its binary as it is
     /// now: its rows stop, resolve from the new manifest, and start again.
     pub async fn restart(&self, name: &str) -> Result<(), String> {
-        let previous = self.inner.slots.lock().unwrap().remove(name);
-        if let Some(previous) = previous {
-            let _ = previous.view.dispose().await;
+        // Wait for a start, restart or stop in progress to finish.
+        loop {
+            if self
+                .inner
+                .slots
+                .lock()
+                .unwrap()
+                .busy
+                .insert(name.to_owned())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        self.inner.resolver.stopped(name);
-        self.inner.start(name)
+        self.inner.clone().restart_now(name).await
     }
 
     /// Every Go runtime: those that run, and the binaries not started.
@@ -903,7 +928,10 @@ impl GoRuntimesHandle {
         binaries
             .into_iter()
             .map(|binary| {
-                let (state, replaced) = match slots.get(&binary.runtime) {
+                let (state, replaced) = match slots.running.get(&binary.runtime) {
+                    None if slots.busy.contains(&binary.runtime) => {
+                        (GoRuntimeState::Starting, false)
+                    }
                     None => (GoRuntimeState::NotStarted, false),
                     Some(slot) => {
                         let state = match (&slot.stopped, slot.handle.state()) {
@@ -935,14 +963,17 @@ impl GoRuntimesHandle {
 impl Inner {
     /// A row resolved to `runtime`: start it unless it runs, or stopped
     /// after a crash with its binary unchanged.
-    fn want(&self, runtime: &str) {
+    fn want(self: &Arc<Self>, runtime: &str) {
         if self.ctx.lock().unwrap().is_none() {
             self.early.lock().unwrap().insert(runtime.to_owned());
             return;
         }
-        let restart = {
+        let transition = {
             let mut slots = self.slots.lock().unwrap();
-            match slots.get_mut(runtime) {
+            if slots.busy.contains(runtime) {
+                return;
+            }
+            let transition = match slots.running.get_mut(runtime) {
                 Some(slot) => {
                     slot.last_used = Instant::now();
                     if slot.stopped.is_none() {
@@ -951,23 +982,52 @@ impl Inner {
                         }
                     }
                     match &slot.stopped {
-                        None => false,
+                        None => None,
                         // Crashed: only a new binary is worth another try.
-                        Some(_) => stamp(&slot.binary) != slot.stamp,
+                        Some(_) if stamp(&slot.binary) != slot.stamp => Some(Transition::Restart),
+                        Some(_) => None,
                     }
                 }
-                None => true,
+                None => Some(Transition::Start),
+            };
+            if transition.is_some() {
+                slots.busy.insert(runtime.to_owned());
             }
+            transition
         };
-        if restart {
-            if let Some(previous) = self.slots.lock().unwrap().remove(runtime) {
-                tokio::spawn(previous.view.dispose());
+        match transition {
+            None => {}
+            Some(Transition::Start) => {
+                let started = self.start(runtime);
+                self.slots.lock().unwrap().busy.remove(runtime);
+                if let Err(error) = started {
+                    eprintln!("rutis-loader: cannot start the Go runtime {runtime}: {error}");
+                }
             }
-            self.resolver.stopped(runtime);
-            if let Err(error) = self.start(runtime) {
-                eprintln!("rutis-loader: cannot start the Go runtime {runtime}: {error}");
+            Some(Transition::Restart) => {
+                let inner = self.clone();
+                let runtime = runtime.to_owned();
+                tokio::spawn(async move {
+                    if let Err(error) = inner.restart_now(&runtime).await {
+                        eprintln!("rutis-loader: cannot restart the Go runtime {runtime}: {error}");
+                    }
+                });
             }
         }
+    }
+
+    /// Stop `runtime` and start it again; the caller marked it busy, and
+    /// this clears the mark. The new process starts only once the old one
+    /// is gone, as both use the runtime's name.
+    async fn restart_now(self: Arc<Self>, runtime: &str) -> Result<(), String> {
+        let previous = self.slots.lock().unwrap().running.remove(runtime);
+        if let Some(previous) = previous {
+            let _ = previous.view.dispose().await;
+        }
+        self.resolver.stopped(runtime);
+        let started = self.start(runtime);
+        self.slots.lock().unwrap().busy.remove(runtime);
+        started
     }
 
     fn start(&self, runtime: &str) -> Result<(), String> {
@@ -990,7 +1050,7 @@ impl Inner {
         let handle = local.handle();
         runtime_plugin.first = Mutex::new(Some(local));
         let view = ctx.plugin(runtime_plugin);
-        self.slots.lock().unwrap().insert(
+        self.slots.lock().unwrap().running.insert(
             runtime.to_owned(),
             Slot {
                 view,
@@ -1006,7 +1066,7 @@ impl Inner {
 
     /// Start the runtimes rows wait for (a row whose resolution the loader
     /// reused asks no resolver), and stop those no row has used for `idle`.
-    fn sweep(&self, loader: &Loader, idle: Option<Duration>) {
+    fn sweep(self: &Arc<Self>, loader: &Loader, idle: Option<Duration>) {
         let used: HashSet<String> = loader
             .entries()
             .into_iter()
@@ -1025,6 +1085,7 @@ impl Inner {
                 .slots
                 .lock()
                 .unwrap()
+                .running
                 .get(runtime)
                 .is_some_and(|slot| slot.stopped.is_none());
             if !running {
@@ -1038,7 +1099,8 @@ impl Inner {
         {
             let mut slots = self.slots.lock().unwrap();
             let now = Instant::now();
-            for (name, slot) in slots.iter_mut() {
+            let Slots { running, busy } = &mut *slots;
+            for (name, slot) in running.iter_mut() {
                 if slot.stopped.is_none() {
                     if let RuntimeState::Down(reason) = slot.handle.state() {
                         slot.stopped = Some(reason);
@@ -1046,20 +1108,27 @@ impl Inner {
                 }
                 if used.contains(name) {
                     slot.last_used = now;
-                } else if slot.stopped.is_none() && now.duration_since(slot.last_used) >= idle {
+                } else if slot.stopped.is_none()
+                    && !busy.contains(name)
+                    && now.duration_since(slot.last_used) >= idle
+                {
                     stopping.push(name.clone());
                 }
             }
             for name in &stopping {
-                if let Some(slot) = slots.get_mut(name) {
-                    slot.stopped = Some("stopped: idle".into());
-                    tokio::spawn(slot.view.dispose());
-                }
+                busy.insert(name.clone());
             }
         }
         for name in stopping {
-            self.resolver.stopped(&name);
-            self.slots.lock().unwrap().remove(&name);
+            let inner = self.clone();
+            tokio::spawn(async move {
+                let previous = inner.slots.lock().unwrap().running.remove(&name);
+                if let Some(previous) = previous {
+                    let _ = previous.view.dispose().await;
+                }
+                inner.resolver.stopped(&name);
+                inner.slots.lock().unwrap().busy.remove(&name);
+            });
         }
     }
 }
@@ -1115,6 +1184,7 @@ impl Plugin for GoRuntimes {
                         .slots
                         .lock()
                         .unwrap()
+                        .running
                         .drain()
                         .map(|(name, _)| name)
                         .collect();
