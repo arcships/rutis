@@ -94,13 +94,13 @@ enum Job {
     Read(TypeKey),
 }
 
-struct Job1 {
+struct JobPlugin {
     job: Arc<Job>,
     title: String,
     injects: Vec<TypeKey>,
 }
 
-impl Plugin for Job1 {
+impl Plugin for JobPlugin {
     fn name(&self) -> &str {
         "job"
     }
@@ -159,7 +159,7 @@ impl PluginFactory<NoConfig> for JobFactory {
     }
 
     fn build(&self, _: &NoConfig) -> Result<Box<dyn Plugin>, CordisError> {
-        Ok(Box::new(Job1 {
+        Ok(Box::new(JobPlugin {
             job: self.job.clone(),
             title: self.title.clone(),
             injects: self.injects.clone(),

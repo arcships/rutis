@@ -23,7 +23,6 @@ function holdsReference(value, seen = new Set()) {
   seen.add(value)
   return Object.values(value).some(item => holdsReference(item, seen))
 }
-const needsRecord = value => holdsReference(value)
 
 // The protocol version this runtime speaks (package.json `rutisProtocol`).
 export const MANIFEST = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
@@ -176,7 +175,7 @@ export class Session {
     if (Array.isArray(value)) return { type: 'list', value: value.map(value => this.#encode(value, grants, business)) }
     // An Error passed as a value (e.g. to a callback) crosses as data.
     if (value instanceof Error) return { type: 'data', value: { name: value.name, message: value.message, ...(typeof value.stack === 'string' ? { stack: value.stack } : {}) } }
-    if (value !== null && typeof value === 'object' && needsRecord(value)) {
+    if (value !== null && typeof value === 'object' && holdsReference(value)) {
       return { type: 'record', value: Object.fromEntries(Object.entries(value).map(([key, item]) => [key, this.#encode(item, grants, business)])) }
     }
     checkData(value)
