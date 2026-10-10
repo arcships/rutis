@@ -148,23 +148,6 @@ jobs:
         run: cargo test -p rutis-loader --features bun,node,python --test bun_rows --test bun_instances --test bun_multilang
       - name: cargo test (rutis-host, Bun)
         run: cargo test -p rutis-host bun
-      # TEMPORARY (#200): how often Bun rows fail on loopback channels, per
-      # Bun version, to choose the minimum version.
-      - name: repeat Bun rows on loopback channels (temporary)
-        if: '!cancelled()'
-        shell: bash
-        env:
-          RUTIS_LOCAL_HANDOVER: loopback
-        run: |
-          failed=0
-          for round in $(seq 1 20); do
-            if ! cargo test -q -p rutis-loader --features bun,node,python --test bun_rows --test bun_instances --test bun_multilang > out.txt 2>&1; then
-              failed=$((failed + 1))
-              grep -E "rutis-bun:|panicked|FAILED" out.txt | head -8
-            fi
-          done
-          echo "bun $(bun --version): $failed of 20 rounds failed" | tee -a "$GITHUB_STEP_SUMMARY"
-          test "$failed" -eq 0
 
   # The network stack and the runtimes on macOS: starting processes on an
   # inherited socket, Unix sockets, WebSocket links, the Node and Python
