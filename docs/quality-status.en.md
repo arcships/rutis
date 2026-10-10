@@ -2,7 +2,7 @@
 
 [中文](quality-status.md) · [Quality standard](quality-standard.en.md)
 
-Status: kept up to date with the code. Last updated: 2026-10-10, baseline `main` `a8733d4` (after 0.8.0).
+Status: kept up to date with the code. Last updated: 2026-10-10 (corrected after the #202 review), baseline `main` `a8733d4` (after 0.8.0).
 Companion to: [Quality standard](quality-standard.en.md). This document maps the standard, clause by clause, to the current implementation: which clauses are met, which partly, what is missing and how it will be added. The standard describes rules that stay the same; the file names, test names, issue numbers and versions here change with the implementation.
 
 ---
@@ -21,7 +21,7 @@ Status: **met**, **partly**, **not met**, **n/a**. The gaps column refers to ris
 | Q4.5 | Risk assessment recorded | Partly | §4 of this document is the first pass |
 | Q5.1.2 | Verification checks results | Partly | No ErrorSink assertions in `typed_plugin.rs`; `contract.rs` sorts before asserting D24, hiding delivery order (#177) |
 | Q5.2 | Each listed fault verified by injection | Partly | Runtime crashes yes; a link dropping mid-call, slow peers, concurrent starts, the host receiving signals no (#178, #184, #174). The `fault` decorator exists but is only used in the memory channel's own tests |
-| Q5.3.2 | Encryption across machines, TLS required off loopback | Partly | Positive cases verified; negative cases (expired certificate, wrong CA, hostname mismatch) not, and no TLS tests on the Python side (#178) |
+| Q5.3.2 | Encryption across machines, TLS required off loopback | Partly | Positive cases verified; among negative cases only an untrusted CA is (`websocket.rs` asserts `AuthRejected`), not an expired certificate or a hostname mismatch; no TLS tests on the Python side (#178) |
 | Q5.3.3 | Credentials never in output | Partly | Required by design, no common automated check |
 | Q5.3.4 | Limits on external input, no crash on malformed input | Partly | WebSocket has a 16 MiB limit with tests; local line framing has no limit (#173); no fuzzing at all (#179) |
 | Q5.3.6 | Unsafe code concentrated, checks before loading | Partly | `unsafe` is concentrated in dylib loading and process spawning; dylib checks are verified by scripts; 5 items in `design-dylib-sdk` §13 are unchecked and need reconciling |
@@ -47,12 +47,12 @@ Status: **met**, **partly**, **not met**, **n/a**. The gaps column refers to ris
 | Q6.5 | Parts that start processes or hold connections | Partly | Concurrent creation has a race (#184); residue checks incomplete |
 | Q6.6 | `rutis-host`, `rutis.json`, project templates | Not met | No black-box tests (`main.rs` at 0% coverage); signal handling missing (#174); templates only checked for generated file content |
 | Q6.7 | Node / Python SDKs and test tools | Partly | Both SDKs have test tools with strict mode; test tools are not compared with real runtimes (A1) |
-| Q6.8 | Node and Python runtimes; Bun (planned) | Partly | Both runtimes pass conformance; not run on Windows (5 test files are `cfg(unix)` as a whole); reentrancy rules written, cross-runtime policy undecided |
+| Q6.8 | Node and Python runtimes; Bun (planned) | Partly | Both runtimes pass conformance. On Windows the loader's row kinds run (loopback handover, including Node and Python cold-starting together and using each other's services); but session conformance (`runtime_conformance.rs`) and the runtime conformance matrix (`session_matrix.rs`, including its WebSocket columns) do not, and 5 tests in `runtime_rows.rs` are Unix only. Reentrancy rules written, cross-runtime policy undecided |
 | Q6.9 | Service contracts across implementations | Not met | No way to run one set of cases against different implementations of a service (G1); needs a design first |
 | Q6.10 | Loader editable layer, dsh profile files | Partly | Atomic writes and conflict replay implemented; no samples from earlier releases |
 | Q6.11 | Cordis binding generation | Partly | Generator unit tests; real baseline plugins compiled and called; no periodic verification against new external versions (F4) |
 | Q6.12 | dylib loading | Partly | Runs on every merge on Linux and macOS; Windows only when dylib code changes |
-| Q6.13 | Node links, remote runtimes, leases | Partly | Library-level tests complete; no verification between two independent host processes (E11); no real network conditions (E12); backoff parameters only checked by category (E3); leases and reconnection not model-checked (E4, E5) |
+| Q6.13 | Node links, remote runtimes, leases | Partly | Library-level tests complete; no verification between two independent host processes (E11); no real network conditions (E12); the backoff sequence (from 0.5 s, 30 s cap, ±20%, reset) has unit tests, but the link's actual retry timing and the reset after 60 s stable do not (E3); leases and reconnection not model-checked (E4, E5) |
 | Q6.14 | Cordis mounts and Cordis nodes | Partly | Differential verification against native Cordis; boundary rules 3, 4, 5, 7 not verified (#178) |
 | Q6.15 | npm, PyPI, binaries, crates.io | Not met | Packaging only; never installed and run in a clean environment (#193) |
 | Q6.16 | `rutis-dev` dev channel | Partly | Local socket and `0600` implemented; "absent from production builds" not verified |
@@ -72,7 +72,7 @@ Status: **met**, **partly**, **not met**, **n/a**. The gaps column refers to ris
 | Q9.1.1 | Designs state levels, risks, acceptance | Partly | Most designs have acceptance sections; none state levels or risks |
 | Q9.3.2 | Incompatible changes detected; versions meeting across releases | Partly | `cargo semver-checks` only warns; the previous release meeting the current one is not verified |
 | Q9.4 | Guarantee register | Not met | No register (#181) |
-| Q10.2 | Minimum and latest versions in the support matrix | Partly | Node and Python verified on one version only; the websockets lower bound never verified (#197); MSRV 1.85 never verified; runtime combinations on Windows not verified |
+| Q10.2 | Minimum and latest versions in the support matrix | Partly | Node verified on 24 (Linux) and 26 (macOS), 22 to add once the minimum drops; Python on 3.12 only; the websockets lower bound never verified (#197); MSRV 1.85 never verified; on Windows loader rows are verified, the bridge's session and runtime conformance suites are not |
 | Q11.3.2 | No coverage gate | Met | — |
 | Q12.1 | Verification at levels | Partly | Before merge and daily; nothing extra after merging to main (full matrix, installation) |
 | Q13 | Release gate | Partly | Version consistency check, packaging, two-machine smoke test; missing clean installation, register check, persisted samples, post-release verification |
@@ -271,7 +271,7 @@ Each scenario first says what it is, which parts it goes through and under what 
 | C7 | The Python runtime is reentrant, so a plugin's service is called in the middle of its own synchronous call and its state is changed concurrently | Correctness | Medium | Medium | P1 | Docs; optionally simulate reentry in the test tool's strict mode | — | Documented |
 | C8 | Wrong withdrawal order: providers stop before consumers | Correctness | High | Low | P1 | K | PR | Yes |
 | C9 | Direct objects within one runtime vs proxies across runtimes differ beyond what the docs say | Correctness | Medium | Medium | P1 | K (`multilang.rs`) | PR | Yes |
-| C10 | Any of the above fails on Windows (loopback TCP + token handover) | Compatibility | High | Medium | P0 | MX: the loopback and WebSocket columns of the conformance suites run on Windows | PR | No: 5 test files are whole-file `cfg(unix)` (#176) |
+| C10 | Any of the above fails on Windows (loopback TCP + token handover) | Compatibility | High | Medium | P0 | MX: the loopback and WebSocket columns of the conformance suites run on Windows | PR | Partly: the loader's row kinds run on Windows over loopback (including the cross-language cold start); 5 bridge test files, among them session conformance and the runtime conformance matrix, are whole-file `cfg(unix)` and empty on Windows (#176) |
 | C11 | Starting several runtimes concurrently in one process fails intermittently | Faults | Medium | High (#184 about 50% locally) | P0 | FI: N threads starting together, 100 rounds | PR | No |
 | C12 | A runtime writing heavily to stdout / stderr fills the pipe and blocks | Faults | Medium | Low | P2 | FI (fixture writing continuously) | Nightly | No |
 
@@ -309,10 +309,10 @@ Each scenario first says what it is, which parts it goes through and under what 
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | E1 | When the network drops, calls in flight report success, or are retried automatically so side effects run twice | Faults | High | Medium | P0 | FI (`fault::drop_and_close` after frame N, the far end counts side effects) | PR | No: `fault` only used in the memory channel's own tests (#178) |
 | E2 | A half-open connection is not found within 30 s | Faults | Medium | Medium | P1 | FI (`half_open` with a paused clock) | PR | Yes |
-| E3 | Reconnection backoff differs from the docs (from 0.5 s, capped at 30 s, ±20%, reset after 60 s stable; 30 s after rejected credentials; stop on incompatibility) | Correctness | Medium | Medium | P1 | U (paused clock, exact intervals asserted) | PR | Partly: categories only |
+| E3 | Reconnection backoff differs from the docs (from 0.5 s, capped at 30 s, ±20%, reset after 60 s stable; 30 s after rejected credentials; stop on incompatibility) | Correctness | Medium | Medium | P1 | U (paused clock, exact intervals asserted) | PR | Partly: a unit test in `link.rs` covers the backoff sequence (from 0.5 s, 30 s cap, ±20%, reset); the link's actual retry timing, the reset after 60 s stable and the 30 s after rejected credentials are untested |
 | E4 | During takeover of a remote runtime, old and new leases coexist; late instructions of the old session act on the new lease | Correctness | High | Low | P1 | TLA (design); K (`leases.rs`) | Design, PR | Partly |
 | E5 | Connections still possible after credentials are revoked; a registration revoked mid-handshake still lets the old handshake hand over | Security | High | Low | P1 | K (`link.rs`); TLA | PR | Partly |
-| E6 | TLS check holes: still connects with an expired certificate, wrong CA, hostname mismatch | Security | High | Medium | P0 | U (three negative cases, Rust and Python each) | PR | No (#178) |
+| E6 | TLS check holes: still connects with an expired certificate, wrong CA, hostname mismatch | Security | High | Medium | P0 | U (three negative cases, Rust and Python each) | PR | Partly: untrusted CA on the Rust side yes; expired certificate, hostname mismatch and the Python side no (#178) |
 | E7 | A malformed WebSocket upgrade request crashes the listener | Security, faults | High | Medium | P0 | FZ | Nightly | No |
 | E8 | Rejection categories differ between implementations (Python↔Rust) | Compatibility | Medium | Medium | P1 | K (a Python column in `websocket_cross.rs`) | PR | Node↔Rust only |
 | E9 | Cancellation and release not passed hop by hop | Correctness, residue | Medium | Medium | P1 | K (new multi-hop cancellation and release tests) | PR | No |
@@ -419,16 +419,16 @@ Each scenario first says what it is, which parts it goes through and under what 
 
 ---
 
-## 5. How residue is checked today
+## 5. Residue checks: proposed approach
 
-How standard Q5.4.2 is checked on the current implementation. Applies to every black-box scenario, every soak and every repeated create/destroy test:
+How standard Q5.4.2 is to be checked on the current implementation; not implemented yet. Today only the two soak tests sample fds and threads (tolerance +16) and check that every child process is reaped. To apply to every black-box scenario, every soak and every repeated create/destroy test:
 
 | Item | How |
 | --- | --- |
 | Every process the host started has exited | Linux: the test process sets `PR_SET_CHILD_SUBREAPER` and enumerates by process group; macOS: `ps` by process group; Windows: the host runs in a Job Object whose process list must be empty |
 | Socket files removed | No `*.sock` under the scenario's temporary directory |
 | Ports released | `bind` on recorded ports succeeds again |
-| fds and threads of the test process | Back to baseline ±2 (sampling code moved out of `local_soak.rs` into `rutis_bridge::testing::residue`) |
+| fds and threads of the test process | Back to baseline, tolerance to be decided (the existing soak uses +16); the sampling code in `local_soak.rs` is to be moved into a shared test module |
 | Live tokio tasks | `Handle::metrics().num_alive_tasks()` back to baseline |
 | Core registries | Fibers, bindings, listeners, event backlog in `diagnostics()` back to baseline |
 | Registrations inside runtimes | Runtimes provide a test query returning how many rows, proxies and export slots they hold |
@@ -444,7 +444,7 @@ The controls used by the P0 and P1 risks of §4, merged into what needs building
 | **E + R: black-box harness and residue checks** | A3–A5, A8, B2–B4, B10, C3, E11, F6, G2, G3, G5, H4 | No | `tests/e2e/`: the harness starts real binaries or installed packages, probe plugins (TS, Python), residue checks; scenarios written in Rust (#175) |
 | **Scenarios** | As above | No | S2 development loop (A), S3 languages and crashes (C), S9 installation (B1) first; then S4 moving implementations (G), S5 nodes in two processes (E); S6 Cordis (F8), S7 embedding and instances (D5), S8 long runs (L1, L3) nightly |
 | **FI: fault injection on sessions and links** | C4, C11, E1, E2 | `fault` exists, self-tested only | Wire into session conformance and link tests; concurrent start test (#178, #184) |
-| **MX: version and platform matrix** | C10, A8, E13, J2, P8 | One version only; Windows skips runtime conformance | Minimum and latest Node, Python, websockets; Windows loopback and WebSocket columns; previous release's runtime vs current host |
+| **MX: version and platform matrix** | C10, A8, E13, J2, P8 | Node 24 / 26, Python 3.12; Windows skips the bridge's session and runtime conformance suites | Node 22 (once the minimum drops), minimum and latest Python, the websockets lower bound; Windows loopback and WebSocket columns; previous release's runtime vs current host |
 | **IN: installation smoke test** | B1 | No | Three platforms × three channels after merge; again with registry packages after release (#193) |
 | **PT: cross-language value round trips** | P7, C5, P4 | Partly | The same random values round-tripped Rust↔Node and Rust↔Python and compared; release counting invariant |
 | **Service contract test tool** | G1 | No | New design: calls and expectations for a service written once, run against an implementation in any language. Design document first |
