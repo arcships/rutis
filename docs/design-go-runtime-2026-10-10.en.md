@@ -428,7 +428,7 @@ G1 and G2 are implemented by #227. Where it differs from this document:
 | Item | This document | Implementation |
 | --- | --- | --- |
 | `async` replies | an asynchronous result reference | the result itself, when the method returns; a `cancel` frame cancels the method's ctx (Rust settles an async method's reply whether it is a value or a future) |
-| Manifest | §3.2's fields | also `runtime: "rutis-go-runtime:1"` (the SDK marker, which keeps it in the binary) |
+| Manifest | §3.2's fields | also `runtime: "rutis-go-runtime:1"` (the SDK marker, which keeps it in the binary) and `platform` (`GOOS/GOARCH`, which `check` prints) |
 | `ServeArgs` | `ServeArgs(args []string) error` | `ServeArgs(args []string, defs ...*Definition) error`; also `ServeConn(net.Conn, defs...)`, `Manifest(defs...)` |
 | `*rutis.Service` | `Call`, `Methods` | also `Local()`: whether a plugin in this process provides the service |
 | Test tool | `rutistest.Load` | `Load(t, plugin, config, services) *Loaded`; `Service(name)` with `Call` / `Bind`; the plugin runs in its real runtime across an in-memory session |
@@ -440,7 +440,9 @@ G1 and G2 are implemented by #227. Where it differs from this document:
 | Remote npm naming | refuses `go:` and `<Go runtime name>:` | refuses any `<name>:` prefix |
 | macOS quarantine | reuse the dylib check | `rutis-host check` checks with `xattr` and says what to do |
 | Manifest timeout | 5 seconds | 30 seconds: on macOS a new binary's first run waits for the system's assessment, over 5 seconds when several start at once |
-| Starting, restarting, stopping one runtime | — | one at a time (the runtime is marked busy); a new process starts once the old one is gone |
+| Starting, restarting, stopping one runtime | §5: a row resolving to it during an idle stop cancels the stop | one at a time (the runtime is marked busy, a mark always cleared); a new process starts once the old one is gone. A row resolving to it during an idle stop does not cancel the stop: the runtime starts again as soon as the stop is over |
+| `rows.load`'s `inject` | in the signature | ignored, as in Python: a row's own `inject` is what a Cordis row waits for in Cordis; a leaf runtime's rows are gated in rutis on what their plugins inject |
+| `check` | prints implementation and engine | does not: they are in the `mount` reply and `check` starts no Go runtime; with Bun B1 |
 | Not done | | Python's `mount` reply `implementation` / `engine` and `check` printing them (with Bun B1); G3 |
 
 ---
