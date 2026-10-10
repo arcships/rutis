@@ -5,6 +5,8 @@ crates/rutis-loader/tests/multilang.rs)."""
 import types
 import unittest
 
+import background
+
 from rutis import define_plugin
 from rutis.peer import UNDEFINED, _apply, _data, _holds_reference, _is_live
 from rutis.plugin import load, shapes
@@ -21,7 +23,7 @@ class Weather:
         pass
 
 
-class PluginTests(unittest.TestCase):
+class PluginTests(background.TestCase):
     def test_shapes_from_classes_and_dicts(self):
         self.assertEqual(
             shapes({"weather": Weather, "clock": {"now": "sync"}}),
@@ -51,7 +53,7 @@ class PluginTests(unittest.TestCase):
             load(types.ModuleType("empty"))
 
 
-class ValueTests(unittest.TestCase):
+class ValueTests(background.TestCase):
     def test_live_objects_cross_by_reference(self):
         self.assertTrue(_is_live(Weather()))
         self.assertFalse(_is_live({"a": 1}))

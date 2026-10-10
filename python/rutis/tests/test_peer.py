@@ -5,10 +5,12 @@ import json
 import socket
 import unittest
 
+import background
+
 from rutis.peer import Peer
 
 
-class PeerTests(unittest.IsolatedAsyncioTestCase):
+class PeerTests(background.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.ours, self.theirs = socket.socketpair()
         self.theirs.settimeout(5)
@@ -56,7 +58,7 @@ class Weather:
         return "monday"
 
 
-class CapabilityTests(unittest.IsolatedAsyncioTestCase):
+class CapabilityTests(background.IsolatedAsyncioTestCase):
     """An object reference goes only to a far end that declared `objects`."""
 
     async def session(self, capabilities):

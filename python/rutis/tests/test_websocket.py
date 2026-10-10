@@ -8,6 +8,8 @@ import threading
 import time
 import unittest
 
+import background
+
 try:
     from websockets.exceptions import ConnectionClosed, InvalidStatus
     from websockets.sync.client import connect
@@ -44,7 +46,7 @@ def dial(address, token="secret", protocol=PROTOCOL, **options):
 
 
 @unittest.skipIf(websocket is None, "needs the websockets package (rutis[network])")
-class WebSocketTest(unittest.TestCase):
+class WebSocketTest(background.TestCase):
     def test_messages_cross_and_an_orderly_close_is_a_normal_end(self):
         address, channels = listen()
         client = dial(address)
@@ -55,6 +57,23 @@ class WebSocketTest(unittest.TestCase):
         self.assertEqual(client.recv(timeout=5), '{"a":"x\\ny"}')
         client.close(1001)
         self.assertIsNone(channel.recv())
+
+    def test_a_closed_listener_refuses_new_connections_and_keeps_established_ones(self):
+        # #197: before websockets 17, close() raised in a background thread
+        # and the listener went on accepting.
+        listener = websocket.listen("ws://127.0.0.1:0/rutis", PROTOCOL, "secret", announce=lambda _: None)
+        first, second = dial(listener.address), dial(listener.address)
+        channels = [listener.accept(), listener.accept()]
+        listener.close()
+        with self.assertRaises(ConnectionRefusedError):
+            dial(listener.address)
+        for client, channel in zip((first, second), channels):
+            client.send("{}")
+            self.assertEqual(channel.recv(), b"{}")
+            channel.send(b"[]")
+            self.assertEqual(client.recv(timeout=5), "[]")
+            client.close()
+            self.assertIsNone(channel.recv())
 
     def test_wrong_or_missing_credentials_and_protocols_are_refused(self):
         address, _ = listen()

@@ -4,6 +4,8 @@ import asyncio
 import unittest
 from dataclasses import dataclass
 
+import background
+
 from rutis import PLUGIN_API, define_plugin
 from rutis.testing import PluginTestError, load
 
@@ -45,7 +47,7 @@ def run(coroutine):
     return asyncio.run(coroutine)
 
 
-class Testing(unittest.TestCase):
+class Testing(background.TestCase):
     def test_a_plugin_runs_with_its_services_and_unloads_latest_first(self):
         plugin, order = weather_plugin()
 
