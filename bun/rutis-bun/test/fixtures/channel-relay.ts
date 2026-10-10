@@ -5,7 +5,16 @@
 import { open, type Channel } from '../../src/channel.ts'
 
 const [first, second] = process.argv.slice(2)
-let a!: Channel, b!: Channel
-const done = () => { a?.close(); b?.close(); setTimeout(() => process.exit(0), 50) }
-a = await open(first, { message: text => b.send(text), closed: done })
-b = await open(second, { message: text => a.send(text), closed: done })
+let a: Channel | undefined, b: Channel | undefined
+let ended = false
+// What reaches `a` before `b` is connected waits for it, in order.
+const early: string[] = []
+const done = () => {
+  ended = true
+  a?.close(); b?.close()
+  setTimeout(() => process.exit(0), 50)
+}
+a = await open(first, { message: text => (b ? b.send(text) : early.push(text)), closed: done })
+b = await open(second, { message: text => a!.send(text), closed: done })
+for (const text of early.splice(0)) b.send(text)
+if (ended) b.close()
