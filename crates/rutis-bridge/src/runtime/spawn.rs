@@ -74,6 +74,8 @@ async fn loopback(mut command: tokio::process::Command, first: &Path) -> Result<
     use crate::transport::local::spawn::{adopt, Loopback, CHANNEL_TOKEN};
     let transport = |error: std::io::Error| Error::Transport(error.to_string());
     let listener = Loopback::bind().await.map_err(transport)?;
+    #[cfg(unix)]
+    crate::transport::local::spawn::hand_over(&mut command, None);
     let mut child = command
         .env(CHANNEL_TOKEN, listener.token())
         .arg(listener.address())
@@ -143,23 +145,8 @@ pub(crate) fn on_disconnect(
 #[cfg(unix)]
 fn inherit(mut command: tokio::process::Command, first: &Path) -> Result<Spawned, Error> {
     let (ours, theirs) = UnixStream::pair().map_err(transport)?;
-    let fd = theirs.as_raw_fd();
-    // SAFETY: between fork and exec, only async-signal-safe calls: dup2 and
-    // fcntl. Our end and every other descriptor keep CLOEXEC; only fd 3
-    // crosses exec.
-    unsafe {
-        command.pre_exec(move || {
-            if fd == CHANNEL_FD {
-                let flags = libc::fcntl(fd, libc::F_GETFD);
-                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            } else if libc::dup2(fd, CHANNEL_FD) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    // Only fd 3 (and stdio) crosses exec, whatever other threads opened.
+    crate::transport::local::spawn::hand_over(&mut command, Some(theirs.as_raw_fd()));
     let child = command
         .arg(format!("fd:{CHANNEL_FD}"))
         .arg(first)
@@ -190,6 +177,7 @@ async fn dial_back(mut command: tokio::process::Command, first: &Path) -> Result
         .map_err(transport)?;
     let socket = directory.path().join("peer.sock");
     let listener = tokio::net::UnixListener::bind(&socket).map_err(transport)?;
+    crate::transport::local::spawn::hand_over(&mut command, None);
     let mut child = command
         .arg(&socket)
         .arg(first)
