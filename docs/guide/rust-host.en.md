@@ -14,8 +14,8 @@ rutis-bridge = { version = "0.8", features = ["python", "websocket"] }   # node 
 | Crate / feature | Contents |
 | --- | --- |
 | `rutis` | Core: plugins, dependencies, and services. |
-| `rutis-loader` | Loads plugins from data rows. `node` / `python` enable rows for those languages; `peer` enables node rows and `peer:` rows. |
-| `rutis-bridge` | Connects processes, languages, and machines. `node` (default) and `python` enable local runtimes; `websocket` enables the WebSocket transport; `cordis` mounts Cordis plugins and generates Rust bindings (see [Cordis](cordis.en.md)); `testing` enables compatibility tests. |
+| `rutis-loader` | Loads plugins from data rows. `node` / `python` / `go` enable rows for those languages; `peer` enables node rows and `peer:` rows. |
+| `rutis-bridge` | Connects processes, languages, and machines. `node` (default), `python` and `go` enable local runtimes; `websocket` enables the WebSocket transport; `cordis` mounts Cordis plugins and generates Rust bindings (see [Cordis](cordis.en.md)); `testing` enables compatibility tests. |
 
 Enable only the language features you use so the application compiles and starts only the required components.
 

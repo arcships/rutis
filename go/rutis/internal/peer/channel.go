@@ -8,7 +8,12 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 )
+
+// writeTimeout bounds a write: a far end that stops reading ends the
+// session instead of blocking the writer forever.
+const writeTimeout = 60 * time.Second
 
 // MaxMessage is the largest message a channel carries, as on the WebSocket
 // channel.
@@ -45,6 +50,7 @@ func (l *Lines) Send(message []byte) error {
 	defer l.mu.Unlock()
 	buffer := make([]byte, 0, len(message)+1)
 	buffer = append(append(buffer, message...), '\n')
+	_ = l.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	_, err := l.conn.Write(buffer)
 	return err
 }

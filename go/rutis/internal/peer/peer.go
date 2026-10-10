@@ -137,7 +137,6 @@ type Peer struct {
 	greeting  *Greeting
 
 	pending    map[string]chan result
-	cancelled  map[string]bool
 	exports    map[int64]*export
 	identities map[any]int64
 	imports    map[int64]*imported
@@ -160,7 +159,6 @@ func New(channel Channel, opts Options) (*Peer, error) {
 		channel:    channel,
 		opts:       opts,
 		pending:    map[string]chan result{},
-		cancelled:  map[string]bool{},
 		exports:    map[int64]*export{},
 		identities: map[any]int64{},
 		imports:    map[int64]*imported{},
@@ -800,9 +798,9 @@ func (p *Peer) Call(ctx context.Context, target, method string, args []any, sync
 func (p *Peer) Notify(target, method string, args []any) {
 	id, _, err := p.request(context.Background(), "invoke", map[string]any{"target": target, "method": method}, args, true, nil)
 	if err == nil {
+		// Its reply, when it comes, is a late one: dropped.
 		p.mu.Lock()
 		delete(p.pending, id)
-		p.cancelled[id] = true
 		p.mu.Unlock()
 	}
 }
@@ -822,9 +820,6 @@ func (p *Peer) call(ctx context.Context, op string, fields map[string]any, args 
 		p.mu.Lock()
 		_, waiting := p.pending[id]
 		delete(p.pending, id)
-		if waiting {
-			p.cancelled[id] = true
-		}
 		p.mu.Unlock()
 		if waiting && cancellable {
 			_ = p.send(map[string]any{"op": "cancel", "id": id})
@@ -993,12 +988,12 @@ func (p *Peer) receive(f *frame) error {
 		}
 		waiter, ok := p.pending[id]
 		if !ok {
-			if p.cancelled[id] {
-				delete(p.cancelled, id)
-				p.mu.Unlock()
+			// A late reply to a call of ours given up (cancelled, or a
+			// notification) is dropped; any other is a fault.
+			p.mu.Unlock()
+			if p.issued(id) {
 				return nil
 			}
-			p.mu.Unlock()
 			return errors.New("response for unknown call")
 		}
 		delete(p.pending, id)
@@ -1007,7 +1002,10 @@ func (p *Peer) receive(f *frame) error {
 		return nil
 	case "cancel":
 		var id string
-		_ = json.Unmarshal(f.ID, &id)
+		if json.Unmarshal(f.ID, &id) != nil {
+			p.mu.Unlock()
+			return errors.New("invalid cancel")
+		}
 		cancel := p.running[id]
 		signal := p.signals[id]
 		p.mu.Unlock()
@@ -1045,6 +1043,18 @@ func (p *Peer) receive(f *frame) error {
 	p.mu.Unlock()
 	go p.execute(job)
 	return nil
+}
+
+// issued reports whether `id` names a call this side made; p.mu is not
+// held.
+func (p *Peer) issued(id string) bool {
+	if !strings.HasPrefix(id, p.local) || !sequence.MatchString(id[len(p.local):]) {
+		return false
+	}
+	n, err := strconv.ParseUint(id[len(p.local):], 10, 64)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return err == nil && n <= p.next
 }
 
 func (p *Peer) greet(f *frame) error {

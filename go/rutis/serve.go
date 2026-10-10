@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	goruntime "runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -112,6 +113,7 @@ func Manifest(defs ...*Definition) ([]byte, error) {
 		"sdk":       Version,
 		"pluginApi": PluginAPI,
 		"runtime":   marker,
+		"platform":  goruntime.GOOS + "/" + goruntime.GOARCH,
 		"plugins":   plugins,
 	})
 }

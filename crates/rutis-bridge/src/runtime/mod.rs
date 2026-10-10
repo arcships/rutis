@@ -62,7 +62,9 @@ pub fn go_runtime_name(path: &std::path::Path) -> String {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let stem = match file.len() > 4 && file[file.len() - 4..].eq_ignore_ascii_case(".exe") {
+    // By bytes: a name need not be ASCII, and `.exe` is.
+    let exe = file.len() > 4 && file.as_bytes()[file.len() - 4..].eq_ignore_ascii_case(b".exe");
+    let stem = match exe {
         true => &file[..file.len() - 4],
         false => &file[..],
     };
@@ -81,4 +83,24 @@ pub fn go_runtime_name(path: &std::path::Path) -> String {
 /// (`RuntimeSession#gpu`).
 pub fn runtime_session_key(name: &str) -> rutis::TypeKey {
     rutis::TypeKey::keyed_dynamic::<dyn RuntimeSession>(name.to_owned())
+}
+
+#[cfg(all(test, feature = "go"))]
+mod tests {
+    use super::go_runtime_name;
+    use std::path::Path;
+
+    #[test]
+    fn go_runtime_names_come_from_file_names() {
+        for (file, name) in [
+            ("netkit", "go-netkit"),
+            ("net.kit_v1.exe", "go-net-kit-v1"),
+            ("NetKit.EXE", "go-netkit"),
+            ("天气", "go---"),
+            ("天气.exe", "go---"),
+            ("a天", "go-a-"),
+        ] {
+            assert_eq!(go_runtime_name(Path::new(file)), name, "{file}");
+        }
+    }
 }

@@ -406,16 +406,19 @@ mod tests {
             ),
         )
         .unwrap();
-        let tested = std::process::Command::new("go")
-            .args(["test", "./..."])
-            .current_dir(&project)
-            .output()
-            .expect("go is on PATH");
-        assert!(
-            tested.status.success(),
-            "{}",
-            String::from_utf8_lossy(&tested.stdout)
-        );
+        for check in [&["vet", "./..."][..], &["test", "./..."][..]] {
+            let output = std::process::Command::new("go")
+                .args(check)
+                .current_dir(&project)
+                .output()
+                .expect("go is on PATH");
+            assert!(
+                output.status.success(),
+                "go {check:?}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         let (config, id) = dev_config(&project).unwrap();
         assert_eq!(id, "net-probe");
         assert_eq!(config.rows[0]["name"], "go-net-probe:net-probe");

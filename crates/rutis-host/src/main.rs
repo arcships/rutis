@@ -267,7 +267,7 @@ async fn check(args: &[String]) -> Result<(), String> {
                     };
                     println!("  api: {api} ({compatible})");
                 }
-                for field in ["version", "inject", "provides"] {
+                for field in ["runtime", "binary", "version", "inject", "provides"] {
                     if let Some(value) = meta.get(field).filter(|value| !value.is_null()) {
                         println!("  {field}: {value}");
                     }
@@ -302,9 +302,14 @@ async fn check(args: &[String]) -> Result<(), String> {
                         false => "incompatible: upgrade the host",
                     };
                     println!(
-                        "  {} ({}): sdk {}, plugin API {} ({api}), plugins: {}",
+                        "  {} ({}): {}sdk {}, plugin API {} ({api}), plugins: {}",
                         binary.runtime,
                         binary.path.display(),
+                        manifest
+                            .platform
+                            .as_ref()
+                            .map(|platform| format!("{platform}, "))
+                            .unwrap_or_default(),
                         manifest.sdk,
                         manifest.plugin_api,
                         plugins.join(", ")

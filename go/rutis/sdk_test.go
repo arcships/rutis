@@ -237,3 +237,16 @@ func TestDefineRefusesBrokenDeclarations(t *testing.T) {
 		Apply:    func(*rutis.Ctx, rutis.NoConfig) error { return nil },
 	})
 }
+
+func TestAnUndeclaredServiceIsRefused(t *testing.T) {
+	undeclared := rutis.Define(rutis.Plugin[rutis.NoConfig]{
+		Name: "undeclared",
+		Apply: func(ctx *rutis.Ctx, _ rutis.NoConfig) error {
+			ctx.Provide("weather", &Weather{})
+			return nil
+		},
+	})
+	if message := loadFails(t, undeclared, nil); !strings.Contains(message, "Provides does not declare it") {
+		t.Fatal(message)
+	}
+}

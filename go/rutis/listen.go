@@ -45,10 +45,16 @@ func heartbeat() (time.Duration, time.Duration) {
 	return 10 * time.Second, 30 * time.Second
 }
 
+// announce reports the address a listener is bound to (stderr; tests
+// replace it).
+var announce = func(address string) {
+	fmt.Fprintf(os.Stderr, "rutis: listening on %s\n", address)
+}
+
 // listen serves one controller at a time on a WebSocket address: a newer
 // connection takes over, and is greeted only once the old lease is gone.
 func listen(spec string, endpoint *peer.Endpoint, defs []*Definition) error {
-	accepted, err := listenWebSocket(spec, fmt.Sprintf("rutis.%d", peer.EndpointProtocol), os.Getenv("RUTIS_TOKEN"), os.Getenv("RUTIS_CERT"), os.Getenv("RUTIS_KEY"))
+	accepted, _, err := listenWebSocket(spec, fmt.Sprintf("rutis.%d", peer.EndpointProtocol), os.Getenv("RUTIS_TOKEN"), os.Getenv("RUTIS_CERT"), os.Getenv("RUTIS_KEY"))
 	if err != nil {
 		return err
 	}
@@ -78,10 +84,12 @@ func listen(spec string, endpoint *peer.Endpoint, defs []*Definition) error {
 	}
 }
 
-func listenWebSocket(spec, protocol, token, cert, key string) (<-chan *wsConn, error) {
+// listenWebSocket listens on `spec` for connections presenting `token` and
+// speaking `protocol`; it returns them, and the address it is bound to.
+func listenWebSocket(spec, protocol, token, cert, key string) (<-chan *wsConn, string, error) {
 	address, err := url.Parse(spec)
 	if err != nil || (address.Scheme != "ws" && address.Scheme != "wss") {
-		return nil, fmt.Errorf("%s is not a ws:// or wss:// address", spec)
+		return nil, "", fmt.Errorf("%s is not a ws:// or wss:// address", spec)
 	}
 	secure := address.Scheme == "wss"
 	host := address.Hostname()
@@ -89,7 +97,7 @@ func listenWebSocket(spec, protocol, token, cert, key string) (<-chan *wsConn, e
 		host = "127.0.0.1"
 	}
 	if !secure && host != "127.0.0.1" && host != "::1" && host != "localhost" {
-		return nil, fmt.Errorf("%s: only a loopback listener may go without TLS", spec)
+		return nil, "", fmt.Errorf("%s: only a loopback listener may go without TLS", spec)
 	}
 	port := address.Port()
 	if port == "" {
@@ -101,17 +109,17 @@ func listenWebSocket(spec, protocol, token, cert, key string) (<-chan *wsConn, e
 	}
 	listener, err := net.Listen("tcp", net.JoinHostPort(host, port))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if secure {
 		if cert == "" || key == "" {
 			listener.Close()
-			return nil, fmt.Errorf("%s: wss needs a certificate and key (RUTIS_CERT, RUTIS_KEY)", spec)
+			return nil, "", fmt.Errorf("%s: wss needs a certificate and key (RUTIS_CERT, RUTIS_KEY)", spec)
 		}
 		pair, err := tls.LoadX509KeyPair(cert, key)
 		if err != nil {
 			listener.Close()
-			return nil, err
+			return nil, "", err
 		}
 		listener = tls.NewListener(listener, &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12})
 	}
@@ -120,7 +128,8 @@ func listenWebSocket(spec, protocol, token, cert, key string) (<-chan *wsConn, e
 	if strings.Contains(shown, ":") {
 		shown = "[" + shown + "]"
 	}
-	fmt.Fprintf(os.Stderr, "rutis: listening on %s://%s:%d%s\n", address.Scheme, shown, bound.Port, path)
+	boundAddress := fmt.Sprintf("%s://%s:%d%s", address.Scheme, shown, bound.Port, path)
+	announce(boundAddress)
 	accepted := make(chan *wsConn)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != path {
@@ -176,7 +185,7 @@ func listenWebSocket(spec, protocol, token, cert, key string) (<-chan *wsConn, e
 	})
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = server.Serve(listener) }()
-	return accepted, nil
+	return accepted, boundAddress, nil
 }
 
 // wsConn is a server-side WebSocket connection carrying text messages.

@@ -194,8 +194,7 @@ impl Launcher {
             .cwd(project)
             .inherit_fd()
     }
-}
-impl Launcher {
+
     /// A Go runtime: `binary`, built with the Go SDK (`go/rutis`), serving
     /// the plugins compiled into it; in `project`, on an inherited socket
     /// (on Windows, a loopback address).

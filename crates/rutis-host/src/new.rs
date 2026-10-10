@@ -5,7 +5,11 @@
 use std::path::Path;
 
 /// The release train this program belongs to: the projects depend on the
-/// SDK of the same version.
+/// SDK of the same version. Every train release tags the Go SDK
+/// (`go/rutis/v<version>`, release.yml), so a released rutis-host makes Go
+/// projects that build; one built from an unreleased commit names a
+/// version that has no tag yet (point the project's go.mod at a checkout
+/// with `replace` meanwhile).
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const NODE: &[(&str, &str)] = &[

@@ -498,6 +498,50 @@ async fn a_new_build_takes_effect_when_its_runtime_restarts() {
     fixture.root.shutdown().await.unwrap();
 }
 
+/// A restart whose caller gives up half way (a timeout around it) leaves
+/// the runtime usable: the rows run again, and the next restart goes on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_given_up_half_way_leaves_the_runtime_usable() {
+    let fixture = fixture(None, &[("netkit", "netkit")]).await;
+    fixture
+        .loader
+        .reconcile(layer(vec![row("ping", "go:ping")]), None)
+        .await
+        .unwrap();
+    let loader = fixture.loader.clone();
+    until("the row", || {
+        state(&loader, "ping") == Some(FiberState::Active)
+    })
+    .await;
+    let _ = tokio::time::timeout(
+        Duration::from_millis(1),
+        fixture.runtimes.restart("go-netkit"),
+    )
+    .await;
+    until("the row again", || {
+        state(&loader, "ping") == Some(FiberState::Active)
+    })
+    .await;
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        fixture.runtimes.restart("go-netkit"),
+    )
+    .await
+    .expect("a restart after one given up")
+    .unwrap();
+    until("the row after the restart", || {
+        state(&loader, "ping") == Some(FiberState::Active)
+    })
+    .await;
+    assert_eq!(
+        call(&fixture.root, "ping", "echo", json!(["still"]))
+            .await
+            .unwrap(),
+        json!("netkit pong still")
+    );
+    fixture.root.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn names_of_other_resolvers_are_not_claimed() {
     let fixture = fixture(None, &[("netkit", "netkit")]).await;

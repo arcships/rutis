@@ -231,7 +231,10 @@ func (rt *runtimeState) provide(r *row, name string, value any) func() {
 	if value == nil {
 		panic(fmt.Sprintf("rutis: provide %s: a nil service", name))
 	}
-	if shape != nil && !reflect.TypeOf(value).AssignableTo(shape.typ) {
+	if shape == nil {
+		panic(fmt.Sprintf("rutis: provide %s: Provides does not declare it", name))
+	}
+	if !reflect.TypeOf(value).AssignableTo(shape.typ) {
 		panic(fmt.Sprintf("rutis: provide %s: %T is not the %s Provides declares", name, value, shape.typ))
 	}
 	rt.mu.Lock()
@@ -354,10 +357,7 @@ func (rt *runtimeState) unload(ctx context.Context, key string) error {
 			errs = append(errs, err)
 		}
 	}
-	if len(errs) > 0 {
-		return errs[0]
-	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (rt *runtimeState) update(ctx context.Context, key string, config any) error {
@@ -466,6 +466,9 @@ func (rt *runtimeState) control(ctx context.Context, method string, args []any) 
 		if len(args) > 2 {
 			config = args[2]
 		}
+		// args[4], the row's own `inject`, names services a Cordis row waits
+		// for in Cordis; a leaf runtime's rows wait in rutis, which gates
+		// every name its plugin injects (as in the Python runtime).
 		pairs, err := argument[[][2]string](args, 3)
 		if err != nil {
 			return nil, fmt.Errorf("isolate: %w", err)
@@ -622,8 +625,9 @@ func (c *Ctx) Use(name string, target any) error {
 }
 
 // Provide provides `value` as the service `name` until the plugin unloads,
-// or until the returned function is called. A service Provides declares
-// must be of the type declared there.
+// or until the returned function is called. Provides must declare `name`,
+// and `value` must be of the type declared there; otherwise Provide panics
+// (in Apply, the load fails).
 func (c *Ctx) Provide(name string, value any) func() {
 	return c.rt.provide(c.row, name, value)
 }
