@@ -148,6 +148,19 @@ test('a line that is not valid UTF-8 closes the channel', async () => {
   assert.deepEqual(received, [])
 })
 
+// The line is decoded whole: an invalid sequence split across two reads is
+// refused, as one that arrives in a single read is.
+test('invalid UTF-8 split across two reads closes the channel', async () => {
+  const { theirs, received, ended } = await framedPair()
+  theirs.on('error', () => {})
+  // A lead byte of a 3-byte sequence, then a byte that cannot continue it.
+  theirs.write(Buffer.concat([Buffer.from('{"v":"'), Buffer.from([0xe2])]), () => {
+    theirs.write(Buffer.concat([Buffer.from([0x41]), Buffer.from('"}\n')]))
+  })
+  assert.match(await ended, /not valid UTF-8/)
+  assert.deepEqual(received, [])
+})
+
 // Only \n separates messages: a \r before it is a byte of the message and
 // counts toward the limit, as in Rust and Python.
 test('a carriage return is part of the message', async () => {

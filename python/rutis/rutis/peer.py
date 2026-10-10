@@ -369,7 +369,9 @@ class Peer:
     def _read(self) -> None:
         try:
             while (message := self._channel.recv()) is not None:
-                self._deliver(json.loads(message))
+                # Strict UTF-8, and no BOM: json.loads would take bytes that
+                # start with one, where Rust and Node refuse the frame.
+                self._deliver(json.loads(message.decode("utf-8")))
         except Exception as error:  # noqa: BLE001 - any failure ends the session
             # Text that is not JSON ends the channel too, not only the session.
             try:

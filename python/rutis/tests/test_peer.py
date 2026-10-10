@@ -67,14 +67,23 @@ class MalformedFrameTests(unittest.IsolatedAsyncioTestCase):
         return peer, theirs
 
     async def test_text_that_is_not_json_closes_the_session_and_the_channel(self):
-        peer, theirs = self.session()
-        peer.start()
-        lines = theirs.makefile("rb")
-        self.assertEqual(json.loads(lines.readline())["op"], "hello")
-        theirs.sendall(b'{"op":"invoke","id":"rust:1"\n')
-        await asyncio.wait_for(peer.closed, 10)
-        self.assertIsInstance(peer.closed_error, ConnectionError)
-        self.assertEqual(lines.readline(), b"", "the channel ends too")
+        cases = {
+            "malformed JSON": b'{"op":"invoke","id":"rust:1"',
+            # json.loads takes bytes that start with a BOM: Rust and Node do not.
+            "a leading BOM": b'\xef\xbb\xbf{"op":"cancel","id":"rust:1"}',
+            "invalid UTF-8": b'{"op":"cancel","id":"rust:\xff"}',
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                peer, theirs = self.session()
+                peer.start()
+                lines = theirs.makefile("rb")
+                self.addCleanup(lines.close)
+                self.assertEqual(json.loads(lines.readline())["op"], "hello")
+                theirs.sendall(text + b"\n")
+                await asyncio.wait_for(peer.closed, 10)
+                self.assertIsInstance(peer.closed_error, ConnectionError)
+                self.assertEqual(lines.readline(), b"", "the channel ends too")
 
     async def test_malformed_and_dangling_frames_close_the_session(self):
         cases = {

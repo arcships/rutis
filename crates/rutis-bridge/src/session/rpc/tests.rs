@@ -244,9 +244,10 @@ async fn handshake_and_release_count_fail_closed() {
 /// with a transport error, whatever was in flight.
 #[tokio::test(flavor = "multi_thread")]
 async fn malformed_and_dangling_frames_close_the_session() {
-    let cases: [(&str, &[u8]); 12] = [
+    let cases: [(&str, &[u8]); 13] = [
         ("malformed JSON", br#"{"op":"invoke","id":"node:1""#),
     ("empty", b""),
+    ("a leading BOM", b"\xef\xbb\xbf{\"op\":\"cancel\",\"id\":\"node:1\"}"),
     (
         "invalid UTF-8 inside a string",
         b"{\"op\":\"invoke\",\"id\":\"node:1\",\"path\":[],\"target\":\"t\",\"method\":\"m\",\"args\":{\"type\":\"data\",\"value\":\"\xff\"}}",

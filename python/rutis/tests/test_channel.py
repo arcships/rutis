@@ -1,6 +1,7 @@
 """The newline framing of local channels: its size limit (risk P2; Q5.3.4,
 Q6.3.2) and its boundaries."""
 
+import errno
 import importlib.util
 import socket
 import threading
@@ -13,20 +14,25 @@ PATIENCE = 10
 
 
 class Writer(threading.Thread):
-    """Writes `chunks` to `sock` on its own thread; a failure other than the
-    far end going away fails the test that joins it."""
+    """Writes `chunks` to `sock` on its own thread, then shuts its side down.
+    With `cut`, the reader is expected to close the channel part way: the
+    far end going away (on a send or on the shutdown) ends the writer. Any
+    other failure, or that one without `cut`, fails the test that joins it."""
 
-    def __init__(self, sock: socket.socket, chunks):
+    GONE = {errno.EPIPE, errno.ECONNRESET, errno.ENOTCONN, errno.ESHUTDOWN}
+
+    def __init__(self, sock: socket.socket, chunks, cut: bool = False):
         super().__init__(daemon=True)
-        self.sock, self.chunks, self.error = sock, chunks, None
+        self.sock, self.chunks, self.cut, self.error = sock, chunks, cut, None
 
     def run(self):
         try:
             for chunk in self.chunks:
                 self.sock.sendall(chunk)
             self.sock.shutdown(socket.SHUT_WR)
-        except (BrokenPipeError, ConnectionResetError):
-            pass  # the channel closed: what the endless tests wait for
+        except OSError as error:
+            if not (self.cut and error.errno in self.GONE):
+                self.error = error
         except BaseException as error:  # noqa: BLE001 - reported by finish()
             self.error = error
 
@@ -62,7 +68,7 @@ class LineLimitTests(unittest.TestCase):
         writer.finish(self)
 
         channel, theirs = self.pair()
-        writer = Writer(theirs, [b"a" * (MAX_MESSAGE + 1) + b"\n{}\n"])
+        writer = Writer(theirs, [b"a" * (MAX_MESSAGE + 1) + b"\n{}\n"], cut=True)
         writer.start()
         with self.assertRaisesRegex(ConnectionError, "over the limit"):
             channel.recv()
@@ -72,7 +78,7 @@ class LineLimitTests(unittest.TestCase):
         channel, theirs = self.pair(max_message=8)
         theirs.sendall(b"1234")
         # Sent apart, received apart: the reader sees the line in pieces.
-        writer = Writer(theirs, [b"5678", b"\n", b"123456789\n"])
+        writer = Writer(theirs, [b"5678", b"\n", b"123456789\n"], cut=True)
         writer.start()
         self.assertEqual(channel.recv(), b"12345678")
         with self.assertRaisesRegex(ConnectionError, "over the limit"):
@@ -92,7 +98,7 @@ class LineLimitTests(unittest.TestCase):
     def test_bytes_without_a_newline_stop_at_the_limit(self):
         channel, theirs = self.pair(max_message=1024)
         # Endless, unless the channel gives up.
-        writer = Writer(theirs, iter(lambda: b"x" * 256, None))
+        writer = Writer(theirs, iter(lambda: b"x" * 256, None), cut=True)
         writer.start()
         with self.assertRaisesRegex(ConnectionError, "over the limit of 1024 bytes"):
             channel.recv()
