@@ -527,10 +527,12 @@ mod tests {
             "runtimes": { "go": { "dir": "plugins/go", "binaries": ["bin/netkit"] } }
         }))
         .unwrap();
-        config.rebase(Path::new("/srv/host"));
+        // Absolute on every platform: on Windows, `/srv/host` gets a drive.
+        let base = std::path::absolute("/srv/host").unwrap();
+        config.rebase(&base);
         let go = config.runtimes.go.unwrap();
-        assert_eq!(go.dir.unwrap(), Path::new("/srv/host/plugins/go"));
-        assert_eq!(go.binaries[0], Path::new("/srv/host/bin/netkit"));
-        assert_eq!(go.project, Path::new("/srv/host/."));
+        assert_eq!(go.dir.unwrap(), base.join("plugins/go"));
+        assert_eq!(go.binaries[0], base.join("bin/netkit"));
+        assert_eq!(go.project, base.join("."));
     }
 }
