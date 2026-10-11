@@ -3164,6 +3164,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rutis-e2e"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "serde_json",
+]
+
+[[package]]
 name = "rutis-greeter-fixture-v1"
 version = "1.0.0"
 dependencies = [
