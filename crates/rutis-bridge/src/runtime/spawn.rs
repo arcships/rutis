@@ -18,7 +18,6 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use crate::channel::{Channel, ChannelError, Closer, Receiver, Sender};
-use crate::transport::local::lines::MAX_MESSAGE;
 use tokio::sync::{oneshot, watch};
 
 use crate::runtime::Error;
@@ -159,7 +158,7 @@ impl Sender for ExitSender {
         self.sender.send(message).map_err(|error| {
             // Refused by the framing (over its limit, a raw newline):
             // nothing the process did.
-            if message.len() > MAX_MESSAGE || message.contains(&b'\n') {
+            if crate::transport::local::lines::refuses(message) {
                 return error;
             }
             // Closed here, before or while waiting: the session ends for
@@ -705,7 +704,7 @@ mod tests {
         assert_eq!(newline.to_string(), "message contains a raw newline");
         let over = channel
             .sender
-            .send(&vec![b'x'; MAX_MESSAGE + 1])
+            .send(&vec![b'x'; crate::transport::local::lines::MAX_MESSAGE + 1])
             .unwrap_err();
         assert!(over.to_string().contains("exceeds the limit"), "{over}");
         assert!(sending.elapsed() < Duration::from_secs(1), "a send waited");
