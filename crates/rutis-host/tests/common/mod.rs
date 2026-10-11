@@ -41,8 +41,10 @@ pub fn repo() -> PathBuf {
 }
 
 /// `text` as on any machine: `dir` (as given, or canonical) is `<dir>`,
-/// separators are `/`, and the system's words for a missing file
-/// (ENOENT, or ERROR_FILE_NOT_FOUND: both 2) are `<not found>`.
+/// separators are `/`, and the system's words for a missing file are
+/// `<not found>`: ENOENT; on Windows ERROR_FILE_NOT_FOUND (2, as ENOENT),
+/// ERROR_PATH_NOT_FOUND (3: its directory is missing too) and, for a
+/// program, what std says when it finds none on PATH.
 pub fn normalize(text: &str, dir: &Path) -> String {
     let mut text = text.to_owned();
     let mut forms = vec![dir.to_path_buf()];
@@ -59,6 +61,13 @@ pub fn normalize(text: &str, dir: &Path) -> String {
         &std::io::Error::from_raw_os_error(2).to_string(),
         "<not found>",
     );
+    if cfg!(windows) {
+        text = text.replace(
+            &std::io::Error::from_raw_os_error(3).to_string(),
+            "<not found>",
+        );
+        text = text.replace("program not found", "<not found>");
+    }
     text.replace('\\', "/")
 }
 

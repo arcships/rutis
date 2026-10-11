@@ -181,10 +181,13 @@ fn a_file_named_relative_to_the_working_directory() {
         .unwrap();
     write(
         dir.path(),
-        &[(
-            "rutis.json",
-            r#"{ "runtimes": { "node": {} }, "rows": [{ "id": "p", "name": "./plugin.mjs" }] }"#,
-        )],
+        &[
+            (
+                "rutis.json",
+                r#"{ "runtimes": { "node": {} }, "rows": [{ "id": "p", "name": "./plugin.mjs" }] }"#,
+            ),
+            ("plugin.mjs", ""),
+        ],
     );
     let cwd = std::env::current_dir().unwrap();
     let relative = relative_to(&dir.path().join("rutis.json"), &cwd);
@@ -193,9 +196,10 @@ fn a_file_named_relative_to_the_working_directory() {
     let name = config.rows[0]["name"].as_str().unwrap();
     let url = url::Url::parse(name).unwrap();
     let file = url.to_file_path().expect("a local file");
+    // Both canonical: on Windows, `\\?\` paths.
     assert_eq!(
-        file.canonicalize().unwrap_or(file.clone()),
-        dir.path().canonicalize().unwrap().join("plugin.mjs"),
+        file.canonicalize().expect("the plugin file"),
+        dir.path().join("plugin.mjs").canonicalize().unwrap(),
         "{name}"
     );
     assert!(config.runtimes.node.unwrap().project.is_absolute());
@@ -323,12 +327,15 @@ fn a_peers_token_comes_before_the_shared_one() {
     std::env::set_var("RUTIS_TOKEN_OFFICE_A", "office");
     assert_eq!(token("office-a").as_deref(), Some("office"));
     assert_eq!(token("gpu").as_deref(), Some("shared"));
-    // The variable is the upper-case one only.
+    // The variable is the upper-case one only (on Windows, where names
+    // ignore case, there is no other).
     std::env::remove_var("RUTIS_TOKEN_OFFICE_A");
-    std::env::set_var("RUTIS_TOKEN_office_a", "lower");
-    assert_eq!(token("office-a").as_deref(), Some("shared"));
+    if cfg!(not(windows)) {
+        std::env::set_var("RUTIS_TOKEN_office_a", "lower");
+        assert_eq!(token("office-a").as_deref(), Some("shared"));
+        std::env::remove_var("RUTIS_TOKEN_office_a");
+    }
     std::env::remove_var("RUTIS_TOKEN");
-    std::env::remove_var("RUTIS_TOKEN_office_a");
     std::env::set_var("RUTIS_TOKEN_GPU", "gpu");
     assert_eq!(token("gpu").as_deref(), Some("gpu"));
     assert_eq!(token("office-a"), None);
