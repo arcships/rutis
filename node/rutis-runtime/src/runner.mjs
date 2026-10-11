@@ -145,8 +145,9 @@ function refresh() {
 }
 
 // Cordis's FiberState is a const enum, gone at run time.
-const UNLOADING = 5
+const ACTIVE = 2
 const DISPOSED = 4
+const UNLOADING = 5
 
 // A row whose plugin disposes its own fiber has ended: what is left of it
 // goes, and rutis hears it (`rows.ended`) and disposes the row there, as a
@@ -337,11 +338,12 @@ async function updateRow([key, config]) {
   if (!row) throw new Error(`row ${key} is not loaded`)
   row.config = config
   const fiber = row.inner
-  // A gate whose plugin fiber is gone re-applies from row.config.
+  // A gate between two plugin fibers (its inject went and came back)
+  // re-applies from row.config.
   if (!fiber || fiber.uid === null) return null
   // Not running (waiting for its own inject, or failed): store the config
   // in the fiber, which activates from it.
-  if (fiber.state !== 2) {
+  if (fiber.state !== ACTIVE) {
     fiber.update(config, true)
     return null
   }

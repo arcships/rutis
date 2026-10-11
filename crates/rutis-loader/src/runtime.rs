@@ -46,6 +46,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Listener, Plugin, PluginFactory, TypeKey};
@@ -654,9 +655,15 @@ impl JsRow {
                 .map_err(failed)?;
             leases.push(lease);
         }
-        // The fiber identity keys the row on the Cordis side: unique, and
-        // new for every generation.
-        let key = ctx.instance().to_string();
+        // The fiber identity and a generation number key the row on the
+        // Cordis side: a fiber keeps its identity across restarts, and a
+        // late `rows.ended` of an earlier generation must not end this one.
+        static GENERATION: AtomicU64 = AtomicU64::new(0);
+        let key = format!(
+            "{}.{}",
+            ctx.instance(),
+            GENERATION.fetch_add(1, Ordering::Relaxed)
+        );
         // The row's services are published from this fiber, so they go when
         // it does.
         let provided = self.provided.clone();

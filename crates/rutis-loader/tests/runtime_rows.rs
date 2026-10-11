@@ -985,11 +985,13 @@ async fn a_row_that_fails_to_load_releases_its_leases() {
 
 const QUIT: &str = r#"
 export const name = 'quit'
+export const inject = ['probe']
 export function apply(ctx, config) {
+  ctx.effect(() => () => ctx.probe.record(`${config.tag}: bye`))
   const quit = () => ctx.fiber.dispose()
   if (config.when === 'apply') quit()
   else if (config.when === 'microtask') queueMicrotask(quit)
-  else setTimeout(quit, 300)
+  else if (config.when === 'later') setTimeout(quit, 300)
 }
 "#;
 
@@ -1008,7 +1010,8 @@ impl Listener<LoaderChanged> for Changes {
 
 /// A Cordis plugin that disposes its own fiber ends its row, as a Rust
 /// plugin disposing itself: while it starts, just after, later, or behind
-/// the gate of the row's `inject`.
+/// the gate of the row's `inject`. A gate unloading because its inject
+/// went is no end of the row.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_plugin_that_disposes_itself_ends_its_row() {
     let dir = tempfile::tempdir().unwrap();
@@ -1026,18 +1029,40 @@ async fn a_plugin_that_disposes_itself_ends_its_row() {
             Changes(changes.clone()),
         )
         .unwrap();
+    let gated = row(
+        "w",
+        &quit,
+        json!({ "tag": "w", "when": "never" }),
+        json!({ "inject": ["late"] }),
+    );
     let report = loader
         .reconcile(
             rows(vec![
-                row("a", &quit, json!({ "when": "apply" }), json!(null)),
-                row("m", &quit, json!({ "when": "microtask" }), json!(null)),
-                row("l", &quit, json!({ "when": "later" }), json!(null)),
+                row(
+                    "a",
+                    &quit,
+                    json!({ "tag": "a", "when": "apply" }),
+                    json!(null),
+                ),
+                row(
+                    "m",
+                    &quit,
+                    json!({ "tag": "m", "when": "microtask" }),
+                    json!(null),
+                ),
+                row(
+                    "l",
+                    &quit,
+                    json!({ "tag": "l", "when": "later" }),
+                    json!(null),
+                ),
                 row(
                     "g",
                     &quit,
-                    json!({ "when": "later" }),
+                    json!({ "tag": "g", "when": "later" }),
                     json!({ "inject": ["late"] }),
                 ),
+                gated.clone(),
                 row("f", &flag, json!({}), json!(null)),
             ]),
             None,
@@ -1064,6 +1089,13 @@ async fn a_plugin_that_disposes_itself_ends_its_row() {
         assert_ne!(row_state(&loader, id), Some(FiberState::Active), "{id}");
     }
     assert_eq!(row_state(&loader, "f"), Some(FiberState::Active));
+
+    // `late` goes: the gate of `w` unloads its plugin, and the row stays.
+    loader.reconcile(rows(vec![gated]), None).await.unwrap();
+    probe.wait_for("w: bye").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(ended(), ["a", "g", "l", "m"]);
+    assert_eq!(row_state(&loader, "w"), Some(FiberState::Active));
 
     root.shutdown().await.unwrap();
 }
