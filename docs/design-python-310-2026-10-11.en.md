@@ -285,7 +285,7 @@ def accept(self):
 - In `serve()`, when `accepting.result()` raises: end the current session (`await current.end()`, cleaning up its lease), then let the exception propagate out of `serve()`.
 - `main()`: when `run` raises, print the traceback to stderr and exit with code 1; a normal end is still 0. `os._exit` stays (plugin threads must not keep the process alive).
 
-Whether the current session should be left to end on its own first: decided: end now (section 13). A runtime that can no longer accept a reconnection should let its process manager (systemd, a container runtime) see that and restart it.
+The current session does not wait to end on its own; it ends at once (section 13). A runtime that can no longer accept a reconnection should let its process manager (systemd, a container runtime) see that and restart it.
 
 ## 6. Tests
 
