@@ -341,6 +341,36 @@ fn listeners_off_loopback_need_tls() {
     assert!(open.validate().unwrap_err().contains("without TLS"));
 }
 
+/// Starting in an async context (as a plugin does), a CA that is not a
+/// certificate and a port another listener holds are errors, not panics.
+/// risk: B6
+#[test]
+fn starting_with_a_bad_ca_or_a_taken_port_fails_without_panicking() {
+    let started = std::thread::spawn(|| {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            WebSocketTransport::start(Config::new().trust(Trust::only(b"not a PEM".to_vec()))).err()
+        })
+    })
+    .join()
+    .expect("no panic");
+    assert_eq!(started.as_deref(), Some("no certificate in PEM"));
+
+    let taken = std::net::TcpListener::bind(loopback()).unwrap();
+    let address = taken.local_addr().unwrap();
+    let error = WebSocketTransport::start(Config::new().listener(ListenerConfig::new(
+        "public",
+        address,
+        id("main"),
+    )))
+    .err()
+    .unwrap();
+    assert!(
+        error.starts_with(&format!("listener public: cannot bind {address}: "))
+            && error.ends_with("another program listens there: stop it, or change the address"),
+        "{error}"
+    );
+}
+
 /// A pair of channels over a real connection between two transports.
 fn connected(
     server: &WebSocketTransport,

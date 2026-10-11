@@ -330,32 +330,87 @@ fn go_resolver(
 }
 
 fn websocket(config: &HostConfig) -> Result<Config, Error> {
-    let read =
-        |path: &Path| std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()));
+    // A PEM file, and where it was named (a field, or an environment
+    // variable).
+    let read = |path: &Path, named: &str, pem: Pem| {
+        let bytes =
+            std::fs::read(path).map_err(|error| format!("{named} {}: {error}", path.display()))?;
+        pem.check(&bytes)
+            .map_err(|error| format!("{named} {}: {error}", path.display()))?;
+        Ok::<_, Error>(bytes)
+    };
     let env_path = |name: &str| std::env::var_os(name).map(PathBuf::from);
     let mut websocket = Config::new();
     if let Some(ca) = env_path("RUTIS_CA") {
         websocket = websocket.trust(Trust {
             system: true,
-            ca_pem: vec![read(&ca)?],
+            ca_pem: vec![read(&ca, "RUTIS_CA", Pem::Certificate)?],
         });
     }
     let local = PeerId::new(config.id.clone()).map_err(|error| format!("id: {error}"))?;
     for listener in &config.listen {
         let mut listening = ListenerConfig::new(&listener.name, listener.address, local.clone());
-        let cert = listener.cert.clone().or_else(|| env_path("RUTIS_CERT"));
-        let key = listener.key.clone().or_else(|| env_path("RUTIS_KEY"));
-        if let (Some(cert), Some(key)) = (cert, key) {
-            listening = listening.tls(ServerTls {
-                certificate_pem: read(&cert)?,
-                key_pem: read(&key)?,
-                client_ca_pem: None,
-            });
+        let name = &listener.name;
+        let from = |field: &Option<PathBuf>, field_name: &str, variable: &str| match (
+            field,
+            env_path(variable),
+        ) {
+            (Some(path), _) => Some((path.clone(), format!("listener {name}: {field_name}"))),
+            (None, Some(path)) => Some((path, format!("listener {name}: {variable}"))),
+            (None, None) => None,
+        };
+        let cert = from(&listener.cert, "cert", "RUTIS_CERT");
+        let key = from(&listener.key, "key", "RUTIS_KEY");
+        match (cert, key) {
+            (Some((cert, cert_named)), Some((key, key_named))) => {
+                listening = listening.tls(ServerTls {
+                    certificate_pem: read(&cert, &cert_named, Pem::Certificate)?,
+                    key_pem: read(&key, &key_named, Pem::Key)?,
+                    client_ca_pem: None,
+                });
+            }
+            (None, None) => {}
+            // Not a listener without TLS: one half was meant to enable it.
+            (Some((_, named)), None) | (None, Some((_, named))) => {
+                return Err(format!(
+                    "{named} is set alone: TLS needs a certificate and its key, \
+                     set both cert and key (or RUTIS_CERT and RUTIS_KEY)"
+                ))
+            }
         }
         websocket = websocket.listener(listening);
     }
     websocket.validate()?;
     Ok(websocket)
+}
+
+/// What a PEM file holds.
+#[derive(Clone, Copy)]
+enum Pem {
+    Certificate,
+    Key,
+}
+
+impl Pem {
+    fn check(self, bytes: &[u8]) -> Result<(), String> {
+        use rustls_pki_types::pem::PemObject;
+        use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+        let found = match self {
+            Pem::Certificate => CertificateDer::pem_slice_iter(bytes)
+                .next()
+                .is_some_and(|first| first.is_ok()),
+            Pem::Key => PrivateKeyDer::from_pem_slice(bytes).is_ok(),
+        };
+        match (found, self) {
+            (true, _) => Ok(()),
+            (false, Pem::Certificate) => {
+                Err("no certificate in it: give a PEM file (-----BEGIN CERTIFICATE-----)".into())
+            }
+            (false, Pem::Key) => {
+                Err("no private key in it: give a PEM file (-----BEGIN PRIVATE KEY-----)".into())
+            }
+        }
+    }
 }
 
 fn identity(config: &HostConfig) -> Result<StaticIdentity, Error> {
@@ -447,9 +502,13 @@ fn python(py: &PythonRuntime) -> Result<LocalRuntime, Error> {
     if let Some(source) = &source {
         check.env("PYTHONPATH", source);
     }
-    let found = check
-        .output()
-        .map_err(|error| format!("{}: {error}", interpreter.display()))?;
+    let found = check.output().map_err(|error| {
+        format!(
+            "the Python runtime cannot run its interpreter {} ({error}): install Python, \
+             or set runtimes.py.python to an interpreter that has the rutis package",
+            interpreter.display()
+        )
+    })?;
     if !found.status.success() {
         return Err(format!(
             "the Python runtime needs the rutis package in {}: run `{} -m pip install rutis` (or `uv add rutis`)",
@@ -534,6 +593,7 @@ mod tests {
             },
             listen: Vec::new(),
             rows: vec![json!({ "id": "greeter", "name": crate::config::file_url(&entry) })],
+            warnings: Vec::new(),
         };
         let host = Host::start(&config).await.unwrap();
         host.runtimes_ready().await.unwrap();
@@ -570,6 +630,7 @@ mod tests {
             },
             listen: Vec::new(),
             rows: vec![json!({ "id": "greeter", "name": "py:greeter" })],
+            warnings: Vec::new(),
         };
         let host = Host::start(&config).await.unwrap();
         host.runtimes_ready().await.unwrap();
@@ -605,6 +666,7 @@ mod tests {
             },
             listen: Vec::new(),
             rows: vec![json!({ "id": "greeter", "name": "bun:./greeter.ts" })],
+            warnings: Vec::new(),
         };
         let host = Host::start(&config).await.unwrap();
         host.runtimes_ready().await.unwrap();
@@ -634,6 +696,7 @@ mod tests {
             },
             listen: Vec::new(),
             rows: Vec::new(),
+            warnings: Vec::new(),
         };
         for taken in ["bun", "file", "g", "GPU"] {
             let error = Host::start(&config(taken)).await.err().expect(taken);

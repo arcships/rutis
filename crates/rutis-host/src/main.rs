@@ -8,11 +8,8 @@
 //! rutis-host go add <module>@<version> [rutis.json]
 //! ```
 
-mod config;
-mod host;
-mod new;
-mod project;
-mod status;
+use rutis_host::{config, host, new, project, status};
+
 mod stop;
 
 use stop::Stopped;
@@ -139,6 +136,13 @@ fn serve(command: &str, args: &[String]) -> Result<Stopped, String> {
     })
 }
 
+/// Show what reading the configuration went on without.
+fn warn(config: &config::HostConfig) {
+    for warning in &config.warnings {
+        eprintln!("rutis-host: warning: {warning}");
+    }
+}
+
 fn config_file(args: &[String]) -> std::path::PathBuf {
     std::path::PathBuf::from(args.first().map(String::as_str).unwrap_or("rutis.json"))
 }
@@ -147,6 +151,7 @@ async fn run(args: &[String]) -> Result<Stopped, String> {
     let (deadline, args) = stop::deadline(args)?;
     let mut signals = stop::Signals::listen()?;
     let config = config::HostConfig::read(&config_file(&args))?;
+    warn(&config);
     let host = host::Host::start(&config).await?;
     let started = async {
         host.runtimes_ready().await?;
@@ -174,6 +179,7 @@ fn go_command(args: &[String]) -> Result<(), String> {
         return Err(format!("{module}: name a version, as {module}@latest"));
     }
     let config = config::HostConfig::read(&config_file(&args[2..]))?;
+    warn(&config);
     let dir = config
         .runtimes
         .go
@@ -237,6 +243,7 @@ async fn dev(args: &[String]) -> Result<Stopped, String> {
     // Go runtimes warn of calls that carry no call chain.
     std::env::set_var("RUTIS_DEV", "1");
     let (config, id) = project::dev_config(&dir)?;
+    warn(&config);
     let go_project = match (
         dir.join("package.json").exists(),
         dir.join("pyproject.toml").exists(),
@@ -342,6 +349,7 @@ async fn check(args: &[String]) -> Result<(), String> {
         (None, false) => project::dev_config(std::path::Path::new("."))?.0,
         _ => config::HostConfig::read(&path)?,
     };
+    warn(&config);
     let host = host::Host::start(&config).await?;
     host.runtimes_ready().await?;
     println!("plugin API: {PLUGIN_API} (supported by this host)");
@@ -360,15 +368,9 @@ async fn check(args: &[String]) -> Result<(), String> {
         match host.loader.resolve(name).await {
             Ok(resolved) => {
                 println!("{id} ({name}): ok");
+                // A plugin needing a newer plugin API does not resolve: its
+                // runtime refuses it, saying what to upgrade.
                 let meta = &resolved.meta;
-                if let Some(api) = meta.get("api").and_then(|api| api.as_u64()) {
-                    let compatible = if api <= PLUGIN_API as u64 {
-                        "compatible"
-                    } else {
-                        "incompatible: the plugin needs a newer runtime"
-                    };
-                    println!("  api: {api} ({compatible})");
-                }
                 for field in ["runtime", "binary", "version", "inject", "provides"] {
                     if let Some(value) = meta.get(field).filter(|value| !value.is_null()) {
                         println!("  {field}: {value}");
@@ -381,6 +383,12 @@ async fn check(args: &[String]) -> Result<(), String> {
             Err(error) => {
                 failed += 1;
                 println!("{id} ({name}): {error}");
+                if let rutis_loader::LoaderError::NotFound { .. } = error {
+                    println!(
+                        "  install it where its runtime finds it (a runtime under runtimes), \
+                         or correct the row's name"
+                    );
+                }
             }
         }
     }
