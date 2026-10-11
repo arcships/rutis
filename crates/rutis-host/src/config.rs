@@ -216,18 +216,20 @@ impl HostConfig {
             .into_iter()
             .map(|warning| format!("{}: {warning}", path.display()))
             .collect();
-        // Absolute, so a plugin file's row is a `file:` URL even when the
-        // file was named relative to the working directory.
         let base = match path.parent() {
             Some(dir) if !dir.as_os_str().is_empty() => dir,
             _ => Path::new("."),
         };
-        let base = std::path::absolute(base).unwrap_or_else(|_| base.to_owned());
-        config.rebase(&base);
+        config.rebase(base);
         Ok(config)
     }
 
+    /// Make the relative paths in this configuration relative to `base`.
+    /// `base` is made absolute first, so a plugin file's row is a `file:` URL
+    /// even when `base` was relative to the working directory (`rutis-host
+    /// run rutis.json`, the usual way): `file://./plugin.mjs` names no file.
     pub fn rebase(&mut self, base: &Path) {
+        let base = &std::path::absolute(base).unwrap_or_else(|_| base.to_owned());
         let at = |path: &mut PathBuf| {
             if path.is_relative() {
                 // Without the `.` components (`<base>/.` for the default
@@ -280,8 +282,7 @@ impl HostConfig {
             }
         }
         // A plugin file named relative to the configuration. `Url` percent-
-        // encodes spaces and the like, which a bare `display()` would not;
-        // it needs an absolute path, so fall back when the base is relative.
+        // encodes spaces and the like, which a bare `display()` would not.
         for row in &mut self.rows {
             if let Some(name) = row["name"].as_str() {
                 let relative = ["./", "../"]
