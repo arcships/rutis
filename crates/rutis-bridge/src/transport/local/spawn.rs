@@ -524,8 +524,14 @@ impl Receiver for Ended {
         match self.receiver.recv() {
             Ok(Some(message)) => Ok(Some(message)),
             _ => Err(ChannelError::Closed {
-                reason: match self.ended.take().and_then(|ended| ended.wait()) {
-                    Some(status) => format!("the process {status}"),
+                reason: match self.ended.take() {
+                    Some(ended) => match ended.wait(HANG_GUARD) {
+                        Some(status) => format!("the process {status}"),
+                        None => format!(
+                            "the process closed its channel but has not exited after {}s",
+                            HANG_GUARD.as_secs_f32()
+                        ),
+                    },
                     None => "the process disconnected".into(),
                 },
             }),
@@ -543,14 +549,18 @@ struct EndedSender {
 
 impl Sender for EndedSender {
     fn send(&mut self, message: &[u8]) -> Result<(), ChannelError> {
-        self.sender
-            .send(message)
-            .map_err(|error| match self.ended.wait() {
+        self.sender.send(message).map_err(|error| {
+            // Refused by the framing itself: nothing to do with the process.
+            if lines::refuses(message) {
+                return error;
+            }
+            match self.ended.wait(HANG_GUARD) {
                 Some(status) => ChannelError::Closed {
                     reason: format!("the process {status}"),
                 },
                 None => error,
-            })
+            }
+        })
     }
 }
 
@@ -566,13 +576,13 @@ impl Exit {
         self.1.notify_all();
     }
 
-    /// Waits for the process to end, so the channel's end can say how: a
-    /// process that closed its channel ends soon, one whose channel was
-    /// closed within the grace period.
-    fn wait(&self) -> Option<String> {
-        let wait = GRACE + Duration::from_secs(1);
+    /// Waits for the process to end, so the channel's end can say how,
+    /// however long that takes (#246): a process that closed its channel is
+    /// ending, one whose channel was closed here is killed after [`GRACE`].
+    /// Only one that keeps running with its channel closed reaches `guard`.
+    fn wait(&self, guard: Duration) -> Option<String> {
         self.1
-            .wait_timeout_while(self.0.lock().unwrap(), wait, |status| status.is_none())
+            .wait_timeout_while(self.0.lock().unwrap(), guard, |status| status.is_none())
             .unwrap()
             .0
             .clone()
@@ -581,6 +591,13 @@ impl Exit {
 
 /// How long a process whose channel closed may take to end by itself.
 const GRACE: Duration = Duration::from_secs(2);
+
+/// How long a process whose channel ended may go on running before the
+/// channel ends without its exit status. Not a wait for the status: a
+/// process that is exiting may close its channel well before it is gone,
+/// and under load that took more than the grace period this once was
+/// (#243, #246).
+const HANG_GUARD: Duration = Duration::from_secs(10);
 
 /// The processes started here that have not been waited for yet.
 static RUNNING: std::sync::LazyLock<watch::Sender<BTreeSet<u32>>> =
