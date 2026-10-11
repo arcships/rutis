@@ -285,7 +285,7 @@ def accept(self):
 - In `serve()`, when `accepting.result()` raises: end the current session (`await current.end()`, cleaning up its lease), then let the exception propagate out of `serve()`.
 - `main()`: when `run` raises, print the traceback to stderr and exit with code 1; a normal end is still 0. `os._exit` stays (plugin threads must not keep the process alive).
 
-Whether the current session should be left to end on its own first: section 13, item 1. Recommended: end now. A runtime that can no longer accept a reconnection should let its process manager (systemd, a container runtime) see that and restart it.
+Whether the current session should be left to end on its own first: decided: end now (section 13). A runtime that can no longer accept a reconnection should let its process manager (systemd, a container runtime) see that and restart it.
 
 ## 6. Tests
 
@@ -361,7 +361,7 @@ Following #204's scope note: no new PR jobs; versions are replaced.
 | `runtimes-go`, `runtimes-bun` | Linux / macOS | 3.12 | 3.10 on Linux, latest on macOS (Python is only a dependency there and follows the platform) |
 
 - websockets: `websockets==15.*` on Linux, latest on macOS / Windows (#204's table).
-- How "latest" is written (a concrete version or `'3.x'`) is settled for all jobs by #204 (#256).
+- How "latest" is written is `'3.x'`, changed by #256.
 - No extra 3.11 or 3.12 runs: Q10.2 only requires the minimum and the latest, as in #204's rule. 3.11 takes the same emulation path as 3.10; the tests of 6.1 were run on 3.11 and 3.12 on a development machine (section 12).
 - `docs/ci.md` / `ci.en.md` are updated together with `ci.yml` by the CI-side PR.
 
@@ -430,10 +430,10 @@ Not verified:
 - what `serve_forever()` of websockets 16 / 17 does when `accept()` fails (to be read from the source during implementation and added to the test matrix of 6.3);
 - the "cancel during the first step is ignored" finding in 3.5.1 comes from reading the code only; the implementation reproduces it with a test first.
 
-## 13. Decisions needed from the maintainer
+## 13. Maintainer decisions (2026-10-11)
 
-| # | Question | Options | Recommendation |
-| --- | --- | --- | --- |
-| 1 | What happens to the current session when listening fails | End the session now and exit non-zero; exit after the current session ends | End now: a runtime that cannot accept reconnections is half dead; let the process manager restart it; clean up the lease before exiting |
-
-Decided: a `cancel` that arrives during the first step and is ignored today is fixed in this PR (3.5.1); 3.12+ keeps native eager start; this PR switches the Linux Python in `ci.yml` to 3.10 itself (an exception to "`ci.yml` is changed only by #203 / #204", see #256), and how "latest" is written is settled by #256; no task names, no runtime version check, no extra 3.11 or 3.12 runs in CI.
+- When listening fails, the current session ends at once and the process exits non-zero after cleaning up the lease, leaving the restart to the process manager (section 5).
+- The `cancel` that arrives during the first step and is ignored today is fixed in this PR (3.5.1).
+- 3.12+ keeps native eager start.
+- This PR switches the Linux Python in `ci.yml` to 3.10 itself (an exception to "`ci.yml` is changed only by #203 / #204"); macOS and Windows use the latest, written `3.x`, changed by #256.
+- No task names, no runtime version check, no extra 3.11 or 3.12 runs in CI.
