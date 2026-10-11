@@ -16,7 +16,8 @@ use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use crate::channel::{Channel, ChannelError, Receiver};
+use crate::channel::{Channel, ChannelError, Closer, Receiver, Sender};
+use crate::transport::local::lines::MAX_MESSAGE;
 use tokio::sync::{oneshot, watch};
 
 use crate::runtime::Error;
@@ -104,37 +105,159 @@ async fn loopback(mut command: tokio::process::Command, first: &Path) -> Result<
     })
 }
 
-/// Ends the channel, however it ends, with the error `disconnected` builds.
+/// Ends the channel, however it ends, with the error `disconnected` builds:
+/// the receiver once the far end is gone, and a send that failed because it
+/// is gone. Such a send waits for that error instead of ending the session
+/// with its own: its failure comes from the same end, often before the
+/// receiver has seen it, and would otherwise hide how the process ended
+/// (#250).
 struct Disconnected {
     receiver: Box<dyn Receiver>,
     disconnected: Option<Box<dyn FnOnce() -> Error + Send>>,
+    ending: Arc<Ending>,
+}
+
+/// What both directions know of the end.
+#[derive(Default)]
+struct Ending {
+    state: Mutex<EndState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct EndState {
+    /// The error the receiver reported.
+    reported: Option<String>,
+    /// The thread receiving, once one started and while its receiver is
+    /// not dropped. Only then is a report on its way (the session greets
+    /// before its reader starts, on the thread that starts it), and never
+    /// for a send on that thread itself.
+    reader: Option<std::thread::ThreadId>,
+    /// This side closed the channel.
+    closed: bool,
+}
+
+/// How long a send may wait for the receiver's report: the receiver itself
+/// waits at most [`HANG_GUARD`] for the process, so this only bounds a
+/// report that never comes.
+const REPORT_GUARD: Duration = Duration::from_secs(2 * HANG_GUARD.as_secs());
+
+impl Ending {
+    fn update(&self, update: impl FnOnce(&mut EndState)) {
+        update(&mut self.state.lock().unwrap());
+        self.changed.notify_all();
+    }
+
+    /// The receiver's error, once it has one; `None` if no reader would
+    /// report it to this thread, or this side closed the channel first.
+    fn reported(&self) -> Option<String> {
+        let here = std::thread::current().id();
+        let state = self.state.lock().unwrap();
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, REPORT_GUARD, |state| {
+                state.reported.is_none()
+                    && state.reader.is_some_and(|reader| reader != here)
+                    && !state.closed
+            })
+            .unwrap();
+        state.reported.clone()
+    }
 }
 
 impl Receiver for Disconnected {
     fn recv(&mut self) -> Result<Option<Vec<u8>>, ChannelError> {
+        if self.disconnected.is_some() {
+            let here = std::thread::current().id();
+            self.ending.update(|state| state.reader = Some(here));
+        }
         match self.receiver.recv() {
             Ok(Some(message)) => Ok(Some(message)),
-            _ => Err(ChannelError::Closed {
-                reason: match self.disconnected.take() {
+            _ => {
+                let reason = match self.disconnected.take() {
                     Some(disconnected) => disconnected().to_string(),
                     None => "peer disconnected".into(),
-                },
-            }),
+                };
+                self.ending
+                    .update(|state| state.reported = Some(reason.clone()));
+                Err(ChannelError::Closed { reason })
+            }
         }
     }
 }
 
+impl Drop for Disconnected {
+    fn drop(&mut self) {
+        self.ending.update(|state| state.reader = None);
+    }
+}
+
+struct DisconnectedSender {
+    sender: Box<dyn Sender>,
+    ending: Arc<Ending>,
+}
+
+impl Sender for DisconnectedSender {
+    fn send(&mut self, message: &[u8]) -> Result<(), ChannelError> {
+        let error = match self.sender.send(message) {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        // Refused for the message itself (the framing's limit and newline):
+        // the far end has nothing to do with it.
+        if message.len() > MAX_MESSAGE || message.contains(&b'\n') {
+            return Err(error);
+        }
+        match self.ending.reported() {
+            Some(reason) => Err(ChannelError::Closed { reason }),
+            None => Err(error),
+        }
+    }
+}
+
+/// Closing from this side wakes a send waiting for the far end's error.
+struct ClosedHere {
+    closer: Arc<dyn Closer>,
+    ending: Arc<Ending>,
+}
+
+impl Closer for ClosedHere {
+    fn close(&self, reason: &str) {
+        self.ending.update(|state| state.closed = true);
+        self.closer.close(reason);
+    }
+
+    fn replaced(&self) {
+        self.ending.update(|state| state.closed = true);
+        self.closer.replaced();
+    }
+}
+
 /// Replace how the channel reports its end: `disconnected` runs on the
-/// reader thread once the far end is gone, and may block.
+/// reader thread once the far end is gone, and may block. The channel must
+/// frame as [`lines`](crate::transport::local::lines) does, with its
+/// default limit.
 pub(crate) fn on_disconnect(
-    mut channel: Channel,
+    channel: Channel,
     disconnected: Box<dyn FnOnce() -> Error + Send>,
 ) -> Channel {
-    channel.receiver = Box::new(Disconnected {
-        receiver: channel.receiver,
-        disconnected: Some(disconnected),
-    });
-    channel
+    let ending = Arc::new(Ending::default());
+    Channel {
+        sender: Box::new(DisconnectedSender {
+            sender: channel.sender,
+            ending: ending.clone(),
+        }),
+        receiver: Box::new(Disconnected {
+            receiver: channel.receiver,
+            disconnected: Some(disconnected),
+            ending: ending.clone(),
+        }),
+        closer: Arc::new(ClosedHere {
+            closer: channel.closer,
+            ending,
+        }),
+        info: channel.info,
+    }
 }
 
 #[cfg(unix)]
@@ -474,6 +597,131 @@ mod tests {
             other => panic!("the channel should end with the exit status, got {other:?}"),
         }
         assert_eq!(child.exited().await, "exited with exit status: 17");
+    }
+
+    fn open_gate(gate: &Path) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(gate)
+            .unwrap()
+            .write_all(b"exit\n")
+            .unwrap();
+    }
+
+    /// Sends until a send fails: on macOS a socket whose far end closed
+    /// still takes writes until the receiver has seen the end.
+    fn send_until_it_fails(
+        mut sender: Box<dyn Sender>,
+    ) -> mpsc::Receiver<Result<(), ChannelError>> {
+        let (sent, send) = mpsc::channel();
+        std::thread::spawn(move || loop {
+            if let Err(error) = sender.send(b"{}") {
+                let _ = sent.send(Err(error));
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        });
+        send
+    }
+
+    /// #250: a send that fails because the process closed its channel says
+    /// how the process ended, as the receiver does, instead of ending the
+    /// session first with its own error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_send_after_the_channel_ended_says_how_the_process_ended() {
+        let directory = tempfile::tempdir().unwrap();
+        let gate = fifo(directory.path());
+        let Spawned { channel, child, .. } =
+            inherit(closes_then_waits(&gate), Path::new("first")).unwrap();
+        let Channel {
+            sender,
+            mut receiver,
+            ..
+        } = channel;
+        let (received, receive) = mpsc::channel();
+        std::thread::spawn(move || received.send(receiver.recv()).unwrap());
+        let send = send_until_it_fails(sender);
+
+        assert!(
+            send.recv_timeout(Duration::from_millis(500)).is_err(),
+            "the send ended before the process did"
+        );
+        assert_eq!(child.status(), None);
+        open_gate(&gate);
+        let expected = ChannelError::Closed {
+            reason: "Cordis process exited with exit status: 17".into(),
+        };
+        assert_eq!(send.recv().unwrap(), Err(expected.clone()));
+        assert_eq!(receive.recv().unwrap(), Err(expected));
+    }
+
+    /// A send waiting for the far end's error stops waiting once this side
+    /// closes the channel: the session ends for its own reason then.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn closing_here_releases_a_waiting_send() {
+        let directory = tempfile::tempdir().unwrap();
+        let gate = fifo(directory.path());
+        let Spawned { channel, child, .. } =
+            inherit(closes_then_waits(&gate), Path::new("first")).unwrap();
+        let Channel {
+            sender,
+            mut receiver,
+            closer,
+            ..
+        } = channel;
+        std::thread::spawn(move || receiver.recv());
+        let send = send_until_it_fails(sender);
+        assert!(send.recv_timeout(Duration::from_millis(500)).is_err());
+
+        closer.close("closed here");
+        let error = send
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the send is released")
+            .unwrap_err();
+        assert!(!error.to_string().contains("exit status"), "{error}");
+        assert_eq!(child.status(), None);
+        open_gate(&gate);
+    }
+
+    /// Before a reader receives, no report is on its way, and a send does not
+    /// wait for one: the session greets before its reader starts, on the
+    /// thread that starts it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_send_before_anyone_receives_does_not_wait() {
+        let directory = tempfile::tempdir().unwrap();
+        let gate = fifo(directory.path());
+        let Spawned { channel, child, .. } =
+            inherit(closes_then_waits(&gate), Path::new("first")).unwrap();
+        let mut sender = channel.sender;
+        let (sent, send) = mpsc::channel();
+        std::thread::spawn(move || {
+            // Until the closed channel refuses one, where the platform does.
+            for _ in 0..20 {
+                if sender.send(b"{}").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            sent.send(()).unwrap();
+        });
+        send.recv_timeout(Duration::from_secs(5))
+            .expect("the sends did not wait for a report");
+        open_gate(&gate);
+        child.exited().await;
+    }
+
+    /// A message the framing refuses fails at once, whatever the far end.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_message_fails_at_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let gate = fifo(directory.path());
+        let Spawned {
+            mut channel, child, ..
+        } = inherit(closes_then_waits(&gate), Path::new("first")).unwrap();
+        let refused = channel.sender.send(b"a\nb").unwrap_err();
+        assert_eq!(refused.to_string(), "message contains a raw newline");
+        open_gate(&gate);
+        child.exited().await;
     }
 
     /// A process that closed its channel and does not exit ends the session
