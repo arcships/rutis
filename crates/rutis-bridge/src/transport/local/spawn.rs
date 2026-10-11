@@ -605,41 +605,44 @@ pub async fn processes_ended() {
 /// without waiting for its cleanups: for a host that exits before they
 /// finish. [`processes_ended`] then waits for them to be gone.
 pub fn kill_processes() {
-    for pid in running_processes() {
-        kill(pid);
-    }
-}
-
-#[cfg(unix)]
-fn kill(pid: u32) {
-    let pid = pid as libc::pid_t;
-    // SAFETY: plain getpgid(2) and kill(2). The id is still this process's
-    // child: it is removed from RUNNING only once waited for, so it cannot
-    // be reused, nor can the group it leads. A process in a group of its
-    // own takes what it started with it.
-    unsafe {
-        let target = if libc::getpgid(pid) == pid { -pid } else { pid };
-        libc::kill(target, libc::SIGKILL);
-    }
-}
-
-#[cfg(windows)]
-fn kill(pid: u32) {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
-    // SAFETY: plain Win32 calls on a handle opened and closed here. The
-    // process is not waited for yet, so its id still names it.
-    unsafe {
-        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
-        if !handle.is_null() {
-            let _ = TerminateProcess(handle, 1);
-            let _ = CloseHandle(handle);
+    // On Windows, every one of them is in this process's job, with what it
+    // started: end the job. Elsewhere, each is killed by the task that
+    // waits for it, so never once it has been waited for and its id reused.
+    #[cfg(windows)]
+    if let Some(Ok(job)) = JOB.get() {
+        // SAFETY: the job handle lives as long as this process.
+        unsafe {
+            windows_sys::Win32::System::JobObjects::TerminateJobObject(*job as _, 1);
         }
     }
+    #[cfg(not(windows))]
+    KILL.send_modify(|kills| *kills += 1);
 }
 
-#[cfg(not(any(unix, windows)))]
-fn kill(_pid: u32) {}
+/// Bumped to kill every process not waited for yet.
+#[cfg(not(windows))]
+static KILL: std::sync::LazyLock<watch::Sender<u64>> =
+    std::sync::LazyLock::new(|| watch::channel(0).0);
+
+/// Kill `child` now. On Unix, while it has not been waited for, its id
+/// still names it and the group it leads: a process in a group of its own
+/// takes what it started with it.
+fn kill_now(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let (Ok(None), Some(pid)) = (child.try_wait(), child.id()) {
+        let pid = pid as libc::pid_t;
+        // SAFETY: plain getpgid(2) and kill(2) on this process's child,
+        // which `try_wait` just found not waited for: neither its id nor
+        // its group's can have been reused.
+        unsafe {
+            if libc::getpgid(pid) == pid {
+                libc::kill(-pid, libc::SIGKILL);
+                return;
+            }
+        }
+    }
+    let _ = child.start_kill();
+}
 
 /// The process, owned by a task that records how it ended. Dropped, it
 /// kills the process; [`Child::end`] gives it [`GRACE`] first.
@@ -667,19 +670,35 @@ impl Child {
                 });
         }
         let record = ended.clone();
+        #[cfg(not(windows))]
+        let mut kills = KILL.subscribe();
         tokio::spawn(async move {
+            #[cfg(not(windows))]
+            let killed_all = async {
+                let _ = kills.changed().await;
+            };
+            #[cfg(windows)]
+            let killed_all = std::future::pending::<()>();
+            tokio::pin!(killed_all);
             let status = tokio::select! {
                 status = child.wait() => status,
+                () = &mut killed_all => {
+                    kill_now(&mut child);
+                    child.wait().await
+                }
                 ended = killed => {
                     // Its channel closed: it may end by itself.
                     let by_itself = match ended {
-                        Ok(()) => tokio::time::timeout(GRACE, child.wait()).await.ok(),
+                        Ok(()) => tokio::select! {
+                            status = tokio::time::timeout(GRACE, child.wait()) => status.ok(),
+                            () = &mut killed_all => None,
+                        },
                         Err(_) => None,
                     };
                     match by_itself {
                         Some(status) => status,
                         None => {
-                            let _ = child.start_kill();
+                            kill_now(&mut child);
                             child.wait().await
                         }
                     }
@@ -783,15 +802,17 @@ fn peek_exit(_pid: u32) -> Option<std::process::ExitStatus> {
     None
 }
 
+/// The job [`adopt`] puts processes in.
+#[cfg(windows)]
+static JOB: std::sync::OnceLock<Result<usize, String>> = std::sync::OnceLock::new();
+
 /// On Windows, put the process in a job that is closed, ending every
 /// process in it, when this process ends however it does: a runtime does
 /// not outlive its host. A process that cannot be put in it is an error.
 /// Elsewhere, the process ends when its channel closes.
 #[cfg(windows)]
 pub(crate) fn adopt(child: &tokio::process::Child) -> Result<(), String> {
-    use std::sync::OnceLock;
     use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
-    static JOB: OnceLock<Result<usize, String>> = OnceLock::new();
     let job = JOB
         .get_or_init(|| job().map(|handle| handle as usize))
         .clone()?;

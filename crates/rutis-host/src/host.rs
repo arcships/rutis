@@ -48,23 +48,25 @@ pub type Error = String;
 /// local transport gives a process whose channel closed before killing it.
 pub const PROCESS_EXIT: Duration = Duration::from_secs(3);
 
+/// How long killed runtime processes may take to be gone.
+pub const KILLED_EXIT: Duration = Duration::from_secs(5);
+
 /// Why a shutdown did not finish.
 pub enum Unfinished {
     /// The cleanups did not finish: why.
     Cleanups(String),
-    /// Every cleanup finished, but the runtime processes did not exit in
-    /// this time.
-    Processes(Duration),
+    /// Every cleanup finished, but the runtime processes did not exit:
+    /// why.
+    Processes(String),
 }
 
 impl std::fmt::Display for Unfinished {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Unfinished::Cleanups(why) => write!(f, "{why}: cleanups did not finish"),
-            Unfinished::Processes(time) => write!(
+            Unfinished::Processes(why) => write!(
                 f,
-                "every cleanup finished, but the runtime processes did not exit within {}s",
-                time.as_secs_f64()
+                "{why}: every cleanup finished, but the runtime processes did not exit"
             ),
         }
     }
@@ -218,12 +220,9 @@ impl Host {
     }
 
     /// Shut the root down: every row and runtime unloads, each cleanup
-    /// running once, and the runtime processes end. Waits up to `deadline`
-    /// for the cleanups; after it, the shutdown goes on and the error says
-    /// so. The processes then get what is left of it, and at least
-    /// [`PROCESS_EXIT`].
-    pub async fn shutdown(&self, deadline: Duration) -> Result<(), Unfinished> {
-        let started = std::time::Instant::now();
+    /// running once. Waits up to `deadline` for the cleanups; after it,
+    /// the shutdown goes on and the error says so.
+    pub async fn shut_down(&self, deadline: Duration) -> Result<(), Unfinished> {
         self.root
             .shutdown_with_timeout(deadline)
             .await
@@ -237,13 +236,16 @@ impl Host {
                     }
                     error => error.to_string(),
                 })
-            })?;
-        // Their channels closed: the processes end by themselves (or are
-        // killed after a grace period of their own).
-        let left = deadline.saturating_sub(started.elapsed()).max(PROCESS_EXIT);
-        tokio::time::timeout(left, rutis_bridge::transport::local::processes_ended())
+            })
+    }
+
+    /// Once the root has shut down, wait up to `time` for the runtime
+    /// processes to end: their channels closed, so they end by themselves
+    /// (or are killed after a grace period of their own).
+    pub async fn processes_exit(&self, time: Duration) -> Result<(), Unfinished> {
+        tokio::time::timeout(time, rutis_bridge::transport::local::processes_ended())
             .await
-            .map_err(|_| Unfinished::Processes(left))
+            .map_err(|_| Unfinished::Processes(format!("{}s passed", time.as_secs_f64())))
     }
 
     /// End the runtime processes now, without their cleanups, and wait
@@ -251,10 +253,7 @@ impl Host {
     pub async fn kill_processes(&self) {
         rutis_bridge::transport::local::kill_processes();
         let gone = rutis_bridge::transport::local::processes_ended();
-        if tokio::time::timeout(std::time::Duration::from_secs(5), gone)
-            .await
-            .is_err()
-        {
+        if tokio::time::timeout(KILLED_EXIT, gone).await.is_err() {
             let left = rutis_bridge::transport::local::running_processes();
             eprintln!("rutis-host: processes {left:?} did not end when killed");
         }

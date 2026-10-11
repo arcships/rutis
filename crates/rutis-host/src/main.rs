@@ -66,6 +66,7 @@ fn main() {
     };
     match result {
         Ok(Stopped::Done) => {}
+        Ok(Stopped::Failed) => std::process::exit(1),
         Ok(Stopped::Unfinished) => std::process::exit(stop::UNFINISHED),
         Err(error) => {
             eprintln!("rutis-host: {error}");
@@ -151,12 +152,13 @@ async fn run(args: &[String]) -> Result<Stopped, String> {
         host.runtimes_ready().await?;
         host.load(config.rows()).await
     };
-    let signal = match start(&host, started, deadline, &mut signals).await? {
-        Some(signal) => signal,
-        None => {
+    let signal = match start(&host, started, deadline, &mut signals).await {
+        Started::Running => {
             status::follow(host.loader.clone());
             signals.next().await
         }
+        Started::Signal(signal) => signal,
+        Started::Failed(stopped) => return Ok(stopped.failed()),
     };
     Ok(stop::stop(&host, signal, deadline, &mut signals).await)
 }
@@ -196,25 +198,34 @@ fn go_command(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Wait for `started`, unless a signal comes first (its name). When it
-/// fails, what did start is shut down first.
+/// How starting went.
+enum Started {
+    Running,
+    /// A signal came first: its name.
+    Signal(&'static str),
+    /// It failed (the error is printed), and what did start was shut down.
+    Failed(Stopped),
+}
+
+/// Wait for `started`, unless a signal comes first. When it fails, what
+/// did start is shut down, as after a signal.
 async fn start(
     host: &host::Host,
     started: impl std::future::Future<Output = Result<(), String>>,
     deadline: std::time::Duration,
     signals: &mut stop::Signals,
-) -> Result<Option<&'static str>, String> {
+) -> Started {
     let started = tokio::select! {
         started = started => started,
-        signal = signals.next() => return Ok(Some(signal)),
+        signal = signals.next() => return Started::Signal(signal),
     };
-    if let Err(error) = started {
-        if let Err(why) = host.shutdown(deadline).await {
-            eprintln!("rutis-host: {why}");
+    match started {
+        Ok(()) => Started::Running,
+        Err(error) => {
+            eprintln!("rutis-host: {error}");
+            Started::Failed(stop::finish(host, deadline, signals).await)
         }
-        return Err(error);
     }
-    Ok(None)
 }
 
 async fn dev(args: &[String]) -> Result<Stopped, String> {
@@ -239,8 +250,12 @@ async fn dev(args: &[String]) -> Result<Stopped, String> {
         host.runtimes_ready().await?;
         host.load(config.rows()).await
     };
-    if let Some(signal) = start(&host, started, deadline, &mut signals).await? {
-        return Ok(stop::stop(&host, signal, deadline, &mut signals).await);
+    match start(&host, started, deadline, &mut signals).await {
+        Started::Running => {}
+        Started::Signal(signal) => {
+            return Ok(stop::stop(&host, signal, deadline, &mut signals).await)
+        }
+        Started::Failed(stopped) => return Ok(stopped.failed()),
     }
     println!("rutis-host dev: running {id}; changes reload it (Ctrl-C ends)");
     status::follow(host.loader.clone());
@@ -260,7 +275,14 @@ async fn dev(args: &[String]) -> Result<Stopped, String> {
         if let (Some(go), Some(running)) = (&go_project, &host.go) {
             // A Go plugin is a binary: build it again, then restart its
             // runtime on the new build. A failed build keeps the old one.
-            match go.build(build + 1) {
+            // Nor does a build: a signal ends it (and the go command).
+            let built = tokio::select! {
+                built = go.rebuild(build + 1) => built,
+                signal = signals.next() => {
+                    return Ok(stop::stop(&host, signal, deadline, &mut signals).await);
+                }
+            };
+            match built {
                 Ok(binary) => {
                     build += 1;
                     running.resolver.replace(&go.runtime, &binary);

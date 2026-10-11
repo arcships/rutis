@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use crate::host::{Host, Unfinished};
+use crate::host::{Host, Unfinished, PROCESS_EXIT};
 
 /// How long cleanups may take after a signal, unless `--shutdown-timeout`
 /// or [`DEADLINE_VARIABLE`] says otherwise.
@@ -25,8 +25,22 @@ pub const UNFINISHED: i32 = 2;
 pub enum Stopped {
     /// Every cleanup finished.
     Done,
+    /// It could not start (the error is printed), and every cleanup of
+    /// what did start finished; the host exits with 1.
+    Failed,
     /// Cleanups did not finish; the host exits with [`UNFINISHED`].
     Unfinished,
+}
+
+impl Stopped {
+    /// After starting failed: [`Stopped::Failed`] unless stopping did not
+    /// finish either, which the exit code says first.
+    pub fn failed(self) -> Self {
+        match self {
+            Stopped::Done => Stopped::Failed,
+            other => other,
+        }
+    }
 }
 
 /// Take `--shutdown-timeout <seconds>` out of `args`; the deadline it, or
@@ -68,20 +82,23 @@ fn deadline_in(
         .parse::<f64>()
         .ok()
         .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
-        .ok_or_else(|| format!("{source}: {value:?} is not a number of seconds"))?;
+        .filter(|deadline| !deadline.is_zero())
+        .ok_or_else(|| format!("{source}: {value:?} is not a number of seconds above 0"))?;
     Ok((deadline, rest))
 }
 
 /// The termination signals: SIGINT, SIGTERM and SIGHUP; on Windows Ctrl-C,
 /// Ctrl-Break and closing the console. Listened to from the start, so a
 /// signal that comes while the host starts ends it once it has started.
+/// On Unix, one the host was started ignoring (by `nohup`, or as a
+/// script's background job) stays ignored.
 pub struct Signals {
     #[cfg(unix)]
-    interrupt: tokio::signal::unix::Signal,
+    interrupt: Option<tokio::signal::unix::Signal>,
     #[cfg(unix)]
-    terminate: tokio::signal::unix::Signal,
+    terminate: Option<tokio::signal::unix::Signal>,
     #[cfg(unix)]
-    hangup: tokio::signal::unix::Signal,
+    hangup: Option<tokio::signal::unix::Signal>,
     #[cfg(windows)]
     ctrl_c: tokio::signal::windows::CtrlC,
     #[cfg(windows)]
@@ -95,11 +112,11 @@ impl Signals {
         let cannot = |error: std::io::Error| format!("cannot listen for signals: {error}");
         #[cfg(unix)]
         {
-            use tokio::signal::unix::{signal, SignalKind};
+            use tokio::signal::unix::SignalKind;
             Ok(Self {
-                interrupt: signal(SignalKind::interrupt()).map_err(cannot)?,
-                terminate: signal(SignalKind::terminate()).map_err(cannot)?,
-                hangup: signal(SignalKind::hangup()).map_err(cannot)?,
+                interrupt: unix_signal(SignalKind::interrupt()).map_err(cannot)?,
+                terminate: unix_signal(SignalKind::terminate()).map_err(cannot)?,
+                hangup: unix_signal(SignalKind::hangup()).map_err(cannot)?,
             })
         }
         #[cfg(windows)]
@@ -118,9 +135,9 @@ impl Signals {
         #[cfg(unix)]
         {
             tokio::select! {
-                _ = self.interrupt.recv() => "SIGINT",
-                _ = self.terminate.recv() => "SIGTERM",
-                _ = self.hangup.recv() => "SIGHUP",
+                () = recv(&mut self.interrupt) => "SIGINT",
+                () = recv(&mut self.terminate) => "SIGTERM",
+                () = recv(&mut self.hangup) => "SIGHUP",
             }
         }
         #[cfg(windows)]
@@ -134,6 +151,31 @@ impl Signals {
     }
 }
 
+/// Listen for `kind`, unless this process was started ignoring it.
+#[cfg(unix)]
+fn unix_signal(
+    kind: tokio::signal::unix::SignalKind,
+) -> std::io::Result<Option<tokio::signal::unix::Signal>> {
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: sigaction(2) only reads the current action into `action`.
+    let read = unsafe { libc::sigaction(kind.as_raw_value(), std::ptr::null(), &mut action) };
+    if read == 0 && action.sa_sigaction == libc::SIG_IGN {
+        return Ok(None);
+    }
+    tokio::signal::unix::signal(kind).map(Some)
+}
+
+/// The next of `signal`; never, when it is not listened to.
+#[cfg(unix)]
+async fn recv(signal: &mut Option<tokio::signal::unix::Signal>) {
+    match signal {
+        Some(signal) => {
+            signal.recv().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
 /// After `signal`: shut the host down, waiting up to `deadline` for the
 /// cleanups, or until another signal.
 pub async fn stop(host: &Host, signal: &str, deadline: Duration, signals: &mut Signals) -> Stopped {
@@ -141,10 +183,28 @@ pub async fn stop(host: &Host, signal: &str, deadline: Duration, signals: &mut S
         "rutis-host: {signal}: stopping; cleanups have {} (again to exit at once)",
         seconds(deadline)
     );
-    let ended = tokio::select! {
-        result = host.shutdown(deadline) => result,
-        signal = signals.next() => Err(Unfinished::Cleanups(format!("{signal} again"))),
-    };
+    finish(host, deadline, signals).await
+}
+
+/// Shut the host down: wait up to `deadline` for the cleanups, then for
+/// the runtime processes to exit (what is left of it, and at least
+/// [`PROCESS_EXIT`]). A signal ends either wait at once; then, or past
+/// the deadline, what is still stopping is listed and the runtime
+/// processes are killed.
+pub async fn finish(host: &Host, deadline: Duration, signals: &mut Signals) -> Stopped {
+    let started = std::time::Instant::now();
+    let ended = async {
+        tokio::select! {
+            result = host.shut_down(deadline) => result?,
+            signal = signals.next() => return Err(Unfinished::Cleanups(signal.into())),
+        }
+        let left = deadline.saturating_sub(started.elapsed()).max(PROCESS_EXIT);
+        tokio::select! {
+            result = host.processes_exit(left) => result,
+            signal = signals.next() => Err(Unfinished::Processes(signal.into())),
+        }
+    }
+    .await;
     let Err(why) = ended else {
         return Stopped::Done;
     };
@@ -186,8 +246,8 @@ mod tests {
             Ok((Duration::from_millis(2500), args(&["a.json"])))
         );
         assert_eq!(
-            deadline_in(&args(&["a.json", "--shutdown-timeout=0"]), None),
-            Ok((Duration::ZERO, args(&["a.json"])))
+            deadline_in(&args(&["a.json", "--shutdown-timeout=0.5"]), None),
+            Ok((Duration::from_millis(500), args(&["a.json"])))
         );
         assert_eq!(
             deadline_in(&args(&["a.json"]), some("7")),
@@ -198,7 +258,7 @@ mod tests {
 
     #[test]
     fn a_deadline_that_is_not_a_number_of_seconds_is_an_error() {
-        for bad in ["abc", "-1", "inf", ""] {
+        for bad in ["abc", "-1", "0", "inf", ""] {
             let error = deadline_in(&args(&["--shutdown-timeout", bad]), None).unwrap_err();
             assert!(
                 error.contains("is not a number of seconds"),

@@ -24,8 +24,8 @@ serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { workspace = true, features = ["signal"] }
 url = "2"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
-
-[target.'cfg(unix)'.dev-dependencies]
-libc = "0.2"

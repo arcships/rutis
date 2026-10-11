@@ -147,6 +147,12 @@ struct Host {
 
 impl Host {
     fn start(args: &[&str], dir: &Path) -> Self {
+        Self::start_ignoring(args, dir, None)
+    }
+
+    /// [`Host::start`], with the signal `ignored` ignored, as `nohup` (or
+    /// a shell starting a script's background job) does.
+    fn start_ignoring(args: &[&str], dir: &Path, ignored: Option<i32>) -> Self {
         use std::os::unix::process::CommandExt;
         let mut command = Command::new(env!("CARGO_BIN_EXE_rutis-host"));
         command
@@ -163,6 +169,16 @@ impl Host {
             let venv = Path::new(&python).parent().and_then(Path::parent);
             if let Some(venv) = venv.filter(|venv| venv.join("pyvenv.cfg").exists()) {
                 command.env("VIRTUAL_ENV", venv);
+            }
+        }
+        if let Some(signal) = ignored {
+            // SAFETY: only signal(2), which is async-signal-safe, between
+            // fork and exec.
+            unsafe {
+                command.pre_exec(move || {
+                    libc::signal(signal, libc::SIG_IGN);
+                    Ok(())
+                });
             }
         }
         let mut child = command.spawn().expect("the rutis-host binary");
@@ -473,6 +489,84 @@ fn a_second_ctrl_c_exits_at_once() {
     let (status, stderr, output) = host.exit();
     let context = format!("status {status:?}; output: {output:#?}; stderr: {stderr}");
     assert_eq!(status.code(), Some(2), "{context}");
+    for pid in pids {
+        assert!(
+            !alive(pid),
+            "runtime process {pid} outlived the host; {context}"
+        );
+    }
+}
+
+/// Started ignoring SIGHUP (`nohup`), the host keeps ignoring it: the
+/// SIGTERM after it is what stops the host, which then ends normally.
+#[test]
+fn a_signal_ignored_when_the_host_started_stays_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = run_project(dir.path(), false);
+    let mut host = Host::start_ignoring(
+        &["run", file.to_str().unwrap()],
+        dir.path(),
+        Some(libc::SIGHUP),
+    );
+    let pids = host.started(&["py-row", "node-row"]);
+    signal(&host, libc::SIGHUP, false);
+    signal(&host, libc::SIGTERM, false);
+    let (status, stderr, output) = host.exit();
+    let context = format!("status {status:?}; output: {output:#?}; stderr: {stderr}");
+    assert_eq!(status.code(), Some(0), "{context}");
+    assert!(stderr.contains("SIGTERM: stopping"), "{context}");
+    assert!(!stderr.contains("SIGHUP"), "{context}");
+    for pid in pids {
+        assert!(
+            !alive(pid),
+            "runtime process {pid} outlived the host; {context}"
+        );
+    }
+}
+
+/// The processes `parent` started, as pgrep(1) lists them.
+fn children(parent: i32) -> Vec<i32> {
+    let output = Command::new("pgrep")
+        .args(["-P", &parent.to_string()])
+        .output()
+        .expect("pgrep");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|pid| pid.trim().parse().ok())
+        .collect()
+}
+
+/// A Go row's runtime ends with the host on Ctrl-C too: out of the
+/// terminal's process group, it is unloaded over its channel, and the host
+/// waits for it to exit (run in the Go CI job: the name has `go`).
+#[test]
+fn run_with_a_go_row_ends_on_ctrl_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugins = dir.path().join("plugins");
+    std::fs::create_dir_all(&plugins).unwrap();
+    let status = Command::new("go")
+        .args(["build", "-o"])
+        .arg(plugins.join("netkit"))
+        .arg("./cmd/netkit")
+        .current_dir(repo().join("crates/rutis-loader/tests/fixtures/go"))
+        .status()
+        .expect("go is on PATH");
+    assert!(status.success());
+    let config = json!({
+        "runtimes": { "go": { "dir": "plugins" } },
+        "rows": [{ "id": "ping", "name": "go:ping" }]
+    });
+    let file = dir.path().join("rutis.json");
+    std::fs::write(&file, config.to_string()).unwrap();
+    let mut host = Host::start(&["run", file.to_str().unwrap()], dir.path());
+    host.until(|line| (line == "ping: running").then_some(()));
+    let pids = children(host.pid());
+    assert!(!pids.is_empty(), "the Go runtime process");
+    host.runtimes.extend(&pids);
+    signal(&host, libc::SIGINT, true);
+    let (status, stderr, output) = host.exit();
+    let context = format!("status {status:?}; output: {output:#?}; stderr: {stderr}");
+    assert_eq!(status.code(), Some(0), "{context}");
     for pid in pids {
         assert!(
             !alive(pid),
