@@ -316,19 +316,27 @@ class Peer:
     # ── I/O ──────────────────────────────────────────────────────
 
     def start(self) -> None:
-        self._reader.start()
+        # Greet before reading (#239): a side that finds the far end's
+        # greeting incompatible closes the channel, and the far end must
+        # still read this side's greeting ahead of the channel end.
         if self._endpoint is None:
-            self._send({"op": "hello", "version": PROTOCOL})
+            hello = {"op": "hello", "version": PROTOCOL}
         else:
-            self._send(
-                {
-                    "op": "hello",
-                    "version": ENDPOINT_PROTOCOL,
-                    "endpoint": self._endpoint["local"],
-                    "implementation": IMPLEMENTATION,
-                    "capabilities": CAPABILITIES + list(self._endpoint.get("declare", [])),
-                }
-            )
+            hello = {
+                "op": "hello",
+                "version": ENDPOINT_PROTOCOL,
+                "endpoint": self._endpoint["local"],
+                "implementation": IMPLEMENTATION,
+                "capabilities": CAPABILITIES + list(self._endpoint.get("declare", [])),
+            }
+        try:
+            self._send(hello)
+        except OSError:
+            # The far end may have greeted and closed before this side
+            # greeted. Its greeting is still on the channel: the reader reads
+            # it, and `ready` reports it as incompatible, or else the end.
+            pass
+        self._reader.start()
 
     @property
     def _origin_id(self):
