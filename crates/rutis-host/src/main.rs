@@ -257,9 +257,10 @@ async fn dev(args: &[String]) -> Result<Stopped, String> {
         }
         Started::Failed(stopped) => return Ok(stopped.failed()),
     }
+    // Before saying it runs: a change made once it says so is a change.
+    let mut seen = project::sources(&dir);
     println!("rutis-host dev: running {id}; changes reload it (Ctrl-C ends)");
     status::follow(host.loader.clone());
-    let mut seen = project::sources(&dir);
     loop {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(400)) => {}
