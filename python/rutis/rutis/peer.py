@@ -37,10 +37,11 @@ PROTOCOL = 2
 ENDPOINT_PROTOCOL = 3
 # What this implementation supports in the endpoint format. It sends objects
 # but cannot receive them, so it does not declare `objects`. `sync-wait`: its
-# synchronous calls say so (`sync: true`), for the host's wait-cycle check.
-CAPABILITIES = ["signals", "reentrant-sync", "sync-wait"]
+# synchronous calls say so (`sync: true`), for the host's wait-cycle check;
+# `sync-stack`: calls run while it waits are stacked on its one thread.
+CAPABILITIES = ["signals", "reentrant-sync", "sync-wait", "sync-stack"]
 # What it declares in the compat format, where older hosts ignore it.
-COMPAT_CAPABILITIES = ["reentrant-sync", "sync-wait"]
+COMPAT_CAPABILITIES = ["reentrant-sync", "sync-wait", "sync-stack"]
 IMPLEMENTATION = {"name": "rutis", "version": "0.8.0"}
 MAX_SAFE = 9_007_199_254_740_991
 _ENDPOINT_ID = re.compile(r"^[a-z0-9-]+$")

@@ -10,6 +10,7 @@ use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -508,6 +509,7 @@ struct Owning {
 
 impl Closer for Owning {
     fn close(&self, reason: &str) {
+        self.child.ended.closed_here();
         self.closer.close(reason);
         self.child.end();
     }
@@ -554,7 +556,9 @@ impl Sender for EndedSender {
             if lines::refuses(message) {
                 return error;
             }
-            match self.ended.wait(HANG_GUARD) {
+            // Closed here, before or while waiting: the session ends for
+            // that, and does not wait for the process to be killed.
+            match self.ended.wait_unless_closed(HANG_GUARD) {
                 Some(status) => ChannelError::Closed {
                     reason: format!("the process {status}"),
                 },
@@ -568,7 +572,7 @@ impl Sender for EndedSender {
 /// which must not depend on the async runtime: a current-thread runtime may
 /// be blocked in a synchronous call.
 #[derive(Default)]
-struct Exit(Mutex<Option<String>>, Condvar);
+struct Exit(Mutex<Option<String>>, Condvar, AtomicBool);
 
 impl Exit {
     fn record(&self, status: String) {
@@ -586,6 +590,29 @@ impl Exit {
             .unwrap()
             .0
             .clone()
+    }
+
+    /// This side closed the channel: wakes a send waiting for the process.
+    fn closed_here(&self) {
+        let status = self.0.lock().unwrap();
+        self.2.store(true, Ordering::SeqCst);
+        drop(status);
+        self.1.notify_all();
+    }
+
+    /// [`Exit::wait`], unless or until this side closed the channel. A send
+    /// holds the session's writer, which closing the session needs: the
+    /// kill that would end the wait runs on the async runtime, which a
+    /// synchronous call may be blocking.
+    fn wait_unless_closed(&self, guard: Duration) -> Option<String> {
+        let closed = || self.2.load(Ordering::SeqCst);
+        let (status, _) = self
+            .1
+            .wait_timeout_while(self.0.lock().unwrap(), guard, |status| {
+                status.is_none() && !closed()
+            })
+            .unwrap();
+        status.clone()
     }
 }
 
@@ -946,6 +973,31 @@ mod tests {
                 }
                 other => panic!("the {end} should fail with the exit status, got {other:?}"),
             }
+        }
+    }
+
+    /// Closed here, a failed send fails at once: it does not wait for the
+    /// process to be killed.
+    #[test]
+    fn a_send_after_closing_here_does_not_wait() {
+        let exit = Arc::new(Exit::default());
+        let mut sender = EndedSender {
+            sender: Box::new(Broken),
+            ended: exit.clone(),
+        };
+        let (sent, sending) = mpsc::channel();
+        std::thread::spawn(move || sent.send(sender.send(b"{}")).unwrap());
+        assert!(
+            sending.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the send waits for the process"
+        );
+        exit.closed_here();
+        match sending
+            .recv_timeout(HANG_GUARD / 2)
+            .expect("woken by the close")
+        {
+            Err(ChannelError::Closed { reason }) => assert_eq!(reason, "Broken pipe"),
+            other => panic!("the send should fail with its own error, got {other:?}"),
         }
     }
 

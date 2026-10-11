@@ -35,10 +35,11 @@ export const ENDPOINT_PROTOCOL = 3
 // `reentrant-sync`: while a synchronous call waits, every incoming call
 // runs, not only those of its own call chain (see `#run`). `sync-wait`:
 // its synchronous calls say so (`sync: true`), for the host's wait-cycle
-// check.
-export const CAPABILITIES = ['signals', 'reentrant-sync', 'sync-wait']
+// check; `sync-stack`: calls run while it waits are stacked on its one
+// thread.
+export const CAPABILITIES = ['signals', 'reentrant-sync', 'sync-wait', 'sync-stack']
 // What it declares in the compat format, where older hosts ignore it.
-const COMPAT_CAPABILITIES = ['reentrant-sync', 'sync-wait']
+const COMPAT_CAPABILITIES = ['reentrant-sync', 'sync-wait', 'sync-stack']
 const ENDPOINT_ID = /^[a-z0-9-]+$/
 
 function checkData(value, seen = new Set()) {

@@ -499,7 +499,7 @@ static NEXT_TAG: AtomicU64 = AtomicU64::new(1);
 const COMPAT_CAPABILITIES: [&str; 1] = ["sync-wait"];
 /// What a compat-format handshake may declare that means anything here; any
 /// other capability there is ignored, as before the format had any.
-const COMPAT_DECLARED: [&str; 2] = ["sync-wait", "reentrant-sync"];
+const COMPAT_DECLARED: [&str; 3] = ["sync-wait", "sync-stack", "reentrant-sync"];
 
 struct Import {
     peer: Weak<SessionState>,
@@ -677,7 +677,8 @@ pub struct Endpoint {
     pub expected: Option<PeerId>,
     pub implementation: Implementation,
     /// What this side supports: `objects`, `signals`, `reentrant-sync`,
-    /// `forwarding`, `sync-wait`. Capabilities grant no permission.
+    /// `forwarding`, `sync-wait` (and, for a runtime with one thread and one
+    /// stack, `sync-stack`). Capabilities grant no permission.
     pub capabilities: Vec<String>,
 }
 
@@ -891,7 +892,9 @@ impl Connection {
         waits::profile(
             &self.0.tag,
             waits::Profile {
-                stacked: self.supports("sync-wait") && !self.supports("forwarding"),
+                // One thread, one stack: declared, not inferred (a Rust far
+                // end marks its waits but runs each call on its own thread).
+                stacked: self.supports("sync-wait") && self.supports("sync-stack"),
                 // Not declared: taken as non-reentrant (#228).
                 reentrant: self.supports("reentrant-sync"),
             },
@@ -1265,7 +1268,13 @@ impl Connection {
                 id
             }
         };
-        grant(&mut exports, id, grants)
+        let mut wire = grant(&mut exports, id, grants)?;
+        // Runtimes before #225 accept only their own ids in a compat-format
+        // origin, as for relays; the object keeps its whole chain here.
+        if let (Format::Compat, WireValue::Reference { origin, .. }) = (&self.0.format, &mut wire) {
+            origin.retain(|entry| !entry.contains('/'));
+        }
+        Ok(wire)
     }
     fn decode(&self, value: WireValue) -> Reply {
         Ok(match value {
@@ -1596,6 +1605,14 @@ impl Connection {
             | Accepted::Get(object, _) => object.executor.handle.clone(),
             Accepted::Invoke(..) => self.0.executor.clone(),
         };
+        // Its caller waits for it synchronously: what it forwards to another
+        // session is checked for wait cycles. Marked before anything can run
+        // or answer it, and outside this session's locks (the table is the
+        // whole process's); a call refused below closes the session, which
+        // drops its marks.
+        if sync {
+            waits::marked(&self.0.tag, &incoming.id);
+        }
         let delivery = {
             let mut calls = self.0.calls.lock().unwrap();
             if let Some(error) = &calls.closed {
@@ -1608,11 +1625,6 @@ impl Connection {
                 .filter(|n| *n > calls.received && *n <= 9_007_199_254_740_991)
                 .ok_or_else(|| transport("invalid or repeated invocation identity"))?;
             calls.received = sequence;
-            // Its caller waits for it synchronously: what it forwards to
-            // another session is checked for wait cycles.
-            if sync {
-                waits::marked(&self.0.tag, &incoming.id);
-            }
             let waiter = incoming
                 .path
                 .iter()

@@ -229,6 +229,11 @@ impl HostConfig {
     /// even when `base` was relative to the working directory (`rutis-host
     /// run rutis.json`, the usual way): `file://./plugin.mjs` names no file.
     pub fn rebase(&mut self, base: &Path) {
+        // `Path::parent` of a bare file name is empty: the working directory.
+        let base = match base.as_os_str().is_empty() {
+            true => Path::new("."),
+            false => base,
+        };
         let base = &std::path::absolute(base).unwrap_or_else(|_| base.to_owned());
         let at = |path: &mut PathBuf| {
             if path.is_relative() {

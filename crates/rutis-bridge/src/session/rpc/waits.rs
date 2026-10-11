@@ -18,13 +18,13 @@
 //!   Had c returned first, its reply would have been read before any frame
 //!   made under d.
 //!
-//! The last two hold only for a runtime with one stack (it declared
-//! `sync-wait` and is no host that forwards: `forwarding`); its
-//! reentrancy is `reentrant-sync`, and a runtime that does not declare it
-//! is taken as non-reentrant. A session whose far end does not mark its
+//! The last two hold only for a runtime with one thread and one stack (it
+//! declared `sync-stack`); its reentrancy is `reentrant-sync`, and a
+//! runtime that does not declare it is taken as non-reentrant. A session whose far end does not mark its
 //! synchronous waits makes no hops: it is outside the check.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 /// A call in this process: a session's tag and the call's id on it.
@@ -68,6 +68,19 @@ struct Waits {
 
 static WAITS: LazyLock<Mutex<Waits>> = LazyLock::new(Mutex::default);
 
+/// How many hops and marked calls the table holds, readable without its
+/// lock: a host where no call is marked never takes it on a reply.
+static HOPS: AtomicUsize = AtomicUsize::new(0);
+static MARKS: AtomicUsize = AtomicUsize::new(0);
+
+impl Waits {
+    /// After a change, under the lock.
+    fn counted(&self) {
+        HOPS.store(self.hops.len(), Ordering::SeqCst);
+        MARKS.store(self.marked.len(), Ordering::SeqCst);
+    }
+}
+
 /// `session`'s far end, once it greeted.
 pub(super) fn profile(session: &str, profile: Profile) {
     WAITS
@@ -79,26 +92,30 @@ pub(super) fn profile(session: &str, profile: Profile) {
 
 /// A call `id` received on `session` whose caller waits synchronously.
 pub(super) fn marked(session: &str, id: &str) {
-    WAITS
-        .lock()
-        .unwrap()
-        .marked
-        .insert((session.to_owned(), id.to_owned()));
+    let mut waits = WAITS.lock().unwrap();
+    waits.marked.insert((session.to_owned(), id.to_owned()));
+    waits.counted();
 }
 
 /// Call `id` received on `session` was answered.
 pub(super) fn answered(session: &str, id: &str) {
-    let mut waits = WAITS.lock().unwrap();
-    if !waits.marked.is_empty() {
-        waits.marked.remove(&(session.to_owned(), id.to_owned()));
+    if MARKS.load(Ordering::SeqCst) == 0 {
+        return;
     }
+    let mut waits = WAITS.lock().unwrap();
+    waits.marked.remove(&(session.to_owned(), id.to_owned()));
+    waits.counted();
 }
 
 /// The reply to call `id` that this side sent on `session` was read (or the
 /// call was cancelled): it waits for nothing any more.
 pub(super) fn returned(session: &str, id: &str) {
+    if HOPS.load(Ordering::SeqCst) == 0 {
+        return;
+    }
     let mut waits = WAITS.lock().unwrap();
     waits.hops.retain(|hop| hop.dst != session || hop.did != id);
+    waits.counted();
 }
 
 /// `session` ended: its calls wait for nothing, and nothing waits for them.
@@ -109,6 +126,7 @@ pub(super) fn ended(session: &str) {
         .retain(|hop| hop.src != session && hop.dst != session);
     waits.marked.retain(|(tag, _)| tag != session);
     waits.profiles.remove(session);
+    waits.counted();
 }
 
 /// The chain `path` (as sent on session `dst`, see `rebase`) names, as
@@ -134,10 +152,10 @@ pub(super) fn forward(
     seq: u64,
     path: &[String],
 ) -> Result<bool, Vec<String>> {
-    let mut waits = WAITS.lock().unwrap();
-    if waits.marked.is_empty() {
+    if MARKS.load(Ordering::SeqCst) == 0 {
         return Ok(false);
     }
+    let mut waits = WAITS.lock().unwrap();
     let chain = decode(path, dst);
     let Some((src, sid)) = chain.last().cloned() else {
         return Ok(false);
@@ -159,6 +177,7 @@ pub(super) fn forward(
         return Err(cycle);
     }
     waits.hops.push(hop);
+    waits.counted();
     Ok(true)
 }
 

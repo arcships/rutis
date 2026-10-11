@@ -163,20 +163,25 @@ fn situation(fixture: &Fixture, ids: &[&str]) -> String {
     let processes: Vec<String> = rutis_bridge::transport::local::running_processes()
         .into_iter()
         .map(|pid| match alive(pid) {
-            true => format!("{pid} (alive)"),
-            false => format!("{pid} (gone)"),
+            Some(true) => format!("{pid} (alive)"),
+            Some(false) => format!("{pid} (gone)"),
+            None => pid.to_string(),
         })
         .collect();
     format!("\nruntimes: {runtimes:?}\nrows: {rows:?}\nprocesses not waited for: {processes:?}")
 }
 
-/// Whether the process `pid` still exists (a zombie not waited for does).
-fn alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
+/// Whether the process `pid` still exists (a zombie not waited for does);
+/// `None` where this cannot tell (Windows has no `kill -0`).
+fn alive(pid: u32) -> Option<bool> {
+    if !cfg!(unix) {
+        return None;
+    }
+    let status = std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])
         .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .status();
+    Some(status.is_ok_and(|status| status.success()))
 }
 
 fn service(root: &Ctx, name: &str) -> Option<Arc<dyn HostDispatch>> {

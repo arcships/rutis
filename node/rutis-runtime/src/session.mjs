@@ -35,10 +35,11 @@ export const ENDPOINT_PROTOCOL = 3
 // What this implementation supports in the endpoint format. It sends
 // objects but cannot receive them, so it does not declare `objects`.
 // `sync-wait`: its synchronous calls say so (`sync: true`), for the host's
-// wait-cycle check; it is not reentrant, so it does not declare that.
-export const CAPABILITIES = ['signals', 'sync-wait']
+// wait-cycle check; `sync-stack`: calls run while it waits are stacked on
+// its one thread. It is not reentrant, so it does not declare that.
+export const CAPABILITIES = ['signals', 'sync-wait', 'sync-stack']
 // What it declares in the compat format, where older hosts ignore it.
-const COMPAT_CAPABILITIES = ['sync-wait']
+const COMPAT_CAPABILITIES = ['sync-wait', 'sync-stack']
 const ENDPOINT_ID = /^[a-z0-9-]+$/
 
 function checkData(value, seen = new Set()) {

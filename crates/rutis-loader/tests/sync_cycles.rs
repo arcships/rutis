@@ -20,6 +20,8 @@ use rutis_loader::{
 use serde_json::{json, Value};
 
 /// The hang guard of every wait (Q7.1): a cycle the host misses hangs.
+/// The gate and each synchronous forward hold a worker of the test's
+/// runtime while they wait; the tests use 8, twice what they hold at most.
 const GUARD: Duration = Duration::from_secs(20);
 
 // ── Two Node runtimes calling each other ────────────────────────
@@ -363,7 +365,7 @@ fn python(name: &str, dir: &Path) -> LocalRuntime {
 /// the first completes. Calls back on the caller's own chain are not
 /// refused.
 /// risk: P10, C6
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn two_node_runtimes_calling_each_other() {
     let dir = tempfile::tempdir().unwrap();
     let work = |me: &str, inject: &str| NODE_WORK.replace("SELF", me).replace("INJECT", inject);
@@ -447,7 +449,7 @@ async fn two_node_runtimes_calling_each_other() {
 /// stack-order edges the cycle goes unnoticed. The host refuses `s2`'s call
 /// back, and everything else completes.
 /// risk: P10, C6
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn one_node_and_two_python_runtimes() {
     let dir = tempfile::tempdir().unwrap();
     let go = write(dir.path(), "go.mjs", NODE_GO);
