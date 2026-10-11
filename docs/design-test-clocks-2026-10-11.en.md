@@ -5,8 +5,8 @@
 Status: design, under review. Date: 2026-10-11. Base: `main` `0941ef4`. Issue: #231 (part of #183).
 Basis: [quality standard](quality-standard.en.md) Q7.1–Q7.5; [quality status](quality-status.en.md) K10, P11; #220 (merged, changed `crates/rutis` only).
 
-Scope: `crates/rutis-bridge`, `crates/rutis-loader`, `crates/rutis-host`, `crates/rutis-dsh`, `crates/rutis-agent`, `crates/rutis-dev`, `tests/e2e`, and the Node (`node/`), Bun (`bun/`), Python (`python/`) and Go (`go/`) tests. `crates/rutis` was done in #220 and is out of scope.
-Out of scope: changes to `stress.yml` and `ci.yml` (CI needs are stated in the PR description); the root-cause fixes for the flaky failures #249 and #250 (they are races in product code, not test clocks; see §8).
+Scope: `crates/rutis-bridge`, `crates/rutis-loader`, `crates/rutis-host`, `crates/rutis-dsh`, `crates/rutis-dev`, `tests/e2e`, and the Node (`node/`), Bun (`bun/`), Python (`python/`) and Go (`go/`) tests. `crates/rutis` was done in #220 and is out of scope.
+Out of scope: the example projects `crates/rutis-agent` and `crates/rutis-cli` (Appendix A.3 lists them for reference only); changes to `stress.yml` and `ci.yml` (none expected; only if Bun 1.4.0 does not support the timeout in `bunfig.toml` does #256 add `--timeout` to `bun test`); the root-cause fixes for the flaky failures #249 and #250 (they are races in product code, not test clocks; see §2).
 
 ## 1. Conclusions
 
@@ -15,9 +15,9 @@ Out of scope: changes to `stress.yml` and `ci.yml` (CI needs are stated in the P
 | C1 | Every wait falls into one of three classes, by whether the test can control the clock: in-process tokio (paused clock possible), across threads or processes (only observable events), and timing that is the behaviour under test (injectable durations or a written tolerance) | 3 |
 | C2 | A bridge session reads frames on its own OS thread (`session/rpc.rs` `Connection::open`) and has its own background runtime thread. So even on the memory transport, bridge and loader tests that go through a session **cannot** use the paused clock; they are class two | 3 |
 | C3 | Add an unpublished workspace crate `rutis-test-support` for the shared wait helpers; #220's `still_pending` and `on_thread` move into it | 4 |
-| C4 | Product code gets 5 small seams (S1–S5); no general `Clock` trait | 5 |
-| C5 | Add a check script `tools/check-test-clocks.mjs`: a new fixed wait, short timeout or elapsed-time bound in a test fails it unless annotated with `clock:` | 6 |
-| C6 | 8 small PRs, bridge first (`node.rs:185`, which the issue marks as priority) | 7 |
+| C4 | Product code gets 2 small seams (S1, S4); no general `Clock` trait | 5 |
+| C5 | Hang guards under 10 s (class C) all become `HANG_GUARD`, a mechanical replacement; classes A, B, E, F, G and U are examined one by one | 3 |
+| C6 | 4 PRs: bridge, loader, the other crates, the other languages | 7 |
 
 ## 2. Inventory summary
 
@@ -40,7 +40,6 @@ Categories:
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | rutis-bridge | 7 | 7 | 21 | 27 | 4 | 4 | 1 | 9 | 5 | 0 |
 | rutis-loader | 0 | 14 | 4 | 26 | 5 | 0 | 0 | 5 | 0 | 1 |
-| rutis-agent | 0 | 6 | 7 | 4 | 4 | 1 | 0 | 8 | 0 | 0 |
 | rutis-dsh | 0 | 0 | 5 | 3 | 2 | 0 | 0 | 1 | 0 | 0 |
 | rutis-host | 0 | 0 | 0 | 9 | 4 | 0 | 0 | 0 | 0 | 0 |
 | rutis-dev | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
@@ -49,9 +48,9 @@ Categories:
 | Bun | 3 | 0 | 1 | 0 | 0 | 0 | 0 | 2 | 0 | 0 |
 | Python | 1 | 0 | 11 | 7 | 1 | 1 | 0 | 1 | 0 | 6 |
 | Go | 1 | 1 | 7 | 3 | 2 | 0 | 0 | 0 | 0 | 7 |
-| **Total** | **13** | **30** | **59** | **83** | **27** | **8** | **1** | **42** | **5** | **17** |
+| **Total** | **13** | **24** | **52** | **79** | **23** | **7** | **1** | **34** | **5** | **17** |
 
-What needs changing is A, B, C, E, F, G, U and some of W: about 155 places. D and H stay (4 of the H items decide the test's outcome by their duration and are treated as A; see A.9).
+What needs changing is A, B, C, E, F, G, U and some of W: about 137 places (excluding the example project `rutis-agent`), 52 of them class C and mechanical. D and H stay (4 of the H items decide the test's outcome by their duration and are treated as A; see A.9).
 
 Other findings:
 
@@ -75,7 +74,7 @@ Other findings:
 In order of preference:
 
 1. **Marker**: do a later thing on the same ordered path, wait for its effect, then assert that the earlier thing did not happen. Example, `node.rs:674`: after `announce(2)`, announce another service `marker`; once `marker` appears, assert that `clock` is absent. This needs the path to guarantee order (frames on one session are handled in order; one loader's reconciles run in order). Each rewrite states in its PR which ordering guarantee it relies on; if there is no written guarantee, use option 2 instead.
-2. **Observable state**: make the code under test leave a record when it decides not to act, and wait for that record. Examples: the loader's `LoaderChanged` and `SelfDisposed` events; in agent, confirm the process group is gone (`kill(-pgid, 0)` returns `ESRCH`) before asserting there is no file; in the memory transport's unit tests (white box), a `#[cfg(test)]` count of blocked senders.
+2. **Observable state**: make the code under test leave a record when it decides not to act, and wait for that record. Examples: the loader's `LoaderChanged` and `SelfDisposed` events; in the memory transport's unit tests (white box), a `#[cfg(test)]` count of blocked senders.
 3. **Weak negative check**: when neither is possible, keep a fixed wait, but only if it can only miss (find nothing on a slow machine) and never fail falsely, the same behaviour has a deterministic test or marker elsewhere, and the code carries `// clock: weak-negative — <reason>`. Items marked "weak" in Appendix A are the ones expected to stay: currently 2 (`channel/testing.rs:150`, `runtime/spawn.rs:459`), both across processes; any found during implementation need a reason in the PR, at most 6 in total.
 
 ### 3.3 Class three: timing is the behaviour
@@ -93,7 +92,7 @@ In order of preference:
 
 - **Hang guards**: one `HANG_GUARD` (10 s); waits that need longer (several runtimes starting cold) use `HANG_GUARD * k` and say why. Every unbounded wait (U) gets a bound. Bun's default of 5 s per test becomes ≥ 10 s (`bunfig.toml` `[test] timeout`, or `--timeout` on the CI command if 1.4.0 does not support it).
 - **Polling**: only when there is no event; 10 ms interval; on timeout the panic message includes the current state (`eventually_with`), as #238 and #249 ask.
-- **Randomness**: a test that uses randomness reads its seed from `RUTIS_SEED`, generates one if unset, and prints `seed: N (replay with RUTIS_SEED=N)`, as `interleave.rs` does. Randomness in product code (backoff jitter in `link.rs`) is set to `jitter: 0.0` in tests, or seeded through S2.
+- **Randomness**: a test that uses randomness reads its seed from `RUTIS_SEED`, generates one if unset, and prints `seed: N (replay with RUTIS_SEED=N)`, as `interleave.rs` does. Randomness in product code (backoff jitter in `link.rs`) is set to `jitter: 0.0` in tests; product code does not change.
 - **Fixture sleeps (H)** may stay. If the test's outcome depends on their duration (a fixture that crashes after 20 ms or exits after 300 ms), treat them as A: the fixture acts on a signal or after something happened.
 - **Window-widening sleeps (W)** are allowed only if the assertion holds whether or not the window is hit, annotated `// clock: widen — <reason>`; where the state can be made observable cheaply (memory transport), wait for the state instead.
 
@@ -123,16 +122,10 @@ pub async fn eventually_with<T>(what: &str, check: impl FnMut() -> Option<T>,
 pub fn eventually_blocking<T>(what: &str, check: impl FnMut() -> Option<T>) -> T;
 pub fn recv_within<T>(what: &str, rx: &std::sync::mpsc::Receiver<T>) -> T;
 
-/// A synchronization point across threads and between sync and async code:
-/// set() once; wait() / wait_blocking() wait for it.
-pub struct Signal { .. }
 
 /// Moved from #220: "still waiting" on the paused clock; run a blocking function on its own thread.
 pub async fn still_pending<F: Future + Unpin>(f: &mut F) -> bool;
 pub fn on_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> oneshot::Receiver<T>;
-
-/// Read RUTIS_SEED or generate one, and print how to replay.
-pub fn seed(test: &str) -> u64;
 ```
 
 The per-file `eventually`, `until`, `soon` and `Probe::wait_for` are removed or call these. Helpers like `Probe::wait_for` that wait for a record to appear keep their own types and use `eventually_with` inside.
@@ -148,53 +141,41 @@ One small file per language, not a package:
 | Python | `python/rutis/tests/support.py` | `HANG_GUARD = 10`, `within`, `eventually` (asyncio and thread versions) |
 | Go | `go/rutis/internal/testwait` (also used by `rutistest`) | `HangGuard = 10 * time.Second`, `Within(t, what, ch)`, `Eventually(t, what, check)` |
 
-Node 22+ has `mock.timers` and Bun has fake timers, but the heartbeats under test cross a socket or a process and fake timers do not reach the other side, so this design does not use them (§10 item 4).
+Node 22+ has `mock.timers` and Bun has fake timers, but the heartbeats under test cross a socket or a process and fake timers do not reach the other side, so this design does not use them (§10 item 2).
 
 ## 5. Seams in product code
 
 | # | Where | Change | Solves | Cost |
 | --- | --- | --- | --- | --- |
 | S1 | `crates/rutis-bridge/src/link.rs:11,256,361` | `Live::since` from `std::time::Instant` to `tokio::time::Instant` | The backoff reset after `stable` can be tested on the paused clock (only on the dial-failure path, which does not go through session threads) | None: the two are the same when not paused |
-| S2 | `crates/rutis-bridge/src/link.rs:497-527` | `Backoff` takes a seed (`#[cfg(test)]` constructor); the unit test prints it via `seed()`; integration tests' `quick()` sets `jitter: 0.0` | G; the jitter-caused timeout noted at `leases.rs:374` | None |
-| S3 | `crates/rutis-loader/src/runtime/go.rs:43,1107-1152,1210-1220` | `GoRuntimes::sweep_interval(Option<Duration>)` (`None`: no periodic sweep); `GoRuntimesHandle::sweep_at(now)` under the `testing` feature, judging idleness at the given instant | The idle-stop test `go_rows.rs:358-371` no longer depends on three real durations (800 / 300 / 100 ms) | One builder option, one hidden method |
 | S4 | `crates/rutis-bridge/src/transport/local/spawn.rs:337` | `TOKEN_WAIT` becomes a `LocalTransport` setting, default 10 s | `local_loopback.rs:100` uses "turn the bad outcome into a hang" and drops `elapsed < 5s` | One field |
-| S5 | `crates/rutis-agent/src/tools/mod.rs:84`, `src/tools/bash.rs:167-171` | `CANCEL_JOIN_GRACE` (2 s) and the bash reap deadline (2 s) become tool settings, defaults unchanged | The 1 s / 3 s bounds in the tests at `tools/mod.rs:315,319` compared against the 2 s constant | Two fields |
+
+Solved in the tests, without product changes:
+
+- Backoff jitter in `link.rs` (G): integration tests' `quick()` sets `jitter: 0.0`.
+- The idle stop in `go_rows.rs:358-371`: `idle` is already settable (`GoRuntimes::idle`); the test waits for the runtime's "stopped" state, bounded by `HANG_GUARD`, instead of asserting after a fixed 800 ms wait. The sweep interval (100 ms) stays.
 
 Not done:
 
 - **A general `Clock` trait**: it would have to cross bridge's session threads, the WebSocket transport's own runtime and child processes. That is a large change, and tolerances (§3.3) suffice there.
-- **An injected clock for WebSocket heartbeats** (`transport/websocket/connection.rs:196-255`): heartbeats run on the transport's own multi-thread runtime (`websocket/mod.rs:129`), which the test's paused clock does not reach. Tolerance instead (§10 item 4).
+- **An injected clock for WebSocket heartbeats** (`transport/websocket/connection.rs:196-255`): heartbeats run on the transport's own multi-thread runtime (`websocket/mod.rs:129`), which the test's paused clock does not reach. Tolerance instead (§10 item 2).
 - **rutis-host's `PROCESS_EXIT` (3 s) and `KILLED_EXIT` (5 s)**: the three `--shutdown-timeout 1` cases in `signals.rs` change their fixtures per §3.3 point 3 (the side that must time out never finishes); the constants stay.
 - **`MANIFEST_TIMEOUT` (30 s)** and the loader's `generate_id`: no test depends on their duration or value.
 
 ## 6. Verifying there is no regression
 
 1. **The rewritten tests still find the problem** (as in #220): for every B and E rewrite, the PR records one "temporarily break the code under test; the test fails at its new assertion" run. Example, `node.rs:200`: make `ExportPlugin` export without waiting for the far end's services; the test must fail at the assertion after the marker.
-2. **Repeated runs under load**: each PR runs the affected test files 50 rounds locally, rotating `--test-threads` over 1, 2 and the core count, with `stress-ng --cpu <cores>` (or two copies in parallel) for load. Results go in the PR description.
-3. **Nightly**: once #245 is merged, the `multiprocess` job in `stress.yml` runs bridge and loader multi-process tests 20 rounds each night. The series is done when, after everything is merged, those files pass 3 nights in a row. What #245 does not cover (agent, dsh, the Node/Bun/Python/Go suites) is run per point 2 in each PR.
-4. **Check script** `tools/check-test-clocks.mjs` (Node, no dependencies, like `check-md-links.mjs`):
-   - scans test files (Rust `tests/`, `tests.rs`, `testing.rs`, and what follows `#[cfg(test)]`; `*.test.mjs`, `*.test.ts`, `test_*.py`, `*_test.go`);
-   - reports: `sleep(` / `Sleep(` / `setTimeout(` / `Bun.sleep(` / `asyncio.sleep(` / `time.sleep(` with a literal duration; `timeout(`, `recv_timeout(`, `settimeout(`, `WithTimeout(` with a literal under 10 s; elapsed-time upper bounds such as `elapsed() <` or `Date.now() -`;
-   - does not report lines with a `clock: <category> — <reason>` annotation on the same or the previous line;
-   - while the series is in progress, an allow-list file `tools/test-clocks-allow.txt` records the places not yet changed; each PR only shrinks it; the last PR empties it.
-   - CI: needs one step `node tools/check-test-clocks.mjs` (< 1 s) in the `js-py` job. `ci.yml` is changed by #203 / #204; this PR only states the need.
+2. **Repeated runs**: each PR runs the affected test files 10 rounds locally, rotating `--test-threads` over 1, 2 and the core count; results go in the PR description.
+3. **Nightly**: bridge and loader multi-process tests are already repeated every night by the `multiprocess` job in `stress.yml` (#245); after the series merges, watch it for new failures.
 
 ## 7. Steps
 
-One PR per step, each touching one area, so each is easy to review and revert.
-
-| Step | Contents | Depends on |
+| PR | Content | Depends on |
 | --- | --- | --- |
-| P1 | `rutis-test-support`; `crates/rutis/tests/common` re-exports it; bridge's 11 copies of `eventually` replaced by the shared one; C bounds become `HANG_GUARD` | — |
-| P2 | Bridge A, B, W, F: `node.rs:185` (priority per the issue), `:200`, `:556`, `:674`; `cancellation.rs`; `settle()` in `projection_lifecycle.rs` / `service_projection.rs`; `bun_runtime.rs:311`; the memory transport unit tests and the channel conformance tests | P1 |
-| P3 | Bridge E, G: heartbeat tests with tolerance; S1, S2, S4 | P1 |
-| P4 | Loader: the 14 B items, the unbounded loop in `bun_multilang.rs:313`, the fixture race at `runtime_rows.rs:994`, S3 | P1, P3 (S2) |
-| P5 | agent, dsh, dev, host, e2e: S5; the `signals.rs` fixtures | P1 |
-| P6 | Node and Bun suites and fixtures | — |
-| P7 | Python and Go suites | — |
-| P8 | `tools/check-test-clocks.mjs` becomes enforcing, allow-list emptied; CI need stated | P1–P7 |
-
-The check script itself can land in P1 (report only, never failing) so every later step shows how many places remain.
+| 1 (this PR) | `rutis-test-support`; `crates/rutis/tests/common` re-exports it; bridge: the 11 copies of `eventually` replaced by the shared one, C bounds become `HANG_GUARD`; A, B, W, F (`node.rs:185` first, `:200`, `:556`, `:674`, `cancellation.rs`, `settle()` in `projection_lifecycle.rs` / `service_projection.rs`, `bun_runtime.rs:311`, the memory transport); E, G (heartbeat tolerance, S1, S4, `jitter: 0.0`) | — |
+| 2 | Loader: the 14 B items, the unbounded loop in `bun_multilang.rs:313`, the fixture race at `runtime_rows.rs:994`, the idle stop in `go_rows.rs`; shared helpers | 1 |
+| 3 | dsh, dev, host, e2e: the `signals.rs` fixtures; shared helpers | 1 |
+| 4 | The Node, Bun, Python and Go suites and fixtures; Bun per-test timeout ≥ 10 s (`bunfig.toml`) | — |
 
 ## 8. Risks
 
@@ -204,29 +185,26 @@ The check script itself can land in P1 (report only, never failing) so every lat
 | The order a marker relies on is not actually guaranteed, so the rewrite adds a new flake | §3.2 point 1: name the ordering guarantee; without one, use option 2 or 3 |
 | The paused clock does not advance, or advances early, around `spawn_blocking` or OS threads (#220 hit this) | Only for class one; not for bridge or loader tests that go through a session (C2); use `on_thread` |
 | With bounds raised to 10 s a real hang fails later | Only affects time to failure, not time to pass |
-| Test seams leak into the public API | S3 sits behind the `testing` feature with `#[doc(hidden)]`; S2 is `#[cfg(test)]`; S4 and S5 are ordinary settings with defaults |
+| Test seams leak into the public API | Only S4 is a new setting, with a default; S1 changes no interface |
 | Conflicts with parallel work: #245 (`stress.yml`), #249 / #250 (the same loader and bridge tests), #177 (typed dispatch tests) | This series does not touch `stress.yml`; fixes for #249 and #250 land first and this series rebases; PRs touching the same file reference each other |
-| Go's `testing/synctest` needs Go 1.25 (`go.mod` says 1.24) | Not used by this design (§10 item 5) |
+| Go's `testing/synctest` needs Go 1.25 (`go.mod` says 1.24) | Not used by this design (§10 item 3) |
 
 ## 9. Acceptance criteria (automatable)
 
-1. `node tools/check-test-clocks.mjs` exits 0 over the whole scope with an empty allow-list; at most 6 `clock: weak-negative` and at most 5 `clock: widen` annotations, each listed in Appendix A.
-2. No `timeout(` / `recv_timeout(` / `settimeout(` / `WithTimeout(` with a literal under 10 s in the scope's test files (same script).
-3. No elapsed-time upper bound of the form `elapsed() <`, `Date.now() - … <`, `time.monotonic() - … <` in the scope (same script).
-4. `rg 'fn eventually|fn until|fn soon' crates tests` finds definitions only in `crates/rutis-test-support`.
-5. Tests that use randomness print `seed:` (grep the output of `cargo test -- --nocapture`).
-6. The Bun suite's per-test timeout is ≥ 10 s (read `bunfig.toml` or the CI command).
-7. #245's `multiprocess` job passes 3 nights in a row after everything is merged.
+1. No `timeout(` / `recv_timeout(` / `settimeout(` / `WithTimeout(` with a literal under 10 s in the scope's test files (checked with `rg`, written into the PR description).
+2. No elapsed-time upper bound of the form `elapsed() <`, `Date.now() - … <`, `time.monotonic() - … <` in the scope.
+3. `rg 'fn eventually|fn until' crates tests` finds definitions only in `crates/rutis-test-support` (example projects aside).
+4. Every A, B, F and U item of Appendix A is rewritten or marked weak with a reason (at most 6).
+5. The Bun suite's per-test timeout is ≥ 10 s.
+6. Each PR description has the "break it, it fails" records and the results of 10 repeated rounds.
 
 ## 10. Decisions for the maintainer
 
-1. **Shared helpers in a new crate `rutis-test-support`, or a `tests/common` copy per crate?** Recommended: the new crate. There are already 30+ copies with inconsistent bounds. It is unpublished and only a dev-dependency, so releases are unaffected: `scripts/train.mjs` publishes an explicit list that does not include it, and published crates list it as a path-only dev-dependency (no version), which `cargo publish` strips (to be confirmed with `cargo publish --dry-run` during implementation).
-2. **Allow "weak negative checks" (§3.2 option 3)?** Recommended: allow, limited to cross-process cases with no ordering guarantee, annotated, with the count in the acceptance criteria (≤ 6). If not allowed, those places need observable events in product code, which costs more.
-3. **Accept the five product seams S1–S5?** Recommended: all of them; each has a default and changes no behaviour. A general `Clock` trait is not recommended (§5).
-4. **Heartbeat tests (4 suites: bridge, Node, Python, Go): tolerance, or an injected clock in the WebSocket transports?** Recommended: tolerance: ping and timeout at least 10× apart, the "stays connected" side waits for a count of pings through the relay, elapsed bounds removed. An injected clock would change the transport in four languages.
-5. **Raise Go's `go.mod` to 1.25 for `testing/synctest`?** Recommended: not now. It does not cover real loopback TCP (`listen_test.go`), the `peer_test.go` problems are solved with events, and raising it changes the Go SDK's minimum version.
-6. **Put the check script in CI (one step in `js-py`), report-only first or enforcing at once?** Recommended: report-only from P1, enforcing from P8. Needs the #203 / #204 side to add it.
-7. **Implementation in this PR or in several?** The issue's practice is to carry the implementation in this PR. Recommended: this PR carries P1 and P2 (shared helpers and the bridge part the issue names), P3–P8 as their own PRs with `Refs #231`, the last one `Closes #231`.
+1. **Allow "weak negative checks" (§3.2 option 3)?** Recommended: allow, limited to cross-process cases with no ordering guarantee, annotated `// clock: weak-negative — <reason>`, at most 6. If not allowed, those places need observable events in product code, which costs more.
+2. **Heartbeat tests (4 suites: bridge, Node, Python, Go): tolerance, or an injected clock in the WebSocket transports?** Recommended: tolerance: ping and timeout at least 10× apart, the "stays connected" side waits for a count of pings through the relay, elapsed bounds removed. An injected clock would change the transport in four languages.
+3. **Raise Go's `go.mod` to 1.25 for `testing/synctest`?** Recommended: not now. It does not cover real loopback TCP (`listen_test.go`), the `peer_test.go` problems are solved with events, and raising it changes the Go SDK's minimum version.
+
+Decided: the shared helpers go in a new crate `rutis-test-support` (unpublished, a dev-dependency only; `scripts/train.mjs` publishes an explicit list without it; confirmed with `cargo publish --dry-run` during implementation); 4 PRs, this one first with `Refs #231`, the last with `Closes #231`; the example project `rutis-agent` is out of scope; no check script `tools/check-test-clocks.mjs`.
 
 ## Appendix A: full inventory
 
@@ -270,9 +248,9 @@ The check script itself can land in P1 (report only, never failing) so every lat
 | `src/session/testing.rs:299` | a 50 ms timeout used to drop an async call | A | thr | Wait for the far end to report the call started |
 | `src/session/testing.rs:302-307` | 100 × 20 ms polling | C | thr | `eventually_blocking` |
 | `src/runtime/spawn.rs:459` | the channel does not end within 2 s (the process still runs) | B | out | Weak: no observable "waiting for the exit" event; keep and annotate; the positive part already asserts the exit status |
-| `src/link.rs:540-550` | backoff unit test, seed from the system time | G | in | S2: seed passed in and printed via `seed()` |
+| `src/link.rs:540-550` | backoff unit test, seed from the system time | G | in | Assert properties that hold for any seed (each delay within range, never above the cap), not a specific sequence; no product change |
 | Fixture sleeps (`rpc_callbacks.rs:160,192,446`, `event_forwarding.rs:49`, `node.rs:359`, `session/testing.rs:56`, `python_runtime.rs:32`, `bun_runtime.rs:30`, `websocket_multihop.rs:158`) | slow operations | H | — | Unchanged |
-| 11 copies of `eventually` (`node.rs:24`, `link.rs:34`, `multihop.rs:26`, `websocket_link.rs:22`, `websocket_soak.rs:29`, `go_runtime.rs:72`, `bun_runtime.rs:75`, `python_runtime.rs:85`, `row_services.rs:77`, `src/runtime/testing.rs:48`, `src/testing.rs:61`) and others | ≥ 10 s | D | — | Replaced by the shared one in P1 |
+| 11 copies of `eventually` (`node.rs:24`, `link.rs:34`, `multihop.rs:26`, `websocket_link.rs:22`, `websocket_soak.rs:29`, `go_runtime.rs:72`, `bun_runtime.rs:75`, `python_runtime.rs:85`, `row_services.rs:77`, `src/runtime/testing.rs:48`, `src/testing.rs:61`) and others | ≥ 10 s | D | — | Replaced by the shared one in the first PR |
 | Run durations of `local_soak.rs`, `websocket_soak.rs` | the duration is the soak's input | — | out | Unchanged |
 
 ### A.2 rutis-loader
@@ -288,17 +266,17 @@ The check script itself can land in P1 (report only, never failing) so every lat
 | `tests/multilang_go.rs:402` | 500 ms | B | out | Same |
 | `tests/cordis_node.rs:193`, `:273`, `:298` | 300 ms each | B | out | Marker: assert after a later call on the same session returns |
 | `tests/go_rows.rs:336` | 300 ms | B | out | Marker or runtime state |
-| `tests/go_rows.rs:358-371` | idle 300 ms; sleeps 800 ms and asserts still running | E, B | out | S3: no periodic sweep; after `sweep_at(now + 2 × idle)` assert still running (a row uses it); after removing the row, `sweep_at` and assert stopped |
+| `tests/go_rows.rs:358-371` | idle 300 ms; sleeps 800 ms and asserts still running | E, B | out | "Not stopped while a row uses it" becomes a state check after a successful call; after removing the row, wait for the runtime's "stopped" state, bounded by `HANG_GUARD`; no product change |
 | `tests/go_rows.rs:516` | a deliberate 1 ms timeout | E | out | Keep (the timeout itself is asserted; the other side never replies); annotate |
 | `tests/bun_multilang.rs:313-320` | `loop { sleep(10ms) }` with no bound | U | out | `eventually` |
 | `tests/instances.rs:390`, `tests/lifecycle.rs:154` | `eventually` 5 s | C | — | Shared helper |
 | `tests/loader.rs:568`, `:592` | 5 s | C | — | `within` |
-| `tests/leases.rs:138`, `:377`, `:400` | 600 / 400 ms stop delays (fixture) | E | out | The fixture is released by the test; the jitter noted at `:374`: `quick()` sets `jitter: 0.0` (S2) |
+| `tests/leases.rs:138`, `:377`, `:400` | 600 / 400 ms stop delays (fixture) | E | out | The fixture is released by the test; the jitter noted at `:374`: `quick()` sets `jitter: 0.0` |
 | `tests/fixtures/go/cmd/logger/main.go:34` | fixture timing | E | out | Same: released by the test |
 | The other 4 fixture sleeps | slow operations | H | — | Unchanged |
-| Wait helpers: 7 `eventually`, 4 `until`, ~9 `Probe::wait_for`, `multilang_go`'s `Fixture::until` (dumps state on timeout; the model for `eventually_with`) | 10–30 s | D | — | Replaced by the shared ones in P1/P4 |
+| Wait helpers: 7 `eventually`, 4 `until`, ~9 `Probe::wait_for`, `multilang_go`'s `Fixture::until` (dumps state on timeout; the model for `eventually_with`) | 10–30 s | D | — | Replaced by the shared ones in the second PR |
 
-### A.3 rutis-agent
+### A.3 rutis-agent (example project, out of scope, for reference only)
 
 | Where | What it does | Cat. | Proc. | Fix |
 | --- | --- | --- | --- | --- |

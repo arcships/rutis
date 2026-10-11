@@ -5,19 +5,19 @@
 状态：设计，待评审。日期：2026-10-11。基准：`main` `0941ef4`。Issue：#231（属于 #183）。
 依据：[质量规范](quality-standard.md) Q7.1–Q7.5；[质量现状](quality-status.md) K10、P11；#220（已合并，只改 `crates/rutis`）。
 
-范围：`crates/rutis-bridge`、`crates/rutis-loader`、`crates/rutis-host`、`crates/rutis-dsh`、`crates/rutis-agent`、`crates/rutis-dev`、`tests/e2e`，以及 Node（`node/`）、Bun（`bun/`）、Python（`python/`）、Go（`go/`）的测试。`crates/rutis` 已由 #220 处理，不在范围内。
-范围外：`stress.yml`、`ci.yml` 的改动（CI 需要在 PR 描述里提出）；#249、#250 两个偶发失败的根因修复（它们是产品代码的竞态，不是测试时钟问题，见 §八）。
+范围：`crates/rutis-bridge`、`crates/rutis-loader`、`crates/rutis-host`、`crates/rutis-dsh`、`crates/rutis-dev`、`tests/e2e`，以及 Node（`node/`）、Bun（`bun/`）、Python（`python/`）、Go（`go/`）的测试。`crates/rutis` 已由 #220 处理，不在范围内。
+范围外：示例项目 `crates/rutis-agent`、`crates/rutis-cli`（附录 A.3 只列出供参考）；`stress.yml`、`ci.yml` 的改动（本系列预计不需要；只有 Bun 1.4.0 不支持 `bunfig.toml` 的超时设置时，由 #256 在 `bun test` 上加 `--timeout`）；#249、#250 两个偶发失败的根因修复（它们是产品代码的竞态，不是测试时钟问题，见 §二）。
 
 ## 一、结论
 
 | # | 结论 | 章节 |
 | --- | --- | --- |
-| C1 | 按"测试能不能控制时钟"把每处等待分成三类：进程内 tokio（可用暂停时钟）、跨线程或跨进程（只能等可观察的事件）、时间本身就是被测行为（要可注入的时长或写明容差） | 三 |
+| C1 | 按"测试能不能控制时钟"把每处等待分成三类：进程内 tokio（可用暂停时钟）、跨线程或跨进程（只能等可观察的事件）、时间本身就是被测行为（可设置的时长或写明容差） | 三 |
 | C2 | bridge 的会话在自己的 OS 线程上读帧（`session/rpc.rs` `Connection::open`），并有自己的后台运行时线程；所以即使用内存通道，bridge 和 loader 里经过会话的测试也**不能**用暂停时钟，只能按第二类处理 | 三 |
 | C3 | 新增一个不发布的工作区 crate `rutis-test-support`，放共用的等待辅助函数；#220 的 `still_pending`、`on_thread` 移进去 | 四 |
-| C4 | 产品代码只加 5 个小接口（S1–S5），不引入通用的 `Clock` trait | 五 |
-| C5 | 加一个检查脚本 `tools/check-test-clocks.mjs`，测试里新出现的固定等待、短超时、耗时上限断言必须带 `clock:` 标注，否则失败 | 六 |
-| C6 | 分 8 个小 PR，先做 bridge（issue 指定的 `node.rs:185` 优先） | 七 |
+| C4 | 产品代码只加 2 个小接口（S1、S4），不引入通用的 `Clock` trait | 五 |
+| C5 | 小于 10 s 的防挂死上限（C 类）统一换成 `HANG_GUARD`，是机械替换；逐处分析的是 A、B、E、F、G、U 类 | 三 |
+| C6 | 分 4 个 PR：bridge、loader、其他 crate、其他语言 | 七 |
 
 ## 二、清单汇总
 
@@ -40,7 +40,6 @@
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | rutis-bridge | 7 | 7 | 21 | 27 | 4 | 4 | 1 | 9 | 5 | 0 |
 | rutis-loader | 0 | 14 | 4 | 26 | 5 | 0 | 0 | 5 | 0 | 1 |
-| rutis-agent | 0 | 6 | 7 | 4 | 4 | 1 | 0 | 8 | 0 | 0 |
 | rutis-dsh | 0 | 0 | 5 | 3 | 2 | 0 | 0 | 1 | 0 | 0 |
 | rutis-host | 0 | 0 | 0 | 9 | 4 | 0 | 0 | 0 | 0 | 0 |
 | rutis-dev | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
@@ -49,14 +48,14 @@
 | Bun | 3 | 0 | 1 | 0 | 0 | 0 | 0 | 2 | 0 | 0 |
 | Python | 1 | 0 | 11 | 7 | 1 | 1 | 0 | 1 | 0 | 6 |
 | Go | 1 | 1 | 7 | 3 | 2 | 0 | 0 | 0 | 0 | 7 |
-| **合计** | **13** | **30** | **59** | **83** | **27** | **8** | **1** | **42** | **5** | **17** |
+| **合计** | **13** | **24** | **52** | **79** | **23** | **7** | **1** | **34** | **5** | **17** |
 
-要改的是 A、B、C、E、F、G、U 和部分 W：约 155 处。D、H 不改（H 里有 4 处的结果取决于夹具的时长，按 A 处理，见附录 A.9）。
+要改的是 A、B、C、E、F、G、U 和部分 W：约 137 处（不含示例项目 `rutis-agent`），其中 52 处 C 类是机械替换。D、H 不改（H 里有 4 处的结果取决于夹具的时长，按 A 处理，见附录 A.9）。
 
 其他发现：
 
 - 没有任何一处用到暂停时钟、虚拟时钟或种子（Rust 的 `start_paused`、Node `mock.timers`、Bun 假定时器、Go `testing/synctest`、Python 的任何假时钟都没有）。
-- 等待辅助函数在各文件里各写一份：bridge 的 `eventually` 11 份，loader 的 `eventually` 7 份、`until` 4 份、`Probe::wait_for` 约 9 份，agent 的 `soon` 5 份，dsh、host 各自一份。上限从 5 s 到 30 s 不等。
+- 等待辅助函数在各文件里各写一份：bridge 的 `eventually` 11 份，loader 的 `eventually` 7 份、`until` 4 份、`Probe::wait_for` 约 9 份，dsh、host 各自一份（示例项目 `rutis-agent` 另有 `soon` 5 份，不改）。上限从 5 s 到 30 s 不等。
 - 风险最高、最可能已经在 CI 上偶发的几处：`python/rutis/tests/test_peer.py:146`（在事件循环线程上做阻塞读）、`go/rutis/internal/peer/peer_test.go:116`、`:190`、`node/rutis-runtime/test/serve.test.mjs:26`、`bun/rutis-bun/test/fixtures/crashing-worker.ts:12`、`crates/rutis-loader/tests/runtime_rows.rs:1101`/`:1119`（夹具 300 ms 后退出，测试也等 300 ms）、三套 WebSocket 心跳测试的耗时上限。
 - 与已登记的偶发失败的关系：#238（multilang_go 20 s 超时）、#249（go_rows 等不到停止）失败时只说"超时"，看不出卡在哪；#233、#250 是"退出状态"与"通道结束"抢先的竞态。它们都不是测试用了太短的时间，而是产品代码的竞态；但它们都说明失败信息要带出当时的状态（§4.2 的 `eventually_with`）。
 
@@ -75,7 +74,7 @@
 按优先顺序：
 
 1. **标记**：在同一条有序路径上做一件后续的事，等它的结果出现，再断言前一件事没发生。例如 `node.rs:674`：先 `announce(2)`，再宣告另一个服务 `marker`；等 `marker` 出现后断言 `clock` 不在。前提是这条路径确实保证顺序（同一会话的帧按序处理、同一个 loader 的 reconcile 按序执行）。每处改写在 PR 里写明依靠的是哪条顺序保证；如果找不到成文的保证，就不能用标记，改用第 2 种。
-2. **可观察的状态**：让被测代码在"决定不做"时留下记录，测试等这条记录。例如 loader 的 `LoaderChanged`、`SelfDisposed` 事件；agent 里用 `kill(-pgid, 0)` 返回 `ESRCH` 确认进程组已经不在，再断言没有文件；内存通道的单元测试（白盒）加一个 `#[cfg(test)]` 的"阻塞中的发送者数量"。
+2. **可观察的状态**：让被测代码在"决定不做"时留下记录，测试等这条记录。例如 loader 的 `LoaderChanged`、`SelfDisposed` 事件；内存通道的单元测试（白盒）加一个 `#[cfg(test)]` 的"阻塞中的发送者数量"。
 3. **弱负向检查**：上面两种都做不到时，保留一段固定等待，但要满足：它只可能漏报（机器慢时什么都没测到），不可能误报；同一行为在别处另有确定性的测试或标记；代码上标 `// clock: weak-negative — <原因>`。附录 A 里标了"弱"的就是预计会留下来的，目前 2 处（`channel/testing.rs:150`、`runtime/spawn.rs:459`），都跨进程；实现中再发现的要在 PR 里说明理由，总数不超过 6。
 
 ### 3.3 第三类：时间是被测行为
@@ -93,7 +92,7 @@
 
 - **防挂死上限**：统一用 `HANG_GUARD`（10 s）；需要更长的（冷启动多个运行时）用 `HANG_GUARD * k` 并写原因。没有上限的等待（U）都加上。Bun 的测试默认每个 5 s，改为 ≥ 10 s（`bunfig.toml` `[test] timeout`，1.4.0 不支持时在 CI 命令上加 `--timeout`）。
 - **轮询**：只用于拿不到事件的情况；间隔 10 ms；超时时 panic 信息要带出当前状态（`eventually_with`），满足 #238、#249 的要求。
-- **随机**：用到随机数的测试从 `RUTIS_SEED` 读种子，没有就生成，打印 `seed: N (replay with RUTIS_SEED=N)`，和 `interleave.rs` 一致。产品代码里的随机（`link.rs` 的退避抖动）在测试里设 `jitter: 0.0`，或者用 S2 传入种子。
+- **随机**：用到随机数的测试从 `RUTIS_SEED` 读种子，没有就生成，打印 `seed: N (replay with RUTIS_SEED=N)`，和 `interleave.rs` 一致。产品代码里的随机（`link.rs` 的退避抖动）在测试里设 `jitter: 0.0`，不改产品代码。
 - **夹具的 sleep（H）**：可以保留。但如果测试结果取决于它的时长（夹具 20 ms 后崩溃、300 ms 后退出），按 A 处理：夹具改为收到信号或某事发生之后再行动。
 - **放大窗口的 sleep（W）**：只在断言无论是否命中都成立时允许，注明 `// clock: widen — <原因>`；能低成本地让状态可观察的（内存通道），改成等状态。
 
@@ -123,15 +122,10 @@ pub async fn eventually_with<T>(what: &str, check: impl FnMut() -> Option<T>,
 pub fn eventually_blocking<T>(what: &str, check: impl FnMut() -> Option<T>) -> T;
 pub fn recv_within<T>(what: &str, rx: &std::sync::mpsc::Receiver<T>) -> T;
 
-/// 跨线程、跨同步异步的同步点：set() 一次，wait() / wait_blocking() 等它。
-pub struct Signal { .. }
 
 /// #220 移入：暂停时钟下判断"仍在等待"；在单独线程上运行阻塞函数。
 pub async fn still_pending<F: Future + Unpin>(f: &mut F) -> bool;
 pub fn on_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> oneshot::Receiver<T>;
-
-/// 读 RUTIS_SEED 或生成一个，并打印重放方式。
-pub fn seed(test: &str) -> u64;
 ```
 
 各文件里的 `eventually`、`until`、`soon`、`Probe::wait_for` 删除或改为调用这里。`Probe::wait_for` 这类等"某条记录出现"的，保留各自的类型，内部换成 `eventually_with`。
@@ -147,53 +141,41 @@ pub fn seed(test: &str) -> u64;
 | Python | `python/rutis/tests/support.py` | `HANG_GUARD = 10`、`within`、`eventually`（asyncio 版和线程版） |
 | Go | `go/rutis/internal/testwait`（`rutistest` 也用） | `HangGuard = 10 * time.Second`、`Within(t, what, ch)`、`Eventually(t, what, check)` |
 
-Node 22+ 有 `mock.timers`，Bun 有假定时器，但被测的心跳都跨 socket 或进程，假定时器管不到对方，所以本设计不用它们（§九 第 4 项）。
+Node 22+ 有 `mock.timers`，Bun 有假定时器，但被测的心跳都跨 socket 或进程，假定时器管不到对方，所以本设计不用它们（§十 第 2 项）。
 
 ## 五、产品代码要加的接口
 
 | # | 位置 | 改动 | 解决 | 成本 |
 | --- | --- | --- | --- | --- |
 | S1 | `crates/rutis-bridge/src/link.rs:11,256,361` | `Live::since` 从 `std::time::Instant` 改为 `tokio::time::Instant` | `stable` 之后退避重置可以在暂停时钟下测（只对不经过会话线程的拨号失败路径） | 无：未暂停时两者相同 |
-| S2 | `crates/rutis-bridge/src/link.rs:497-527` | `Backoff` 的种子可以传入（`#[cfg(test)]` 构造函数）；单元测试用 `seed()` 打印种子；集成测试的 `quick()` 设 `jitter: 0.0` | G；`leases.rs:374` 提到的抖动导致超时 | 无 |
-| S3 | `crates/rutis-loader/src/runtime/go.rs:43,1107-1152,1210-1220` | `GoRuntimes::sweep_interval(Option<Duration>)`（`None` 不启动定时清扫）；`testing` feature 下的 `GoRuntimesHandle::sweep_at(now)`，用传入的时刻判断空闲 | `go_rows.rs:358-371` 空闲停止测试不再依赖 800 ms / 300 ms / 100 ms 三个真实时长 | 一个构建选项、一个隐藏方法 |
 | S4 | `crates/rutis-bridge/src/transport/local/spawn.rs:337` | `TOKEN_WAIT` 改为 `LocalTransport` 的设置项，默认 10 s | `local_loopback.rs:100` 用"把坏结果变成挂死"，删掉 `elapsed < 5s` | 一个字段 |
-| S5 | `crates/rutis-agent/src/tools/mod.rs:84`、`src/tools/bash.rs:167-171` | `CANCEL_JOIN_GRACE`（2 s）、bash 回收时限（2 s）改为工具配置项，默认不变 | `tools/mod.rs:315,319` 测试的 1 s / 3 s 和 2 s 常量互相比较 | 两个字段 |
+
+不改产品代码、在测试里解决的：
+
+- `link.rs` 的退避抖动（G）：集成测试的 `quick()` 设 `jitter: 0.0`。
+- `go_rows.rs:358-371` 的空闲停止：`idle` 已可设置（`GoRuntimes::idle`）；测试等运行时的"已停止"状态，上限 `HANG_GUARD`，不再用 800 ms 的固定等待来断言。清扫间隔（100 ms）不变。
 
 不做的：
 
 - **通用 `Clock` trait**：要穿过 bridge 的会话线程、WebSocket 传输自己的运行时和子进程，改动大，而这些地方用容差（§3.3）就够了。
-- **WebSocket 心跳注入时钟**（`transport/websocket/connection.rs:196-255`）：心跳在传输自己的多线程运行时里跑（`websocket/mod.rs:129`），测试的暂停时钟管不到。用容差（§九 第 4 项）。
+- **WebSocket 心跳注入时钟**（`transport/websocket/connection.rs:196-255`）：心跳在传输自己的多线程运行时里跑（`websocket/mod.rs:129`），测试的暂停时钟管不到。用容差（§十 第 2 项）。
 - **rutis-host 的 `PROCESS_EXIT`（3 s）、`KILLED_EXIT`（5 s）**：`signals.rs` 的三处 `--shutdown-timeout 1` 按 §3.3 第 3 条改夹具（必须超时的一方永不结束），不需要改常量。
 - **`MANIFEST_TIMEOUT`（30 s）**、loader 的 `generate_id`：没有测试依赖它们的时长或取值。
 
 ## 六、怎么确认没有退步
 
 1. **改写后的测试仍能发现问题**（和 #220 相同）：每处 B、E 的改写，在 PR 里写一次"临时把被测代码改坏，测试在新断言处失败"的记录。例如 `node.rs:200`：让 `ExportPlugin` 不等对方提供服务就导出，测试应在标记之后的断言处失败。
-2. **加负载重复运行**：每个 PR 在本地跑受影响的测试文件 50 轮，`--test-threads` 轮换 1、2、核数，同时用 `stress-ng --cpu <核数>`（或并行跑两份）制造负载。结果写在 PR 描述里。
-3. **夜间**：#245 合并后，`stress.yml` 的 `multiprocess` 任务每晚跑 bridge、loader 的多进程测试 20 轮。本系列全部合并后，连续 3 晚这些文件没有失败，才算完成。#245 不覆盖的（agent、dsh、Node/Bun/Python/Go 套件）在 PR 里按第 2 条跑。
-4. **检查脚本** `tools/check-test-clocks.mjs`（Node，和 `check-md-links.mjs` 一样不需要依赖）：
-   - 扫描测试文件（Rust 的 `tests/`、`tests.rs`、`testing.rs`、`#[cfg(test)]` 之后的部分；`*.test.mjs`、`*.test.ts`、`test_*.py`、`*_test.go`）；
-   - 报告：`sleep(` / `Sleep(` / `setTimeout(` / `Bun.sleep(` / `asyncio.sleep(` / `time.sleep(` 带字面时长；`timeout(`、`recv_timeout(`、`settimeout(`、`WithTimeout(` 的字面时长小于 10 s；`elapsed() <`、`Date.now() -` 之类的耗时上限；
-   - 同一行或上一行有 `clock: <类别> — <原因>` 标注的不报告；
-   - 本系列进行期间，用一个允许清单文件 `tools/test-clocks-allow.txt` 记录还没改的位置，每个 PR 只减不增；最后一个 PR 清空它。
-   - CI：需要在 `js-py` 任务里加一步 `node tools/check-test-clocks.mjs`（< 1 s）。`ci.yml` 由 #203 / #204 修改，本 PR 只提出需要。
+2. **重复运行**：每个 PR 在本地把受影响的测试文件跑 10 轮，`--test-threads` 轮换 1、2、核数，结果写在 PR 描述里。
+3. **夜间**：bridge、loader 的多进程测试已经由 `stress.yml` 的 `multiprocess` 任务（#245）每晚重复运行；本系列合并后看它有没有新的失败。
 
 ## 七、分步
 
-每步一个 PR，每个 PR 只改一个范围，便于审阅和回退。
-
-| 步 | 内容 | 依赖 |
+| PR | 内容 | 依赖 |
 | --- | --- | --- |
-| P1 | `rutis-test-support`；`crates/rutis/tests/common` 改为转出；bridge 的 11 份 `eventually` 换成共用函数，C 类上限改为 `HANG_GUARD` | — |
-| P2 | bridge 的 A、B、W、F：`node.rs:185`（issue 指定优先）、`:200`、`:556`、`:674`；`cancellation.rs`；`projection_lifecycle.rs` / `service_projection.rs` 的 `settle()`；`bun_runtime.rs:311`；内存通道单元测试和通道一致性测试 | P1 |
-| P3 | bridge 的 E、G：心跳测试改容差；S1、S2、S4 | P1 |
-| P4 | loader：14 处 B、`bun_multilang.rs:313` 无上限循环、`runtime_rows.rs:994` 夹具竞态、S3 | P1、P3（S2） |
-| P5 | agent、dsh、dev、host、e2e：S5；`signals.rs` 夹具 | P1 |
-| P6 | Node、Bun 套件和夹具 | — |
-| P7 | Python、Go 套件 | — |
-| P8 | `tools/check-test-clocks.mjs` 改为强制、清空允许清单；提出 CI 需要 | P1–P7 |
-
-检查脚本本身可以在 P1 里先加（只报告、不失败），后面每步都能看到剩余数量。
+| 1（本 PR） | `rutis-test-support`；`crates/rutis/tests/common` 改为转出；bridge：11 份 `eventually` 换成共用函数，C 类上限改为 `HANG_GUARD`；A、B、W、F（`node.rs:185` 优先，`:200`、`:556`、`:674`，`cancellation.rs`，`projection_lifecycle.rs` / `service_projection.rs` 的 `settle()`，`bun_runtime.rs:311`，内存通道）；E、G（心跳容差，S1、S4，`jitter: 0.0`） | — |
+| 2 | loader：14 处 B、`bun_multilang.rs:313` 无上限循环、`runtime_rows.rs:994` 夹具竞态、`go_rows.rs` 空闲停止；共用函数 | 1 |
+| 3 | dsh、dev、host、e2e：`signals.rs` 夹具；共用函数 | 1 |
+| 4 | Node、Bun、Python、Go 套件和夹具；Bun 每测试超时 ≥ 10 s（`bunfig.toml`） | — |
 
 ## 八、风险
 
@@ -203,29 +185,26 @@ Node 22+ 有 `mock.timers`，Bun 有假定时器，但被测的心跳都跨 sock
 | "标记"依赖的顺序其实没有保证，改写引入新的偶发失败 | §3.2 第 1 条：写明依靠的顺序保证，找不到就用第 2、3 种 |
 | 暂停时钟遇到 `spawn_blocking` 或 OS 线程不推进或提前推进（#220 遇到过） | 只用于第一类；bridge、loader 经过会话的测试不用（C2）；用 `on_thread` |
 | 上限放宽到 10 s，真挂住时测试更晚失败 | 只影响失败时的时长，不影响通过时的时长 |
-| 测试用接口进入公开 API | S3 放在 `testing` feature 下并 `#[doc(hidden)]`；S2 是 `#[cfg(test)]`；S4、S5 是普通配置项，有默认值 |
+| 测试用接口进入公开 API | 只有 S4 是新的配置项，有默认值；S1 不改接口 |
 | 与并行的工作冲突：#245（`stress.yml`）、#249 / #250（同一批 loader、bridge 测试）、#177（类型分发测试） | 本系列不改 `stress.yml`；#249、#250 的修复先合，本系列 rebase；改到同一文件时在 PR 里互相注明 |
-| Go 的 `testing/synctest` 要 Go 1.25（`go.mod` 是 1.24） | 本设计不用它（§九 第 5 项） |
+| Go 的 `testing/synctest` 要 Go 1.25（`go.mod` 是 1.24） | 本设计不用它（§十 第 3 项） |
 
 ## 九、验收标准（可自动检查）
 
-1. `node tools/check-test-clocks.mjs` 在全部范围内退出码为 0，允许清单为空；`clock: weak-negative` 标注不超过 6 处，`clock: widen` 不超过 5 处，每处都在附录 A 里。
-2. 范围内的测试文件里，没有字面时长小于 10 s 的 `timeout(` / `recv_timeout(` / `settimeout(` / `WithTimeout(`（同上脚本）。
-3. 范围内没有 `elapsed() <`、`Date.now() - … <`、`time.monotonic() - … <` 形式的耗时上限断言（同上脚本）。
-4. `rg 'fn eventually|fn until|fn soon' crates tests` 只在 `crates/rutis-test-support` 里找到定义。
-5. 用到随机数的测试输出包含 `seed:`（`cargo test -- --nocapture` 后 grep）。
-6. Bun 套件的每测试超时 ≥ 10 s（读 `bunfig.toml` 或 CI 命令）。
-7. #245 的 `multiprocess` 任务在全部合并后连续 3 晚通过。
+1. 范围内的测试文件里，没有字面时长小于 10 s 的 `timeout(` / `recv_timeout(` / `settimeout(` / `WithTimeout(`（`rg` 检查，实现时写进 PR 描述）。
+2. 范围内没有 `elapsed() <`、`Date.now() - … <`、`time.monotonic() - … <` 形式的耗时上限断言。
+3. `rg 'fn eventually|fn until' crates tests` 只在 `crates/rutis-test-support` 里找到定义（示例项目除外）。
+4. 附录 A 里的 A、B、F、U 类，每处都已改写，或标为"弱"并写明原因（不超过 6 处）。
+5. Bun 套件的每测试超时 ≥ 10 s。
+6. 每个 PR 描述里有"改坏后失败"的记录和 10 轮重复运行的结果。
 
 ## 十、需要维护者决定
 
-1. **共用辅助函数放在新 crate `rutis-test-support`，还是每个 crate 各放一份 `tests/common`？** 推荐新 crate：现在已经有 30 多份重复，而且上限不一致；新 crate 不发布、只做 dev-dependency，不影响发布流程：`scripts/train.mjs` 按显式清单发布，不会包含它；已发布的 crate 以只写 `path`、不写版本的方式把它列为 dev-dependency，`cargo publish` 会去掉这类依赖（实现时用 `cargo publish --dry-run` 确认）。
-2. **是否允许"弱负向检查"（§3.2 第 3 种）？** 推荐允许，但限定为跨进程、无顺序保证的场合，必须标注，数量写进验收标准（≤ 6）。不允许的话，这 6 处要给产品代码加可观察的事件，成本更高。
-3. **是否接受 S1–S5 五个产品代码接口？** 推荐全部接受；它们都有默认值、不改变行为。不推荐通用 `Clock` trait（§五）。
-4. **心跳测试（bridge、Node、Python、Go 共 4 套）用容差，还是给 WebSocket 传输注入时钟？** 推荐容差：ping 与 timeout 至少差 10 倍，"保持连接"一方等经过中继的 ping 次数，删掉耗时上限。注入时钟要改四种语言的传输实现。
-5. **Go 是否把 `go.mod` 升到 1.25 以使用 `testing/synctest`？** 推荐暂不升级：它管不到真实的 loopback TCP（`listen_test.go`），而 `peer_test.go` 的问题用事件就能解决；升级会改变 Go SDK 的最低支持版本。
-6. **检查脚本是否进 CI（`js-py` 任务加一步），先只报告还是直接强制？** 推荐 P1 进 CI 只报告，P8 改为强制。需要 #203 / #204 那边加。
-7. **实现放在本 PR 还是分成多个 PR？** issue 的做法是本 PR 带上实现。推荐本 PR 带 P1、P2（共用函数和 issue 指定的 bridge 部分），P3–P8 各开 PR，写 `Refs #231`，最后一个 `Closes #231`。
+1. **是否允许"弱负向检查"（§3.2 第 3 种）？** 推荐允许，但限定为跨进程、无顺序保证的场合，必须标注 `// clock: weak-negative — <原因>`，不超过 6 处。不允许的话，这几处要给产品代码加可观察的事件，成本更高。
+2. **心跳测试（bridge、Node、Python、Go 共 4 套）用容差，还是给 WebSocket 传输注入时钟？** 推荐容差：ping 与 timeout 至少差 10 倍，"保持连接"一方等经过中继的 ping 次数，删掉耗时上限。注入时钟要改四种语言的传输实现。
+3. **Go 是否把 `go.mod` 升到 1.25 以使用 `testing/synctest`？** 推荐暂不升级：它管不到真实的 loopback TCP（`listen_test.go`），`peer_test.go` 的问题用事件就能解决；升级会改变 Go SDK 的最低支持版本。
+
+已决定：共用函数放新 crate `rutis-test-support`（不发布，只做 dev-dependency；`scripts/train.mjs` 按显式清单发布，不会包含它；实现时用 `cargo publish --dry-run` 确认）；分成 4 个 PR，本 PR 是第 1 个，写 `Refs #231`，最后一个写 `Closes #231`；示例项目 `rutis-agent` 不在范围内；不做检查脚本 `tools/check-test-clocks.mjs`。
 
 ## 附录 A：完整清单
 
@@ -269,9 +248,9 @@ Node 22+ 有 `mock.timers`，Bun 有假定时器，但被测的心跳都跨 sock
 | `src/session/testing.rs:299` | 50 ms 超时用来丢弃异步调用 | A | 线 | 等对方报告调用已开始 |
 | `src/session/testing.rs:302-307` | 100 × 20 ms 轮询 | C | 线 | `eventually_blocking` |
 | `src/runtime/spawn.rs:459` | 2 s 内通道不结束（进程还在） | B | 外 | 弱：没有可观察的"正在等退出"事件；保留并标注，正向部分已断言退出状态 |
-| `src/link.rs:540-550` | 退避单元测试，种子来自系统时间 | G | 内 | S2：`seed()` 传入并打印 |
+| `src/link.rs:540-550` | 退避单元测试，种子来自系统时间 | G | 内 | 断言对任意种子都成立的性质（每次延迟在范围内、不超过上限），不依赖具体序列；不改产品代码 |
 | 夹具 sleep（`rpc_callbacks.rs:160,192,446`、`event_forwarding.rs:49`、`node.rs:359`、`session/testing.rs:56`、`python_runtime.rs:32`、`bun_runtime.rs:30`、`websocket_multihop.rs:158`） | 模拟慢操作 | H | — | 不改 |
-| `eventually` 副本 11 份（`node.rs:24`、`link.rs:34`、`multihop.rs:26`、`websocket_link.rs:22`、`websocket_soak.rs:29`、`go_runtime.rs:72`、`bun_runtime.rs:75`、`python_runtime.rs:85`、`row_services.rs:77`、`src/runtime/testing.rs:48`、`src/testing.rs:61`）等 | ≥ 10 s | D | — | P1 换成共用函数 |
+| `eventually` 副本 11 份（`node.rs:24`、`link.rs:34`、`multihop.rs:26`、`websocket_link.rs:22`、`websocket_soak.rs:29`、`go_runtime.rs:72`、`bun_runtime.rs:75`、`python_runtime.rs:85`、`row_services.rs:77`、`src/runtime/testing.rs:48`、`src/testing.rs:61`）等 | ≥ 10 s | D | — | 第 1 个 PR 换成共用函数 |
 | `local_soak.rs`、`websocket_soak.rs` 的运行时长 | 时长是长时间测试的输入 | — | 外 | 不改 |
 
 ### A.2 rutis-loader
@@ -287,17 +266,17 @@ Node 22+ 有 `mock.timers`，Bun 有假定时器，但被测的心跳都跨 sock
 | `tests/multilang_go.rs:402` | 500 ms | B | 外 | 同上 |
 | `tests/cordis_node.rs:193`、`:273`、`:298` | 各 300 ms | B | 外 | 标记：同一会话上的后续调用返回后断言 |
 | `tests/go_rows.rs:336` | 300 ms | B | 外 | 标记或运行时状态 |
-| `tests/go_rows.rs:358-371` | 空闲 300 ms、sleep 800 ms 后断言仍在运行 | E、B | 外 | S3：关闭定时清扫，`sweep_at(now + 2 × idle)` 后断言仍运行（有行在用）；移除行后 `sweep_at` 断言停止 |
+| `tests/go_rows.rs:358-371` | 空闲 300 ms、sleep 800 ms 后断言仍在运行 | E、B | 外 | "有行在用时不停"改为在一次调用成功之后检查状态仍是运行；移除行后等运行时"已停止"，上限 `HANG_GUARD`；不改产品代码 |
 | `tests/go_rows.rs:516` | 故意 1 ms 超时 | E | 外 | 保留（断言超时这件事本身，对方永不回复），注明 |
 | `tests/bun_multilang.rs:313-320` | `loop { sleep(10ms) }` 无上限 | U | 外 | `eventually` |
 | `tests/instances.rs:390`、`tests/lifecycle.rs:154` | `eventually` 5 s | C | — | 共用函数 |
 | `tests/loader.rs:568`、`:592` | 5 s | C | — | `within` |
-| `tests/leases.rs:138`、`:377`、`:400` | 600 / 400 ms 停止延迟（夹具） | E | 外 | 夹具改为由测试放行；`:374` 提到的抖动：`quick()` 设 `jitter: 0.0`（S2） |
+| `tests/leases.rs:138`、`:377`、`:400` | 600 / 400 ms 停止延迟（夹具） | E | 外 | 夹具改为由测试放行；`:374` 提到的抖动：`quick()` 设 `jitter: 0.0` |
 | `tests/fixtures/go/cmd/logger/main.go:34` | 夹具计时 | E | 外 | 同上，由测试放行 |
 | 夹具 sleep 其余 4 处 | 模拟慢操作 | H | — | 不改 |
-| 等待辅助函数：`eventually` 7 份、`until` 4 份、`Probe::wait_for` 约 9 份、`multilang_go` 的 `Fixture::until`（超时时输出状态，保留为 `eventually_with` 的用法范例） | 10–30 s | D | — | P1/P4 换成共用函数 |
+| 等待辅助函数：`eventually` 7 份、`until` 4 份、`Probe::wait_for` 约 9 份、`multilang_go` 的 `Fixture::until`（超时时输出状态，保留为 `eventually_with` 的用法范例） | 10–30 s | D | — | 第 2 个 PR 换成共用函数 |
 
-### A.3 rutis-agent
+### A.3 rutis-agent（示例项目，不在范围内，只列出供参考）
 
 | 位置 | 做什么 | 类 | 进程 | 改法 |
 | --- | --- | --- | --- | --- |
