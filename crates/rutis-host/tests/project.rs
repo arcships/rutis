@@ -295,9 +295,15 @@ fn the_dev_file_is_merged_into_the_project() {
             r#"{ "rows": [{ "id": "x", "nam": "y" }] }"#,
         )],
     );
-    let error = dev_config(project).unwrap_err();
+    // The dev file's warnings are the configuration's.
+    let (config, _) = dev_config(project).unwrap();
+    let warnings: Vec<String> = config
+        .warnings
+        .iter()
+        .map(|warning| normalize(warning, project))
+        .collect();
     assert_eq!(
-        normalize(&error, project),
-        "<dir>/rutis.dev.json: rows[0] (id \"x\"): unknown field `nam`, expected one of `id`, `name`, `config`, `inject`, `isolate`, `disabled`, `group`, `instanced`"
+        warnings,
+        ["<dir>/rutis.dev.json: rows[0] (id \"x\"): unknown field `nam` is ignored; a row has `id`, `name`, `config`, `inject`, `isolate`, `disabled`, `group`, `instanced`"]
     );
 }

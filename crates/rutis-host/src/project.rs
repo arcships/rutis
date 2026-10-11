@@ -50,6 +50,7 @@ pub fn dev_config(dir: &Path) -> Result<(HostConfig, String), String> {
         runtimes,
         listen: Vec::new(),
         rows,
+        warnings: Vec::new(),
     };
     let extra = dir.join("rutis.dev.json");
     if extra.exists() {

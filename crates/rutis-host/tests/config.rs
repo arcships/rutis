@@ -224,8 +224,7 @@ fn relative_to(path: &Path, base: &Path) -> PathBuf {
 }
 
 /// A field the host does not know is an error that names it, where it is,
-/// and what is known there — in a row too, where the loader would ignore
-/// it.
+/// and what is known there; in a row, a warning.
 /// risk: B5, A7
 #[test]
 fn unknown_fields_are_refused() {
@@ -264,14 +263,6 @@ fn unknown_fields_are_refused() {
             "<dir>/rutis.json: unknown field `tls`, expected one of `name`, `address`, `cert`, `key` at line 1 column 59",
         ),
         (
-            r#"{ "rows": [{ "id": "w", "name": "weather", "confg": { "city": "Oslo" } }] }"#,
-            "<dir>/rutis.json: rows[0] (id \"w\"): unknown field `confg`, expected one of `id`, `name`, `config`, `inject`, `isolate`, `disabled`, `group`, `instanced`",
-        ),
-        (
-            r#"{ "rows": [{ "id": "g", "group": true, "config": [{ "id": "w", "name": "weather" }, { "name": "x", "enabled": true }] }] }"#,
-            "<dir>/rutis.json: rows[0] (id \"g\").config[1]: unknown field `enabled`, expected one of `id`, `name`, `config`, `inject`, `isolate`, `disabled`, `group`, `instanced`",
-        ),
-        (
             r#"{ "rows": ["weather"] }"#,
             "<dir>/rutis.json: rows[0]: a row is an object",
         ),
@@ -280,8 +271,36 @@ fn unknown_fields_are_refused() {
         let error = read(dir.path(), text).expect_err(text);
         assert_eq!(normalize(&error, dir.path()), expected, "{text}");
     }
-    // Every field the loader reads, and a group's own rows, pass.
-    read(
+    // In a row, the loader would drop it: the row runs without it, and a
+    // warning says so, for every one.
+    let config = read(
+        dir.path(),
+        r#"{ "rows": [
+             { "id": "w", "name": "weather", "confg": { "city": "Oslo" }, "note": "x" },
+             { "id": "g", "group": true, "config": [{ "id": "a", "name": "a" }, { "name": "x", "enabled": true }] }
+           ] }"#,
+    )
+    .unwrap();
+    let warnings: Vec<String> = config
+        .warnings
+        .iter()
+        .map(|warning| normalize(warning, dir.path()))
+        .collect();
+    let fields = "`id`, `name`, `config`, `inject`, `isolate`, `disabled`, `group`, `instanced`";
+    assert_eq!(
+        warnings,
+        [
+            format!("<dir>/rutis.json: rows[0] (id \"w\"): unknown field `confg` is ignored; a row has {fields}"),
+            format!("<dir>/rutis.json: rows[0] (id \"w\"): unknown field `note` is ignored; a row has {fields}"),
+            format!("<dir>/rutis.json: rows[1] (id \"g\").config[1]: unknown field `enabled` is ignored; a row has {fields}"),
+        ]
+    );
+    assert_eq!(
+        config.rows[0]["confg"]["city"], "Oslo",
+        "passed on as it was"
+    );
+    // Every field the loader reads, and a group's own rows, pass quietly.
+    let config = read(
         dir.path(),
         r#"{ "rows": [
              { "id": "a", "name": "a", "config": {}, "inject": ["x"], "isolate": { "x": "l" }, "disabled": true },
@@ -289,6 +308,7 @@ fn unknown_fields_are_refused() {
            ] }"#,
     )
     .unwrap();
+    assert!(config.warnings.is_empty(), "{:?}", config.warnings);
 }
 
 /// A link's token is `RUTIS_TOKEN_<PEER>` (upper case, `-` as `_`), else

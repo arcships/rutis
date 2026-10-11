@@ -67,7 +67,7 @@ On Unix, a signal `rutis-host` was started ignoring (SIGHUP under `nohup`, for e
 
 Relative paths in the file are resolved from the directory containing the file.
 
-An unknown field is an error, in `rows` too: the host does not start, and says the file, where (line and column, or which row) and the fields allowed there. A misspelt field is never silently ignored.
+An unknown field is an error: the host does not start, and says the file, the line and column, and the fields allowed there. An unknown field in `rows` is a warning: the row runs (without it), and before starting the host says the file, which row, and the fields a row has. A misspelt field is never silently ignored.
 
 ### `id`
 

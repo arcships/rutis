@@ -593,6 +593,7 @@ mod tests {
             },
             listen: Vec::new(),
             rows: vec![json!({ "id": "greeter", "name": crate::config::file_url(&entry) })],
+            warnings: Vec::new(),
         };
         let host = Host::start(&config).await.unwrap();
         host.runtimes_ready().await.unwrap();
@@ -629,6 +630,7 @@ mod tests {
             },
             listen: Vec::new(),
             rows: vec![json!({ "id": "greeter", "name": "py:greeter" })],
+            warnings: Vec::new(),
         };
         let host = Host::start(&config).await.unwrap();
         host.runtimes_ready().await.unwrap();
@@ -664,6 +666,7 @@ mod tests {
             },
             listen: Vec::new(),
             rows: vec![json!({ "id": "greeter", "name": "bun:./greeter.ts" })],
+            warnings: Vec::new(),
         };
         let host = Host::start(&config).await.unwrap();
         host.runtimes_ready().await.unwrap();
@@ -693,6 +696,7 @@ mod tests {
             },
             listen: Vec::new(),
             rows: Vec::new(),
+            warnings: Vec::new(),
         };
         for taken in ["bun", "file", "g", "GPU"] {
             let error = Host::start(&config(taken)).await.err().expect(taken);

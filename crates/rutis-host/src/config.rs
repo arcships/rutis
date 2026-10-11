@@ -18,8 +18,8 @@
 //!
 //! Paths are relative to the file. Rows are rutis-loader rows; every service
 //! name crosses between languages and nodes by name. A field the host does
-//! not know, in a row too, is an error: a misspelt one would otherwise be
-//! dropped without a word.
+//! not know is an error; in a row, a warning (the row runs without it), so
+//! a misspelt one is not dropped without a word.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -41,6 +41,10 @@ pub struct HostConfig {
     pub listen: Vec<Listener>,
     #[serde(default)]
     pub rows: Vec<Value>,
+    /// What reading the file found wrong but went on without: the host
+    /// shows these before it starts.
+    #[serde(skip)]
+    pub warnings: Vec<String>,
 }
 
 fn default_id() -> String {
@@ -205,7 +209,13 @@ impl HostConfig {
         })?;
         let mut config: Self =
             serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
-        check_rows(&config.rows, "rows").map_err(|error| format!("{}: {error}", path.display()))?;
+        let mut ignored = Vec::new();
+        check_rows(&config.rows, "rows", &mut ignored)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        config.warnings = ignored
+            .into_iter()
+            .map(|warning| format!("{}: {warning}", path.display()))
+            .collect();
         // Absolute, so a plugin file's row is a `file:` URL even when the
         // file was named relative to the working directory.
         let base = match path.parent() {
@@ -306,6 +316,7 @@ impl HostConfig {
         self.runtimes.remote.extend(other.runtimes.remote);
         self.listen.extend(other.listen);
         self.rows.extend(other.rows);
+        self.warnings.extend(other.warnings);
     }
 
     /// Each runtime's name, which is also the prefix of its rows
@@ -398,8 +409,10 @@ const ROW_FIELDS: &[&str] = &[
     "instanced",
 ];
 
-/// Refuse a row field the loader does not know, in `rows` and in groups.
-fn check_rows(rows: &[Value], at: &str) -> Result<(), String> {
+/// Each row field the loader does not know, in `rows` and in groups, as a
+/// warning in `ignored` (the loader ignores it); a row that is not an
+/// object is an error.
+fn check_rows(rows: &[Value], at: &str, ignored: &mut Vec<String>) -> Result<(), String> {
     for (index, row) in rows.iter().enumerate() {
         let Some(fields) = row.as_object() else {
             return Err(format!("{at}[{index}]: a row is an object"));
@@ -408,12 +421,12 @@ fn check_rows(rows: &[Value], at: &str) -> Result<(), String> {
             Some(id) => format!("{at}[{index}] (id {id:?})"),
             None => format!("{at}[{index}]"),
         };
-        if let Some(unknown) = fields
+        for unknown in fields
             .keys()
-            .find(|key| !ROW_FIELDS.contains(&key.as_str()))
+            .filter(|key| !ROW_FIELDS.contains(&key.as_str()))
         {
-            return Err(format!(
-                "{place}: unknown field `{unknown}`, expected one of {}",
+            ignored.push(format!(
+                "{place}: unknown field `{unknown}` is ignored; a row has {}",
                 ROW_FIELDS
                     .iter()
                     .map(|field| format!("`{field}`"))
@@ -426,7 +439,7 @@ fn check_rows(rows: &[Value], at: &str) -> Result<(), String> {
             None | Some(Value::Null | Value::Bool(false))
         );
         if let (true, Some(children)) = (group, row["config"].as_array()) {
-            check_rows(children, &format!("{place}.config"))?;
+            check_rows(children, &format!("{place}.config"), ignored)?;
         }
     }
     Ok(())

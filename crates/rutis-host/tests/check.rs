@@ -185,11 +185,21 @@ async fn check_fails_what_cannot_run() {
     assert_eq!(checked.status, 1);
 }
 
-/// A configuration that is not valid is refused before anything starts.
+/// A configuration that is not valid is refused before anything starts;
+/// a row's unknown field is a warning, and the check goes on.
 /// risk: A6, B5
 #[tokio::test(flavor = "multi_thread")]
 async fn check_refuses_a_configuration_that_is_not_valid() {
     let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), &[("rutis.json", r#"{ "row": [] }"#)]);
+    let checked = check(dir.path(), &["rutis.json"], &[]).await;
+    assert_eq!(checked.stdout, "");
+    assert_eq!(
+        checked.stderr,
+        "rutis-host: rutis.json: unknown field `row`, expected one of `id`, `runtimes`, `listen`, `rows` at line 1 column 7\n"
+    );
+    assert_eq!(checked.status, 1);
+
     write(
         dir.path(),
         &[(
@@ -198,10 +208,16 @@ async fn check_refuses_a_configuration_that_is_not_valid() {
         )],
     );
     let checked = check(dir.path(), &["rutis.json"], &[]).await;
-    assert_eq!(checked.stdout, "");
+    assert_eq!(
+        checked.stdout,
+        "plugin API: 1 (supported by this host)\n\
+         w (weather): no plugin named \"weather\"\n  \
+         install it where its runtime finds it (a runtime under runtimes), or correct the row's name\n"
+    );
     assert_eq!(
         checked.stderr,
-        "rutis-host: rutis.json: rows[0] (id \"w\"): unknown field `confg`, expected one of `id`, `name`, `config`, `inject`, `isolate`, `disabled`, `group`, `instanced`\n"
+        "rutis-host: warning: rutis.json: rows[0] (id \"w\"): unknown field `confg` is ignored; a row has `id`, `name`, `config`, `inject`, `isolate`, `disabled`, `group`, `instanced`\n\
+         rutis-host: 1 row(s) or binaries cannot run\n"
     );
     assert_eq!(checked.status, 1);
 
