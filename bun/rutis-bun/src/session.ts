@@ -287,12 +287,14 @@ export class Session {
       if (!this.#handshake) throw new Error('request before protocol handshake')
       if (frame.op === 'return' || frame.op === 'throw') {
         // Decode/pin before admitting a subsequent release frame.
+        if (frame.op === 'throw' && (typeof frame.error?.name !== 'string' || typeof frame.error.message !== 'string')) throw new Error('invalid error')
         const value = frame.op === 'return' ? this.#decode(frame.value) : decodeError(frame.error)
         const pending = this.#pending.get(frame.id)
         if (!pending) throw new Error('response for unknown call')
         this.#pending.delete(frame.id); pending({ ok: frame.op === 'return', value }); return
       }
       if (frame.op === 'cancel') {
+        if (typeof frame.id !== 'string') throw new Error('invalid cancel')
         // The caller gave up; the method decides how to honour its signal.
         const call = this.#signals.has(frame.id) ? frame.id : this.#awaits.get(frame.id)
         this.#signals.get(call)?.abort(new DOMException('The operation was cancelled by the caller', 'AbortError'))
@@ -308,6 +310,7 @@ export class Session {
       const digits = frame.id.slice(this.#remote.length), sequence = Number(digits)
       if (!/^[1-9][0-9]*$/.test(digits) || !Number.isSafeInteger(sequence) || sequence <= this.#received) throw new Error('invalid or repeated invocation identity')
       this.#received = sequence
+      if (frame.op === 'invoke' && (typeof frame.target !== 'string' || typeof frame.method !== 'string')) throw new Error('invalid target or method')
       if (frame.op === 'call' && frame.method !== undefined && typeof frame.method !== 'string') throw new Error('invalid method')
       if (frame.op === 'get' && typeof frame.property !== 'string') throw new Error('invalid property')
       let args
