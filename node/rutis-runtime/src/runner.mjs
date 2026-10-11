@@ -144,6 +144,25 @@ function refresh() {
   }
 }
 
+// Cordis's FiberState is a const enum, gone at run time.
+const UNLOADING = 5
+const DISPOSED = 4
+
+// A row whose plugin disposes its own fiber has ended: what is left of it
+// goes, and rutis hears it (`rows.ended`) and disposes the row there, as a
+// Rust plugin disposing itself. Disposals that are not the plugin's own do
+// not count: `unloadRow` forgets the row first, and a gate unloading takes
+// its plugin with it.
+ctx.on('internal/status', fiber => {
+  if (fiber.state !== DISPOSED || closing) return
+  const ended = [...rows].find(([, row]) => row.inner === fiber && row.fiber.state !== UNLOADING)
+  if (!ended) return
+  const [key] = ended
+  unloadRow(key).catch(() => {}).then(() => {
+    if (!closing) peer.callAsync('', 'rows.ended', [key]).catch(() => {})
+  })
+})
+
 ctx.on('internal/service', () => { if (slots.size) refresh() })
 ctx.on('internal/set', (_ctx, _name, _value, _error, next) => {
   const result = next()

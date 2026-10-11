@@ -668,6 +668,13 @@ impl JsRow {
                 .unwrap_or_else(|| host_key(name))
         });
         projection.attach(ctx, process.clone())?;
+        // A plugin that disposes itself there ends this fiber, as a Rust
+        // plugin disposing itself: the loader's monitor takes it from there.
+        let ending = ctx.clone();
+        process.on_row_ended(&key, move || {
+            // Already unloading or restarted: nothing left to end.
+            let _ = ending.dispose_self();
+        });
         if let Err(error) = process
             .load_row_exporting(
                 &key,

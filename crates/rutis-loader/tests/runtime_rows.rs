@@ -8,13 +8,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rutis::{Ctx, FiberState, FiberView};
+use rutis::{BoxFuture, CordisError, Ctx, EventKey, FiberState, FiberView, Listener};
 use rutis_bridge::runtime::LocalRuntime;
 use rutis_bridge::session::{host_key, HostDispatch};
 use rutis_bridge::session::{Reply, Value as RpcValue};
 use rutis_loader::{
-    Chain, EntryStatus, Layer, Loader, LoaderError, LoaderOptions, LoaderPlugin, Patch,
-    RuntimeResolver, RuntimeRows, RuntimeRowsPlugin, ServiceCatalog,
+    Chain, EntryStatus, Layer, Loader, LoaderChanged, LoaderError, LoaderOptions, LoaderPlugin,
+    Patch, RuntimeResolver, RuntimeRows, RuntimeRowsPlugin, ServiceCatalog,
 };
 use serde_json::{json, Value};
 
@@ -980,5 +980,90 @@ async fn a_row_that_fails_to_load_releases_its_leases() {
         "the failed row's lease was given back"
     );
     drop(inspector);
+    root.shutdown().await.unwrap();
+}
+
+const QUIT: &str = r#"
+export const name = 'quit'
+export function apply(ctx, config) {
+  const quit = () => ctx.fiber.dispose()
+  if (config.when === 'apply') quit()
+  else if (config.when === 'microtask') queueMicrotask(quit)
+  else setTimeout(quit, 300)
+}
+"#;
+
+struct Changes(Arc<Mutex<Vec<LoaderChanged>>>);
+
+impl Listener<LoaderChanged> for Changes {
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a Ctx,
+        e: &'a LoaderChanged,
+    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+        self.0.lock().unwrap().push(e.clone());
+        Box::pin(async { Ok(None) })
+    }
+}
+
+/// A Cordis plugin that disposes its own fiber ends its row, as a Rust
+/// plugin disposing itself: while it starts, just after, later, or behind
+/// the gate of the row's `inject`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_that_disposes_itself_ends_its_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let quit = dir.path().join("quit.mjs");
+    std::fs::write(&quit, QUIT).unwrap();
+    let flag = dir.path().join("flag.mjs");
+    std::fs::write(&flag, FLAG).unwrap();
+    let probe = Probe::default();
+    let (root, loader, _runtime) = interop_loader(&probe).await;
+    let changes = Arc::new(Mutex::new(Vec::new()));
+    root.events()
+        .on(
+            &root,
+            &EventKey::<LoaderChanged>::of(),
+            Changes(changes.clone()),
+        )
+        .unwrap();
+    let report = loader
+        .reconcile(
+            rows(vec![
+                row("a", &quit, json!({ "when": "apply" }), json!(null)),
+                row("m", &quit, json!({ "when": "microtask" }), json!(null)),
+                row("l", &quit, json!({ "when": "later" }), json!(null)),
+                row(
+                    "g",
+                    &quit,
+                    json!({ "when": "later" }),
+                    json!({ "inject": ["late"] }),
+                ),
+                row("f", &flag, json!({}), json!(null)),
+            ]),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(report.failures.is_empty(), "{report:?}");
+    let ended = || {
+        let mut ids: Vec<String> = changes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|change| match change {
+                LoaderChanged::SelfDisposed { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        ids.sort();
+        ids
+    };
+    until("the rows to end", || ended().len() == 4).await;
+    assert_eq!(ended(), ["a", "g", "l", "m"]);
+    for id in ["a", "g", "l", "m"] {
+        assert_ne!(row_state(&loader, id), Some(FiberState::Active), "{id}");
+    }
+    assert_eq!(row_state(&loader, "f"), Some(FiberState::Active));
+
     root.shutdown().await.unwrap();
 }
