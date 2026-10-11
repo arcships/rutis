@@ -174,11 +174,8 @@ Acceptance (all automatable):
 
 The implementation PR also records one manual reverse check: temporarily make `dev` unload the old instance on a failed reload, or skip cleanup on Ctrl-C, and confirm the scenario fails.
 
-## 11. Decisions for the maintainer
+## 11. Maintainer decisions (2026-10-11)
 
-| # | Question | Recommendation |
-| --- | --- | --- |
-| 1 | Step 2 with the repository's packages, or a real `npm install` / `uv sync` | The repository's packages: on an unreleased commit the template's dependency versions do not exist yet; registry installs belong to #193 |
-| 2 | What "calls do not fail while broken" means: the old version keeps serving after the failed reload (a), or calls made during the reload do not fail (b) | a. `dev` reloads every row, including the probe, so b needs another caller that is not reloaded, at high cost; in Go projects the probe is not reloaded, which covers part of b |
-
-Decided: CI changes are added by #256; the `inject` check of `check` is #258.
+- Step 2 links the repository's packages; no registry installs (those belong to #193).
+- "Calls do not fail while broken" is tested as "after the failed reload the old version keeps serving and is not unloaded"; in Go projects the probe is not reloaded, which also covers calls during the rebuild.
+- CI changes are added by #256; the `inject` check of `check` is #258.
