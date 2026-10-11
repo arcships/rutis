@@ -97,8 +97,8 @@
 | --- | --- | --- | --- | --- |
 | `rust`、`js-py`、`checks` | Linux | 24 → **22** | 3.12（#196 合并后 **3.10**，由 #196 的 PR 改） | `>=13` → **`==15.*`** |
 | `runtimes-go`、`runtimes-bun`（Linux） | Linux | 24 → **22** | 同上 | `>=13` → **`==15.*`** |
-| `network-macos` | macOS | 26 | 3.12 → **最新**（十第 2 项） | `>=13` → **`>=15`** |
-| `runtimes-windows` | Windows | 24 → **26** | 3.12 → **最新** | `>=13` → **`>=15`** |
+| `network-macos` | macOS | 26 | 3.12 → **`3.x`** | `>=13` → **`>=15`** |
+| `runtimes-windows` | Windows | 24 → **26** | 3.12 → **`3.x`** | `>=13` → **`>=15`** |
 | `stress.yml` `multiprocess` | Linux | 跟 `rust` | 跟 `rust` | 跟 `rust` |
 | `release.yml`、`release-*` | — | 24（发布工具的版本，不属于支持矩阵，不变） | — | — |
 
@@ -189,11 +189,11 @@ MSRV 只按我们的 `Cargo.lock` 验证；guide 里写一句：旧版 Rust 的�
 5. `deps.yml` 在本分支上手动运行一次成功。
 6. T + 7 天：普通代码 PR 中位数 ≤ 10 分钟，样本 ≥ 10 次。
 
-## 十、需要维护者决定
+## 十、维护者的决定（2026-10-11）
 
-| # | 问题 | 推荐 |
-| --- | --- | --- |
-| 1 | Windows 上的 Node、Python 用最新版本，还是保持 24、3.12 | 最新版本：规则统一为"Linux 最低，macOS 和 Windows 最新"；保持不变则 Windows 验证的是一个既不是最低也不是最新的版本 |
-| 2 | Python 的"最新"写 `3.x`（自动跟随），还是写具体版本、手动升级 | `3.x`：新版本发布后第一个 PR 就会用到它，出问题正是 Q10.2 要发现的；修好之前可以临时写死上一版 |
-
-已决定：MSRV 统一 1.88、示例项目不声明；22 个 clippy 警告一次改掉；依赖检查失败通知 @eric8810；#196 自己改 Linux 的 Python 版本，#186、#193 需要的 CI 改动由本 issue 加。
+- 规则统一：Linux 用最低版本，macOS 和 Windows 用最新版本；Windows 的 Node 改为 26、Python 改为最新。
+- Python 的"最新"写作 `3.x`，自动跟随；新版本让 PR 失败时，临时写死上一版并另开 PR 修。
+- MSRV 统一 1.88，示例项目 `rutis-agent`、`rutis-cli` 不声明。
+- 22 个 clippy 警告一次改掉，不设基线。
+- 每周依赖检查失败由 GitHub 通知 @eric8810。
+- #196 自己改 Linux 的 Python 版本；#186、#193 需要的 CI 改动由本 issue 加。

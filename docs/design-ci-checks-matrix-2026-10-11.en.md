@@ -97,8 +97,8 @@ Rule: for each language, Linux jobs use the minimum supported version, macOS and
 | --- | --- | --- | --- | --- |
 | `rust`, `js-py`, `checks` | Linux | 24 → **22** | 3.12 (**3.10** once #196 merges, changed by #196's PR) | `>=13` → **`==15.*`** |
 | `runtimes-go`, `runtimes-bun` (Linux) | Linux | 24 → **22** | Same | `>=13` → **`==15.*`** |
-| `network-macos` | macOS | 26 | 3.12 → **latest** (section 10 item 2) | `>=13` → **`>=15`** |
-| `runtimes-windows` | Windows | 24 → **26** | 3.12 → **latest** | `>=13` → **`>=15`** |
+| `network-macos` | macOS | 26 | 3.12 → **`3.x`** | `>=13` → **`>=15`** |
+| `runtimes-windows` | Windows | 24 → **26** | 3.12 → **`3.x`** | `>=13` → **`>=15`** |
 | `stress.yml` `multiprocess` | Linux | As `rust` | As `rust` | As `rust` |
 | `release.yml`, `release-*` | — | 24 (the release tooling's version, not part of the support matrix; unchanged) | — | — |
 
@@ -189,11 +189,11 @@ Acceptance (all checkable by command):
 5. One manual run of `deps.yml` on this branch succeeds.
 6. At T + 7 days: ordinary code PR median ≤ 10 minutes over ≥ 10 runs.
 
-## 10. Decisions for the maintainer
+## 10. Maintainer decisions (2026-10-11)
 
-| # | Question | Recommendation |
-| --- | --- | --- |
-| 1 | Node and Python on Windows: latest, or keep 24 and 3.12 | Latest: one rule, "Linux minimum, macOS and Windows latest"; otherwise Windows checks a version that is neither the minimum nor the latest |
-| 2 | Python "latest": `3.x` (follows automatically) or a concrete version bumped by hand | `3.x`: the first PR after a release uses it, and a failure then is exactly what Q10.2 is for; pin the previous version temporarily until it is fixed |
-
-Decided: one MSRV, 1.88, with the example projects declaring none; the 22 clippy warnings are fixed at once; dependency check failures notify @eric8810; #196 changes its own Linux Python version, and the CI changes #186 and #193 need are added by this issue.
+- One rule: Linux uses the minimum versions, macOS and Windows the latest; on Windows Node becomes 26 and Python the latest.
+- Python "latest" is written `3.x` and follows automatically; when a new release fails a PR, pin the previous version temporarily and fix it in a separate PR.
+- One MSRV, 1.88; the example projects `rutis-agent` and `rutis-cli` declare none.
+- The 22 clippy warnings are fixed at once; no baseline.
+- Weekly dependency check failures are notified to @eric8810 by GitHub.
+- #196 changes its own Linux Python version; the CI changes #186 and #193 need are added by this issue.
