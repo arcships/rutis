@@ -121,12 +121,17 @@ export class Session {
     for (const pending of this.#pending.values()) pending({ ok: false, value: error })
     this.#pending.clear(); this.#exports.clear(); this.#imports.clear(); this.#queued.clear()
   }
-  #fault(error) { this.close(error); this.#abort?.(error) }
+  // What this side found wrong with the session, if that is what ended it
+  // (a frame it refused, say): not a normal end.
+  fault
+  #fault(error) { if (!this.#closed) this.fault = error; this.close(error); this.#abort?.(error) }
   // A call id in an invocation chain: one of either side's, possibly
   // tagged with the session it came through (`s3/mac:4`).
   #callId(id) {
     if (typeof id !== 'string') return false
-    if (!this.#endpoint) return /^(node|rust):[1-9][0-9]*$/.test(id)
+    // Compat: this session's ids are `node:`/`rust:`; another session's
+    // come tagged with it, whatever its format (`s1/node:3`, #225).
+    if (!this.#endpoint) return /^(node|rust|s[0-9]+\/[a-z0-9-]+):[1-9][0-9]*$/.test(id)
     return /^(s[0-9]+\/)?[a-z0-9-]+:[1-9][0-9]*$/.test(id)
   }
   #path() { return this.#syncPath ?? this.#context.getStore() ?? [] }

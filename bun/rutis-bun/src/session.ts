@@ -135,7 +135,9 @@ export class Session {
   // tagged with the session it came through (`s3/mac:4`).
   #callId(id) {
     if (typeof id !== 'string') return false
-    if (!this.#endpoint) return /^(node|rust):[1-9][0-9]*$/.test(id)
+    // Compat: this session's ids are `node:`/`rust:`; another session's
+    // come tagged with it, whatever its format (`s1/node:3`, #225).
+    if (!this.#endpoint) return /^(node|rust|s[0-9]+\/[a-z0-9-]+):[1-9][0-9]*$/.test(id)
     return /^(s[0-9]+\/)?[a-z0-9-]+:[1-9][0-9]*$/.test(id)
   }
   #path() { return this.#syncPath ?? this.#context.getStore() ?? [] }

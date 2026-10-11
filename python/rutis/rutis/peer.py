@@ -41,7 +41,9 @@ CAPABILITIES = ["signals", "reentrant-sync"]
 IMPLEMENTATION = {"name": "rutis", "version": "0.8.0"}
 MAX_SAFE = 9_007_199_254_740_991
 _ENDPOINT_ID = re.compile(r"^[a-z0-9-]+$")
-_COMPAT_ORIGIN = re.compile(r"^(node|rust):[1-9][0-9]*$")
+# In the compat format, this session's ids are `node:`/`rust:`; another
+# session's come tagged with it, whatever its format (`s1/node:3`, #225).
+_COMPAT_ORIGIN = re.compile(r"^(node|rust|s[0-9]+/[a-z0-9-]+):[1-9][0-9]*$")
 # An id in a chain: either side's, possibly tagged with the session it came
 # through (`s3/mac:4`).
 _ENDPOINT_ORIGIN = re.compile(r"^(s[0-9]+/)?[a-z0-9-]+:[1-9][0-9]*$")
