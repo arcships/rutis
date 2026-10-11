@@ -581,52 +581,85 @@ mod tests {
         assert_eq!(child.exited().await, "exited with exit status: 17");
     }
 
+    /// A channel whose receiver ends when `end` says so, whose sender fails
+    /// as the line framing does once its receiver saw the end, and whose
+    /// end waits for `exit` to say how the process ended.
+    fn watched(end: mpsc::Receiver<()>, exit: mpsc::Receiver<&'static str>) -> Channel {
+        struct Ends(mpsc::Receiver<()>);
+        impl Receiver for Ends {
+            fn recv(&mut self) -> Result<Option<Vec<u8>>, ChannelError> {
+                let _ = self.0.recv();
+                Ok(None)
+            }
+        }
+        struct Ended;
+        impl Sender for Ended {
+            fn send(&mut self, _: &[u8]) -> Result<(), ChannelError> {
+                Err(ChannelError::Closed {
+                    reason: "the channel ended".into(),
+                })
+            }
+        }
+        struct Nothing;
+        impl Closer for Nothing {
+            fn close(&self, _: &str) {}
+        }
+        on_disconnect(
+            Channel {
+                sender: Box::new(Ended),
+                receiver: Box::new(Ends(end)),
+                closer: Arc::new(Nothing),
+                info: Default::default(),
+            },
+            Box::new(move || Error::Transport(format!("Cordis process {}", exit.recv().unwrap()))),
+        )
+    }
+
     /// #250: a send after the channel ended but before the exit status is
     /// known fails with the exit status too, not with "the channel ended":
-    /// whichever fails first ends the session, and with its reason.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_send_after_the_end_fails_with_the_exit_status() {
-        let directory = tempfile::tempdir().unwrap();
-        let gate = fifo(directory.path());
-        let closed = directory.path().join("closed");
-        // As `closes_then_waits`, saying when the channel is closed.
-        let mut command = tokio::process::Command::new("sh");
-        command
-            .arg("-c")
-            .arg(r#"exec 3>&-; : > "$CLOSED"; read line < "$GATE"; exit 17"#)
-            .env("GATE", &gate)
-            .env("CLOSED", &closed);
-        let Spawned { channel, child, .. } = inherit(command, Path::new("first")).unwrap();
-        let (mut sender, mut receiver) = (channel.sender, channel.receiver);
-        let (received, receiving) = mpsc::channel();
-        std::thread::spawn(move || received.send(receiver.recv()).unwrap());
-        while !closed.exists() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        let (sent, sending) = mpsc::channel();
-        std::thread::spawn(move || sent.send(sender.send(b"{}")).unwrap());
-
-        // The process is still running: the send waits with the receiver.
-        assert!(
-            sending.recv_timeout(Duration::from_millis(500)).is_err(),
-            "the send failed before the process ended"
-        );
-        assert_eq!(child.status(), None);
-
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&gate)
-            .unwrap()
-            .write_all(b"exit\n")
-            .unwrap();
-        let reason = "Cordis process exited with exit status: 17";
-        for (end, ended) in [
-            ("send", sending.recv().unwrap()),
-            ("recv", receiving.recv().unwrap().map(|_| ())),
-        ] {
-            match ended {
-                Err(ChannelError::Closed { reason: got }) => assert_eq!(got, reason, "{end}"),
-                other => panic!("the {end} should fail with the exit status, got {other:?}"),
+    /// whichever fails first ends the session, and with its reason. Either
+    /// order: the send before or after the receiver saw the end.
+    #[test]
+    fn a_send_after_the_end_fails_with_the_exit_status() {
+        for send_first in [false, true] {
+            let (end, ends) = mpsc::channel();
+            let (exit, exits) = mpsc::channel();
+            let Channel {
+                mut sender,
+                mut receiver,
+                ..
+            } = watched(ends, exits);
+            let (received, receiving) = mpsc::channel();
+            let (sent, sending) = mpsc::channel();
+            let mut send = Some(move || {
+                std::thread::spawn(move || sent.send(sender.send(b"{}")).unwrap());
+            });
+            if send_first {
+                send.take().unwrap()();
+            }
+            std::thread::spawn(move || received.send(receiver.recv()).unwrap());
+            end.send(()).unwrap();
+            if let Some(send) = send.take() {
+                send();
+            }
+            // The exit status is not known yet: the send waits with the
+            // receiver.
+            assert!(
+                sending.recv_timeout(Duration::from_millis(200)).is_err(),
+                "the send failed before the exit status was known"
+            );
+            exit.send("exited with exit status: 17").unwrap();
+            let reason = "Cordis process exited with exit status: 17";
+            for (end, ended) in [
+                ("send", sending.recv().unwrap()),
+                ("recv", receiving.recv().unwrap().map(|_| ())),
+            ] {
+                match ended {
+                    Err(ChannelError::Closed { reason: got }) => {
+                        assert_eq!(got, reason, "{end}, send first: {send_first}")
+                    }
+                    other => panic!("the {end} should fail with the exit status, got {other:?}"),
+                }
             }
         }
     }

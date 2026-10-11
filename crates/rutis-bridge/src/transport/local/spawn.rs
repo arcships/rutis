@@ -888,3 +888,75 @@ fn job() -> Result<windows_sys::Win32::Foundation::HANDLE, String> {
 pub(crate) fn adopt(_child: &tokio::process::Child) -> Result<(), String> {
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    struct Ends;
+    impl Receiver for Ends {
+        fn recv(&mut self) -> Result<Option<Vec<u8>>, ChannelError> {
+            Ok(None)
+        }
+    }
+    struct Broken;
+    impl Sender for Broken {
+        fn send(&mut self, _: &[u8]) -> Result<(), ChannelError> {
+            Err(ChannelError::Closed {
+                reason: "Broken pipe".into(),
+            })
+        }
+    }
+
+    /// #246: a process may close its channel well before it exits, under
+    /// load longer than the grace period and the second the channel's end
+    /// once waited. The channel's end, and a send after it, wait for the
+    /// exit however long it takes, and say how the process ended.
+    #[test]
+    fn the_end_of_the_channel_waits_for_the_exit_status() {
+        let exit = Arc::new(Exit::default());
+        let mut receiver = Ended {
+            receiver: Box::new(Ends),
+            ended: Some(exit.clone()),
+        };
+        let mut sender = EndedSender {
+            sender: Box::new(Broken),
+            ended: exit.clone(),
+        };
+        let (received, receiving) = mpsc::channel();
+        std::thread::spawn(move || received.send(receiver.recv().map(|_| ())).unwrap());
+        let (sent, sending) = mpsc::channel();
+        std::thread::spawn(move || sent.send(sender.send(b"{}")).unwrap());
+
+        let past = GRACE + Duration::from_millis(1500);
+        assert!(
+            receiving.recv_timeout(past).is_err(),
+            "the channel ended first"
+        );
+        assert!(sending.try_recv().is_err(), "the send failed first");
+        exit.record("exited with exit status: 17".into());
+        for (end, ended) in [
+            ("recv", receiving.recv().unwrap()),
+            ("send", sending.recv().unwrap()),
+        ] {
+            match ended {
+                Err(ChannelError::Closed { reason }) => {
+                    assert_eq!(reason, "the process exited with exit status: 17", "{end}")
+                }
+                other => panic!("the {end} should fail with the exit status, got {other:?}"),
+            }
+        }
+    }
+
+    /// What the framing refuses itself fails at once, without waiting for
+    /// a process that is still running.
+    #[test]
+    fn a_refused_message_does_not_wait() {
+        let mut sender = EndedSender {
+            sender: Box::new(Broken),
+            ended: Arc::new(Exit::default()),
+        };
+        assert!(sender.send(b"a\nb").is_err());
+    }
+}
