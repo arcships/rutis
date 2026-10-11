@@ -193,11 +193,8 @@ install.yml（可复用；输入：来源 local | registry，版本）
 7. `tools/test-sdk-bundle.sh` 中 E7 没有跳过分支。
 8. 普通 PR 的关键路径不变；main 上 `package` + `install` ≤ 25 分钟。
 
-## 十四、需要维护者决定
+## 十四、维护者的决定（2026-10-11）
 
-| # | 问题 | 推荐 |
-| --- | --- | --- |
-| 1 | Linux 最低版本格子的 Node 用 22.0.0 还是 22 的最新补丁 | 22 的最新补丁（`setup-node` 写 `22`）：声明是主版本级别，补丁版本不加功能；22.0.0 已经很旧，用户也不会停在那里 |
-| 2 | PyPI 在 musl Linux 上 | 只在文档里写明 PyPI 分发支持 glibc Linux；有用户需要时再加 musllinux wheel |
-
-已决定：workflow（`package.yml`、`install.yml`、`release.yml`）在本 PR 里改，`ci.yml` 的改动由 #256 做；发布后验证失败时自动开 issue，撤回由人决定；`xtask dev` 的 SDK_ID 测试移到 #260。
+- Linux 最低版本格子的 Node 用 22 的最新补丁（`setup-node` 写 `22`）。
+- PyPI 在 musl Linux：只在文档里写明 PyPI 分发支持 glibc Linux，不加 musllinux wheel。
+- workflow（`package.yml`、`install.yml`、`release.yml`）在本 PR 里改，`ci.yml` 的改动由 #256 做；发布后验证失败时自动开 issue，撤回由人决定；`xtask dev` 的 SDK_ID 测试移到 #260。

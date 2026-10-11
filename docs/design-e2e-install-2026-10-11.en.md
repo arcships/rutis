@@ -193,11 +193,8 @@ The `ci.yml` changes — removing `release-windows` and `release-wheel-aarch64`,
 7. E7 in `tools/test-sdk-bundle.sh` has no skip branch.
 8. The critical path of ordinary PRs is unchanged; `package` + `install` on main ≤ 25 minutes.
 
-## 14. Decisions for the maintainer
+## 14. Maintainer decisions (2026-10-11)
 
-| # | Question | Recommendation |
-| --- | --- | --- |
-| 1 | Node in the Linux minimum cell: 22.0.0 or the latest 22 patch | The latest 22 patch (`setup-node` with `22`): the declaration is at major-version level and patches add no features; 22.0.0 is old and users do not stay on it |
-| 2 | PyPI on musl Linux | Only state in the documentation that the PyPI distribution supports glibc Linux; add musllinux wheels when users need them |
-
-Decided: the workflows (`package.yml`, `install.yml`, `release.yml`) change in this PR, the `ci.yml` changes in #256; a failed post-release check opens an issue automatically and withdrawing is a human decision; the `xtask dev` SDK_ID test moved to #260.
+- Node in the Linux minimum cell: the latest 22 patch (`setup-node` with `22`).
+- PyPI on musl Linux: the documentation states that the PyPI distribution supports glibc Linux; no musllinux wheels.
+- The workflows (`package.yml`, `install.yml`, `release.yml`) change in this PR, the `ci.yml` changes in #256; a failed post-release check opens an issue automatically and withdrawing is a human decision; the `xtask dev` SDK_ID test moved to #260.
