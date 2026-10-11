@@ -36,8 +36,11 @@ PROTOCOL = 2
 # capabilities, either side calling the other.
 ENDPOINT_PROTOCOL = 3
 # What this implementation supports in the endpoint format. It sends objects
-# but cannot receive them, so it does not declare `objects`.
-CAPABILITIES = ["signals", "reentrant-sync"]
+# but cannot receive them, so it does not declare `objects`. `sync-wait`: its
+# synchronous calls say so (`sync: true`), for the host's wait-cycle check.
+CAPABILITIES = ["signals", "reentrant-sync", "sync-wait"]
+# What it declares in the compat format, where older hosts ignore it.
+COMPAT_CAPABILITIES = ["reentrant-sync", "sync-wait"]
 IMPLEMENTATION = {"name": "rutis", "version": "0.8.0"}
 MAX_SAFE = 9_007_199_254_740_991
 _ENDPOINT_ID = re.compile(r"^[a-z0-9-]+$")
@@ -310,6 +313,8 @@ class Peer:
         self._remote: str | None = None if endpoint else "rust:"
         # What the far end said of itself (endpoint format), once it greeted.
         self.greeting: dict | None = None
+        # What the far end declared (either format), once it greeted.
+        self._declared: list = []
         self.closed_error: BaseException | None = None
         self.ready: asyncio.Future = self.loop.create_future()
         self.closed: asyncio.Future = self.loop.create_future()
@@ -322,7 +327,7 @@ class Peer:
         # greeting incompatible closes the channel, and the far end must
         # still read this side's greeting ahead of the channel end.
         if self._endpoint is None:
-            hello = {"op": "hello", "version": PROTOCOL}
+            hello = {"op": "hello", "version": PROTOCOL, "capabilities": COMPAT_CAPABILITIES}
         else:
             hello = {
                 "op": "hello",
@@ -352,6 +357,8 @@ class Peer:
         if self._endpoint is None:
             if version != PROTOCOL or "endpoint" in frame:
                 raise ValueError(f"incompatible session: the far end speaks protocol {version}, this side {PROTOCOL}")
+            capabilities = frame.get("capabilities")
+            self._declared = capabilities if isinstance(capabilities, list) else []
             return
         if version != ENDPOINT_PROTOCOL:
             raise ValueError(
@@ -375,6 +382,7 @@ class Peer:
             "implementation": frame.get("implementation"),
             "capabilities": capabilities if isinstance(capabilities, list) else [],
         }
+        self._declared = self.greeting["capabilities"]
 
     def _read(self) -> None:
         try:
@@ -625,12 +633,18 @@ class Peer:
 
     # ── Outgoing calls ───────────────────────────────────────────
 
-    def _request(self, op: str, fields: dict, args: Any, finish: Callable, origin: list | None = None) -> str:
+    def _request(
+        self, op: str, fields: dict, args: Any, finish: Callable, origin: list | None = None, sync: bool = False
+    ) -> str:
         call = self._allocate()
         grants: list = []
         try:
             path = list(dict.fromkeys([*self._path(), *(origin or [])]))
             frame = {"op": op, "id": call, "path": path, **fields}
+            # This thread waits for the reply: a host that checks for wait
+            # cycles needs to know (#228); older hosts would refuse the field.
+            if sync and "sync-wait" in self._declared:
+                frame["sync"] = True
             if op != "await":
                 frame["args"] = self._encode(args, grants, True)
             data = dumps(frame)
@@ -652,7 +666,7 @@ class Peer:
             future = asyncio.run_coroutine_threadsafe(self._request_async(op, fields, args), self.loop)
             return future.result()
         result: list = []
-        call = self._request(op, fields, args, result.append)
+        call = self._request(op, fields, args, result.append, sync=True)
         self._waiting.append(call)
         try:
             for job in list(self._queued):
