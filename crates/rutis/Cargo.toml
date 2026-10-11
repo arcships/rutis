@@ -15,6 +15,11 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+# Paused clock (`start_paused`) for the tests that check something has not
+# happened yet.
+tokio = { workspace = true, features = ["test-util"] }
+
 [[bench]]
 name = "events"
 harness = false

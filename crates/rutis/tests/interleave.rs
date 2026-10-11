@@ -4,6 +4,11 @@
 //! several tasks and then checks invariants that must hold for every
 //! interleaving: nothing hangs, generations never overlap, and every
 //! cleanup a generation registered runs exactly once.
+//!
+//! The mix comes from a seed: `RUTIS_SEED` if set, otherwise a random one.
+//! Each test prints its seed, and every failure names it, so a failing
+//! run can be replayed with `RUTIS_SEED=<seed> cargo test -p rutis --test
+//! interleave`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,6 +24,25 @@ async fn soon<F: std::future::IntoFuture>(f: F) -> F::Output {
     tokio::time::timeout(Duration::from_secs(10), f)
         .await
         .expect("timed out")
+}
+
+/// The seed for this run: `RUTIS_SEED` if set, otherwise random. Printed,
+/// so the test output of a failing run carries it.
+fn seed() -> u64 {
+    let seed = match std::env::var("RUTIS_SEED") {
+        Ok(value) => value
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("RUTIS_SEED must be a number, got {value:?}")),
+        Err(_) => {
+            use std::hash::{BuildHasher, Hasher};
+            std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish()
+        }
+    };
+    println!("interleave seed: {seed} (replay with RUTIS_SEED={seed})");
+    seed
 }
 
 /// A small deterministic generator, so a failing round can be replayed.
@@ -46,16 +70,20 @@ struct Ledger {
 }
 
 impl Ledger {
-    fn check(&self, round: u64) {
+    fn check(&self, seed: u64, round: u64) {
         assert_eq!(
             self.registered.load(Ordering::SeqCst),
             self.cleaned.load(Ordering::SeqCst),
-            "round {round}: every registered cleanup runs exactly once"
+            "seed {seed} round {round}: every registered cleanup runs exactly once"
         );
-        assert_eq!(self.live.load(Ordering::SeqCst), 0, "round {round}");
+        assert_eq!(
+            self.live.load(Ordering::SeqCst),
+            0,
+            "seed {seed} round {round}"
+        );
         assert!(
             self.max_live.load(Ordering::SeqCst) <= 1,
-            "round {round}: two generations were live at once"
+            "seed {seed} round {round}: two generations were live at once"
         );
     }
 }
@@ -119,7 +147,7 @@ impl Plugin for Tracked {
 }
 
 /// Runs `op` from `TASKS` tasks, each drawing `OPS_PER_TASK` op codes.
-async fn storm<F>(round: u64, codes: u64, op: F)
+async fn storm<F>(seed: u64, round: u64, codes: u64, op: F)
 where
     F: Fn(u64) -> BoxFuture<'static, ()> + Send + Sync + 'static,
 {
@@ -128,22 +156,24 @@ where
     for task in 0..TASKS {
         let op = op.clone();
         tasks.push(tokio::spawn(async move {
-            let mut rng = Lcg(round * 1_000 + task);
+            let mut rng = Lcg(seed.wrapping_add(round * 1_000 + task));
             for _ in 0..OPS_PER_TASK {
                 op(rng.next(codes)).await;
             }
         }));
     }
-    soon(async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         for task in tasks {
             task.await.expect("op task");
         }
     })
-    .await;
+    .await
+    .unwrap_or_else(|_| panic!("seed {seed} round {round}: operations hung"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn restart_settle_and_dispose_interleave() {
+    let seed = seed();
     for round in 0..ROUNDS {
         let ctx = Ctx::root().unwrap();
         let ledger = Arc::new(Ledger::default());
@@ -153,7 +183,7 @@ async fn restart_settle_and_dispose_interleave() {
             child: None,
         });
         let target = view.clone();
-        storm(round, 8, move |code| {
+        storm(seed, round, 8, move |code| {
             let view = target.clone();
             Box::pin(async move {
                 // Results are not checked: a restart after dispose is
@@ -167,8 +197,12 @@ async fn restart_settle_and_dispose_interleave() {
         })
         .await;
         soon(view.dispose()).await.ok();
-        assert_eq!(view.state().state, FiberState::Disposed, "round {round}");
-        ledger.check(round);
+        assert_eq!(
+            view.state().state,
+            FiberState::Disposed,
+            "seed {seed} round {round}"
+        );
+        ledger.check(seed, round);
         soon(ctx.shutdown()).await.unwrap();
     }
 }
@@ -178,6 +212,7 @@ struct Dep;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dependency_churn_interleaves_with_restart() {
+    let seed = seed();
     for round in 0..ROUNDS {
         let ctx = Ctx::root().unwrap();
         let ledger = Arc::new(Ledger::default());
@@ -188,7 +223,7 @@ async fn dependency_churn_interleaves_with_restart() {
         });
         let provided = Arc::new(tokio::sync::Mutex::new(None));
         let (target, host) = (view.clone(), ctx.clone());
-        storm(round, 6, move |code| {
+        storm(seed, round, 6, move |code| {
             let (view, ctx, provided) = (target.clone(), host.clone(), provided.clone());
             Box::pin(async move {
                 match code {
@@ -217,15 +252,20 @@ async fn dependency_churn_interleaves_with_restart() {
             ctx.provide(Dep).unwrap();
         }
         soon(&view).await.expect("settles");
-        assert_eq!(view.state().state, FiberState::Active, "round {round}");
+        assert_eq!(
+            view.state().state,
+            FiberState::Active,
+            "seed {seed} round {round}"
+        );
         soon(view.dispose()).await.unwrap();
-        ledger.check(round);
+        ledger.check(seed, round);
         soon(ctx.shutdown()).await.unwrap();
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn parent_restart_interleaves_with_child_operations() {
+    let seed = seed();
     for round in 0..ROUNDS {
         let ctx = Ctx::root().unwrap();
         let parent_ledger = Arc::new(Ledger::default());
@@ -238,7 +278,7 @@ async fn parent_restart_interleaves_with_child_operations() {
         });
         soon(&parent).await.expect("parent loads");
         let (target, slot) = (parent.clone(), child_slot.clone());
-        storm(round, 6, move |code| {
+        storm(seed, round, 6, move |code| {
             let parent = target.clone();
             // The newest child; an older one may already be gone.
             let child = slot.lock().unwrap().clone();
@@ -256,10 +296,14 @@ async fn parent_restart_interleaves_with_child_operations() {
         soon(parent.dispose()).await.unwrap();
         // Disposing the parent took every child generation with it.
         if let Some(child) = child_slot.lock().unwrap().take() {
-            assert_eq!(child.state().state, FiberState::Disposed, "round {round}");
+            assert_eq!(
+                child.state().state,
+                FiberState::Disposed,
+                "seed {seed} round {round}"
+            );
         }
-        parent_ledger.check(round);
-        child_ledger.check(round);
+        parent_ledger.check(seed, round);
+        child_ledger.check(seed, round);
         soon(ctx.shutdown()).await.unwrap();
     }
 }

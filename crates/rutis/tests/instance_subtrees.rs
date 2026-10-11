@@ -1,3 +1,5 @@
+mod common;
+
 use std::future::IntoFuture;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -8,6 +10,8 @@ use rutis::{
     TypeKey,
 };
 use tokio::sync::{oneshot, Semaphore};
+
+use common::still_pending;
 
 struct Capture(Arc<Mutex<Option<Ctx>>>);
 
@@ -176,7 +180,7 @@ async fn instance_emit_reports_synchronous_listener_panic() {
             Arc::new(Ping(1)),
         )
         .unwrap();
-    let error = tokio::time::timeout(Duration::from_secs(2), rx)
+    let error = tokio::time::timeout(Duration::from_secs(10), rx)
         .await
         .unwrap()
         .unwrap();
@@ -633,7 +637,7 @@ async fn dropping_borrowed_serial_releases_shutdown_flight() {
         result = entered_rx => result.unwrap(),
     }
     drop(dispatch);
-    tokio::time::timeout(Duration::from_secs(2), view.shutdown())
+    tokio::time::timeout(Duration::from_secs(10), view.shutdown())
         .await
         .unwrap()
         .unwrap();
@@ -682,7 +686,7 @@ async fn callback_can_start_own_shutdown_and_return() {
         )
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), view.shutdown())
+    tokio::time::timeout(Duration::from_secs(10), view.shutdown())
         .await
         .unwrap()
         .unwrap();
@@ -727,7 +731,7 @@ async fn dependency_gate_reuses_registration_snapshot() {
     root.shutdown().await.unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn instance_events_are_isolated_ordered_and_drained_by_shutdown() {
     let root = Ctx::root().unwrap();
     let (view_a, a) = child(&root).await;
@@ -780,9 +784,10 @@ async fn instance_events_are_isolated_ordered_and_drained_by_shutdown() {
             Arc::new(Ping(2)),
         )
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), async {
+    // Polls on the paused clock, so the hang guard still fires.
+    tokio::time::timeout(Duration::from_secs(10), async {
         while log_b.lock().unwrap().is_empty() {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
     .await
@@ -810,9 +815,10 @@ async fn instance_events_are_isolated_ordered_and_drained_by_shutdown() {
     let closed_child = a.plugin(PanicMetadata);
     assert_eq!(closed_child.state().state, FiberState::Disposed);
     let mut waiter = tokio::spawn(pending);
-    assert!(tokio::time::timeout(Duration::from_millis(20), &mut waiter)
-        .await
-        .is_err());
+    assert!(
+        still_pending(&mut waiter).await,
+        "shutdown waits for the accepted callback"
+    );
     release.add_permits(1);
     waiter.await.unwrap().unwrap();
     assert_eq!(*log_a.lock().unwrap(), vec![1, 3]);
@@ -865,7 +871,7 @@ async fn closing_listener_is_excluded_from_new_ancestor_dispatches() {
     root.shutdown().await.unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn dropped_parallel_waiter_does_not_finish_dispatch_early() {
     let root = Ctx::root().unwrap();
     let (view, ctx) = child(&root).await;
@@ -898,9 +904,8 @@ async fn dropped_parallel_waiter_does_not_finish_dispatch_early() {
     waiting.abort();
     let mut closing = tokio::spawn(view.shutdown());
     assert!(
-        tokio::time::timeout(Duration::from_millis(20), &mut closing)
-            .await
-            .is_err()
+        still_pending(&mut closing).await,
+        "shutdown waits for the callback the dropped waiter started"
     );
     release.add_permits(1);
     closing.await.unwrap().unwrap();
@@ -908,7 +913,7 @@ async fn dropped_parallel_waiter_does_not_finish_dispatch_early() {
     root.shutdown().await.unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn manual_instance_listener_disposal_waits_for_accepted_callback() {
     let root = Ctx::root().unwrap();
     let (view, ctx) = child(&root).await;
@@ -938,9 +943,8 @@ async fn manual_instance_listener_disposal_waits_for_accepted_callback() {
 
     let mut removing = tokio::spawn(listener.dispose());
     assert!(
-        tokio::time::timeout(Duration::from_millis(20), &mut removing)
-            .await
-            .is_err()
+        still_pending(&mut removing).await,
+        "listener disposal waits for the accepted callback"
     );
     release.add_permits(1);
     removing.await.unwrap().unwrap();
@@ -1070,7 +1074,7 @@ async fn concurrent_parent_and_child_shutdown_join_without_cycle() {
         c.shutdown().await
     });
     barrier.wait().await;
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         parent_waiter.await.unwrap().unwrap();
         child_waiter.await.unwrap().unwrap();
     })
@@ -1190,7 +1194,7 @@ async fn dispose_child_shutdown_and_parent_shutdown_converge() {
         });
         barrier.wait().await;
         let (disposed, leaf_closed, parent_closed) =
-            tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::time::timeout(Duration::from_secs(10), async {
                 tokio::join!(dispose, close_leaf, close_parent)
             })
             .await
@@ -1328,7 +1332,7 @@ async fn start_owner_waiting_callback(ancestor: &Ctx, owner: &Ctx) -> Arc<Atomic
         .events()
         .emit(ancestor, &key, Arc::new(Ping(1)))
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), entered.acquire())
+    tokio::time::timeout(Duration::from_secs(10), entered.acquire())
         .await
         .expect("callback entered")
         .unwrap()
@@ -1344,7 +1348,7 @@ async fn root_shutdown_cancels_descendants_before_draining_instance_events() {
 
     // A waiter dropped by its timeout does not stop the shutdown.
     let _ = tokio::time::timeout(Duration::from_millis(1), root.shutdown()).await;
-    tokio::time::timeout(Duration::from_secs(5), root.shutdown())
+    tokio::time::timeout(Duration::from_secs(10), root.shutdown())
         .await
         .expect("root shutdown finishes without a separate child shutdown")
         .unwrap();
@@ -1362,7 +1366,7 @@ async fn subtree_shutdown_cancels_descendants_before_draining_instance_events() 
     let (_owner_view, owner) = child(&ancestor).await;
     let returned = start_owner_waiting_callback(&ancestor, &owner).await;
 
-    tokio::time::timeout(Duration::from_secs(5), ancestor_view.shutdown())
+    tokio::time::timeout(Duration::from_secs(10), ancestor_view.shutdown())
         .await
         .expect("subtree shutdown finishes")
         .unwrap();

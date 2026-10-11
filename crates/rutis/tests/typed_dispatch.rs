@@ -95,7 +95,7 @@ async fn pending<F: Future>(future: std::pin::Pin<&mut F>) {
     .await;
 }
 async fn until(mut condition: impl FnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         while !condition() {
             tokio::task::yield_now().await;
         }

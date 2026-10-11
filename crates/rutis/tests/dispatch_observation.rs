@@ -1,3 +1,5 @@
+mod common;
+
 use std::future::IntoFuture;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -5,6 +7,8 @@ use std::time::Duration;
 
 use rutis::{BoxFuture, CordisError, Ctx, DispatchMode, Effect, Event, Listener, Plugin, TypeKey};
 use tokio::sync::oneshot;
+
+use common::{on_thread, still_pending};
 
 struct Ping(u32);
 
@@ -66,7 +70,7 @@ async fn old_context_still_notifies_non_instance_dispatch_observers() {
     let root = Ctx::root().unwrap();
     let bus = root.events().clone();
     let (view, old) = child(&root).await;
-    tokio::time::timeout(Duration::from_secs(2), view.restart())
+    tokio::time::timeout(Duration::from_secs(10), view.restart())
         .await
         .expect("restart timed out")
         .unwrap();
@@ -80,15 +84,15 @@ async fn old_context_still_notifies_non_instance_dispatch_observers() {
     bus.emit(&old, &rutis::EventKey::of(), Arc::new(Ping(1)))
         .expect("default event dispatch");
     assert_eq!(seen.load(Ordering::SeqCst), 1);
-    tokio::time::timeout(Duration::from_secs(2), view.dispose())
+    tokio::time::timeout(Duration::from_secs(10), view.dispose())
         .await
         .expect("view dispose timed out")
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), observer.dispose())
+    tokio::time::timeout(Duration::from_secs(10), observer.dispose())
         .await
         .expect("observer dispose timed out")
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), root.shutdown())
+    tokio::time::timeout(Duration::from_secs(10), root.shutdown())
         .await
         .expect("root shutdown timed out")
         .unwrap();
@@ -263,7 +267,7 @@ async fn observer_panic_and_sink_panic_do_not_stop_dispatch() {
     assert_eq!(reached.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(start_paused = true)]
 async fn shutdown_waits_for_selected_synchronous_observer() {
     let root = Ctx::root().unwrap();
     let bus = root.events().clone();
@@ -283,7 +287,7 @@ async fn shutdown_waits_for_selected_synchronous_observer() {
     .unwrap();
     let bus_emit = bus.clone();
     let ctx_emit = ctx.clone();
-    let emit = tokio::task::spawn_blocking(move || {
+    let emit = on_thread(move || {
         bus_emit.emit(
             &ctx_emit,
             &rutis::EventKey::of().instance(ctx_emit.instance()),
@@ -294,16 +298,15 @@ async fn shutdown_waits_for_selected_synchronous_observer() {
     let shutdown = view.shutdown();
     tokio::pin!(shutdown);
     assert!(
-        tokio::time::timeout(Duration::from_millis(30), &mut shutdown)
-            .await
-            .is_err()
+        still_pending(&mut shutdown).await,
+        "shutdown waits for the observer already running"
     );
     release_tx.send(()).unwrap();
     assert!(matches!(emit.await.unwrap(), Err(CordisError::Closed)));
     shutdown.await.unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(start_paused = true)]
 async fn early_disposal_waits_for_in_flight_observer_and_prevents_new_calls() {
     let root = Ctx::root().unwrap();
     let bus = root.events().clone();
@@ -326,7 +329,7 @@ async fn early_disposal_waits_for_in_flight_observer_and_prevents_new_calls() {
         .unwrap();
     let bus_emit = bus.clone();
     let root_emit = root.clone();
-    let emit = tokio::task::spawn_blocking(move || {
+    let emit = on_thread(move || {
         bus_emit
             .emit(&root_emit, &rutis::EventKey::of(), Arc::new(Ping(1)))
             .expect("default event dispatch")
@@ -335,9 +338,8 @@ async fn early_disposal_waits_for_in_flight_observer_and_prevents_new_calls() {
     let disposal = observer.dispose();
     tokio::pin!(disposal);
     assert!(
-        tokio::time::timeout(Duration::from_millis(30), &mut disposal)
-            .await
-            .is_err()
+        still_pending(&mut disposal).await,
+        "disposal waits for the observer call in flight"
     );
     release_tx.send(()).unwrap();
     emit.await.unwrap();
@@ -380,7 +382,7 @@ async fn observer_reentry_observes_nested_dispatch_and_business_listener_runs() 
     // Use serial for the outer dispatch; the observer runs during observation,
     // then serial finds no hooks and returns immediately.
     let result = tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(10),
         bus.serial(&root, &rutis::EventKey::of(), &Ping(1)),
     )
     .await

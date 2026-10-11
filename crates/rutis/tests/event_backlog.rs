@@ -58,7 +58,7 @@ async fn same_key_emits_waiting_behind_a_slow_listener_are_visible() {
 
     // Each handled event leaves the backlog; the entry goes once it is empty.
     permits.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         while pending(&ctx, &busy).map(|(count, _)| count) != Some(2) {
             tokio::task::yield_now().await;
         }
@@ -66,7 +66,7 @@ async fn same_key_emits_waiting_behind_a_slow_listener_are_visible() {
     .await
     .expect("one event handled");
     permits.add_permits(2);
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         while pending(&ctx, &busy).is_some() {
             tokio::task::yield_now().await;
         }

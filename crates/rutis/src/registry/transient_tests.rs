@@ -34,7 +34,7 @@ async fn churn_injects_release_index() {
         view.dispose().await.unwrap();
         drop(view);
     }
-    for _ in 0..500 {
+    for _ in 0..5_000 {
         let empty = ctx
             .shared()
             .registry

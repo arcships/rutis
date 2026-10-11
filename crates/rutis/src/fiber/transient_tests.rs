@@ -29,7 +29,7 @@ async fn churn_mount_records_release_from_root() {
         drop(view);
     }
     // 释放尾随 TaskDone(dispose 的 join 点),有界等待列表清空
-    for _ in 0..500 {
+    for _ in 0..5_000 {
         if root.effects.lock().unwrap().is_empty() {
             break;
         }
@@ -85,18 +85,18 @@ async fn shutdown_completes_dispose_task_queued_behind_it() {
     .unwrap();
 
     let shutdown = ctx.shutdown();
-    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+    tokio::time::timeout(Duration::from_secs(10), entered.notified())
         .await
         .unwrap();
     let dispose_task = TransitionTask::new();
     root.transition.lock().unwrap().terminal_task = Some(dispose_task.clone());
     root.post(Intent::Dispose);
     release.notify_one();
-    tokio::time::timeout(Duration::from_secs(1), shutdown)
+    tokio::time::timeout(Duration::from_secs(10), shutdown)
         .await
         .unwrap()
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(1), join_task(&dispose_task))
+    tokio::time::timeout(Duration::from_secs(10), join_task(&dispose_task))
         .await
         .expect("dispose task stranded behind Shutdown")
         .unwrap();

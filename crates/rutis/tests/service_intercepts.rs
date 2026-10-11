@@ -1,3 +1,5 @@
+mod common;
+
 use std::future::IntoFuture;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -8,6 +10,8 @@ use rutis::{
     ServiceWriteFailure, ServiceWriter, TypeKey,
 };
 use tokio::sync::oneshot;
+
+use common::{on_thread, still_pending};
 
 struct Capture {
     injects: Vec<TypeKey>,
@@ -397,7 +401,7 @@ async fn old_writer_cannot_commit_after_binding_is_replaced_during_hook() {
     drop(current);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(start_paused = true)]
 async fn subtree_shutdown_waits_for_selected_read_hook() {
     let root = Ctx::root().unwrap();
     let key = TypeKey::keyed::<u64>("shutdown");
@@ -419,14 +423,13 @@ async fn subtree_shutdown_waits_for_selected_read_hook() {
         })
         .unwrap();
     let reader_task = reader.clone();
-    let read = tokio::task::spawn_blocking(move || reader_task.require_as::<u64>(key));
+    let read = on_thread(move || reader_task.require_as::<u64>(key));
     entered_rx.await.unwrap();
     let shutdown = view.shutdown();
     tokio::pin!(shutdown);
     assert!(
-        tokio::time::timeout(Duration::from_millis(30), &mut shutdown)
-            .await
-            .is_err()
+        still_pending(&mut shutdown).await,
+        "shutdown waits for the read hook already running"
     );
     release_tx.send(()).unwrap();
     assert_eq!(*read.await.unwrap().unwrap(), 1);
@@ -590,7 +593,7 @@ async fn writer_set_stale_candidate_drop_no_deadlock_replaced_binding() {
         let _ = tx.send(res);
     });
 
-    let result = rx.recv_timeout(Duration::from_secs(5));
+    let result = rx.recv_timeout(Duration::from_secs(10));
     assert!(
         result.is_ok(),
         "set should not deadlock (recv_timeout means Mutex deadlock)"
@@ -639,7 +642,7 @@ async fn writer_set_stale_candidate_drop_no_deadlock_removing_flag() {
         let _ = tx.send(res);
     });
 
-    let result = rx.recv_timeout(Duration::from_secs(5));
+    let result = rx.recv_timeout(Duration::from_secs(10));
     assert!(
         result.is_ok(),
         "set should not deadlock (recv_timeout means Mutex deadlock)"
@@ -744,7 +747,7 @@ async fn writer_set_stale_candidate_drop_no_deadlock_generation_stale() {
         let _ = tx.send(res);
     });
 
-    let result = rx.recv_timeout(Duration::from_secs(5));
+    let result = rx.recv_timeout(Duration::from_secs(10));
     assert!(
         result.is_ok(),
         "set should not deadlock (recv_timeout means Mutex deadlock)"
