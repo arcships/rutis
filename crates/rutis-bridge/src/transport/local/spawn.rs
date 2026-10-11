@@ -16,7 +16,8 @@ use std::time::Duration;
 use crate::channel::{
     Channel, ChannelError, ChannelInfo, Closer, ConnectError, PeerId, Receiver, Sender,
 };
-use tokio::sync::oneshot;
+use std::collections::BTreeSet;
+use tokio::sync::{oneshot, watch};
 
 use crate::transport::local::lines;
 
@@ -37,7 +38,10 @@ pub const CHANNEL_TOKEN: &str = "RUTIS_CHANNEL_TOKEN";
 pub enum Stdio {
     /// None: no input to read, output discarded (the null device).
     Null,
-    /// This process's own stream: its terminal, when it runs in one.
+    /// This process's own stream: its terminal, when it runs in one. As
+    /// standard input on Unix, it keeps the process in this process's
+    /// group, so a Ctrl-C in the terminal reaches it as well (otherwise it
+    /// gets a group of its own, out of the terminal's reach).
     Inherit,
 }
 
@@ -116,6 +120,17 @@ impl Spawn {
             .stdout(self.stdout.process())
             .stderr(self.stderr.process())
             .kill_on_drop(true);
+        // Out of the terminal's reach: Ctrl-C there signals this process,
+        // which unloads the process's plugins over the channel, and not the
+        // process itself, which would end before its cleanups ran. Not when
+        // it reads the terminal: a background group reading it is stopped
+        // (SIGTTIN), so it stays in this one, and Ctrl-C reaches it too.
+        #[cfg(unix)]
+        if !matches!(self.stdin, Stdio::Inherit) {
+            command.process_group(0);
+        }
+        #[cfg(windows)]
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
         }
@@ -567,6 +582,68 @@ impl Exit {
 /// How long a process whose channel closed may take to end by itself.
 const GRACE: Duration = Duration::from_secs(2);
 
+/// The processes started here that have not been waited for yet.
+static RUNNING: std::sync::LazyLock<watch::Sender<BTreeSet<u32>>> =
+    std::sync::LazyLock::new(|| watch::channel(BTreeSet::new()).0);
+
+/// The ids of the processes the local transport started, in this process,
+/// that have not ended yet.
+pub fn running_processes() -> Vec<u32> {
+    RUNNING.borrow().iter().copied().collect()
+}
+
+/// Wait until every process the local transport started has ended and been
+/// waited for: what a host that is ending does once its root has shut down
+/// (the processes end when their channels close, or are killed after a
+/// grace period). Needs the async runtime that started them to keep running.
+pub async fn processes_ended() {
+    let mut running = RUNNING.subscribe();
+    let _ = running.wait_for(|running| running.is_empty()).await;
+}
+
+/// Kill every process the local transport started that has not ended yet,
+/// without waiting for its cleanups: for a host that exits before they
+/// finish. [`processes_ended`] then waits for them to be gone.
+pub fn kill_processes() {
+    // On Windows, every one of them is in this process's job, with what it
+    // started: end the job. Elsewhere, each is killed by the task that
+    // waits for it, so never once it has been waited for and its id reused.
+    #[cfg(windows)]
+    if let Some(Ok(job)) = JOB.get() {
+        // SAFETY: the job handle lives as long as this process.
+        unsafe {
+            windows_sys::Win32::System::JobObjects::TerminateJobObject(*job as _, 1);
+        }
+    }
+    #[cfg(not(windows))]
+    KILL.send_modify(|kills| *kills += 1);
+}
+
+/// Bumped to kill every process not waited for yet.
+#[cfg(not(windows))]
+static KILL: std::sync::LazyLock<watch::Sender<u64>> =
+    std::sync::LazyLock::new(|| watch::channel(0).0);
+
+/// Kill `child` now. On Unix, while it has not been waited for, its id
+/// still names it and the group it leads: a process in a group of its own
+/// takes what it started with it.
+fn kill_now(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let (Ok(None), Some(pid)) = (child.try_wait(), child.id()) {
+        let pid = pid as libc::pid_t;
+        // SAFETY: plain getpgid(2) and kill(2) on this process's child,
+        // which `try_wait` just found not waited for: neither its id nor
+        // its group's can have been reused.
+        unsafe {
+            if libc::getpgid(pid) == pid {
+                libc::kill(-pid, libc::SIGKILL);
+                return;
+            }
+        }
+    }
+    let _ = child.start_kill();
+}
+
 /// The process, owned by a task that records how it ended. Dropped, it
 /// kills the process; [`Child::end`] gives it [`GRACE`] first.
 struct Child {
@@ -578,7 +655,11 @@ impl Child {
     fn watch(mut child: tokio::process::Child) -> Self {
         let (kill, killed) = oneshot::channel::<()>();
         let ended = Arc::new(Exit::default());
-        if let Some(pid) = child.id() {
+        let pid = child.id();
+        if let Some(pid) = pid {
+            RUNNING.send_modify(|running| {
+                running.insert(pid);
+            });
             let record = ended.clone();
             let _ = std::thread::Builder::new()
                 .name("rutis-spawn-exit".into())
@@ -589,22 +670,47 @@ impl Child {
                 });
         }
         let record = ended.clone();
+        #[cfg(not(windows))]
+        let mut kills = KILL.subscribe();
         tokio::spawn(async move {
+            #[cfg(not(windows))]
+            let killed_all = async {
+                let _ = kills.changed().await;
+            };
+            #[cfg(windows)]
+            let killed_all = std::future::pending::<()>();
+            tokio::pin!(killed_all);
             let status = tokio::select! {
                 status = child.wait() => status,
+                () = &mut killed_all => {
+                    kill_now(&mut child);
+                    child.wait().await
+                }
                 ended = killed => {
                     // Its channel closed: it may end by itself.
-                    if ended.is_ok() {
-                        if let Ok(status) = tokio::time::timeout(GRACE, child.wait()).await {
-                            record.record(describe(status));
-                            return;
+                    let by_itself = match ended {
+                        Ok(()) => tokio::select! {
+                            status = tokio::time::timeout(GRACE, child.wait()) => status.ok(),
+                            () = &mut killed_all => None,
+                        },
+                        Err(_) => None,
+                    };
+                    match by_itself {
+                        Some(status) => status,
+                        None => {
+                            kill_now(&mut child);
+                            child.wait().await
                         }
                     }
-                    let _ = child.start_kill();
-                    child.wait().await
                 }
             };
             record.record(describe(status));
+            // Waited for: the process is gone, its id free for reuse.
+            if let Some(pid) = pid {
+                RUNNING.send_modify(|running| {
+                    running.remove(&pid);
+                });
+            }
         });
         Self {
             ended,
@@ -696,15 +802,17 @@ fn peek_exit(_pid: u32) -> Option<std::process::ExitStatus> {
     None
 }
 
+/// The job [`adopt`] puts processes in.
+#[cfg(windows)]
+static JOB: std::sync::OnceLock<Result<usize, String>> = std::sync::OnceLock::new();
+
 /// On Windows, put the process in a job that is closed, ending every
 /// process in it, when this process ends however it does: a runtime does
 /// not outlive its host. A process that cannot be put in it is an error.
 /// Elsewhere, the process ends when its channel closes.
 #[cfg(windows)]
 pub(crate) fn adopt(child: &tokio::process::Child) -> Result<(), String> {
-    use std::sync::OnceLock;
     use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
-    static JOB: OnceLock<Result<usize, String>> = OnceLock::new();
     let job = JOB
         .get_or_init(|| job().map(|handle| handle as usize))
         .clone()?;

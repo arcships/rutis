@@ -13,6 +13,9 @@ mod host;
 mod new;
 mod project;
 mod status;
+mod stop;
+
+use stop::Stopped;
 
 /// The plugin API this host supports; plugins needing more cannot run here.
 const PLUGIN_API: u32 = 1;
@@ -24,6 +27,9 @@ usage:
   rutis-host run [rutis.json]                 run what the configuration names
   rutis-host dev [dir]                        run the plugin project in dir (default .),
                                               reloading (Go: rebuilding) it as its files change
+    run and dev: --shutdown-timeout <seconds> how long cleanups may take after
+                                              Ctrl-C or SIGTERM (default 10, or
+                                              RUTIS_SHUTDOWN_TIMEOUT)
   rutis-host check [rutis.json]               describe every row and Go binary; fail on what
                                               cannot run (in a plugin project without
                                               rutis.json: the project)
@@ -35,27 +41,37 @@ usage:
   rutis-host --version
 
 Credentials for links come from RUTIS_TOKEN (or RUTIS_TOKEN_<PEER>), RUTIS_CA,
-RUTIS_CERT and RUTIS_KEY.";
+RUTIS_CERT and RUTIS_KEY.
+
+Exit status: 0 when it ends normally (also on Ctrl-C or SIGTERM once every
+cleanup ran), 1 when it cannot start or run (configuration, loading, a row
+check fails), 2 when stopping did not finish (past the deadline, a second
+Ctrl-C, or runtime processes that did not exit).";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
-        Some("new") => new_project(&args[1..]),
-        Some("go") => go_command(&args[1..]),
+        Some("new") => new_project(&args[1..]).map(|()| Stopped::Done),
+        Some("go") => go_command(&args[1..]).map(|()| Stopped::Done),
         Some("--version" | "-V") => {
             println!("rutis-host {}", env!("CARGO_PKG_VERSION"));
-            Ok(())
+            Ok(Stopped::Done)
         }
         Some("--help" | "-h" | "help") | None => {
             println!("{USAGE}");
-            Ok(())
+            Ok(Stopped::Done)
         }
         Some(command @ ("run" | "dev" | "check")) => serve(command, &args[1..]),
         Some(other) => Err(format!("unknown command {other}\n\n{USAGE}")),
     };
-    if let Err(error) = result {
-        eprintln!("rutis-host: {error}");
-        std::process::exit(1);
+    match result {
+        Ok(Stopped::Done) => {}
+        Ok(Stopped::Failed) => std::process::exit(1),
+        Ok(Stopped::Unfinished) => std::process::exit(stop::UNFINISHED),
+        Err(error) => {
+            eprintln!("rutis-host: {error}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -109,7 +125,7 @@ fn new_project(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn serve(command: &str, args: &[String]) -> Result<(), String> {
+fn serve(command: &str, args: &[String]) -> Result<Stopped, String> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -118,7 +134,7 @@ fn serve(command: &str, args: &[String]) -> Result<(), String> {
         match command {
             "run" => run(args).await,
             "dev" => dev(args).await,
-            _ => check(args).await,
+            _ => check(args).await.map(|()| Stopped::Done),
         }
     })
 }
@@ -127,16 +143,24 @@ fn config_file(args: &[String]) -> std::path::PathBuf {
     std::path::PathBuf::from(args.first().map(String::as_str).unwrap_or("rutis.json"))
 }
 
-async fn run(args: &[String]) -> Result<(), String> {
-    let config = config::HostConfig::read(&config_file(args))?;
+async fn run(args: &[String]) -> Result<Stopped, String> {
+    let (deadline, args) = stop::deadline(args)?;
+    let mut signals = stop::Signals::listen()?;
+    let config = config::HostConfig::read(&config_file(&args))?;
     let host = host::Host::start(&config).await?;
-    host.runtimes_ready().await?;
-    host.load(config.rows()).await?;
-    status::follow(host.loader.clone());
-    // Until Ctrl-C (or a signal) ends the process; the runtimes it started
-    // end with their channels.
-    std::future::pending::<()>().await;
-    Ok(())
+    let started = async {
+        host.runtimes_ready().await?;
+        host.load(config.rows()).await
+    };
+    let signal = match start(&host, started, deadline, &mut signals).await {
+        Started::Running => {
+            status::follow(host.loader.clone());
+            signals.next().await
+        }
+        Started::Signal(signal) => signal,
+        Started::Failed(stopped) => return Ok(stopped.failed()),
+    };
+    Ok(stop::stop(&host, signal, deadline, &mut signals).await)
 }
 
 /// `rutis-host go add <module>@<version> [rutis.json]`: `go install` the
@@ -174,9 +198,41 @@ fn go_command(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-async fn dev(args: &[String]) -> Result<(), String> {
+/// How starting went.
+enum Started {
+    Running,
+    /// A signal came first: its name.
+    Signal(&'static str),
+    /// It failed (the error is printed), and what did start was shut down.
+    Failed(Stopped),
+}
+
+/// Wait for `started`, unless a signal comes first. When it fails, what
+/// did start is shut down, as after a signal.
+async fn start(
+    host: &host::Host,
+    started: impl std::future::Future<Output = Result<(), String>>,
+    deadline: std::time::Duration,
+    signals: &mut stop::Signals,
+) -> Started {
+    let started = tokio::select! {
+        started = started => started,
+        signal = signals.next() => return Started::Signal(signal),
+    };
+    match started {
+        Ok(()) => Started::Running,
+        Err(error) => {
+            eprintln!("rutis-host: {error}");
+            Started::Failed(stop::finish(host, deadline, signals).await)
+        }
+    }
+}
+
+async fn dev(args: &[String]) -> Result<Stopped, String> {
     use std::time::Duration;
 
+    let (deadline, args) = stop::deadline(args)?;
+    let mut signals = stop::Signals::listen()?;
     let dir = std::path::PathBuf::from(args.first().map(String::as_str).unwrap_or("."));
     // Go runtimes warn of calls that carry no call chain.
     std::env::set_var("RUTIS_DEV", "1");
@@ -190,13 +246,28 @@ async fn dev(args: &[String]) -> Result<(), String> {
     };
     let mut build = 1;
     let host = host::Host::start(&config).await?;
-    host.runtimes_ready().await?;
-    host.load(config.rows()).await?;
+    let started = async {
+        host.runtimes_ready().await?;
+        host.load(config.rows()).await
+    };
+    match start(&host, started, deadline, &mut signals).await {
+        Started::Running => {}
+        Started::Signal(signal) => {
+            return Ok(stop::stop(&host, signal, deadline, &mut signals).await)
+        }
+        Started::Failed(stopped) => return Ok(stopped.failed()),
+    }
+    // Before saying it runs: a change made once it says so is a change.
+    let mut seen = project::sources(&dir);
     println!("rutis-host dev: running {id}; changes reload it (Ctrl-C ends)");
     status::follow(host.loader.clone());
-    let mut seen = project::sources(&dir);
     loop {
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(400)) => {}
+            signal = signals.next() => {
+                return Ok(stop::stop(&host, signal, deadline, &mut signals).await);
+            }
+        }
         let now = project::sources(&dir);
         if now == seen {
             continue;
@@ -205,11 +276,25 @@ async fn dev(args: &[String]) -> Result<(), String> {
         if let (Some(go), Some(running)) = (&go_project, &host.go) {
             // A Go plugin is a binary: build it again, then restart its
             // runtime on the new build. A failed build keeps the old one.
-            match go.build(build + 1) {
+            // Nor does a build: a signal ends it (and the go command).
+            let built = tokio::select! {
+                built = go.rebuild(build + 1) => built,
+                signal = signals.next() => {
+                    return Ok(stop::stop(&host, signal, deadline, &mut signals).await);
+                }
+            };
+            match built {
                 Ok(binary) => {
                     build += 1;
                     running.resolver.replace(&go.runtime, &binary);
-                    match running.runtimes.restart(&go.runtime).await {
+                    // A runtime that hangs starting does not keep a signal out.
+                    let restarted = tokio::select! {
+                        restarted = running.runtimes.restart(&go.runtime) => restarted,
+                        signal = signals.next() => {
+                            return Ok(stop::stop(&host, signal, deadline, &mut signals).await);
+                        }
+                    };
+                    match restarted {
                         Ok(()) => println!("{}: rebuilt and restarted", go.runtime),
                         Err(error) => println!("{}: cannot restart: {error}", go.runtime),
                     }
@@ -236,7 +321,14 @@ async fn dev(args: &[String]) -> Result<(), String> {
             .map(|entry| entry.id)
             .collect();
         for row in rows {
-            match host.loader.reload(&row).await {
+            // A plugin whose new code hangs does not keep a signal out.
+            let reloaded = tokio::select! {
+                reloaded = host.loader.reload(&row) => reloaded,
+                signal = signals.next() => {
+                    return Ok(stop::stop(&host, signal, deadline, &mut signals).await);
+                }
+            };
+            match reloaded {
                 Ok(_) => println!("{row}: reloaded"),
                 Err(error) => println!("{row}: cannot reload: {error}"),
             }

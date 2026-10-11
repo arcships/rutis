@@ -197,6 +197,12 @@ impl Launcher {
     /// The setting is the whole runtime process's: every plugin loaded into
     /// it can read the input. Run a plugin that needs the terminal in a
     /// runtime of its own ([`LocalRuntime::named`](crate::runtime::LocalRuntime::named)).
+    ///
+    /// On Unix, a runtime process normally runs in a process group of its
+    /// own, so a Ctrl-C in the terminal reaches only the host, which unloads
+    /// its plugins first. One that reads the terminal stays in the host's
+    /// group (a background group reading it would be stopped), so a Ctrl-C
+    /// reaches it too, and its plugins' cleanups may not run then.
     pub fn stdin(mut self, stdio: Stdio) -> Self {
         self.stdin = stdio;
         self

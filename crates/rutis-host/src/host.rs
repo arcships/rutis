@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use rutis::Ctx;
 use rutis_bridge::runtime::{LocalRuntime, RuntimeHandle, RuntimePlugin, RuntimeState};
@@ -25,7 +26,7 @@ use crate::config::{
 
 pub struct Host {
     /// The host runs while this lives.
-    _root: Ctx,
+    root: Ctx,
     pub loader: Loader,
     pub runtimes: Vec<(String, RuntimeHandle)>,
     /// The resolvers of the runtimes' rows, to invalidate after a change.
@@ -41,6 +42,35 @@ pub struct GoHost {
 }
 
 pub type Error = String;
+
+/// How long the runtime processes may take to exit once every cleanup
+/// finished, however little of the deadline is left: longer than the
+/// local transport gives a process whose channel closed before killing it.
+pub const PROCESS_EXIT: Duration = Duration::from_secs(3);
+
+/// How long killed runtime processes may take to be gone.
+pub const KILLED_EXIT: Duration = Duration::from_secs(5);
+
+/// Why a shutdown did not finish.
+pub enum Unfinished {
+    /// The cleanups did not finish: why.
+    Cleanups(String),
+    /// Every cleanup finished, but the runtime processes did not exit:
+    /// why.
+    Processes(String),
+}
+
+impl std::fmt::Display for Unfinished {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unfinished::Cleanups(why) => write!(f, "{why}: cleanups did not finish"),
+            Unfinished::Processes(why) => write!(
+                f,
+                "{why}: every cleanup finished, but the runtime processes did not exit"
+            ),
+        }
+    }
+}
 
 impl Host {
     /// Start everything `config` names; the rows are not loaded yet.
@@ -154,7 +184,7 @@ impl Host {
             None => None,
         };
         Ok(Self {
-            _root: root,
+            root,
             loader,
             runtimes,
             resolvers,
@@ -189,13 +219,73 @@ impl Host {
             .map_err(|error| error.to_string())
     }
 
+    /// Shut the root down: every row and runtime unloads, each cleanup
+    /// running once. Waits up to `deadline` for the cleanups; after it,
+    /// the shutdown goes on and the error says so.
+    pub async fn shut_down(&self, deadline: Duration) -> Result<(), Unfinished> {
+        self.root
+            .shutdown_with_timeout(deadline)
+            .await
+            .map_err(|error| {
+                Unfinished::Cleanups(match error {
+                    rutis::DisposeWaitError::TimedOut { .. } => {
+                        format!("{}s passed", deadline.as_secs_f64())
+                    }
+                    rutis::DisposeWaitError::Failed(error) => {
+                        format!("the shutdown failed: {error}")
+                    }
+                    error => error.to_string(),
+                })
+            })
+    }
+
+    /// Once the root has shut down, wait up to `time` for the runtime
+    /// processes to end: their channels closed, so they end by themselves
+    /// (or are killed after a grace period of their own).
+    pub async fn processes_exit(&self, time: Duration) -> Result<(), Unfinished> {
+        tokio::time::timeout(time, rutis_bridge::transport::local::processes_ended())
+            .await
+            .map_err(|_| Unfinished::Processes(format!("{}s passed", time.as_secs_f64())))
+    }
+
+    /// End the runtime processes now, without their cleanups, and wait
+    /// (briefly) until they are gone.
+    pub async fn kill_processes(&self) {
+        rutis_bridge::transport::local::kill_processes();
+        let gone = rutis_bridge::transport::local::processes_ended();
+        if tokio::time::timeout(KILLED_EXIT, gone).await.is_err() {
+            let left = rutis_bridge::transport::local::running_processes();
+            eprintln!("rutis-host: processes {left:?} did not end when killed");
+        }
+    }
+
+    /// What has not stopped yet: the plugins stopping (or still starting),
+    /// and how many others wait for them to stop first.
+    pub fn still_running(&self) -> (Vec<String>, usize) {
+        use rutis::FiberState;
+        let root = self.root.root_view().map(|root| root.id);
+        let mut stopping = Vec::new();
+        let mut waiting = 0;
+        for plugin in self.root.diagnostics().plugins {
+            if Some(plugin.id) == root {
+                continue;
+            }
+            match plugin.state {
+                FiberState::Disposed | FiberState::Failed => {}
+                FiberState::Unloading => stopping.push(plugin.name),
+                FiberState::Loading => stopping.push(format!("{} (still starting)", plugin.name)),
+                _ => waiting += 1,
+            }
+        }
+        (stopping, waiting)
+    }
+
     /// The service `name` as rutis sees it (what a row provides).
     #[allow(dead_code)]
     pub fn service(&self, name: &str) -> Option<Arc<dyn rutis_bridge::session::HostDispatch>> {
-        self._root
-            .get_as::<dyn rutis_bridge::session::HostDispatch>(rutis_bridge::session::host_key(
-                name,
-            ))
+        self.root.get_as::<dyn rutis_bridge::session::HostDispatch>(
+            rutis_bridge::session::host_key(name),
+        )
     }
 
     /// Forget what the runtimes' resolvers cached, so changed plugins are
