@@ -992,6 +992,7 @@ export function apply(ctx, config) {
   if (config.when === 'apply') quit()
   else if (config.when === 'microtask') queueMicrotask(quit)
   else if (config.when === 'later') setTimeout(quit, 300)
+  else if (config.when === 'throw') { quit(); throw new Error('quit and fail') }
 }
 "#;
 
@@ -1011,7 +1012,8 @@ impl Listener<LoaderChanged> for Changes {
 /// A Cordis plugin that disposes its own fiber ends its row, as a Rust
 /// plugin disposing itself: while it starts, just after, later, or behind
 /// the gate of the row's `inject`. A gate unloading because its inject
-/// went is no end of the row.
+/// went is no end of the row, and a plugin that disposes itself and then
+/// fails to load only fails.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_plugin_that_disposes_itself_ends_its_row() {
     let dir = tempfile::tempdir().unwrap();
@@ -1091,11 +1093,32 @@ async fn a_plugin_that_disposes_itself_ends_its_row() {
     assert_eq!(row_state(&loader, "f"), Some(FiberState::Active));
 
     // `late` goes: the gate of `w` unloads its plugin, and the row stays.
-    loader.reconcile(rows(vec![gated]), None).await.unwrap();
+    loader
+        .reconcile(rows(vec![gated.clone()]), None)
+        .await
+        .unwrap();
     probe.wait_for("w: bye").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(ended(), ["a", "g", "l", "m"]);
     assert_eq!(row_state(&loader, "w"), Some(FiberState::Active));
+
+    let failing = row(
+        "t",
+        &quit,
+        json!({ "tag": "t", "when": "throw" }),
+        json!(null),
+    );
+    loader
+        .reconcile(rows(vec![gated, failing]), None)
+        .await
+        .unwrap();
+    until("the failing row to fail", || {
+        row_state(&loader, "t") == Some(FiberState::Failed)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(ended(), ["a", "g", "l", "m"]);
+    assert_eq!(row_state(&loader, "t"), Some(FiberState::Failed));
 
     root.shutdown().await.unwrap();
 }

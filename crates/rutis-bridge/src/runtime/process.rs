@@ -864,7 +864,14 @@ impl Process {
     /// (a Cordis plugin disposing its own fiber): the runtime has unloaded
     /// what was left of the row by then. Register it before loading the
     /// row, since the plugin may end while it starts; it is dropped when
-    /// the row is unloaded ([`Process::unload_row`]) or fails to load.
+    /// the row is unloaded ([`Process::unload_row`]) or fails to load. A
+    /// row that fails to load never ends this way: its load reports the
+    /// error instead.
+    ///
+    /// The runtime ends such a row whether or not anything is registered
+    /// for it: without `ended`, nobody hears it, a later `rows.update` of
+    /// the row fails as for a row that is not loaded, and
+    /// [`Process::unload_row`] still succeeds.
     pub fn on_row_ended(&self, key: &str, ended: impl FnOnce() + Send + 'static) {
         self.imports
             .ended

@@ -45,7 +45,7 @@ let disposing
 let version = 0
 let emits = new Set() // events the rutis side may emit here
 // Rows: plugins rutis-loader manages one by one in this Context (`rows.*`).
-const rows = new Map() // key -> { fiber, inner, config, exports }
+const rows = new Map() // key -> { fiber, inner, config, exports, loading }
 // rutis services registered one by one (`hosts.*`): id -> withdraw
 const hosts = new Map()
 // What this runner supports beyond protocol 2, reported by `mount`.
@@ -153,15 +153,20 @@ const UNLOADING = 5
 // goes, and rutis hears it (`rows.ended`) and disposes the row there, as a
 // Rust plugin disposing itself. Disposals that are not the plugin's own do
 // not count: `unloadRow` forgets the row first, and a gate unloading takes
-// its plugin with it.
-ctx.on('internal/status', fiber => {
-  if (fiber.state !== DISPOSED || closing) return
-  const ended = [...rows].find(([, row]) => row.inner === fiber && row.fiber.state !== UNLOADING)
-  if (!ended) return
-  const [key] = ended
+// its plugin with it. A row still loading is left to `loadRow`, which
+// answers first: a load that fails reports only its error.
+const hasEnded = row => row.inner?.uid === null && row.fiber.state !== UNLOADING
+
+function endRow(key) {
   unloadRow(key).catch(() => {}).then(() => {
     if (!closing) peer.callAsync('', 'rows.ended', [key]).catch(() => {})
   })
+}
+
+ctx.on('internal/status', fiber => {
+  if (fiber.state !== DISPOSED || closing) return
+  const ended = [...rows].find(([, row]) => row.inner === fiber && !row.loading && hasEnded(row))
+  if (ended) endRow(ended[0])
 })
 
 ctx.on('internal/service', () => { if (slots.size) refresh() })
@@ -259,7 +264,7 @@ async function loadRow([key, entry, config, isolate, inject, exports]) {
     scopedId(name, label)
     scope = scope.isolate(name, isolated(name, label))
   }
-  const row = { fiber: undefined, inner: undefined, config, exports: ids }
+  const row = { fiber: undefined, inner: undefined, config, exports: ids, loading: true }
   const fiber = fiberOf(inject?.length
     ? scope.plugin({ name: `row:${key}`, inject, apply(gated) { row.inner = fiberOf(gated.plugin(plugin, row.config)) } })
     : scope.plugin(plugin, config))
@@ -279,6 +284,9 @@ async function loadRow([key, entry, config, isolate, inject, exports]) {
     await unloadRow(key)
     throw error
   }
+  row.loading = false
+  // Ended while it loaded (rutis unloading it meanwhile forgot it).
+  if (rows.get(key) === row && hasEnded(row)) endRow(key)
   return null
 }
 
