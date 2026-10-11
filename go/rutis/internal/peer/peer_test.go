@@ -272,3 +272,33 @@ func TestACallBeforeTheHandshakeEndsTheSession(t *testing.T) {
 		t.Fatal("the session should end")
 	}
 }
+
+func TestConcurrentCallsGoOutInTheOrderOfTheirIdentities(t *testing.T) {
+	host, runtime := pair(t, nil, func(ctx context.Context, target, method string, args []any) (any, error) {
+		return "ok", nil
+	})
+	// The far end refuses an identity not above the last it received
+	// (#238): many goroutines calling at once must not reorder theirs.
+	var calls sync.WaitGroup
+	failures := make(chan error, 64*20)
+	for range 64 {
+		calls.Add(1)
+		go func() {
+			defer calls.Done()
+			for range 20 {
+				if _, err := host.Call(context.Background(), "x", "go", nil, true); err != nil {
+					failures <- err
+					return
+				}
+			}
+		}()
+	}
+	calls.Wait()
+	close(failures)
+	for err := range failures {
+		t.Fatal(err)
+	}
+	if err := runtime.Err(); err != nil {
+		t.Fatal(err)
+	}
+}

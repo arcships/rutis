@@ -242,8 +242,15 @@ async fn fixture() -> Fixture {
 impl Fixture {
     /// Wait for `line`; on a timeout, say where every row and Go runtime is.
     async fn expect(&self, line: &str) {
+        let what = format!("{line:?} to be recorded");
+        self.until(&what, || self.probe.position(line).is_some())
+            .await;
+    }
+
+    /// Wait for `done`; on a timeout, say where every row and Go runtime is.
+    async fn until(&self, what: &str, mut done: impl FnMut() -> bool) {
         let waited = tokio::time::timeout(Duration::from_secs(30), async {
-            while self.probe.position(line).is_none() {
+            while !done() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -262,7 +269,7 @@ impl Fixture {
                 .map(|runtime| format!("{}: {:?}", runtime.name, runtime.state))
                 .collect();
             panic!(
-                "{line:?} not recorded: {:?}\nrows: {rows:#?}\ngo runtimes: {runtimes:?}",
+                "timed out waiting for {what}; recorded: {:?}\nrows: {rows:#?}\ngo runtimes: {runtimes:?}",
                 self.probe.lines()
             );
         }
@@ -304,16 +311,6 @@ fn row_state(loader: &Loader, id: &str) -> Option<FiberState> {
     }
 }
 
-async fn until(what: &str, mut done: impl FnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        while !done() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
-}
-
 /// Three runtimes start cold with rows using each other's services: none
 /// waits for another, every row starts, synchronous calls into Go that call
 /// back into Node or Python complete.
@@ -349,21 +346,23 @@ async fn a_go_provider_that_goes_stops_its_users_first() {
     let loader = &fixture.loader;
     let all = all_rows(&fixture);
     loader.reconcile(layer(all.clone()), None).await.unwrap();
-    until("every row to run", || {
-        ["pp", "pg", "jp", "jg", "gp", "gc", "gl"]
-            .iter()
-            .all(|id| row_state(loader, id) == Some(FiberState::Active))
-    })
-    .await;
+    fixture
+        .until("every row to run", || {
+            ["pp", "pg", "jp", "jg", "gp", "gc", "gl"]
+                .iter()
+                .all(|id| row_state(loader, id) == Some(FiberState::Active))
+        })
+        .await;
     let remaining: Vec<Value> = all.into_iter().filter(|row| row["id"] != "gp").collect();
     loader.reconcile(layer(remaining), None).await.unwrap();
     fixture.probe.wait_for("go provider: bye").await;
-    until("the users to wait", || {
-        ["pg", "jg", "gl"]
-            .iter()
-            .all(|id| row_state(loader, id) == Some(FiberState::Pending))
-    })
-    .await;
+    fixture
+        .until("the users to wait", || {
+            ["pg", "jg", "gl"]
+                .iter()
+                .all(|id| row_state(loader, id) == Some(FiberState::Pending))
+        })
+        .await;
     for id in ["pp", "jp", "gc"] {
         assert_eq!(
             row_state(loader, id),
@@ -409,9 +408,10 @@ async fn injected_services_gate_a_go_plugin() {
     fixture.probe.wait_for("go gated: 42").await;
     llm.dispose().await.unwrap();
     fixture.probe.wait_for("go gated: bye").await;
-    until("the row to wait again", || {
-        row_state(loader, "gg") == Some(FiberState::Pending)
-    })
-    .await;
+    fixture
+        .until("the row to wait again", || {
+            row_state(loader, "gg") == Some(FiberState::Pending)
+        })
+        .await;
     fixture.root.shutdown().await.unwrap();
 }

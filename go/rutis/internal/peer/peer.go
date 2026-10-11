@@ -283,11 +283,16 @@ func (p *Peer) send(frame any) error {
 }
 
 func (p *Peer) write(data []byte) error {
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	return p.writeLocked(data)
+}
+
+// writeLocked sends `data`; p.writeMu is held.
+func (p *Peer) writeLocked(data []byte) error {
 	if err := p.Err(); err != nil {
 		return err
 	}
-	p.writeMu.Lock()
-	defer p.writeMu.Unlock()
 	return p.channel.Send(data)
 }
 
@@ -830,6 +835,10 @@ func (p *Peer) call(ctx context.Context, op string, fields map[string]any, args 
 
 func (p *Peer) request(ctx context.Context, op string, fields map[string]any, args []any, hasArgs bool, origin []string) (string, chan result, error) {
 	chain := ChainOf(ctx)
+	// Identities go out in the order they are taken: the far end refuses
+	// one not above the last it received, so the write lock spans both.
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
 	p.mu.Lock()
 	if p.closeErr != nil {
 		err := p.closeErr
@@ -873,7 +882,7 @@ func (p *Peer) request(ctx context.Context, op string, fields map[string]any, ar
 	waiter := make(chan result, 1)
 	p.pending[id] = waiter
 	p.mu.Unlock()
-	if err := p.write(data); err != nil {
+	if err := p.writeLocked(data); err != nil {
 		p.mu.Lock()
 		delete(p.pending, id)
 		p.rollback(grants)
