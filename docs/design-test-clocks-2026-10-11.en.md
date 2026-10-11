@@ -198,13 +198,12 @@ Not done:
 5. The Bun suite's per-test timeout is ≥ 10 s.
 6. Each PR description has the "break it, it fails" records and the results of 10 repeated rounds.
 
-## 10. Decisions for the maintainer
+## 10. Maintainer decisions (2026-10-11)
 
-1. **Allow "weak negative checks" (§3.2 option 3)?** Recommended: allow, limited to cross-process cases with no ordering guarantee, annotated `// clock: weak-negative — <reason>`, at most 6. If not allowed, those places need observable events in product code, which costs more.
-2. **Heartbeat tests (4 suites: bridge, Node, Python, Go): tolerance, or an injected clock in the WebSocket transports?** Recommended: tolerance: ping and timeout at least 10× apart, the "stays connected" side waits for a count of pings through the relay, elapsed bounds removed. An injected clock would change the transport in four languages.
-3. **Raise Go's `go.mod` to 1.25 for `testing/synctest`?** Recommended: not now. It does not cover real loopback TCP (`listen_test.go`), the `peer_test.go` problems are solved with events, and raising it changes the Go SDK's minimum version.
-
-Decided: the shared helpers go in a new crate `rutis-test-support` (unpublished, a dev-dependency only; `scripts/train.mjs` publishes an explicit list without it; confirmed with `cargo publish --dry-run` during implementation); 4 PRs, this one first with `Refs #231`, the last with `Closes #231`; the example project `rutis-agent` is out of scope; no check script `tools/check-test-clocks.mjs`.
+- Weak negative checks (§3.2 option 3) are allowed only in cross-process places with no ordering guarantee, annotated `// clock: weak-negative — <reason>`, at most 6.
+- The four WebSocket heartbeat suites use tolerance: ping and timeout at least 10× apart, the "stays connected" side waits for a count of pings through the relay, elapsed bounds removed; no injected clock in the transports.
+- Go stays on 1.24 for now; no `testing/synctest`.
+- The shared helpers go in a new crate `rutis-test-support` (unpublished, a dev-dependency only; confirmed with `cargo publish --dry-run` during implementation); 4 PRs, this one first with `Refs #231`, the last with `Closes #231`; the example project `rutis-agent` is out of scope; no check script.
 
 ## Appendix A: full inventory
 

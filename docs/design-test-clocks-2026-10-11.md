@@ -198,13 +198,12 @@ Node 22+ 有 `mock.timers`，Bun 有假定时器，但被测的心跳都跨 sock
 5. Bun 套件的每测试超时 ≥ 10 s。
 6. 每个 PR 描述里有"改坏后失败"的记录和 10 轮重复运行的结果。
 
-## 十、需要维护者决定
+## 十、维护者的决定（2026-10-11）
 
-1. **是否允许"弱负向检查"（§3.2 第 3 种）？** 推荐允许，但限定为跨进程、无顺序保证的场合，必须标注 `// clock: weak-negative — <原因>`，不超过 6 处。不允许的话，这几处要给产品代码加可观察的事件，成本更高。
-2. **心跳测试（bridge、Node、Python、Go 共 4 套）用容差，还是给 WebSocket 传输注入时钟？** 推荐容差：ping 与 timeout 至少差 10 倍，"保持连接"一方等经过中继的 ping 次数，删掉耗时上限。注入时钟要改四种语言的传输实现。
-3. **Go 是否把 `go.mod` 升到 1.25 以使用 `testing/synctest`？** 推荐暂不升级：它管不到真实的 loopback TCP（`listen_test.go`），`peer_test.go` 的问题用事件就能解决；升级会改变 Go SDK 的最低支持版本。
-
-已决定：共用函数放新 crate `rutis-test-support`（不发布，只做 dev-dependency；`scripts/train.mjs` 按显式清单发布，不会包含它；实现时用 `cargo publish --dry-run` 确认）；分成 4 个 PR，本 PR 是第 1 个，写 `Refs #231`，最后一个写 `Closes #231`；示例项目 `rutis-agent` 不在范围内；不做检查脚本 `tools/check-test-clocks.mjs`。
+- 允许"弱负向检查"（§3.2 第 3 种）：只限跨进程、没有顺序保证的地方，标注 `// clock: weak-negative — <原因>`，不超过 6 处。
+- 四套 WebSocket 心跳测试用容差：ping 与 timeout 至少差 10 倍，"保持连接"一方等经过中继的 ping 次数，删掉耗时上限；不给传输注入时钟。
+- Go 暂不升到 1.25，不用 `testing/synctest`。
+- 共用函数放新 crate `rutis-test-support`（不发布，只做 dev-dependency；实现时用 `cargo publish --dry-run` 确认）；分成 4 个 PR，本 PR 是第 1 个，写 `Refs #231`，最后一个写 `Closes #231`；示例项目 `rutis-agent` 不在范围内；不做检查脚本。
 
 ## 附录 A：完整清单
 
