@@ -18,11 +18,13 @@ use crate::channel::{Channel, ConnectError};
 use crate::{transport_key, Dial, Transport};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin};
 
-mod lines;
+pub(crate) mod lines;
+
+pub use lines::MAX_MESSAGE;
 
 /// Frame a connected byte stream (two handles of one socket, and a closer
-/// that wakes both) as a channel, one message per line: what this
-/// transport's Unix channels are.
+/// that wakes both) as a channel, one message per line of at most
+/// [`MAX_MESSAGE`] bytes: what this transport's Unix channels are.
 pub fn framed(
     read: impl std::io::Read + Send + 'static,
     write: impl std::io::Write + Send + 'static,

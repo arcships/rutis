@@ -63,4 +63,17 @@ mod tests {
             (end(a), end(b))
         });
     }
+
+    /// Q6.3.2: the size limit, at a size a test can reach quickly; the
+    /// default is checked in `lines`.
+    #[test]
+    fn refuses_messages_over_its_limit() {
+        let limited = |stream: UnixStream| {
+            let reader = stream.try_clone().unwrap();
+            let closer = Arc::new(Shut(stream.try_clone().unwrap()));
+            lines::limited(reader, stream, closer, ChannelInfo::default(), 1024)
+        };
+        let (a, b) = UnixStream::pair().unwrap();
+        crate::channel::testing::size_limit((limited(a), limited(b)), 1024);
+    }
 }

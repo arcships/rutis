@@ -11,35 +11,54 @@ from __future__ import annotations
 import socket
 import threading
 
+# The largest message either way, without its newline: the WebSocket
+# binding's 16 MiB. Over it, the channel closes; a far end that never sends a
+# newline costs at most this much memory.
+MAX_MESSAGE = 16 * 1024 * 1024
+
 
 class SocketChannel:
-    """A Unix socket (dialed, or inherited as fd 3), one message per line."""
+    """A Unix socket (dialed, or inherited as fd 3), one message per line of
+    at most `max_message` bytes."""
 
-    def __init__(self, sock: socket.socket):
+    def __init__(self, sock: socket.socket, max_message: int = MAX_MESSAGE):
         self._sock = sock
         self._reader = sock.makefile("rb")
         self._lock = threading.Lock()
+        self._max = max_message
 
     def send(self, message: bytes) -> None:
+        if len(message) > self._max:
+            reason = f"message of {len(message)} bytes exceeds the limit of {self._max}"
+            self.close(reason)
+            raise ConnectionError(reason)
         if b"\n" in message:
             raise ValueError("a message contains a raw newline")
         with self._lock:
             self._sock.sendall(message + b"\n")
 
     def recv(self) -> bytes | None:
-        line = self._reader.readline()
+        # At most the limit and the newline: a longer line stops here.
+        line = self._reader.readline(self._max + 1)
         if not line:
             return None
-        if not line.endswith(b"\n"):
-            raise ConnectionError("stream ended inside a message")
-        return line[:-1]
+        if line.endswith(b"\n"):
+            return line[:-1]
+        if len(line) > self._max:
+            reason = f"received a message over the limit of {self._max} bytes"
+            self.close(reason)
+            raise ConnectionError(reason)
+        raise ConnectionError("stream ended inside a message")
 
     def close(self, reason: str = "") -> None:
         try:
             self._sock.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
-        try:
-            self._sock.close()
-        except OSError:
-            pass
+        # The reader holds the descriptor open after the socket closes; a
+        # read blocked on it returned once the socket was shut down.
+        for closing in (self._reader, self._sock):
+            try:
+                closing.close()
+            except OSError:
+                pass

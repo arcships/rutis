@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { Session } from '../src/session.mjs'
+import { decode } from '../src/codec.mjs'
 
 const PROTOCOL = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).rutisProtocol
 const data = value => ({ type: 'data', value })
@@ -144,4 +145,40 @@ test('an object reference goes only to a far end that declared objects', async (
     else assert.equal(reply.value.value.kind, 'object')
     session.close()
   }
+})
+
+// Q6.2.3, risk P3: a frame of the wrong shape, or naming a call or reference
+// this side does not have, ends the session; the cases of rutis-bridge's
+// `malformed_and_dangling_frames_close_the_session`.
+test('malformed and dangling frames close the session', async () => {
+  // Text that is not JSON never reaches the session: the codec refuses it,
+  // and the I/O worker closes the channel.
+  assert.throws(() => decode('{"op":"invoke","id":"rust:1"'), SyntaxError)
+  const cases = {
+    'not an object': 42,
+    'unknown op': { op: 'frobnicate', id: 'rust:1' },
+    'wrong field type': { op: 'invoke', id: 'rust:1', path: [], target: 7, method: 'm', args: { type: 'undefined' } },
+    'missing field': { op: 'invoke', id: 'rust:1', path: [], target: 't', args: { type: 'undefined' } },
+    'unknown wire value': { op: 'invoke', id: 'rust:1', path: [], target: 't', method: 'm', args: { type: 'bogus' } },
+    'call of an unknown reference': { op: 'call', id: 'rust:1', path: [], reference: 99, args: { type: 'undefined' } },
+    'await of an unknown reference': { op: 'await', id: 'rust:1', path: [], reference: 99 },
+    'release of an unknown reference': { op: 'release', reference: 99, count: 1 },
+    'reply to an unknown call': { op: 'return', id: 'node:99', value: { type: 'undefined' } },
+    'cancel without an id': { op: 'cancel', id: 7 },
+  }
+  for (const [name, frame] of Object.entries(cases)) {
+    const { peer, fault } = harness(() => 'served')
+    peer.receive(frame)
+    assert.ok(fault() instanceof Error, name)
+    await assert.rejects(peer.invokeAsync('t', 'm', []), undefined, name)
+  }
+  // A cancel may cross the reply of the call it cancels: one for a call
+  // this side does not have is ignored.
+  const { peer, sent, fault } = harness(() => 'served')
+  peer.receive({ op: 'cancel', id: 'rust:7' })
+  peer.receive(invoke(1, 'm'))
+  await Promise.resolve()
+  assert.equal(fault(), undefined)
+  assert.equal(sent.at(-1).value.value, 'served')
+  peer.close()
 })

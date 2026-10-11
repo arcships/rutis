@@ -5,13 +5,11 @@
 //! Transports belong to the transport modules ([`crate::transport::local`]);
 //! this copy exists only because the facade still starts its own processes.
 //! It goes once runtimes get their sessions through local + link (N2).
-use std::io::{BufRead, BufReader, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::channel::{Channel, ChannelError, ChannelInfo, Closer, Receiver, Sender};
+use crate::channel::{Channel, ChannelInfo, Closer};
 
 use crate::runtime::rpc::{Connection, Dispatch};
 use crate::runtime::Error;
@@ -23,65 +21,24 @@ impl Closer for Shut {
     }
 }
 
-/// One message per line, as the runtimes have always spoken. Once the
-/// receiver saw the end, sending fails: a macOS socket whose far end shut it
-/// down still takes writes, and drops them.
-struct Lines(UnixStream, Arc<AtomicBool>);
-impl Sender for Lines {
-    fn send(&mut self, message: &[u8]) -> Result<(), ChannelError> {
-        if self.1.load(Ordering::SeqCst) {
-            return Err(ChannelError::Closed {
-                reason: "the channel ended".into(),
-            });
-        }
-        let mut line = Vec::with_capacity(message.len() + 1);
-        line.extend_from_slice(message);
-        line.push(b'\n');
-        self.0
-            .write_all(&line)
-            .map_err(|error| ChannelError::Closed {
-                reason: error.to_string(),
-            })
-    }
-}
-struct LinesIn(BufReader<UnixStream>, Arc<AtomicBool>);
-impl Receiver for LinesIn {
-    fn recv(&mut self) -> Result<Option<Vec<u8>>, ChannelError> {
-        let mut line = Vec::new();
-        let received = match self.0.read_until(b'\n', &mut line) {
-            Ok(0) => Ok(None),
-            Ok(_) => {
-                if line.last() == Some(&b'\n') {
-                    line.pop();
-                }
-                return Ok(Some(line));
-            }
-            Err(error) => Err(ChannelError::Closed {
-                reason: error.to_string(),
-            }),
-        };
-        self.1.store(true, Ordering::SeqCst);
-        received
-    }
-}
-
-/// A newline-framed channel on a connected Unix socket.
+/// A newline-framed channel on a connected Unix socket, one message per
+/// line as the runtimes have always spoken: the local transport's framing,
+/// with its size limit.
 pub(crate) fn channel(stream: UnixStream, label: &str) -> Result<Channel, Error> {
     let transport = |error: std::io::Error| Error::Transport(error.to_string());
     stream.set_nonblocking(false).map_err(transport)?;
     let reader = stream.try_clone().map_err(transport)?;
     let closer = Arc::new(Shut(stream.try_clone().map_err(transport)?));
-    let ended = Arc::new(AtomicBool::new(false));
-    Ok(Channel {
-        sender: Box::new(Lines(stream, ended.clone())),
-        receiver: Box::new(LinesIn(BufReader::new(reader), ended)),
+    Ok(crate::transport::local::lines::channel(
+        reader,
+        stream,
         closer,
-        info: ChannelInfo {
+        ChannelInfo {
             transport: "unix",
             peer: None,
             label: label.to_owned(),
         },
-    })
+    ))
 }
 
 impl Connection {

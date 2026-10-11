@@ -5,8 +5,10 @@
 //! rutis_bridge::channel::testing::contract(|| my_transport::pair());
 //! ```
 //!
-//! Each check panics with what was broken. Transport-specific behaviour
-//! (framing, heartbeats, size limits) is tested by the transport itself.
+//! Each check panics with what was broken. A transport with a message size
+//! limit also runs [`size_limit`] with its limit. Transport-specific
+//! behaviour (framing, heartbeats, what the far end is told of a message
+//! over the limit, receiving one) is tested by the transport itself.
 
 mod fault;
 pub use fault::{fault, Faults};
@@ -18,6 +20,9 @@ use crate::channel::{Channel, ChannelError};
 
 /// How long a check waits for something that must happen.
 const PATIENCE: Duration = Duration::from_secs(5);
+
+/// How long a check waits before it fails rather than hangs.
+const GUARD: Duration = Duration::from_secs(10);
 
 /// Run every check on fresh pairs from `pair`: two channels joined end to
 /// end, what one sends the other receives.
@@ -151,6 +156,68 @@ pub fn the_far_end_closing_ends_the_channel((mut a, mut b): (Channel, Channel)) 
     );
     let failed = (0..1000).any(|_| b.sender.send(&[b'x'; 1024]).is_err());
     assert!(failed, "sending to a closed far end must fail");
+}
+
+/// For a transport with a message size limit (Q6.3.2), on pairs whose ends
+/// both have the limit `limit`: a message of exactly `limit` bytes arrives;
+/// one byte more is refused, ends the channel, and the far end sees the end
+/// rather than the message.
+///
+/// Not part of [`contract`]: the in-memory transport has no limit (it
+/// crosses no process boundary, so nothing untrusted sends on it), and a
+/// receiver over the limit can only be reached by bypassing the sender's
+/// own check, which each transport does in its own tests.
+pub fn size_limit((mut a, b): (Channel, Channel), limit: usize) {
+    // `b` receives on a thread of its own, so a far end that never sees
+    // anything fails the check instead of hanging it.
+    let Channel {
+        mut receiver,
+        closer: far_closer,
+        ..
+    } = b;
+    let (deliver, delivered) = mpsc::channel();
+    std::thread::spawn(move || loop {
+        let received = receiver.recv();
+        let more = matches!(received, Ok(Some(_)));
+        if deliver.send(received).is_err() || !more {
+            return;
+        }
+    });
+    let next = |what: &str| {
+        delivered.recv_timeout(GUARD).unwrap_or_else(|_| {
+            far_closer.close("the check gave up");
+            panic!("{what}: nothing arrived within {GUARD:?}")
+        })
+    };
+
+    let at_limit = vec![b'x'; limit];
+    let sending = std::thread::spawn(move || {
+        a.sender.send(&at_limit).unwrap();
+        a
+    });
+    let received = next("the message at the limit")
+        .unwrap_or_else(|error| panic!("receive failed: {error}"))
+        .expect("the message at the limit");
+    assert_eq!(
+        received.len(),
+        limit,
+        "a message at the limit arrives whole"
+    );
+    let mut a = sending.join().unwrap();
+
+    let over = vec![b'x'; limit + 1];
+    assert!(
+        a.sender.send(&over).is_err(),
+        "a message over the limit is refused"
+    );
+    assert!(
+        !matches!(next("the end"), Ok(Some(_))),
+        "the far end sees the end, not the message"
+    );
+    assert!(
+        a.sender.send(b"after").is_err(),
+        "the channel ended with the refused message"
+    );
 }
 
 fn recv_or_end(channel: &mut Channel) -> Option<Vec<u8>> {

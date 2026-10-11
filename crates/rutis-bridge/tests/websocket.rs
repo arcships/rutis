@@ -382,6 +382,29 @@ fn messages_over_the_limit_close_the_channel_either_way() {
     );
 }
 
+/// Q6.3.2: the shared size-limit check, both ends at the same limit.
+#[test]
+fn meets_the_size_limit_check() {
+    let small = Limits {
+        max_message: 1024,
+        ..Limits::default()
+    };
+    let server = server(small.clone());
+    let client = client(small);
+    let (dialed, accepted, _r) = connected(&server, &client);
+    rutis_bridge::channel::testing::size_limit((dialed, accepted), 1024);
+}
+
+/// The local transport frames lines with the WebSocket transport's default
+/// limit.
+#[test]
+fn the_local_limit_is_the_websocket_default() {
+    assert_eq!(
+        rutis_bridge::transport::local::MAX_MESSAGE,
+        Limits::default().max_message
+    );
+}
+
 fn server_with(limits: Limits) -> Arc<WebSocketTransport> {
     server(limits)
 }
