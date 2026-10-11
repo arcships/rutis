@@ -82,7 +82,13 @@ struct Imports {
     exported: Mutex<HashMap<String, Exported>>,
     hosts: Mutex<HashMap<String, HostEntry>>,
     forwarded: Option<Arc<dyn EventSink>>,
+    /// What to do when a row's plugin ends on its own (`rows.ended`), by
+    /// row key (see [`Process::on_row_ended`]).
+    ended: Mutex<HashMap<String, RowEnded>>,
 }
+
+/// Run once when a row's plugin ends on its own.
+type RowEnded = Box<dyn FnOnce() + Send>;
 
 /// Everything one mount needs: the plugins loaded in order into one Cordis
 /// Context, the exported services, and what the rutis side contributes.
@@ -197,6 +203,12 @@ impl Launcher {
     /// The setting is the whole runtime process's: every plugin loaded into
     /// it can read the input. Run a plugin that needs the terminal in a
     /// runtime of its own ([`LocalRuntime::named`](crate::runtime::LocalRuntime::named)).
+    ///
+    /// On Unix, a runtime process normally runs in a process group of its
+    /// own, so a Ctrl-C in the terminal reaches only the host, which unloads
+    /// its plugins first. One that reads the terminal stays in the host's
+    /// group (a background group reading it would be stopped), so a Ctrl-C
+    /// reaches it too, and its plugins' cleanups may not run then.
     pub fn stdin(mut self, stdio: Stdio) -> Self {
         self.stdin = stdio;
         self
@@ -337,6 +349,14 @@ impl Dispatch for Imports {
                 Some(sink) => sink.event(&name, values),
                 None => Ok(RpcValue::Undefined),
             };
+        }
+        if target.is_empty() && method == "rows.ended" {
+            let (key,): (String,) = crate::runtime::decode(args.json()?)?;
+            let ended = self.ended.lock().unwrap().remove(&key);
+            if let Some(ended) = ended {
+                ended();
+            }
+            return Ok(RpcValue::Undefined);
         }
         if !(target.is_empty() && method == "service") {
             return Err(Error::Value(
@@ -613,6 +633,7 @@ impl Process {
             exported: Mutex::default(),
             hosts: Mutex::new(hosts),
             forwarded,
+            ended: Mutex::default(),
         });
         let rest = MountRest {
             plugins,
@@ -708,13 +729,18 @@ impl Process {
         isolate: &[(String, String)],
         inject: &[String],
     ) -> Result<(), Error> {
-        self.call_async(
-            "",
-            "rows.load",
-            json!([key, entry, config, isolate, inject]),
-        )
-        .await
-        .map(|_| ())
+        let loaded = self
+            .call_async(
+                "",
+                "rows.load",
+                json!([key, entry, config, isolate, inject]),
+            )
+            .await;
+        if loaded.is_err() {
+            // Never loaded, so it cannot end.
+            self.imports.ended.lock().unwrap().remove(key);
+        }
+        loaded.map(|_| ())
     }
 
     /// Load row `key` like [`Process::load_row`], exporting the services in
@@ -725,6 +751,27 @@ impl Process {
     /// of its label ([`scoped_id`]), which needs the runtime's `scopes`.
     #[allow(clippy::too_many_arguments)]
     pub async fn load_row_exporting(
+        &self,
+        key: &str,
+        entry: &Path,
+        config: Value,
+        isolate: &[(String, String)],
+        inject: &[String],
+        exports: &serde_json::Map<String, Value>,
+        observer: Arc<dyn ServiceEvents>,
+    ) -> Result<(), Error> {
+        let loaded = self
+            .load_exporting(key, entry, config, isolate, inject, exports, observer)
+            .await;
+        if loaded.is_err() {
+            // Never loaded, so it cannot end.
+            self.imports.ended.lock().unwrap().remove(key);
+        }
+        loaded
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn load_exporting(
         &self,
         key: &str,
         entry: &Path,
@@ -815,7 +862,28 @@ impl Process {
         // After the call: the withdrawals of the row's services arrive
         // before its reply.
         self.forget_exports(key);
+        self.imports.ended.lock().unwrap().remove(key);
         unloaded.map(|_| ())
+    }
+
+    /// Run `ended` if the plugin of row `key` ends on its own in the runtime
+    /// (a Cordis plugin disposing its own fiber): the runtime has unloaded
+    /// what was left of the row by then. Register it before loading the
+    /// row, since the plugin may end while it starts; it is dropped when
+    /// the row is unloaded ([`Process::unload_row`]) or fails to load. A
+    /// row that fails to load never ends this way: its load reports the
+    /// error instead.
+    ///
+    /// The runtime ends such a row whether or not anything is registered
+    /// for it: without `ended`, nobody hears it, a later `rows.update` of
+    /// the row fails as for a row that is not loaded, and
+    /// [`Process::unload_row`] still succeeds.
+    pub fn on_row_ended(&self, key: &str, ended: impl FnOnce() + Send + 'static) {
+        self.imports
+            .ended
+            .lock()
+            .unwrap()
+            .insert(key.to_owned(), Box::new(ended));
     }
 
     /// What the plugin at `entry` declares: its config schema (schemastery

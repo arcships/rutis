@@ -33,7 +33,7 @@ body:
     id: platform
     attributes:
       label: Platform · 平台
-      placeholder: Linux x86_64, Rust 1.90, Node 24, Python 3.12
+      placeholder: Linux x86_64, Rust 1.90, Node 22, Python 3.12
   - type: textarea
     id: logs
     attributes:

@@ -106,6 +106,104 @@ impl Dispatch for Fixture {
     }
 }
 
+/// Messages no implementation may take as a frame, with what is wrong with
+/// each (Q6.2.3), in the endpoint format, sent by `main` once the session
+/// is ready.
+pub const MALFORMED: [(&str, &[u8]); 13] = [
+    ("malformed JSON", br#"{"op":"invoke","id":"main:1""#),
+    ("empty", b""),
+    ("a leading BOM", b"\xef\xbb\xbf{\"op\":\"cancel\",\"id\":\"main:1\"}"),
+    (
+        "invalid UTF-8 inside a string",
+        b"{\"op\":\"invoke\",\"id\":\"main:1\",\"path\":[],\"target\":\"conformance\",\"method\":\"echo\",\"args\":{\"type\":\"data\",\"value\":\"\xff\"}}",
+    ),
+    ("not an object", b"42"),
+    ("unknown op", br#"{"op":"frobnicate","id":"main:1"}"#),
+    (
+        "wrong field type",
+        br#"{"op":"invoke","id":"main:1","path":[],"target":7,"method":"echo","args":{"type":"undefined"}}"#,
+    ),
+    (
+        "missing field",
+        br#"{"op":"invoke","id":"main:1","path":[],"target":"conformance","args":{"type":"undefined"}}"#,
+    ),
+    (
+        "unknown wire value",
+        br#"{"op":"invoke","id":"main:1","path":[],"target":"conformance","method":"echo","args":{"type":"bogus"}}"#,
+    ),
+    (
+        "call of an unknown reference",
+        br#"{"op":"call","id":"main:1","path":[],"reference":99,"args":{"type":"undefined"}}"#,
+    ),
+    (
+        "await of an unknown reference",
+        br#"{"op":"await","id":"main:1","path":[],"reference":99}"#,
+    ),
+    (
+        "release of an unknown reference",
+        br#"{"op":"release","reference":99,"count":1}"#,
+    ),
+    (
+        "reply to an unknown call",
+        br#"{"op":"return","id":"far:99","value":{"type":"undefined"}}"#,
+    ),
+];
+
+/// Check that the far end ends the session, and the channel with it, on
+/// each of [`MALFORMED`], replying nothing but its greeting. `open` makes a fresh channel to
+/// a far end that expects endpoint `main`; this side speaks raw frames on
+/// it. Blocks: run it from a thread that may block.
+pub fn malformed(open: impl Fn() -> crate::channel::Channel) {
+    let hello = serde_json::to_vec(&json!({
+        "op": "hello",
+        "version": crate::session::ENDPOINT_PROTOCOL,
+        "endpoint": "main",
+        "implementation": { "name": "conformance", "version": "0" },
+        "capabilities": [],
+    }))
+    .unwrap();
+    for (case, message) in MALFORMED {
+        let crate::channel::Channel {
+            mut sender,
+            mut receiver,
+            closer,
+            ..
+        } = open();
+        let (done, ended) = std::sync::mpsc::channel();
+        let reading = std::thread::spawn(move || {
+            let mut received = Vec::new();
+            let end = loop {
+                match receiver.recv() {
+                    Ok(Some(message)) => received.push(message),
+                    end => break end,
+                }
+            };
+            let _ = done.send(());
+            (received, end)
+        });
+        sender.send(&hello).expect("the far end takes the greeting");
+        // The far end may already have gone after the greeting failed; then
+        // the reader says why.
+        let _ = sender.send(message);
+        let ended = ended.recv_timeout(Duration::from_secs(10));
+        // Unblock the reader either way, so a failure is reported, not hung.
+        closer.close("checked");
+        let (received, end) = reading.join().unwrap();
+        assert!(ended.is_ok(), "{case}: the far end kept the session open");
+        let ops: Vec<String> = received
+            .iter()
+            .map(|message| {
+                serde_json::from_slice::<serde_json::Value>(message).unwrap()["op"].to_string()
+            })
+            .collect();
+        // It may end before its own greeting went out, but never replies.
+        assert!(
+            ops.iter().all(|op| op == "\"hello\""),
+            "{case}: the far end replied {ops:?} before it ended ({end:?})"
+        );
+    }
+}
+
 fn data(value: serde_json::Value) -> Value {
     Value::Data(value)
 }

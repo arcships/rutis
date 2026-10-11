@@ -7,6 +7,8 @@ import sys
 import types
 import unittest
 
+import background
+
 from rutis.runner import Runtime, handle_of, scoped_id
 
 
@@ -18,7 +20,7 @@ def module(name: str, apply) -> str:
     return name
 
 
-class ScopedIds(unittest.TestCase):
+class ScopedIds(background.TestCase):
     def test_ids_of_different_pairs_differ(self):
         self.assertNotEqual(scoped_id("x@L", None), scoped_id("x", "L"))
         self.assertNotEqual(scoped_id("x", "a#2"), handle_of(scoped_id("x", "a"), 2))

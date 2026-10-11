@@ -50,6 +50,7 @@ pub fn dev_config(dir: &Path) -> Result<(HostConfig, String), String> {
         runtimes,
         listen: Vec::new(),
         rows,
+        warnings: Vec::new(),
     };
     let extra = dir.join("rutis.dev.json");
     if extra.exists() {
@@ -132,6 +133,23 @@ impl GoDev {
 
     /// Build #`n`: its binary, or the compiler's errors.
     pub fn build(&self, n: u32) -> Result<PathBuf, String> {
+        let (mut command, binary) = self.build_command(n)?;
+        built(command.output(), binary)
+    }
+
+    /// [`GoDev::build`], without blocking; dropped, it kills the go
+    /// command.
+    pub async fn rebuild(&self, n: u32) -> Result<PathBuf, String> {
+        let (command, binary) = self.build_command(n)?;
+        let output = tokio::process::Command::from(command)
+            .kill_on_drop(true)
+            .output()
+            .await;
+        built(output, binary)
+    }
+
+    /// The command that builds #`n`, and the binary it writes.
+    fn build_command(&self, n: u32) -> Result<(std::process::Command, PathBuf), String> {
         let builds = self.dir.join(".rutis").join("go");
         std::fs::create_dir_all(&builds).map_err(|error| error.to_string())?;
         let file = match cfg!(windows) {
@@ -139,17 +157,27 @@ impl GoDev {
             false => format!("{}-{n}", self.name),
         };
         let binary = builds.join(file);
-        let output = std::process::Command::new("go")
+        let mut command = std::process::Command::new("go");
+        command
             .args(["build", "-o"])
             .arg(&binary)
             .arg(&self.package)
-            .current_dir(&self.dir)
-            .output()
-            .map_err(|error| format!("cannot run go (is the Go toolchain on PATH?): {error}"))?;
-        match output.status.success() {
-            true => Ok(binary),
-            false => Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
-        }
+            .current_dir(&self.dir);
+        Ok((command, binary))
+    }
+}
+
+/// `binary`, if the build that wrote it succeeded; else the compiler's
+/// errors.
+fn built(
+    output: std::io::Result<std::process::Output>,
+    binary: PathBuf,
+) -> Result<PathBuf, String> {
+    let output =
+        output.map_err(|error| format!("cannot run go (is the Go toolchain on PATH?): {error}"))?;
+    match output.status.success() {
+        true => Ok(binary),
+        false => Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
     }
 }
 

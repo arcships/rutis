@@ -32,7 +32,7 @@ ctx.plugin(Events, { peer: 'main', out: ['tock'], in: ['tick'] })
 
 ## 在 Rust 应用里挂载 Cordis 插件
 
-当前支持 Unix（Linux、macOS），需要 Node 24 或更高。设计与边界见 [兼容层设计](../design-protocol-plugin-mount.md)，完整示例见 [`examples/dsh-baseline`](../../examples/dsh-baseline)。
+当前支持 Unix（Linux、macOS），需要 Node 22 或更高。设计与边界见 [兼容层设计](../design-protocol-plugin-mount.md)，完整示例见 [`examples/dsh-baseline`](../../examples/dsh-baseline)。
 
 ### 1. 准备 npm 项目
 

@@ -106,7 +106,7 @@ So rutis is not a translation of Cordis. Mechanisms that only hold within one pr
 - **Processes and latency**: each language needs at least one process, and a synchronous cross-language call takes about 30µs (measured on the Node side), far slower than a call within a process. Capabilities called often should eventually be solidified in Rust or placed in the same runtime.
 - **Weaker semantics**: across a process boundary, events can only be notifications, waterfalls are not forwarded, and `instanceof` does not hold; see the [boundary rules](requirements-protocol-plugins.en.md) §5.
 - **Failure scope**: plugins in one runtime share a process; if one crashes the process, the others in it stop too. Isolation means more runtime instances.
-- **Environment requirements**: each language used needs its environment (Node 24+, Python 3.12+), deployed along with it.
+- **Environment requirements**: each language used needs its environment (Node 22+, Python 3.12+), deployed along with it.
 - **More verbose code**: obtaining services and passing the context explicitly takes a few more words than Cordis's `ctx.foo`.
 - **Maintenance surface**: every language connected is one more runtime and one more SDK to maintain over the long term.
 
@@ -121,7 +121,7 @@ This section follows from the claims above and is written mainly for contributor
 3. **Guarantees are written down and pinned by tests**; guarantees not made are written down too ([core design](design-rust-port.en.md) D31).
 4. **Extension points are opened for concrete needs, and kept narrow**; no catch-all hooks ([observation and interception design](design-cordis-observation.en.md)).
 5. **Whatever rutis connects to is a plugin**: runtimes, nodes and mounts are under the same lifecycle, with no special privileges.
-6. **Contracts cover only what crossing a boundary needs**: service names and method shapes (sync or async), no general type layer.
+6. **Contracts cover only what crossing a boundary needs**: service names and method shapes (sync or async), no general type layer. rutis defines how values convert between languages; whether different implementations of one service return the same data, and can replace each other, is up to the service's authors.
 7. **What cannot be done across a boundary becomes a boundary rule**, not a silent degradation.
 8. **Dependency declarations contain only service names**, never languages or locations.
 9. **Configuration describes the desired state**, which the loader keeps reconciling; the host does not hand-write start and stop sequences.
@@ -138,7 +138,6 @@ This section follows from the claims above and is written mainly for contributor
 ## 8. Open questions
 
 - **Permissions**: trust is currently per trusted peer. The more devices and external runtimes a host connects to, the finer the authorization it needs: which node or plugin may provide or use which services.
-- **Contract evolution**: for "Python first, Rust later" to be seamless, the data shapes of one service must also stay the same across languages; for now that relies on convention.
 - **Cycle diagnostics**: the core does not promise cycle detection, but the loader and host know the services plugins declare and could report suspected cycles.
 - **More runtimes**: runtimes for macOS system capabilities (Swift) and for Go are planned ([multi-language design](design-multilang-runtimes-2026-10-03.en.md) §11), to be added one by one as real needs appear.
 

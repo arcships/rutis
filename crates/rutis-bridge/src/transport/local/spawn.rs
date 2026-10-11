@@ -16,7 +16,8 @@ use std::time::Duration;
 use crate::channel::{
     Channel, ChannelError, ChannelInfo, Closer, ConnectError, PeerId, Receiver, Sender,
 };
-use tokio::sync::oneshot;
+use std::collections::BTreeSet;
+use tokio::sync::{oneshot, watch};
 
 use crate::transport::local::lines;
 
@@ -37,7 +38,10 @@ pub const CHANNEL_TOKEN: &str = "RUTIS_CHANNEL_TOKEN";
 pub enum Stdio {
     /// None: no input to read, output discarded (the null device).
     Null,
-    /// This process's own stream: its terminal, when it runs in one.
+    /// This process's own stream: its terminal, when it runs in one. As
+    /// standard input on Unix, it keeps the process in this process's
+    /// group, so a Ctrl-C in the terminal reaches it as well (otherwise it
+    /// gets a group of its own, out of the terminal's reach).
     Inherit,
 }
 
@@ -116,6 +120,17 @@ impl Spawn {
             .stdout(self.stdout.process())
             .stderr(self.stderr.process())
             .kill_on_drop(true);
+        // Out of the terminal's reach: Ctrl-C there signals this process,
+        // which unloads the process's plugins over the channel, and not the
+        // process itself, which would end before its cleanups ran. Not when
+        // it reads the terminal: a background group reading it is stopped
+        // (SIGTTIN), so it stays in this one, and Ctrl-C reaches it too.
+        #[cfg(unix)]
+        if !matches!(self.stdin, Stdio::Inherit) {
+            command.process_group(0);
+        }
+        #[cfg(windows)]
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
         }
@@ -174,27 +189,110 @@ pub(crate) async fn start(spawn: &Spawn) -> Result<Channel, ConnectError> {
 
 type Started = (Channel, Child, Option<tempfile::TempDir>);
 
+/// Let only fds 0–2 and, when given, `channel` (as fd 3) cross the exec
+/// that starts `command`.
+///
+/// Every descriptor here is created close-on-exec, but not always
+/// atomically: on macOS (no `SOCK_CLOEXEC`, no `pipe2`) std creates a
+/// socket pair or a pipe, then marks it. A fork on another thread in
+/// between copies it unmarked into that child, and the program the child
+/// runs holds it for its whole life (#184): another runtime's channel,
+/// which then does not end when its own process does, or the pipe on which
+/// std waits for another child's exec, which then waits for this child to
+/// end. Which thread's descriptor, and which fork, is a matter of timing,
+/// and some are created by std or other libraries rather than rutis; so the
+/// child itself marks every descriptor above the ones it keeps before exec,
+/// whoever created it. A lock around rutis' own creations and forks would
+/// cover neither those nor forks by other code, and would serialize starts.
+///
+/// Running a `pre_exec` hook makes std fork rather than `posix_spawn`.
+#[cfg(unix)]
+pub(crate) fn hand_over(
+    command: &mut tokio::process::Command,
+    channel: Option<std::os::fd::RawFd>,
+) {
+    let first = match channel {
+        Some(_) => CHANNEL_FD + 1,
+        None => CHANNEL_FD,
+    };
+    // Computed here: sysconf need not be async-signal-safe.
+    let limit = descriptor_limit();
+    // SAFETY: between fork and exec, only async-signal-safe calls: dup2,
+    // fcntl and close_range; nothing allocates.
+    unsafe {
+        command.pre_exec(move || {
+            match channel {
+                Some(fd) if fd == CHANNEL_FD => {
+                    // dup2 onto itself would leave it close-on-exec.
+                    let flags = libc::fcntl(fd, libc::F_GETFD);
+                    if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Some(fd) if libc::dup2(fd, CHANNEL_FD) < 0 => {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Some(_) | None => {}
+            }
+            close_on_exec_from(first, limit)
+        });
+    }
+}
+
+/// One past the highest descriptor number to check: the process's limit,
+/// at most 65536. Without `close_range` the child checks every number
+/// below it, and numbers above that are not handed out in practice.
+#[cfg(unix)]
+fn descriptor_limit() -> i32 {
+    // SAFETY: sysconf has no preconditions.
+    let limit = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+    match limit {
+        ..=0 => 1 << 16, // unknown or unlimited
+        limit => limit.min(1 << 16) as i32,
+    }
+}
+
+/// Mark every descriptor from `first` on close-on-exec, leaving those that
+/// already are (std's own exec-error pipe among them) as they are. Runs
+/// between fork and exec.
+#[cfg(unix)]
+fn close_on_exec_from(first: i32, limit: i32) -> std::io::Result<()> {
+    // Linux 5.11+ does it in one call.
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: a plain syscall with integer arguments.
+        let marked = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                first as libc::c_uint,
+                libc::c_uint::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            )
+        };
+        if marked == 0 {
+            return Ok(());
+        }
+    }
+    for fd in first..limit {
+        // SAFETY: fcntl on a number that may not be open: EBADF, skipped.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags >= 0
+                && flags & libc::FD_CLOEXEC == 0
+                && libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn inherit(spawn: &Spawn) -> Result<Started, ConnectError> {
     let (ours, theirs) = UnixStream::pair().map_err(retryable)?;
-    let fd = theirs.as_raw_fd();
     let mut command = spawn.command();
-    // SAFETY: between fork and exec, only async-signal-safe calls: dup2 and
-    // fcntl. Our end and every other descriptor keep CLOEXEC; only fd 3
-    // crosses exec.
-    unsafe {
-        command.pre_exec(move || {
-            if fd == CHANNEL_FD {
-                let flags = libc::fcntl(fd, libc::F_GETFD);
-                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            } else if libc::dup2(fd, CHANNEL_FD) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    hand_over(&mut command, Some(theirs.as_raw_fd()));
     let child = command
         .arg(format!("fd:{CHANNEL_FD}"))
         .args(&spawn.trailing)
@@ -213,8 +311,9 @@ async fn dial_back(spawn: &Spawn) -> Result<Started, ConnectError> {
         .map_err(retryable)?;
     let path = directory.path().join("peer.sock");
     let listener = tokio::net::UnixListener::bind(&path).map_err(retryable)?;
-    let mut child = spawn
-        .command()
+    let mut command = spawn.command();
+    hand_over(&mut command, None);
+    let mut child = command
         .arg(&path)
         .args(&spawn.trailing)
         .spawn()
@@ -239,8 +338,10 @@ const TOKEN_WAIT: Duration = Duration::from_secs(10);
 
 async fn loopback(spawn: &Spawn) -> Result<Started, ConnectError> {
     let listener = Loopback::bind().await.map_err(retryable)?;
-    let mut child = spawn
-        .command()
+    let mut command = spawn.command();
+    #[cfg(unix)]
+    hand_over(&mut command, None);
+    let mut child = command
         .env(CHANNEL_TOKEN, listener.token())
         .arg(listener.address())
         .args(&spawn.trailing)
@@ -481,6 +582,68 @@ impl Exit {
 /// How long a process whose channel closed may take to end by itself.
 const GRACE: Duration = Duration::from_secs(2);
 
+/// The processes started here that have not been waited for yet.
+static RUNNING: std::sync::LazyLock<watch::Sender<BTreeSet<u32>>> =
+    std::sync::LazyLock::new(|| watch::channel(BTreeSet::new()).0);
+
+/// The ids of the processes the local transport started, in this process,
+/// that have not ended yet.
+pub fn running_processes() -> Vec<u32> {
+    RUNNING.borrow().iter().copied().collect()
+}
+
+/// Wait until every process the local transport started has ended and been
+/// waited for: what a host that is ending does once its root has shut down
+/// (the processes end when their channels close, or are killed after a
+/// grace period). Needs the async runtime that started them to keep running.
+pub async fn processes_ended() {
+    let mut running = RUNNING.subscribe();
+    let _ = running.wait_for(|running| running.is_empty()).await;
+}
+
+/// Kill every process the local transport started that has not ended yet,
+/// without waiting for its cleanups: for a host that exits before they
+/// finish. [`processes_ended`] then waits for them to be gone.
+pub fn kill_processes() {
+    // On Windows, every one of them is in this process's job, with what it
+    // started: end the job. Elsewhere, each is killed by the task that
+    // waits for it, so never once it has been waited for and its id reused.
+    #[cfg(windows)]
+    if let Some(Ok(job)) = JOB.get() {
+        // SAFETY: the job handle lives as long as this process.
+        unsafe {
+            windows_sys::Win32::System::JobObjects::TerminateJobObject(*job as _, 1);
+        }
+    }
+    #[cfg(not(windows))]
+    KILL.send_modify(|kills| *kills += 1);
+}
+
+/// Bumped to kill every process not waited for yet.
+#[cfg(not(windows))]
+static KILL: std::sync::LazyLock<watch::Sender<u64>> =
+    std::sync::LazyLock::new(|| watch::channel(0).0);
+
+/// Kill `child` now. On Unix, while it has not been waited for, its id
+/// still names it and the group it leads: a process in a group of its own
+/// takes what it started with it.
+fn kill_now(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let (Ok(None), Some(pid)) = (child.try_wait(), child.id()) {
+        let pid = pid as libc::pid_t;
+        // SAFETY: plain getpgid(2) and kill(2) on this process's child,
+        // which `try_wait` just found not waited for: neither its id nor
+        // its group's can have been reused.
+        unsafe {
+            if libc::getpgid(pid) == pid {
+                libc::kill(-pid, libc::SIGKILL);
+                return;
+            }
+        }
+    }
+    let _ = child.start_kill();
+}
+
 /// The process, owned by a task that records how it ended. Dropped, it
 /// kills the process; [`Child::end`] gives it [`GRACE`] first.
 struct Child {
@@ -492,7 +655,11 @@ impl Child {
     fn watch(mut child: tokio::process::Child) -> Self {
         let (kill, killed) = oneshot::channel::<()>();
         let ended = Arc::new(Exit::default());
-        if let Some(pid) = child.id() {
+        let pid = child.id();
+        if let Some(pid) = pid {
+            RUNNING.send_modify(|running| {
+                running.insert(pid);
+            });
             let record = ended.clone();
             let _ = std::thread::Builder::new()
                 .name("rutis-spawn-exit".into())
@@ -503,22 +670,47 @@ impl Child {
                 });
         }
         let record = ended.clone();
+        #[cfg(not(windows))]
+        let mut kills = KILL.subscribe();
         tokio::spawn(async move {
+            #[cfg(not(windows))]
+            let killed_all = async {
+                let _ = kills.changed().await;
+            };
+            #[cfg(windows)]
+            let killed_all = std::future::pending::<()>();
+            tokio::pin!(killed_all);
             let status = tokio::select! {
                 status = child.wait() => status,
+                () = &mut killed_all => {
+                    kill_now(&mut child);
+                    child.wait().await
+                }
                 ended = killed => {
                     // Its channel closed: it may end by itself.
-                    if ended.is_ok() {
-                        if let Ok(status) = tokio::time::timeout(GRACE, child.wait()).await {
-                            record.record(describe(status));
-                            return;
+                    let by_itself = match ended {
+                        Ok(()) => tokio::select! {
+                            status = tokio::time::timeout(GRACE, child.wait()) => status.ok(),
+                            () = &mut killed_all => None,
+                        },
+                        Err(_) => None,
+                    };
+                    match by_itself {
+                        Some(status) => status,
+                        None => {
+                            kill_now(&mut child);
+                            child.wait().await
                         }
                     }
-                    let _ = child.start_kill();
-                    child.wait().await
                 }
             };
             record.record(describe(status));
+            // Waited for: the process is gone, its id free for reuse.
+            if let Some(pid) = pid {
+                RUNNING.send_modify(|running| {
+                    running.remove(&pid);
+                });
+            }
         });
         Self {
             ended,
@@ -610,15 +802,17 @@ fn peek_exit(_pid: u32) -> Option<std::process::ExitStatus> {
     None
 }
 
+/// The job [`adopt`] puts processes in.
+#[cfg(windows)]
+static JOB: std::sync::OnceLock<Result<usize, String>> = std::sync::OnceLock::new();
+
 /// On Windows, put the process in a job that is closed, ending every
 /// process in it, when this process ends however it does: a runtime does
 /// not outlive its host. A process that cannot be put in it is an error.
 /// Elsewhere, the process ends when its channel closes.
 #[cfg(windows)]
 pub(crate) fn adopt(child: &tokio::process::Child) -> Result<(), String> {
-    use std::sync::OnceLock;
     use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
-    static JOB: OnceLock<Result<usize, String>> = OnceLock::new();
     let job = JOB
         .get_or_init(|| job().map(|handle| handle as usize))
         .clone()?;

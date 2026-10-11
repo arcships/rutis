@@ -32,7 +32,7 @@ For the rutis node configuration, see [Connect nodes](nodes.en.md).
 
 ## Mount Cordis plugins in a Rust application
 
-Currently supported on Unix (Linux and macOS), with Node 24 or later. See the [compatibility layer design](../design-protocol-plugin-mount.en.md) for design boundaries and [`examples/dsh-baseline`](../../examples/dsh-baseline) for a complete example.
+Currently supported on Unix (Linux and macOS), with Node 22 or later. See the [compatibility layer design](../design-protocol-plugin-mount.en.md) for design boundaries and [`examples/dsh-baseline`](../../examples/dsh-baseline) for a complete example.
 
 ### 1. Prepare an npm project
 

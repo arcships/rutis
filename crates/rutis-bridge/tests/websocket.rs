@@ -341,6 +341,36 @@ fn listeners_off_loopback_need_tls() {
     assert!(open.validate().unwrap_err().contains("without TLS"));
 }
 
+/// Starting in an async context (as a plugin does), a CA that is not a
+/// certificate and a port another listener holds are errors, not panics.
+/// risk: B6
+#[test]
+fn starting_with_a_bad_ca_or_a_taken_port_fails_without_panicking() {
+    let started = std::thread::spawn(|| {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            WebSocketTransport::start(Config::new().trust(Trust::only(b"not a PEM".to_vec()))).err()
+        })
+    })
+    .join()
+    .expect("no panic");
+    assert_eq!(started.as_deref(), Some("no certificate in PEM"));
+
+    let taken = std::net::TcpListener::bind(loopback()).unwrap();
+    let address = taken.local_addr().unwrap();
+    let error = WebSocketTransport::start(Config::new().listener(ListenerConfig::new(
+        "public",
+        address,
+        id("main"),
+    )))
+    .err()
+    .unwrap();
+    assert!(
+        error.starts_with(&format!("listener public: cannot bind {address}: "))
+            && error.ends_with("another program listens there: stop it, or change the address"),
+        "{error}"
+    );
+}
+
 /// A pair of channels over a real connection between two transports.
 fn connected(
     server: &WebSocketTransport,
@@ -379,6 +409,29 @@ fn messages_over_the_limit_close_the_channel_either_way() {
     assert!(
         matches!(&ended, Err(rutis_bridge::channel::ChannelError::Closed { reason }) if reason.contains("1009")),
         "{ended:?}"
+    );
+}
+
+/// Q6.3.2: the shared size-limit check, both ends at the same limit.
+#[test]
+fn meets_the_size_limit_check() {
+    let small = Limits {
+        max_message: 1024,
+        ..Limits::default()
+    };
+    let server = server(small.clone());
+    let client = client(small);
+    let (dialed, accepted, _r) = connected(&server, &client);
+    rutis_bridge::channel::testing::size_limit((dialed, accepted), 1024);
+}
+
+/// The local transport frames lines with the WebSocket transport's default
+/// limit.
+#[test]
+fn the_local_limit_is_the_websocket_default() {
+    assert_eq!(
+        rutis_bridge::transport::local::MAX_MESSAGE,
+        Limits::default().max_message
     );
 }
 

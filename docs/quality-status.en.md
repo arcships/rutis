@@ -48,7 +48,7 @@ Status: **met**, **partly**, **not met**, **n/a**. The gaps column refers to ris
 | Q6.6 | `rutis-host`, `rutis.json`, project templates | Not met | No black-box tests (`main.rs` at 0% coverage); signal handling missing (#174); templates only checked for generated file content |
 | Q6.7 | Node / Python SDKs and test tools | Partly | Both SDKs have test tools with strict mode; test tools are not compared with real runtimes (A1) |
 | Q6.8 | Node and Python runtimes; Bun (planned) | Partly | Both runtimes pass conformance. On Windows the loader's row kinds run (loopback handover, including Node and Python cold-starting together and using each other's services); but session conformance (`runtime_conformance.rs`) and the runtime conformance matrix (`session_matrix.rs`, including its WebSocket columns) do not, and 5 tests in `runtime_rows.rs` are Unix only. Reentrancy rules written, cross-runtime policy undecided |
-| Q6.9 | Service contracts across implementations | Not met | No way to run one set of cases against different implementations of a service (G1); needs a design first |
+| Q6.9 | Service contracts across implementations | Partly | Method shapes can be declared; every language can name its errors; value passing rules are written, but cross-language round trips cover only a few fixed values (P7) and test tools are not compared with real runtimes (A1); replacement itself has no end-to-end verification (S4 #188). Whether implementations return the same data is out of scope (item 4, decided 2026-10-11) |
 | Q6.10 | Loader editable layer, dsh profile files | Partly | Atomic writes and conflict replay implemented; no samples from earlier releases |
 | Q6.11 | Cordis binding generation | Partly | Generator unit tests; real baseline plugins compiled and called; no periodic verification against new external versions (F4) |
 | Q6.12 | dylib loading | Partly | Runs on every merge on Linux and macOS; Windows only when dylib code changes |
@@ -360,7 +360,7 @@ Each scenario first says what it is, which parts it goes through and under what 
 
 | # | What can go wrong | Dimension | Impact | Likelihood | Pri | Control | Stage | Current |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| G1 | Implementations of the same service in different languages return differently shaped data (field names, optional fields, error types); consumers break after the switch | Correctness | High | High | P0 | Service contract test tool (#211): a plugin author writes a service's calls and expectations once; the SDK test tool and the real host can run them against an implementation in any language. Design philosophy §8 lists "evolution of contracts" as an open question | Design, PR | No |
+| G1 | Implementations of the same service in different languages return differently shaped data (field names, optional fields, error types); consumers break after the switch | Correctness | — | — | Out of scope | The service's authors are responsible (standard Q6.9.4, decided 2026-10-11). The part rutis owns: the same value converts the same way between languages (P7), and test tools behave like real runtimes (A1) | — | — |
 | G2 | Calls hang during the switch | Faults | Medium | Medium | P1 | E (S4: continuous calls during the switch, each succeeds or fails explicitly) | PR | No |
 | G3 | The old implementation leaves residue after the switch (processes, links) | Residue | Medium | Medium | P1 | E + R | PR | No |
 | G4 | Consumers do not restart and keep the old implementation | Correctness | High | Low | P1 | K (core eviction) | PR | Yes |
@@ -455,7 +455,6 @@ The controls used by the P0 and P1 risks of §4, merged into what needs building
 | **MX: version and platform matrix** | C10, A8, E13, J2, P8 | Node 24 / 26, Python 3.12; Windows skips the bridge's session and runtime conformance suites | Node 22 (once the minimum drops), minimum and latest Python, the websockets lower bound; Windows loopback and WebSocket columns; previous release's runtime vs current host |
 | **IN: installation smoke test** | B1 | No | Three platforms × three channels after merge; again with registry packages after release (#193) |
 | **PT: cross-language value round trips** | P7, C5, P4 | Partly | The same random values round-tripped Rust↔Node and Rust↔Python and compared; release counting invariant |
-| **Service contract test tool** | G1 | No | New design: calls and expectations for a service written once, run against an implementation in any language. Design document first |
 | **X: test tools vs real runtimes** | A1 | No | The conformance fixture run both in test tools and in real runtimes |
 | **X: nightly baseline with the latest Cordis plugins** | F4 | No | Nightly install of the latest versions, baseline run, report only |
 | **FZ** | P2, E7, B5 | No | Session frames, local line framing, WebSocket upgrade requests; configuration files at low priority (#179) |
@@ -631,7 +630,6 @@ Ordered by risk level, P0 first; within a level, infrastructure others depend on
 | Previous release's runtime vs current host | J2, E13 | #209 |
 | Nightly baseline with the latest Cordis plugins | F4 | part of #190 |
 | TLA+ Spec 2 | E4, E5 | #210 |
-| Service contract test tool (design first) | G1 | #211 |
 | Bun columns | Bun variant of C10 | #194 (after Spec 1) |
 
 ### 9.4 Waiting for design
@@ -647,7 +645,7 @@ Ordered by risk level, P0 first; within a level, infrastructure others depend on
 
 1. **Scale assumptions** (§2.2): affect the ratings of D11, L1, L2 and the length and size of soaks.
 2. **Whether `rutis-host run` watches its configuration file**: affects how B4 is verified.
-3. **Service contract test tool (G1)**: design philosophy §8 lists this as open. It is key to whether "moving an implementation" is reliable, and needs its own design.
+3. ~~Service contract test tool (G1)~~: decided (2026-10-11). Whether implementations of one service return the same data is up to the service's authors; rutis provides no contract tool (standard Q6.9.4). rutis only guarantees that the rules for converting values across languages hold in every runtime and test tool (P7, A1).
 4. **Isolation and permissions for agent-written plugins (H1, H2)**: design philosophy §8 "permissions" lists this as open.
 5. **Adopting TLA+**: the first spec, including learning, takes about one to two weeks; staffing to confirm.
 

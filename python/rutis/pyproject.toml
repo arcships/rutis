@@ -14,7 +14,7 @@ Documentation = "https://github.com/arcships/rutis/tree/main/docs/guide"
 
 [project.optional-dependencies]
 # WebSocket channels: a runtime other machines reach (listen:ws://…, listen:wss://…).
-network = ["websockets>=13"]
+network = ["websockets>=15"]
 
 [build-system]
 requires = ["setuptools>=68"]

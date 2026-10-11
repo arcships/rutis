@@ -1,0 +1,4 @@
+*.jar
+states/
+*_TTrace_*.tla
+*.out

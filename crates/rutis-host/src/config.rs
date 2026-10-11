@@ -17,7 +17,9 @@
 //! ```
 //!
 //! Paths are relative to the file. Rows are rutis-loader rows; every service
-//! name crosses between languages and nodes by name.
+//! name crosses between languages and nodes by name. A field the host does
+//! not know is an error; in a row, a warning (the row runs without it), so
+//! a misspelt one is not dropped without a word.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -39,6 +41,10 @@ pub struct HostConfig {
     pub listen: Vec<Listener>,
     #[serde(default)]
     pub rows: Vec<Value>,
+    /// What reading the file found wrong but went on without: the host
+    /// shows these before it starts.
+    #[serde(skip)]
+    pub warnings: Vec<String>,
 }
 
 fn default_id() -> String {
@@ -194,19 +200,39 @@ pub struct Listener {
 impl HostConfig {
     /// Read `path`; relative paths in it become relative to its directory.
     pub fn read(path: &Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let text = std::fs::read_to_string(path).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => format!(
+                "{}: {error}: name the configuration, as `rutis-host run path/to/rutis.json`",
+                path.display()
+            ),
+            _ => format!("{}: {error}", path.display()),
+        })?;
         let mut config: Self =
             serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
-        let base = path.parent().unwrap_or(Path::new("."));
-        config.rebase(base);
+        let mut ignored = Vec::new();
+        check_rows(&config.rows, "rows", &mut ignored)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        config.warnings = ignored
+            .into_iter()
+            .map(|warning| format!("{}: {warning}", path.display()))
+            .collect();
+        // Absolute, so a plugin file's row is a `file:` URL even when the
+        // file was named relative to the working directory.
+        let base = match path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir,
+            _ => Path::new("."),
+        };
+        let base = std::path::absolute(base).unwrap_or_else(|_| base.to_owned());
+        config.rebase(&base);
         Ok(config)
     }
 
     pub fn rebase(&mut self, base: &Path) {
         let at = |path: &mut PathBuf| {
             if path.is_relative() {
-                *path = base.join(&*path);
+                // Without the `.` components (`<base>/.` for the default
+                // project), which errors would show.
+                *path = base.join(&*path).components().collect();
             }
         };
         if let Some(node) = &mut self.runtimes.node {
@@ -290,6 +316,7 @@ impl HostConfig {
         self.runtimes.remote.extend(other.runtimes.remote);
         self.listen.extend(other.listen);
         self.rows.extend(other.rows);
+        self.warnings.extend(other.warnings);
     }
 
     /// Each runtime's name, which is also the prefix of its rows
@@ -368,6 +395,54 @@ impl HostConfig {
             })
             .collect()
     }
+}
+
+/// The fields of a row (rutis-loader's; `config` holds a group's rows).
+const ROW_FIELDS: &[&str] = &[
+    "id",
+    "name",
+    "config",
+    "inject",
+    "isolate",
+    "disabled",
+    "group",
+    "instanced",
+];
+
+/// Each row field the loader does not know, in `rows` and in groups, as a
+/// warning in `ignored` (the loader ignores it); a row that is not an
+/// object is an error.
+fn check_rows(rows: &[Value], at: &str, ignored: &mut Vec<String>) -> Result<(), String> {
+    for (index, row) in rows.iter().enumerate() {
+        let Some(fields) = row.as_object() else {
+            return Err(format!("{at}[{index}]: a row is an object"));
+        };
+        let place = match row["id"].as_str() {
+            Some(id) => format!("{at}[{index}] (id {id:?})"),
+            None => format!("{at}[{index}]"),
+        };
+        for unknown in fields
+            .keys()
+            .filter(|key| !ROW_FIELDS.contains(&key.as_str()))
+        {
+            ignored.push(format!(
+                "{place}: unknown field `{unknown}` is ignored; a row has {}",
+                ROW_FIELDS
+                    .iter()
+                    .map(|field| format!("`{field}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        let group = !matches!(
+            fields.get("group"),
+            None | Some(Value::Null | Value::Bool(false))
+        );
+        if let (true, Some(children)) = (group, row["config"].as_array()) {
+            check_rows(children, &format!("{place}.config"), ignored)?;
+        }
+    }
+    Ok(())
 }
 
 /// The token presented to, or accepted from, `peer`:
