@@ -840,9 +840,10 @@ pub(crate) async fn drive(this: Arc<FiberInner>, mut rx: mpsc::UnboundedReceiver
         }
         if let Some(task) = shutdown_task {
             this.alive.store(false, Ordering::SeqCst);
-            // dispose() may have passed its closing check before shutdown was
-            // posted, then registered terminal_task while Shutdown was queued.
-            // Its Dispose intent carries no task, so complete the stored task.
+            // A registered terminal task must end with this result. Its
+            // Dispose intent carries no task. Since #234 a root dispose cannot
+            // register behind a queued Shutdown (both take the admission
+            // lock); this stays as the guard for that state.
             let (terminal, err) = {
                 let tr = this.transition.lock().unwrap();
                 (tr.terminal_task.clone(), tr.error.clone())
@@ -1250,25 +1251,41 @@ impl FiberView {
 
     /// dispose:恰好一次;重复/并发调用 join 同一 `Arc<CordisError>`(D6/D20)。
     /// 入队前预取消当前代 token(运行中的 apply 协作退出,D27 第②步前置)。
+    ///
+    /// Root (#234): the call is ordered against `Ctx::shutdown()` by the
+    /// admission lock. Before shutdown closes admission it registers its own
+    /// dispose, which the shutdown then waits behind and shares; after, it
+    /// joins the shutdown task. Either way it shares the one cleanup result.
     pub fn dispose(&self) -> BoxFuture<'static, Result<(), Arc<CordisError>>> {
-        if self.inner.is_root && self.inner.ctx.shared().closing.load(Ordering::SeqCst) {
-            let task = self
-                .inner
-                .ctx
-                .shared()
-                .shutdown_task
-                .lock()
-                .unwrap()
-                .clone();
-            if let Some(task) = task {
-                return Box::pin(async move { join_task(&task).await });
+        let task = if self.inner.is_root {
+            #[cfg(test)]
+            test_hooks::root_dispose();
+            // Deciding (closing or not) and registering must be one step:
+            // checked apart, a whole shutdown can finish in between and the
+            // dispose would register on a stopped driver and get `Closed`.
+            let shared = self.inner.ctx.shared().clone();
+            let _admission = shared.admission.lock().unwrap();
+            if shared.closing.load(Ordering::SeqCst) {
+                shared
+                    .shutdown_task
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .expect("shutdown stores its task before closing admission")
+            } else {
+                self.register_unconditional_dispose()
             }
-        }
-        let task = match self.register_dispose(|_| Ok(())) {
-            Ok(task) => task,
-            Err(_) => unreachable!("an unconditional dispose is always registered"),
+        } else {
+            self.register_unconditional_dispose()
         };
         Box::pin(async move { join_task(&task).await })
+    }
+
+    fn register_unconditional_dispose(&self) -> Arc<TransitionTask> {
+        match self.register_dispose(|_| Ok(())) {
+            Ok(task) => task,
+            Err(_) => unreachable!("an unconditional dispose is always registered"),
+        }
     }
 
     /// Register the dispose (or join the one registered) if `check` accepts
@@ -1601,6 +1618,27 @@ impl std::future::IntoFuture for &FiberView {
 
     fn into_future(self) -> Self::IntoFuture {
         settle(&self.inner)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static ROOT_DISPOSE: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    /// Run `f` once, on this thread, inside the next root `dispose()` call:
+    /// after the call has started and before it registers or joins anything.
+    pub(crate) fn on_root_dispose(f: impl FnOnce() + 'static) {
+        ROOT_DISPOSE.with(|hook| *hook.borrow_mut() = Some(Box::new(f)));
+    }
+
+    pub(super) fn root_dispose() {
+        if let Some(f) = ROOT_DISPOSE.with(|hook| hook.borrow_mut().take()) {
+            f();
+        }
     }
 }
 

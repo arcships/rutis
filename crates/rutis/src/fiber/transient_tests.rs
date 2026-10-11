@@ -61,8 +61,9 @@ async fn churn_root_provides_release_accounting() {
     );
 }
 
-/// Stage the interleaving where dispose passed the closing check, but its
-/// terminal task and Dispose intent arrive after Shutdown was enqueued.
+/// Stage a terminal task and Dispose intent that arrive after Shutdown was
+/// enqueued. The public root `dispose()` can no longer do this (#234); the
+/// test guards the driver's completion of such a task.
 #[tokio::test]
 async fn shutdown_completes_dispose_task_queued_behind_it() {
     let ctx = Ctx::root().unwrap();
@@ -100,6 +101,70 @@ async fn shutdown_completes_dispose_task_queued_behind_it() {
         .await
         .expect("dispose task stranded behind Shutdown")
         .unwrap();
+}
+
+/// #234: shutdown runs to completion between the moment a root `dispose()`
+/// starts and the moment it would register. The dispose must join the
+/// shutdown's result, not register on the stopped driver and get `Closed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_234_root_dispose_overtaken_by_shutdown_joins_its_result() {
+    let ctx = Ctx::root().unwrap();
+    let root = ctx.root_view().unwrap();
+    let shutdown = Arc::new(Mutex::new(None));
+    test_hooks::on_root_dispose({
+        let ctx = ctx.clone();
+        let shutdown = shutdown.clone();
+        move || {
+            let pending = ctx.shutdown();
+            let handle = tokio::runtime::Handle::current();
+            let result = tokio::task::block_in_place(|| handle.block_on(pending));
+            *shutdown.lock().unwrap() = Some(result);
+        }
+    });
+    let dispose = root.dispose();
+    let shutdown = shutdown.lock().unwrap().take().expect("hook ran");
+    assert!(shutdown.is_ok(), "shutdown: {shutdown:?}");
+    let dispose = tokio::time::timeout(Duration::from_secs(10), dispose)
+        .await
+        .expect("dispose stalled");
+    assert!(
+        dispose.is_ok(),
+        "dispose must share shutdown's Ok, got {dispose:?}"
+    );
+}
+
+/// #234: a root dispose registered before shutdown closes admission and the
+/// shutdown share one cleanup and the same result `Arc`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_234_root_dispose_before_shutdown_shares_one_cleanup() {
+    let ctx = Ctx::root().unwrap();
+    let root = ctx.root_view().unwrap();
+    let cleanups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    ctx.effect({
+        let cleanups = cleanups.clone();
+        move || {
+            Effect::AsyncDisposer(Box::new(move || {
+                Box::pin(async move {
+                    cleanups.fetch_add(1, Ordering::SeqCst);
+                    Err(CordisError::PluginFailed("root cleanup failed".into()))
+                })
+            }))
+        }
+    })
+    .unwrap();
+    let dispose = root.dispose();
+    let shutdown = ctx.shutdown();
+    let (dispose, shutdown) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(dispose, shutdown)
+    })
+    .await
+    .expect("dispose/shutdown stalled");
+    let (dispose, shutdown) = (dispose.unwrap_err(), shutdown.unwrap_err());
+    assert!(
+        Arc::ptr_eq(&dispose, &shutdown),
+        "{dispose:?} vs {shutdown:?}"
+    );
+    assert_eq!(cleanups.load(Ordering::SeqCst), 1);
 }
 
 struct ProbeEvent;
