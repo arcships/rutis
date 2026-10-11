@@ -264,7 +264,14 @@ async fn dev(args: &[String]) -> Result<Stopped, String> {
                 Ok(binary) => {
                     build += 1;
                     running.resolver.replace(&go.runtime, &binary);
-                    match running.runtimes.restart(&go.runtime).await {
+                    // A runtime that hangs starting does not keep a signal out.
+                    let restarted = tokio::select! {
+                        restarted = running.runtimes.restart(&go.runtime) => restarted,
+                        signal = signals.next() => {
+                            return Ok(stop::stop(&host, signal, deadline, &mut signals).await);
+                        }
+                    };
+                    match restarted {
                         Ok(()) => println!("{}: rebuilt and restarted", go.runtime),
                         Err(error) => println!("{}: cannot restart: {error}", go.runtime),
                     }
