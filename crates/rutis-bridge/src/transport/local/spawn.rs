@@ -174,27 +174,110 @@ pub(crate) async fn start(spawn: &Spawn) -> Result<Channel, ConnectError> {
 
 type Started = (Channel, Child, Option<tempfile::TempDir>);
 
+/// Let only fds 0–2 and, when given, `channel` (as fd 3) cross the exec
+/// that starts `command`.
+///
+/// Every descriptor here is created close-on-exec, but not always
+/// atomically: on macOS (no `SOCK_CLOEXEC`, no `pipe2`) std creates a
+/// socket pair or a pipe, then marks it. A fork on another thread in
+/// between copies it unmarked into that child, and the program the child
+/// runs holds it for its whole life (#184): another runtime's channel,
+/// which then does not end when its own process does, or the pipe on which
+/// std waits for another child's exec, which then waits for this child to
+/// end. Which thread's descriptor, and which fork, is a matter of timing,
+/// and some are created by std or other libraries rather than rutis; so the
+/// child itself marks every descriptor above the ones it keeps before exec,
+/// whoever created it. A lock around rutis' own creations and forks would
+/// cover neither those nor forks by other code, and would serialize starts.
+///
+/// Running a `pre_exec` hook makes std fork rather than `posix_spawn`.
+#[cfg(unix)]
+pub(crate) fn hand_over(
+    command: &mut tokio::process::Command,
+    channel: Option<std::os::fd::RawFd>,
+) {
+    let first = match channel {
+        Some(_) => CHANNEL_FD + 1,
+        None => CHANNEL_FD,
+    };
+    // Computed here: sysconf need not be async-signal-safe.
+    let limit = descriptor_limit();
+    // SAFETY: between fork and exec, only async-signal-safe calls: dup2,
+    // fcntl and close_range; nothing allocates.
+    unsafe {
+        command.pre_exec(move || {
+            match channel {
+                Some(fd) if fd == CHANNEL_FD => {
+                    // dup2 onto itself would leave it close-on-exec.
+                    let flags = libc::fcntl(fd, libc::F_GETFD);
+                    if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Some(fd) if libc::dup2(fd, CHANNEL_FD) < 0 => {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Some(_) | None => {}
+            }
+            close_on_exec_from(first, limit)
+        });
+    }
+}
+
+/// One past the highest descriptor number to check: the process's limit,
+/// at most 65536. Without `close_range` the child checks every number
+/// below it, and numbers above that are not handed out in practice.
+#[cfg(unix)]
+fn descriptor_limit() -> i32 {
+    // SAFETY: sysconf has no preconditions.
+    let limit = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+    match limit {
+        ..=0 => 1 << 16, // unknown or unlimited
+        limit => limit.min(1 << 16) as i32,
+    }
+}
+
+/// Mark every descriptor from `first` on close-on-exec, leaving those that
+/// already are (std's own exec-error pipe among them) as they are. Runs
+/// between fork and exec.
+#[cfg(unix)]
+fn close_on_exec_from(first: i32, limit: i32) -> std::io::Result<()> {
+    // Linux 5.11+ does it in one call.
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: a plain syscall with integer arguments.
+        let marked = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                first as libc::c_uint,
+                libc::c_uint::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            )
+        };
+        if marked == 0 {
+            return Ok(());
+        }
+    }
+    for fd in first..limit {
+        // SAFETY: fcntl on a number that may not be open: EBADF, skipped.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags >= 0
+                && flags & libc::FD_CLOEXEC == 0
+                && libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn inherit(spawn: &Spawn) -> Result<Started, ConnectError> {
     let (ours, theirs) = UnixStream::pair().map_err(retryable)?;
-    let fd = theirs.as_raw_fd();
     let mut command = spawn.command();
-    // SAFETY: between fork and exec, only async-signal-safe calls: dup2 and
-    // fcntl. Our end and every other descriptor keep CLOEXEC; only fd 3
-    // crosses exec.
-    unsafe {
-        command.pre_exec(move || {
-            if fd == CHANNEL_FD {
-                let flags = libc::fcntl(fd, libc::F_GETFD);
-                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            } else if libc::dup2(fd, CHANNEL_FD) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    hand_over(&mut command, Some(theirs.as_raw_fd()));
     let child = command
         .arg(format!("fd:{CHANNEL_FD}"))
         .args(&spawn.trailing)
@@ -213,8 +296,9 @@ async fn dial_back(spawn: &Spawn) -> Result<Started, ConnectError> {
         .map_err(retryable)?;
     let path = directory.path().join("peer.sock");
     let listener = tokio::net::UnixListener::bind(&path).map_err(retryable)?;
-    let mut child = spawn
-        .command()
+    let mut command = spawn.command();
+    hand_over(&mut command, None);
+    let mut child = command
         .arg(&path)
         .args(&spawn.trailing)
         .spawn()
@@ -239,8 +323,10 @@ const TOKEN_WAIT: Duration = Duration::from_secs(10);
 
 async fn loopback(spawn: &Spawn) -> Result<Started, ConnectError> {
     let listener = Loopback::bind().await.map_err(retryable)?;
-    let mut child = spawn
-        .command()
+    let mut command = spawn.command();
+    #[cfg(unix)]
+    hand_over(&mut command, None);
+    let mut child = command
         .env(CHANNEL_TOKEN, listener.token())
         .arg(listener.address())
         .args(&spawn.trailing)
