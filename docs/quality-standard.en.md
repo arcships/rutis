@@ -289,9 +289,10 @@ E.g.: the per-language runtime processes. Before support for a new language or r
 
 E.g.: one service name provided by implementations in different languages or places.
 
-1. A service's method shapes (sync or async) and data shapes can be declared;
-2. different implementations of the same service can be verified for consistent behavior with one set of cases;
-3. when an implementation is replaced, consumers need no change and the host needs no restart; calls during the replacement either succeed or fail explicitly, never hang; the old implementation leaves nothing behind.
+1. A service's method shapes (sync or async) can be declared;
+2. values passed across languages are converted by one written set of rules (plugin API, "Passing values"): every runtime and every SDK's test tool passes values by those rules, and this is verified; an implementation in any language can name the errors it throws;
+3. when an implementation is replaced, consumers need no change and the host needs no restart; calls during the replacement either succeed or fail explicitly, never hang; the old implementation leaves nothing behind;
+4. whether different implementations of one service return the same data (fields, missing versus `null`, error names, meaning) is the responsibility of the service's authors and outside rutis: rutis does not define a service's data shapes and provides no contract format or checking tool.
 
 ### Q6.10 Persistence
 
