@@ -123,6 +123,9 @@ impl WebSocketTransport {
     /// Start the transport's threads and bind its listeners.
     pub fn start(config: Config) -> Result<Arc<Self>, String> {
         config.validate()?;
+        // Before the runtime: returning with it, in an async context, would
+        // panic as it is dropped.
+        let roots = tls::roots(&config.trust)?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("rutis-websocket")
@@ -137,7 +140,6 @@ impl WebSocketTransport {
             live: Default::default(),
             ended: Default::default(),
         });
-        let roots = tls::roots(&config.trust)?;
         let mut listeners = HashMap::new();
         for listener in &config.listeners {
             let listening = listen::start(listener, shared.clone(), &handle);

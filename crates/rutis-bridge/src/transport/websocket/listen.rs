@@ -34,8 +34,14 @@ pub(crate) fn start(
     runtime: &tokio::runtime::Handle,
 ) -> Result<Listening, String> {
     let std_listener = std::net::TcpListener::bind(config.bind).map_err(|error| {
+        let hint = match error.kind() {
+            std::io::ErrorKind::AddrInUse => {
+                ": another program listens there: stop it, or change the address"
+            }
+            _ => "",
+        };
         format!(
-            "listener {}: cannot bind {}: {error}",
+            "listener {}: cannot bind {}: {error}{hint}",
             config.name, config.bind
         )
     })?;

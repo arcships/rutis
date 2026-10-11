@@ -67,6 +67,8 @@ On Unix, a signal `rutis-host` was started ignoring (SIGHUP under `nohup`, for e
 
 Relative paths in the file are resolved from the directory containing the file.
 
+An unknown field is an error, in `rows` too: the host does not start, and says the file, where (line and column, or which row) and the fields allowed there. A misspelt field is never silently ignored.
+
 ### `id`
 
 The endpoint ID of this node. Connected nodes see this name. Defaults to `host`.
@@ -85,7 +87,7 @@ If a runtime package is missing, startup fails and prints an installation comman
 
 ### `listen`
 
-WebSocket listeners used by other nodes to connect. `cert` and `key` are a TLS certificate and private key in PEM format; they can also be supplied through `RUTIS_CERT` and `RUTIS_KEY`. A listener without TLS can bind only to a loopback address.
+WebSocket listeners used by other nodes to connect. `cert` and `key` are a TLS certificate and private key in PEM format; they can also be supplied through `RUTIS_CERT` and `RUTIS_KEY` (the file's own come first). They go together: with only one of them the host does not start, rather than listening without TLS. A listener without TLS can bind only to a loopback address.
 
 ### `rows`
 

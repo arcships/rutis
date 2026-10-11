@@ -17,7 +17,9 @@
 //! ```
 //!
 //! Paths are relative to the file. Rows are rutis-loader rows; every service
-//! name crosses between languages and nodes by name.
+//! name crosses between languages and nodes by name. A field the host does
+//! not know, in a row too, is an error: a misspelt one would otherwise be
+//! dropped without a word.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -194,19 +196,33 @@ pub struct Listener {
 impl HostConfig {
     /// Read `path`; relative paths in it become relative to its directory.
     pub fn read(path: &Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let text = std::fs::read_to_string(path).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => format!(
+                "{}: {error}: name the configuration, as `rutis-host run path/to/rutis.json`",
+                path.display()
+            ),
+            _ => format!("{}: {error}", path.display()),
+        })?;
         let mut config: Self =
             serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
-        let base = path.parent().unwrap_or(Path::new("."));
-        config.rebase(base);
+        check_rows(&config.rows, "rows").map_err(|error| format!("{}: {error}", path.display()))?;
+        // Absolute, so a plugin file's row is a `file:` URL even when the
+        // file was named relative to the working directory.
+        let base = match path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir,
+            _ => Path::new("."),
+        };
+        let base = std::path::absolute(base).unwrap_or_else(|_| base.to_owned());
+        config.rebase(&base);
         Ok(config)
     }
 
     pub fn rebase(&mut self, base: &Path) {
         let at = |path: &mut PathBuf| {
             if path.is_relative() {
-                *path = base.join(&*path);
+                // Without the `.` components (`<base>/.` for the default
+                // project), which errors would show.
+                *path = base.join(&*path).components().collect();
             }
         };
         if let Some(node) = &mut self.runtimes.node {
@@ -368,6 +384,52 @@ impl HostConfig {
             })
             .collect()
     }
+}
+
+/// The fields of a row (rutis-loader's; `config` holds a group's rows).
+const ROW_FIELDS: &[&str] = &[
+    "id",
+    "name",
+    "config",
+    "inject",
+    "isolate",
+    "disabled",
+    "group",
+    "instanced",
+];
+
+/// Refuse a row field the loader does not know, in `rows` and in groups.
+fn check_rows(rows: &[Value], at: &str) -> Result<(), String> {
+    for (index, row) in rows.iter().enumerate() {
+        let Some(fields) = row.as_object() else {
+            return Err(format!("{at}[{index}]: a row is an object"));
+        };
+        let place = match row["id"].as_str() {
+            Some(id) => format!("{at}[{index}] (id {id:?})"),
+            None => format!("{at}[{index}]"),
+        };
+        if let Some(unknown) = fields
+            .keys()
+            .find(|key| !ROW_FIELDS.contains(&key.as_str()))
+        {
+            return Err(format!(
+                "{place}: unknown field `{unknown}`, expected one of {}",
+                ROW_FIELDS
+                    .iter()
+                    .map(|field| format!("`{field}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        let group = !matches!(
+            fields.get("group"),
+            None | Some(Value::Null | Value::Bool(false))
+        );
+        if let (true, Some(children)) = (group, row["config"].as_array()) {
+            check_rows(children, &format!("{place}.config"))?;
+        }
+    }
+    Ok(())
 }
 
 /// The token presented to, or accepted from, `peer`:

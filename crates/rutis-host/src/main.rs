@@ -8,11 +8,8 @@
 //! rutis-host go add <module>@<version> [rutis.json]
 //! ```
 
-mod config;
-mod host;
-mod new;
-mod project;
-mod status;
+use rutis_host::{config, host, new, project, status};
+
 mod stop;
 
 use stop::Stopped;
@@ -381,6 +378,12 @@ async fn check(args: &[String]) -> Result<(), String> {
             Err(error) => {
                 failed += 1;
                 println!("{id} ({name}): {error}");
+                if let rutis_loader::LoaderError::NotFound { .. } = error {
+                    println!(
+                        "  install it where its runtime finds it (a runtime under runtimes), \
+                         or correct the row's name"
+                    );
+                }
             }
         }
     }

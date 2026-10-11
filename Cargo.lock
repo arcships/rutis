@@ -3182,6 +3182,7 @@ name = "rutis-host"
 version = "0.8.0"
 dependencies = [
  "libc",
+ "rustls-pki-types",
  "rutis",
  "rutis-bridge",
  "rutis-loader",

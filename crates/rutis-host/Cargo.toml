@@ -11,6 +11,9 @@ readme = "README.md"
 keywords = ["rutis", "plugin", "host", "python", "go"]
 categories = ["command-line-utilities", "development-tools"]
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "rutis-host"
 path = "src/main.rs"
@@ -19,6 +22,8 @@ path = "src/main.rs"
 rutis = { path = "../rutis", version = "0.8.0" }
 rutis-bridge = { path = "../rutis-bridge", version = "0.8.0", features = ["node", "python", "bun", "go", "websocket"] }
 rutis-loader = { path = "../rutis-loader", version = "0.8.0", features = ["node", "python", "bun", "go", "peer"] }
+# To say which file is not PEM (the transport only sees the contents).
+rustls-pki-types = { version = "1", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { workspace = true, features = ["signal"] }
