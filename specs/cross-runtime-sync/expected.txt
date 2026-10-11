@@ -1,0 +1,18 @@
+# configuration  expected TLC outcome (see README.md)
+current-2node deadlock
+current-1node deadlock
+current-1node-1python ok
+current-reentrant ok
+current-norebase violated:RoutingSound
+policy-a-1node deadlock
+policy-a-2node deadlock
+policy-a-refusals violated:NoLegitimateRefused
+policy-bchain-2node deadlock
+policy-b-2node ok
+policy-b-1node ok
+policy-b-nonreentrant ok
+policy-b-acts violated:NeverCycle
+policy-b-2node-seq ok
+policy-b-2node-3roots ok
+policy-b-1node-3roots ok
+policy-b-2node-depth4 ok
