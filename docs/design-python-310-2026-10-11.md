@@ -6,7 +6,7 @@
 依据：#196（含 2026-10-09 的决定和 #218 遗留的 `accept()` 问题）、#204（CI 范围调整）、#197 / #218（websockets 下限 15）、#193（PyPI 安装冒烟）、#228（策略 B）。属于 #183 第一步。
 规范：[质量规范](quality-standard.md) Q10.2、Q10.4、Q6.7.1、Q5.2.2；[现状](quality-status.md) 风险 MX。
 
-范围外：Python 3.9 及更早；Node 最低版本（#195）；websockets 下限本身（#197 已合入）；CI 文件的修改（由 #203 / #204 的 PR 做，本文只列需求）。
+范围外：Python 3.9 及更早；Node 最低版本（#195）；websockets 下限本身（#197 已合入）；CI 里其他版本的改动（由 #204 的 #256 做）。
 
 ## 一、决策
 
@@ -14,7 +14,7 @@
 | --- | --- |
 | D1 | 最低 Python 版本 3.10；`requires-python = ">=3.10"`（三处）。3.9 不支持 |
 | D2 | 3.12 及以上继续用原生 `asyncio.Task(..., eager_start=True)` |
-| D3 | 3.10、3.11 用新模块 `rutis/_eager.py` 模拟 eager start，行为与原生一致（第三节），差异写明并有界（3.10 节） |
+| D3 | 3.10、3.11 用新模块 `rutis/_eager.py` 模拟 eager start，行为与原生一致（第三节），差异写明并有界（3.9 节） |
 | D4 | 两条路径都直接构造 `asyncio.Task`，不经过 `loop.create_task`，因此都不使用 `loop.set_task_factory` 设置的工厂（与现在 3.12 路径一致） |
 | D5 | 两条路径共用一组带固定预期的测试，在 3.10、3.11、3.12+ 上都断言同一结果 |
 | D6 | `websocket.Listener` 的监听失败后，`accept()` 立即抛出；`python -m rutis` 因此以非 0 退出码结束并打印原因 |
@@ -73,11 +73,11 @@ else:
 新模块 `python/rutis/rutis/_eager.py`，只在 3.10、3.11 上被 `_task` 使用（测试在所有版本上都用它，见 6.1）：
 
 ```python
-def start(loop, coro, context, name=None):
-    """asyncio.Task(coro, loop=loop, context=context, eager_start=True, name=name)
+def start(loop, coro, context):
+    """asyncio.Task(coro, loop=loop, context=context, eager_start=True)
     for Python 3.10 and 3.11."""
     rest = _Rest(coro, context)
-    task = asyncio.Task(rest, loop=loop, name=name)   # 调度第一次 __step；不经过工厂
+    task = asyncio.Task(rest, loop=loop)   # 调度第一次 __step；不经过工厂
     previous = _tasks._current_tasks.get(loop)
     _tasks._current_tasks[loop] = task                # 第一步期间 current_task() 是 task
     try:
@@ -121,11 +121,10 @@ loop 没有在运行时（peer 里不会出现），原生 eager start 退化成
 ```python
 def _task(self, coroutine, call=None):
     context = contextvars.copy_context()
-    name = f"rutis {call}" if call is not None else None   # 见 3.7
     if sys.version_info >= (3, 12):
-        task = asyncio.Task(coroutine, loop=self.loop, context=context, eager_start=True, name=name)
+        task = asyncio.Task(coroutine, loop=self.loop, context=context, eager_start=True)
     else:
-        task = _eager.start(self.loop, coroutine, context, name)
+        task = _eager.start(self.loop, coroutine, context)
     ...
 ```
 
@@ -151,14 +150,14 @@ def _task(self, coroutine, call=None):
 | 时机 | 发生什么（两条路径相同） |
 | --- | --- |
 | 方法开始之前 | 协议里不会发生：`cancel` 帧在 `invoke` 帧之后到达；如果 `invoke` 还在队列里（`call_soon` 的 `_run`），`_tasks` 里没有这次调用，`cancel` 只让 `Signal` 参数变为已取消，方法照常执行。现有行为，本文不改 |
-| 第一步之中 | 只有第一步发出同步调用、在等待期间收到这次调用的 `cancel` 帧时才会发生。现在 `_tasks[call]` 在 `_task` 返回后才登记，这个 `cancel` 被忽略（代码阅读得出，原生路径同样如此）。见 3.5.1 |
+| 第一步之中 | 只有第一步发出同步调用、在等待期间收到这次调用的 `cancel` 帧时才会发生。现在 `_tasks[call]` 在 `_task` 返回后才登记，这个 `cancel` 被忽略（代码阅读得出，原生路径同样如此）。见 3.5.1，本 PR 一起修 |
 | 第一步之后、任务第一次 `__step` 之前 | 原生：任务已在 `F` 上等待，`cancel()` 取消 `F`，协程在 `await` 处收到 `CancelledError`。模拟：`task` 设 `_must_cancel`，第一次 `__step` 调 `_Rest.throw`，`_Rest` 先取消 `F` 再把 `CancelledError` 抛进协程。结果相同（原型 `s_cancel_now`：协程在 `await` 处收到取消，`F` 被取消） |
 | 之后任意时刻 | 都是 `Task.cancel()` 的普通行为（原型 `s_cancel_later`） |
 | 协程吞掉 `CancelledError` 并返回 | 任务正常完成（原型 `s_swallow_cancel`） |
 
-#### 3.5.1 第一步之中的取消（建议一并修）
+#### 3.5.1 第一步之中的取消（本 PR 一起修）
 
-做法：`_execute` 执行 `invoke` / `call` 期间把调用号放进 `self._starting`；`_receive` 处理 `cancel` 时，如果调用号在 `_starting` 里，记入 `self._cancel_early`；`_task` 得到未完成的任务后，如果调用号在 `_cancel_early` 里，立即 `task.cancel()`。协程在第一个挂起点收到 `CancelledError`。两条路径都适用。是否在本 PR 里做，见第十三节。
+做法：`_execute` 执行 `invoke` / `call` 期间把调用号放进 `self._starting`；`_receive` 处理 `cancel` 时，如果调用号在 `_starting` 里，记入 `self._cancel_early`；`_task` 得到未完成的任务后，如果调用号在 `_cancel_early` 里，立即 `task.cancel()`。协程在第一个挂起点收到 `CancelledError`。两条路径都适用。先写复现测试（6.2 第 5 条），再修。
 
 ### 3.6 返回的对象，调用方怎么等
 
@@ -167,19 +166,15 @@ def _task(self, coroutine, call=None):
 
 peer 里对返回值只用 `asyncio.isfuture`、`done()`、`add_done_callback`、`cancel()`、`_outcome`（`_execute`、`_respond`、`_encode`、`_future_done`），`Future` 和 `Task` 都满足；回复都是 `future` 引用，Rust 侧 `await` 它。插件代码拿不到这个对象（它在 peer 内部）。
 
-第一步就结束时，`start` 已经创建的 `task` 在下一轮 loop 以同样结果结束，然后被丢弃。它存在的原因是：第一步期间 `asyncio.current_task()` 必须是一个任务（3.9 节）。代价是每次调用多一个任务和一次调度（3.11 节）。
+第一步就结束时，`start` 已经创建的 `task` 在下一轮 loop 以同样结果结束，然后被丢弃。它存在的原因是：第一步期间 `asyncio.current_task()` 必须是一个任务（3.8 节）。代价是每次调用多一个任务和一次调度（3.10 节）。
 
-### 3.7 任务名
-
-现在原生路径不给名字（`Task-N`），3.12 以下的回退也不给。建议两条路径都给 `rutis <调用号>`（如 `rutis rust:7`），`_encode` 路径没有调用号，保留默认名。`asyncio.Task` 的 `name` 参数 3.8 起就有，两条路径一致（原型 `s_name`）。用途：`asyncio.all_tasks()`、调试日志和 `print_stack` 能对应到线上的调用。见第十三节。
-
-### 3.8 `loop.set_task_factory`
+### 3.7 `loop.set_task_factory`
 
 两条路径都直接构造 `asyncio.Task`，不使用工厂（原型 `s_factory`）。原因：原生 `asyncio.Task(..., eager_start=True)` 本来就不经过工厂；如果模拟经过工厂，工厂拿到的是 `_Rest` 而不是插件的协程，返回的任务可能不是 `asyncio.Task`，3.10 / 3.11 上的行为会和 3.12 不同。插件自己用 `create_task` 创建的任务照常使用工厂，不受影响。
 
 `python.en.md` §3.3 第 2 条的建议保持：不全局安装 `eager_task_factory`，只对 peer 从返回的协程创建的任务使用 eager start。
 
-### 3.9 `asyncio.current_task()`
+### 3.8 `asyncio.current_task()`
 
 第一步期间 `current_task()` 必须是将来驱动剩余部分的那个任务，否则第一步里的 `async with asyncio.timeout(...)`、`asyncio.TaskGroup()`（3.11 有）会因为"不在任务里"报错，或者取消错误的任务（第一步可能是在另一个任务的 `__step` 里、经同步调用的等待嵌套执行的，这时当前任务是外层任务）。
 
@@ -187,7 +182,7 @@ peer 里对返回值只用 `asyncio.isfuture`、`done()`、`add_done_callback`�
 
 这是私有接口，只在 3.10、3.11 上使用。这两个版本只接受安全修复（3.10 已停止维护），这部分代码不会再变。3.12 及以上走原生路径，不依赖它。原型在 3.12–3.14 上也能正确切换，测试可以在那里比较模拟与原生（6.1）。
 
-### 3.10 与原生 3.12 的差异（写明并有界）
+### 3.9 与原生 3.12 的差异（写明并有界）
 
 | 差异 | 影响 | 有界在哪 |
 | --- | --- | --- |
@@ -195,9 +190,9 @@ peer 里对返回值只用 `asyncio.isfuture`、`done()`、`add_done_callback`�
 | 第一步就结束时多一个在下一轮结束的任务；第一步里取得的 `current_task()` 是它 | 插件若在第一步里保存 `current_task()` 并在之后 `await` 它，得到同样的结果，只是晚一轮 | `asyncio.all_tasks()` 里短暂多一个任务 |
 | 第一步挂起在未完成的 `F` 上时，唤醒在下一轮才登记到 `F` 上 | `F` 的回调里，任务唤醒的先后可能排在下一轮之前登记的其他回调之后；"什么时候继续"相同（`F` 完成后的下一轮） | 原型 `s_order_*` 三个场景的先后与原生一致；同一轮里回调的先后不作保证，文档不承诺 |
 | `task.get_coro()` 返回 `_Rest` 而不是插件协程 | 只影响检查任务的工具 | `get_stack()` / `repr` 已转发到插件协程 |
-| 每次调用多几微秒（3.11 节） | 同步往返本身约 25–60 µs | — |
+| 每次调用多几微秒（3.10 节） | 同步往返本身约 25–60 µs | — |
 
-### 3.11 开销（本机实测，Apple M 系列，每项 2 万次）
+### 3.10 开销（本机实测，Apple M 系列，每项 2 万次）
 
 | 版本 | 模拟：第一步就结束 | 模拟：挂起一次 | 原生：第一步就结束 | 原生：挂起一次 |
 | --- | --- | --- | --- | --- |
@@ -208,7 +203,7 @@ peer 里对返回值只用 `asyncio.isfuture`、`done()`、`add_done_callback`�
 
 3.10 的"挂起一次"包含 3.10 自身较慢的 `sleep(0)` 和任务调度。和一次跨进程同步调用相比（`python.en.md` §3.2：Rust → Python 同步 invoke 49–59 µs）可以接受。
 
-### 3.12 与策略 B（#228）的关系
+### 3.11 与策略 B（#228）的关系
 
 策略 B 的"栈顺序"边：同一运行时里后开始执行的调用压在先开始的调用之上。按 eager start：
 
@@ -216,7 +211,7 @@ peer 里对返回值只用 `asyncio.isfuture`、`done()`、`add_done_callback`�
 - 第一步之后回复 `future` 引用，对 Rust 来说这次 `invoke` 已经返回。剩余部分在 loop 回调里执行，不会嵌套在某个同步等待之上（同步等待期间 loop 只执行进来的帧，不执行任务的步骤）；但它发出的调用 `path` 里仍含这次调用的号。#228 实现时要处理"`path` 里含一个已返回的调用"：它不在栈上，不产生栈顺序边。这一点与 Python 版本无关，原生路径现在就是这样。
 - 模拟在同一个位置（`_execute` → `_task` 之内）执行第一步，`_sync_path`、`_context`、回复时机都与原生相同，所以 3.10 / 3.11 上 Rust 看到的帧顺序与 3.12 相同，策略 B 不需要区分 Python 版本。"同步等待"字段只由 `_call_sync` 发送，与 eager start 无关。
 
-结论：不需要改 #228 的设计；建议在 #228 的说明里补一句"异步方法返回后，其后续调用的 `path` 仍含它"（第十三节第 6 条）。
+结论：不需要改 #228 的设计；实现 #228 时注意"异步方法返回后，其后续调用的 `path` 仍含它"，本 PR 在 #228 里留一条评论。
 
 ## 四、调研表逐项
 
@@ -232,7 +227,7 @@ peer 里对返回值只用 `asyncio.isfuture`、`done()`、`add_done_callback`�
 
 `requires-python` 改为 `>=3.10`：`python/rutis/pyproject.toml:7`、`crates/rutis-host/pyproject.toml:13`、`crates/rutis-host/templates/python/pyproject.toml:6`。
 
-低于 3.10 的解释器：pip / uv 按 `requires-python` 拒绝安装；用源码目录（`PYTHONPATH`）时会在别处报语法或属性错误。建议在 `rutis/__init__.py` 开头检查版本，低于 3.10 时抛 `ImportError("rutis needs Python 3.10 or later; this is 3.x.y")`；`rutis-host` 的 `import rutis` 检查（`crates/rutis-host/src/host.rs` `python()`）失败时把子进程的 stderr 附在错误后面，否则用户看到的是"需要安装 rutis 包"（Q5.2.2 第 1 条：可区分的错误）。见第十三节。
+低于 3.10 的解释器：pip / uv 按 `requires-python` 拒绝安装。不另加运行时的版本检查：绕过 `requires-python`（源码目录、`PYTHONPATH`）的用法很少见。
 
 ## 五、websocket：监听失败后 `accept()` 立即抛出（Q5.2.2）
 
@@ -289,7 +284,7 @@ def accept(self):
 - `serve()` 里 `accepting.result()` 抛出时：结束当前会话（`await current.end()`，清理租约），然后把异常抛出 `serve()`。
 - `main()`：`run` 抛出时把 traceback 打到 stderr，以退出码 1 结束；正常结束仍是 0。`os._exit` 保留（插件线程不能拖住进程）。
 
-当前会话是否等它自然结束再退出，见第十三节；建议立即结束：一个不能再接受重连的运行时应当让外部的进程管理（systemd、容器）知道并重启它。
+当前会话是否等它自然结束再退出，见第十三节第 1 条；建议立即结束：一个不能再接受重连的运行时应当让外部的进程管理（systemd、容器）知道并重启它。
 
 ## 六、测试
 
@@ -310,7 +305,6 @@ def accept(self):
 | `sleep(0)` 与其他回调的先后、`F` 已完成 / 稍后完成时继续的先后 | 记录顺序等于预期 |
 | 第一步之后抛异常 | 任务带异常 |
 | 设置了任务工厂 | 工厂没有被调用 |
-| 任务名 | `get_name()` 是给定的名字 |
 | `get_stack()` | 顶层帧是插件协程 |
 | 没有被取走的异常 | 不产生 asyncio 日志（捕获 `asyncio` logger） |
 
@@ -332,7 +326,7 @@ def accept(self):
 2. **前半段在回复之前执行**：方法第一步记录一个标记；读到 `return` 帧时标记已存在。
 3. **第一步里同步回调**：方法第一步 `peer.call(...)` 同步调用对端，对端回复后方法继续；回复帧的顺序是"回调请求 → 回调结果 → 方法的 `return`"。
 4. **取消**：方法挂起在门控 future 上；对端发 `cancel`；协程收到 `CancelledError`，`await` 得到 `throw` `CancelledError`。另一例：`invoke` 和 `cancel` 在同一批帧里送达（任务第一次 `__step` 之前）。
-5. **第一步之中的取消**（如果第十三节第 2 条采纳）：方法第一步同步调用对端，对端在回复之前发这次调用的 `cancel`；协程在第一个挂起点收到 `CancelledError`。
+5. **第一步之中的取消**（3.5.1）：方法第一步同步调用对端，对端在回复之前发这次调用的 `cancel`；协程在第一个挂起点收到 `CancelledError`。
 6. **异常**：第一步抛出 → `invoke` 的回复是 `return` 一个已完成的 future 引用，`await` 它得到 `throw`，`name` 是异常类名；挂起后抛出 → 同样。
 7. **调用链**：方法 `await` 之后发出的调用，`path` 含这次调用的号。
 
@@ -353,7 +347,7 @@ def accept(self):
 
 #193（E2E S9）的 PyPI 安装冒烟用 3.10：`uv venv -p 3.10`，安装 `rutis-host`，`uvx rutis-host new` 生成的 Python 插件能跑通。这是 #196 的验收之一，由 #193 的任务执行。
 
-## 七、CI（需求，由 #203 / #204 的 PR 修改 `ci.yml`）
+## 七、CI（Linux 的 Python 版本由本 PR 改，其余由 #256 改）
 
 按 #204 的范围调整：PR 上不新增任务，替换版本。
 
@@ -366,8 +360,8 @@ def accept(self):
 | `runtimes-go`、`runtimes-bun` | Linux / macOS | 3.12 | Linux 3.10，macOS 最新版（Python 只是依赖，跟随所在平台） |
 
 - websockets：Linux 装 `websockets==15.*`，macOS / Windows 装最新版（#204 的表）。
-- "最新版"写具体版本（如 `'3.14'`），不写 `'3.x'`，升级由人改；具体用哪个版本见第十三节。
-- 3.11 和 3.12：Q10.2 只要求最低和最新。3.11 与 3.10 走同一条模拟路径，但 asyncio 内部有差异；3.12 是原生路径的最早版本。建议**只在 main 上**、在 `js-py` 里多跑两次 Python 单元测试（3.11、3.12，约 1 分钟），PR 上不跑。见第十三节。
+- "最新版"怎么写（具体版本还是 `'3.x'`）由 #204（#256）统一定。
+- 不额外跑 3.11、3.12：Q10.2 只要求最低和最新，与 #204 的规则一致。3.11 与 3.10 走同一条模拟路径；6.1 的测试在开发机上用 3.11、3.12 跑过（第十二节）。
 - `docs/ci.md` / `ci.en.md` 的版本说明随 `ci.yml` 一起由 CI 那边的 PR 更新。
 
 ## 八、文档
@@ -394,17 +388,17 @@ def accept(self):
 | --- | --- | --- |
 | 模拟与原生有未发现的差异 | 3.10 / 3.11 上个别插件的时序与 3.12 不同 | 6.1 的固定预期在三个版本段上都断言；Rust 侧全部测试在 3.10 上跑 |
 | 使用私有的 `asyncio.tasks._current_tasks` | 只在 3.10 / 3.11 上用，这两个版本不再有功能变更 | 3.12+ 不用；测试在 3.12+ 上若发现它失效只跳过模拟测试 |
-| 第一步就结束时每次调用多一个任务 | 每次约 4–10 µs | 3.11 节实测；调用频繁的场景本来就建议放到同一运行时或 Rust |
+| 第一步就结束时每次调用多一个任务 | 每次约 4–10 µs | 3.10 节实测；调用频繁的场景本来就建议放到同一运行时或 Rust |
 | 3.10 已停止维护 | 安全修复只来自发行版（Ubuntu 22.04 等） | 目标用户的环境决定；3.10 在 CI 里一直验证，停止验证时按 Q10.3 从声明中删除 |
 | websockets 吞掉 `accept()` 的 errno | 错误消息只能写可能原因 | 消息写明；测试 6.3 第 3 条确认真实 `EMFILE` 走到这条路径 |
-| 监听失败时直接结束进程 | 当前会话随之断开 | 第十三节第 3 条；结束前清理租约，退出码非 0 |
+| 监听失败时直接结束进程 | 当前会话随之断开 | 第十三节第 1 条；结束前清理租约，退出码非 0 |
 
 ## 十、分阶段（都在本 PR 内）
 
 1. **eager start**：`_eager.py`、`_task` 改动、`test_eager.py`、`test_peer.py` 的 6.2 测试；3.10 / 3.11 / 3.12+ 本地全部通过。
-2. **版本声明**：三处 `requires-python`；`rutis/__init__.py` 的版本检查和 host 的错误信息（如采纳）；第八节文档。
+2. **版本声明**：三处 `requires-python`；第八节文档。
 3. **websocket 与 `__main__`**：第五节修改和 6.3 测试。
-4. **CI 需求**：PR 描述里写明第七节，由 #204 的 PR 修改 `ci.yml`；本 PR 合入前，CI 那边的改动已合入或同时合入，保证 Q10.4（先验证再声明）。
+4. **CI**：本 PR 把 Linux 任务的 Python 换成 3.10，和 `requires-python` 的修改在同一个 PR 里，保证 Q10.4（先验证再声明）；macOS、Windows 的版本由 #256 改。
 
 ## 十一、验收（都可自动检查）
 
@@ -425,7 +419,7 @@ def accept(self):
 - 3.10.16：未改代码时 `multilang`（4）、`instance_runtimes`（2，另 1 个与 Python 无关的通过）、`python_rows`（1）失败；把原型接入 `_task` 后全部通过。
 - 3.10.16 + websockets 15.0.1，原型接入 `_task`（临时改动，未提交）：`cargo test -p rutis-loader --features node,python,peer` 与 `cargo test -p rutis-bridge --all-features` 全部通过（含 `leases`、`python_runtime`、`runtime_conformance`、`session_matrix`、`rpc_callbacks`、`cancellation`、WebSocket 各项），没有失败。Go 行的 loader 测试未跑（没开 `go` feature）。
 - websockets 15.0.1 源码：`serve_forever()` 在 `accept()` 抛 `OSError` 时返回。
-- 开销：3.11 节。
+- 开销：3.10 节。
 
 没有验证的：
 
@@ -433,16 +427,12 @@ def accept(self):
 - Windows；
 - 3.15（本机没有）；
 - websockets 16 / 17 的 `serve_forever()` 在 `accept()` 失败时的行为（实现时读源码并加进 6.3 的测试矩阵）；
-- 3.5.1 的"第一步之中的取消被忽略"只来自代码阅读，没有写测试复现。
+- 3.5.1 的"第一步之中的取消被忽略"只来自代码阅读，实现时先写测试复现。
 
 ## 十三、需要维护者决定
 
 | # | 问题 | 选项 | 建议 |
 | --- | --- | --- | --- |
-| 1 | CI 的"最新版"用哪个 | `'3.14'`；3.15 已发布且 `setup-python` 可用时用 `'3.15'`；`'3.x'` 自动跟随 | 写具体版本，当前用 setup-python 能装到的最新正式版；新版发布后由人升级（避免 PR 上无关的失败） |
-| 2 | 第一步之中到达的 `cancel` 现在被忽略（3.5.1），是否本 PR 一起修 | 本 PR 修；另开 issue | 本 PR 修：改动小（一个集合和三处判断），测试与 6.2 第 5 条同一套脚本对端；两条路径都受益 |
-| 3 | 监听失败后当前会话怎么办 | 立即结束会话并以非 0 退出；等当前会话结束后再退出 | 立即结束：不能接受重连的运行时等于半死，交给外部进程管理重启；退出前清理租约 |
-| 4 | 3.11、3.12 是否在 CI 里跑 | 不跑；main 上在 `js-py` 里跑 Python 单元测试；PR 上也跑 | main 上跑单元测试（约 1 分钟），PR 上不跑 |
-| 5 | 低于 3.10 的提示 | 只靠 `requires-python`；加 `rutis/__init__.py` 版本检查并让 host 附上 stderr | 两者都加：源码目录和 `PYTHONPATH` 用法绕过 `requires-python` |
-| 6 | 任务名 | 不命名；`rutis <调用号>` | `rutis <调用号>`，两条路径一致；并在 #228 补一句"异步方法返回后，后续调用的 `path` 仍含它" |
-| 7 | 3.12+ 是否也统一用模拟（只保留一条路径） | 统一用模拟；3.12+ 用原生 | 3.12+ 用原生（已决定）：不依赖私有接口，且更快；模拟在 3.12+ 只在测试里与原生比较 |
+| 1 | 监听失败后当前会话怎么办 | 立即结束会话并以非 0 退出；等当前会话结束后再退出 | 立即结束：不能接受重连的运行时等于半死，交给外部进程管理重启；退出前清理租约 |
+
+已决定：第一步之中到达的 `cancel` 被忽略的问题在本 PR 一起修（3.5.1）；3.12+ 继续用原生 eager start；`ci.yml` 里 Linux 的 Python 换成 3.10 由本 PR 自己改（"`ci.yml` 只由 #203 / #204 修改"的例外，见 #256），"最新版"的写法由 #256 定；不加任务名，不加运行时版本检查，CI 不额外跑 3.11、3.12。

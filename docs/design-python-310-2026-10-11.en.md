@@ -6,7 +6,7 @@ Status: design, under review. Date: 2026-10-11. Base: `main` `0941ef4`.
 Sources: #196 (including the 2026-10-09 decision and the `accept()` leftover from #218), #204 (CI scope note), #197 / #218 (websockets lower bound 15), #193 (PyPI install smoke), #228 (strategy B). Part of step 1 of #183.
 Standard: [quality standard](quality-standard.en.md) Q10.2, Q10.4, Q6.7.1, Q5.2.2; [status](quality-status.en.md) risk MX.
 
-Out of scope: Python 3.9 and older; the Node minimum version (#195); the websockets lower bound itself (#197 is merged); changes to CI files (made by the #203 / #204 PRs; this document only lists the requirements).
+Out of scope: Python 3.9 and older; the Node minimum version (#195); the websockets lower bound itself (#197 is merged); the other CI version changes (made by #204, #256).
 
 ## 1. Decisions
 
@@ -14,7 +14,7 @@ Out of scope: Python 3.9 and older; the Node minimum version (#195); the websock
 | --- | --- |
 | D1 | Minimum Python 3.10; `requires-python = ">=3.10"` (three places). 3.9 is not supported |
 | D2 | 3.12 and later keep the native `asyncio.Task(..., eager_start=True)` |
-| D3 | 3.10 and 3.11 emulate eager start in a new module `rutis/_eager.py`, behaving like native (section 3); differences are listed and bounded (3.10) |
+| D3 | 3.10 and 3.11 emulate eager start in a new module `rutis/_eager.py`, behaving like native (section 3); differences are listed and bounded (3.9) |
 | D4 | Both paths construct `asyncio.Task` directly, not through `loop.create_task`, so neither uses a factory set with `loop.set_task_factory` (as the 3.12 path does today) |
 | D5 | Both paths share one set of tests with fixed expectations, asserting the same results on 3.10, 3.11 and 3.12+ |
 | D6 | Once a `websocket.Listener` fails, `accept()` raises at once; `python -m rutis` then exits with a non-zero code and prints the reason |
@@ -73,11 +73,11 @@ Point 2 decides whether `SyncWaitCycle` is reported falsely. When `_execute` han
 New module `python/rutis/rutis/_eager.py`, used by `_task` only on 3.10 and 3.11 (tests use it on every version, see 6.1):
 
 ```python
-def start(loop, coro, context, name=None):
-    """asyncio.Task(coro, loop=loop, context=context, eager_start=True, name=name)
+def start(loop, coro, context):
+    """asyncio.Task(coro, loop=loop, context=context, eager_start=True)
     for Python 3.10 and 3.11."""
     rest = _Rest(coro, context)
-    task = asyncio.Task(rest, loop=loop, name=name)   # schedules the first __step; no factory
+    task = asyncio.Task(rest, loop=loop)   # schedules the first __step; no factory
     previous = _tasks._current_tasks.get(loop)
     _tasks._current_tasks[loop] = task                # current_task() is task during the first step
     try:
@@ -122,11 +122,10 @@ If the loop is not running (never the case in the peer), native eager start fall
 ```python
 def _task(self, coroutine, call=None):
     context = contextvars.copy_context()
-    name = f"rutis {call}" if call is not None else None   # see 3.7
     if sys.version_info >= (3, 12):
-        task = asyncio.Task(coroutine, loop=self.loop, context=context, eager_start=True, name=name)
+        task = asyncio.Task(coroutine, loop=self.loop, context=context, eager_start=True)
     else:
-        task = _eager.start(self.loop, coroutine, context, name)
+        task = _eager.start(self.loop, coroutine, context)
     ...
 ```
 
@@ -152,14 +151,14 @@ In the last case the exception propagates from `_task` into `_execute`, whose ou
 | When | What happens (same on both paths) |
 | --- | --- |
 | Before the method starts | Does not happen in the protocol: a `cancel` frame arrives after its `invoke` frame; if the `invoke` is still queued (`_run` via `call_soon`), `_tasks` has no entry for the call, so the `cancel` only marks a `Signal` argument cancelled and the method runs. Existing behaviour, unchanged here |
-| During the first step | Only if the first step makes a synchronous call and, while waiting, receives a `cancel` frame for this call. `_tasks[call]` is only recorded after `_task` returns, so that `cancel` is ignored today (found by reading the code; the native path is the same). See 3.5.1 |
+| During the first step | Only if the first step makes a synchronous call and, while waiting, receives a `cancel` frame for this call. `_tasks[call]` is only recorded after `_task` returns, so that `cancel` is ignored today (found by reading the code; the native path is the same). See 3.5.1; fixed in this PR |
 | After the first step, before the task's first `__step` | Native: the task already waits on `F`; `cancel()` cancels `F`, and the coroutine gets `CancelledError` at its `await`. Emulation: `task` sets `_must_cancel`; its first `__step` calls `_Rest.throw`, which cancels `F` and throws `CancelledError` into the coroutine. Same result (prototype `s_cancel_now`: the coroutine is cancelled at its `await`, `F` is cancelled) |
 | Any later time | Ordinary `Task.cancel()` behaviour (prototype `s_cancel_later`) |
 | The coroutine swallows `CancelledError` and returns | The task completes normally (prototype `s_swallow_cancel`) |
 
-#### 3.5.1 Cancellation during the first step (proposed fix)
+#### 3.5.1 Cancellation during the first step (fixed in this PR)
 
-While `_execute` runs an `invoke` / `call`, put the call id in `self._starting`; when `_receive` handles `cancel` for an id in `_starting`, add it to `self._cancel_early`; when `_task` gets a task that is not done and its call id is in `_cancel_early`, call `task.cancel()` at once. The coroutine gets `CancelledError` at its first suspension point. Applies to both paths. Whether to do it in this PR: section 13.
+While `_execute` runs an `invoke` / `call`, put the call id in `self._starting`; when `_receive` handles `cancel` for an id in `_starting`, add it to `self._cancel_early`; when `_task` gets a task that is not done and its call id is in `_cancel_early`, call `task.cancel()` at once. The coroutine gets `CancelledError` at its first suspension point. Applies to both paths. A test reproduces it first (6.2 item 5), then the fix.
 
 ### 3.6 The returned object, and how callers await it
 
@@ -168,19 +167,15 @@ While `_execute` runs an `invoke` / `call`, put the call id in `self._starting`;
 
 The peer only uses `asyncio.isfuture`, `done()`, `add_done_callback`, `cancel()` and `_outcome` on it (`_execute`, `_respond`, `_encode`, `_future_done`); `Future` and `Task` both satisfy that, and the reply is a `future` reference either way, which the Rust side awaits. Plugin code never sees this object (it stays inside the peer).
 
-When the first step finished, the `task` that `start` already created finishes with the same result on the next loop iteration and is then dropped. It exists because `asyncio.current_task()` must be a task during the first step (3.9). The cost is one extra task and one scheduling per call (3.11).
+When the first step finished, the `task` that `start` already created finishes with the same result on the next loop iteration and is then dropped. It exists because `asyncio.current_task()` must be a task during the first step (3.8). The cost is one extra task and one scheduling per call (3.10).
 
-### 3.7 Task names
-
-Today neither the native path nor the pre-3.12 fallback names the task (`Task-N`). Proposal: both paths name it `rutis <call id>` (such as `rutis rust:7`); the `_encode` path has no call id and keeps the default name. `asyncio.Task` has accepted `name` since 3.8, so both paths match (prototype `s_name`). Use: `asyncio.all_tasks()`, debug logs and `print_stack` map to the call on the wire. See section 13.
-
-### 3.8 `loop.set_task_factory`
+### 3.7 `loop.set_task_factory`
 
 Neither path uses the factory (prototype `s_factory`). Reason: native `asyncio.Task(..., eager_start=True)` never goes through the factory; if the emulation did, the factory would receive `_Rest` instead of the plugin's coroutine and could return something other than an `asyncio.Task`, and 3.10 / 3.11 would behave differently from 3.12. Tasks plugins create themselves with `create_task` still use the factory.
 
 The advice in `python.en.md` §3.3 item 2 stands: do not install `eager_task_factory` globally; use eager start only for tasks the peer creates from returned coroutines.
 
-### 3.9 `asyncio.current_task()`
+### 3.8 `asyncio.current_task()`
 
 During the first step `current_task()` must be the task that will drive the rest. Otherwise `async with asyncio.timeout(...)` or `asyncio.TaskGroup()` (3.11) in the first step fails with "not inside a task", or cancels the wrong task (the first step can run nested inside another task's `__step` through a synchronous call's wait, where the current task is that outer task).
 
@@ -188,7 +183,7 @@ During the first step `current_task()` must be the task that will drive the rest
 
 This is a private interface, used only on 3.10 and 3.11. Those versions only receive security fixes (3.10 has reached end of life), so this code will not change under us. 3.12 and later take the native path and do not depend on it. The prototype also switches correctly on 3.12–3.14, so tests can compare emulation and native there (6.1).
 
-### 3.10 Differences from native 3.12 (listed and bounded)
+### 3.9 Differences from native 3.12 (listed and bounded)
 
 | Difference | Effect | Bound |
 | --- | --- | --- |
@@ -196,9 +191,9 @@ This is a private interface, used only on 3.10 and 3.11. Those versions only rec
 | When the first step finishes, an extra task that finishes one iteration later; `current_task()` taken in the first step is that task | A plugin that keeps `current_task()` from the first step and later awaits it gets the same result, one iteration later | `asyncio.all_tasks()` briefly shows one more task |
 | When the first step suspends on a pending `F`, the wakeup is registered on `F` one iteration later | Among `F`'s callbacks, the task's wakeup may come after callbacks others registered before that iteration; *when* it continues is the same (the iteration after `F` completes) | The prototype's three `s_order_*` scenarios order exactly as native; ordering among callbacks of the same iteration is not guaranteed, and the docs do not promise it |
 | `task.get_coro()` returns `_Rest` rather than the plugin coroutine | Only affects tools that inspect tasks | `get_stack()` / `repr` delegate to the plugin coroutine |
-| A few microseconds more per call (3.11) | A synchronous round trip itself is about 25–60 µs | — |
+| A few microseconds more per call (3.10) | A synchronous round trip itself is about 25–60 µs | — |
 
-### 3.11 Cost (measured locally, Apple M series, 20,000 runs each)
+### 3.10 Cost (measured locally, Apple M series, 20,000 runs each)
 
 | Version | Emulated: done in first step | Emulated: suspends once | Native: done in first step | Native: suspends once |
 | --- | --- | --- | --- | --- |
@@ -209,7 +204,7 @@ This is a private interface, used only on 3.10 and 3.11. Those versions only rec
 
 On 3.10, "suspends once" includes 3.10's own slower `sleep(0)` and task scheduling. Compared with one cross-process synchronous call (`python.en.md` §3.2: Rust → Python sync invoke 49–59 µs), this is acceptable.
 
-### 3.12 Interaction with strategy B (#228)
+### 3.11 Interaction with strategy B (#228)
 
 Strategy B's "stack order" edge: in one runtime, a call that starts later sits above one that started earlier. With eager start:
 
@@ -217,7 +212,7 @@ Strategy B's "stack order" edge: in one runtime, a call that starts later sits a
 - After the first step, the reply is a `future` reference; for Rust, this `invoke` has returned. The rest runs from loop callbacks and never nests above a synchronous wait (during a synchronous wait the loop only runs incoming frames, not task steps), but the calls it makes still carry this call's id in their `path`. #228 must handle "a `path` that names a call which has already returned": it is not on the stack and yields no stack-order edge. This does not depend on the Python version; the native path already behaves so.
 - The emulation runs the first step at the same place (inside `_execute` → `_task`), with the same `_sync_path`, `_context` and reply timing as native, so on 3.10 / 3.11 Rust sees the same frame order as on 3.12, and strategy B need not distinguish Python versions. The "waiting synchronously" field is sent only by `_call_sync` and is unrelated to eager start.
 
-Conclusion: #228's design needs no change; we suggest adding one sentence to #228: "after an async method has returned, the `path` of its later calls still names it" (section 13, item 6).
+Conclusion: #228's design needs no change; when implementing #228, note that "after an async method has returned, the `path` of its later calls still names it". This PR leaves a comment on #228.
 
 ## 4. The survey table, item by item
 
@@ -233,7 +228,7 @@ We also searched the repository for 3.11+ interfaces (`asyncio.timeout`, `TaskGr
 
 `requires-python` becomes `>=3.10` in `python/rutis/pyproject.toml:7`, `crates/rutis-host/pyproject.toml:13` and `crates/rutis-host/templates/python/pyproject.toml:6`.
 
-Interpreters older than 3.10: pip / uv refuse to install because of `requires-python`; a source checkout on `PYTHONPATH` fails elsewhere with a syntax or attribute error. Proposal: `rutis/__init__.py` checks the version first and raises `ImportError("rutis needs Python 3.10 or later; this is 3.x.y")`; when `rutis-host`'s `import rutis` check (`crates/rutis-host/src/host.rs` `python()`) fails, it appends the child's stderr to its error, which otherwise tells the user "install the rutis package" (Q5.2.2 item 1: a distinguishable error). See section 13.
+Interpreters older than 3.10: pip / uv refuse to install because of `requires-python`. No extra runtime version check: uses that bypass `requires-python` (source checkouts, `PYTHONPATH`) are rare.
 
 ## 5. websocket: `accept()` raises once listening has failed (Q5.2.2)
 
@@ -290,7 +285,7 @@ def accept(self):
 - In `serve()`, when `accepting.result()` raises: end the current session (`await current.end()`, cleaning up its lease), then let the exception propagate out of `serve()`.
 - `main()`: when `run` raises, print the traceback to stderr and exit with code 1; a normal end is still 0. `os._exit` stays (plugin threads must not keep the process alive).
 
-Whether the current session should be left to end on its own first: section 13. Recommended: end now. A runtime that can no longer accept a reconnection should let its process manager (systemd, a container runtime) see that and restart it.
+Whether the current session should be left to end on its own first: section 13, item 1. Recommended: end now. A runtime that can no longer accept a reconnection should let its process manager (systemd, a container runtime) see that and restart it.
 
 ## 6. Tests
 
@@ -311,7 +306,6 @@ A set of scenarios, each with a **fixed expected record** (not "both implementat
 | Order of `sleep(0)` relative to other callbacks; order of resumption when `F` is already done / completes later | the recorded order equals the expectation |
 | Raises after the first step | the task holds the exception |
 | A task factory is set | the factory is not called |
-| Task name | `get_name()` is the given name |
 | `get_stack()` | the top frame is the plugin coroutine |
 | Unretrieved exceptions | no asyncio log records (captured from the `asyncio` logger) |
 
@@ -333,7 +327,7 @@ With the existing scripted peer on a socketpair:
 2. **The prefix runs before the reply**: the method's first step records a marker; when the `return` frame is read, the marker exists.
 3. **A synchronous callback in the first step**: the method's first step calls the far end with `peer.call(...)`; after the far end replies, the method continues; the frames are "callback request → callback result → the method's `return`".
 4. **Cancellation**: the method suspends on a gated future; the far end sends `cancel`; the coroutine gets `CancelledError`, and `await` gets `throw` `CancelledError`. A second case: `invoke` and `cancel` delivered in the same batch of frames (before the task's first `__step`).
-5. **Cancellation during the first step** (if section 13 item 2 is accepted): the method's first step calls the far end synchronously; before replying, the far end sends `cancel` for this call; the coroutine gets `CancelledError` at its first suspension point.
+5. **Cancellation during the first step** (3.5.1): the method's first step calls the far end synchronously; before replying, the far end sends `cancel` for this call; the coroutine gets `CancelledError` at its first suspension point.
 6. **Exceptions**: raised in the first step → the `invoke` reply is a `return` of a completed future reference, and awaiting it gets `throw` with the exception's class name; raised after suspending → the same.
 7. **Call chain**: calls the method makes after its `await` carry this call's id in `path`.
 
@@ -354,7 +348,7 @@ Proposed: one bridge test that pins the semantics of 2.2 independently of the Py
 
 The PyPI install smoke of #193 (E2E S9) uses 3.10: `uv venv -p 3.10`, install `rutis-host`, and a Python plugin generated by `uvx rutis-host new` runs. This is one of #196's acceptance criteria and runs in #193's job.
 
-## 7. CI (requirements; `ci.yml` is changed by the #203 / #204 PRs)
+## 7. CI (this PR changes the Linux Python version; #256 the rest)
 
 Following #204's scope note: no new PR jobs; versions are replaced.
 
@@ -367,8 +361,8 @@ Following #204's scope note: no new PR jobs; versions are replaced.
 | `runtimes-go`, `runtimes-bun` | Linux / macOS | 3.12 | 3.10 on Linux, latest on macOS (Python is only a dependency there and follows the platform) |
 
 - websockets: `websockets==15.*` on Linux, latest on macOS / Windows (#204's table).
-- "Latest" is written as a concrete version (such as `'3.14'`), not `'3.x'`, and is bumped by hand; which version: section 13.
-- 3.11 and 3.12: Q10.2 only requires the minimum and the latest. 3.11 takes the same emulation path as 3.10 but its asyncio internals differ; 3.12 is the first native-path version. Proposal: **on main only**, run the Python unit tests twice more in `js-py` (3.11, 3.12, about a minute); not on PRs. See section 13.
+- How "latest" is written (a concrete version or `'3.x'`) is settled for all jobs by #204 (#256).
+- No extra 3.11 or 3.12 runs: Q10.2 only requires the minimum and the latest, as in #204's rule. 3.11 takes the same emulation path as 3.10; the tests of 6.1 were run on 3.11 and 3.12 on a development machine (section 12).
 - `docs/ci.md` / `ci.en.md` are updated together with `ci.yml` by the CI-side PR.
 
 ## 8. Documentation
@@ -395,17 +389,17 @@ Not changed: past release notes (`docs/releases/0.7.0*`, `0.8.0*`), migration gu
 | --- | --- | --- |
 | An undiscovered difference between emulation and native | timing of some plugin differs on 3.10 / 3.11 from 3.12 | the fixed expectations of 6.1 are asserted on all three version ranges; every Rust test runs on 3.10 |
 | Use of the private `asyncio.tasks._current_tasks` | only on 3.10 / 3.11, which get no more feature changes | not used on 3.12+; if tests find it broken on 3.12+, only the emulation test is skipped there |
-| One extra task per call when the first step finishes | about 4–10 µs per call | measured in 3.11; frequent calls are already advised to stay in one runtime or move to Rust |
+| One extra task per call when the first step finishes | about 4–10 µs per call | measured in 3.10; frequent calls are already advised to stay in one runtime or move to Rust |
 | 3.10 is end of life | security fixes only come from distributions (Ubuntu 22.04 and others) | the target users' environments decide; 3.10 stays verified in CI, and once it is no longer verified it is removed from the support statement (Q10.3) |
 | websockets swallows `accept()`'s errno | the message can only name the likely cause | the message says so; test 6.3 item 3 confirms a real `EMFILE` reaches this path |
-| Ending the process when listening fails | the current session ends with it | section 13 item 3; the lease is cleaned up first and the exit code is non-zero |
+| Ending the process when listening fails | the current session ends with it | section 13 item 1; the lease is cleaned up first and the exit code is non-zero |
 
 ## 10. Phases (all in this PR)
 
 1. **Eager start**: `_eager.py`, the `_task` change, `test_eager.py`, the tests of 6.2; all pass locally on 3.10 / 3.11 / 3.12+.
-2. **Version statements**: the three `requires-python`; the version check in `rutis/__init__.py` and the host's error message (if accepted); the docs of section 8.
+2. **Version statements**: the three `requires-python`; the docs of section 8.
 3. **websocket and `__main__`**: the changes of section 5 and the tests of 6.3.
-4. **CI requirements**: section 7 stated in the PR description and made in `ci.yml` by the #204 PR; before this PR merges, the CI change has merged or merges with it, so that Q10.4 (verify before declaring) holds.
+4. **CI**: this PR switches the Linux jobs to Python 3.10 in the same PR as the `requires-python` change, so that Q10.4 (verify before declaring) holds; the macOS and Windows versions are changed by #256.
 
 ## 11. Acceptance (all automatable)
 
@@ -426,7 +420,7 @@ Verified:
 - 3.10.16, code unchanged: `multilang` (4), `instance_runtimes` (2; a third test that does not start Python passes) and `python_rows` (1) fail; with the prototype wired into `_task`, they all pass.
 - 3.10.16 + websockets 15.0.1, prototype wired into `_task` (a temporary, uncommitted change): `cargo test -p rutis-loader --features node,python,peer` and `cargo test -p rutis-bridge --all-features` pass completely (including `leases`, `python_runtime`, `runtime_conformance`, `session_matrix`, `rpc_callbacks`, `cancellation` and the WebSocket tests), with no failures. Loader tests for Go rows were not run (no `go` feature).
 - websockets 15.0.1 source: `serve_forever()` returns when `accept()` raises `OSError`.
-- Cost: section 3.11.
+- Cost: section 3.10.
 
 Not verified:
 
@@ -434,16 +428,12 @@ Not verified:
 - Windows;
 - 3.15 (not available locally);
 - what `serve_forever()` of websockets 16 / 17 does when `accept()` fails (to be read from the source during implementation and added to the test matrix of 6.3);
-- the "cancel during the first step is ignored" finding in 3.5.1 comes from reading the code only; no test reproduces it yet.
+- the "cancel during the first step is ignored" finding in 3.5.1 comes from reading the code only; the implementation reproduces it with a test first.
 
 ## 13. Decisions needed from the maintainer
 
 | # | Question | Options | Recommendation |
 | --- | --- | --- | --- |
-| 1 | Which version is "latest" in CI | `'3.14'`; `'3.15'` if it is released and available in `setup-python`; `'3.x'` that follows automatically | a concrete version: the newest final release `setup-python` can install today; bumped by hand after a new release (avoids unrelated failures on PRs) |
-| 2 | A `cancel` that arrives during the first step is ignored today (3.5.1); fix it in this PR? | fix in this PR; open a separate issue | fix in this PR: the change is small (one set and three checks), its test uses the same scripted peer as 6.2 item 5, and both paths benefit |
-| 3 | What happens to the current session when listening fails | end the session at once and exit non-zero; exit after the current session ends | end at once: a runtime that cannot accept a reconnection is half dead; let the process manager restart it; clean up the lease before exiting |
-| 4 | Run 3.11 and 3.12 in CI? | no; Python unit tests in `js-py` on main; on PRs too | unit tests on main (about a minute), not on PRs |
-| 5 | Message for interpreters older than 3.10 | rely on `requires-python` only; add a version check in `rutis/__init__.py` and have the host append stderr | both: source checkouts and `PYTHONPATH` use bypass `requires-python` |
-| 6 | Task names | none; `rutis <call id>` | `rutis <call id>` on both paths; and add to #228: "after an async method has returned, the `path` of its later calls still names it" |
-| 7 | Use the emulation on 3.12+ too (a single path)? | emulation everywhere; native on 3.12+ | native on 3.12+ (already decided): no private interface, and faster; on 3.12+ the emulation only runs in tests, compared with native |
+| 1 | What happens to the current session when listening fails | End the session now and exit non-zero; exit after the current session ends | End now: a runtime that cannot accept reconnections is half dead; let the process manager restart it; clean up the lease before exiting |
+
+Decided: a `cancel` that arrives during the first step and is ignored today is fixed in this PR (3.5.1); 3.12+ keeps native eager start; this PR switches the Linux Python in `ci.yml` to 3.10 itself (an exception to "`ci.yml` is changed only by #203 / #204", see #256), and how "latest" is written is settled by #256; no task names, no runtime version check, no extra 3.11 or 3.12 runs in CI.
