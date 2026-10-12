@@ -2,6 +2,8 @@
 
 [中文](design-kotlin-runtime-2026-10-12.md)
 
+> **Positioning (updated 2026-10-12)**: the Kotlin runtime's main goal is **connecting to the Android ecosystem and apps**; the main-line design is [the Android runtime (Kotlin remote node)](design-android-runtime-2026-10-12.en.md) — a helper APK on the device as a remote node, sharing one KMP SDK with this document. This document describes the **desktop-JVM runtime**: the local runtime for the Maven/JVM language ecosystem (`Launcher::kotlin`, `kt:` rows), doubling as the desktop debugging companion for Android plugins. Implementation is scheduled after the Android phases (A1–A4); the SDK and the method-shape/value rules are shared between the two documents, and whatever this one no longer repeats is in the Android design.
+
 Status: design draft, not implemented. Date: 2026-10-12. Baseline: `main` `ebf0711` (0.9.1).
 Based on: [the multilingual design](design-multilang-runtimes-2026-10-03.en.md) (with its [M1](design-multilang-m1-2026-10-04.en.md) and [M2](design-multilang-m2-2026-10-04.en.md) implementation notes), [the Bun runtime](design-bun-runtime-2026-10-09.en.md), [the Go plugin runtime](design-go-runtime-2026-10-10.en.md), [developer packages](design-developer-packages-2026-10-06.en.md), and [the plugin API](guide/plugin-api.en.md). Swift (M3 of the overall design) has not been started; this is the first new language runtime since that design, and it answers the reentrancy question the Go design §9 proposed, for Kotlin (§6). The answer should be recorded back into the overall design §9.
 

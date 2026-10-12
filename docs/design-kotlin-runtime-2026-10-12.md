@@ -2,6 +2,8 @@
 
 [English](design-kotlin-runtime-2026-10-12.en.md)
 
+> **定位（2026-10-12 更新）**：Kotlin 运行时的主目标是**对接 Android 生态与应用**，主线设计是 [Android 运行时（Kotlin 远程节点）](design-android-runtime-2026-10-12.md)——设备上的辅助 APK 作为远程节点，与本文档共享同一套 KMP SDK。本文档描述的是**桌面 JVM 运行时**：对接 Maven/JVM 语言生态的本地运行时（`Launcher::kotlin`、`kt:` 行），同时作为 Android 插件的桌面调试伴跑。实现排在 Android 阶段（A1–A4）之后；SDK 与方法形状/值规则两稿共用，本文不再重复的部分见 Android 稿。
+
 状态：设计稿，未实现。日期：2026-10-12。基线：`main` `ebf0711`（0.9.1）。
 依据：[多语言插件总体设计](design-multilang-runtimes-2026-10-03.md)（及其 [M1](design-multilang-m1-2026-10-04.md)、[M2](design-multilang-m2-2026-10-04.md) 实施稿）、[Bun 运行时设计](design-bun-runtime-2026-10-09.md)、[Go 插件运行时设计](design-go-runtime-2026-10-10.md)、[开发者包设计](design-developer-packages-2026-10-06.md)、[插件 API 约定](guide/plugin-api.md)。Swift（总体稿的 M3）尚未开工，本设计是总体稿之后第一个新语言运行时，按 Go 设计 §9 的提议替 Kotlin 回答可重入问题（§6），结论应回记到总体稿 §九。
 
