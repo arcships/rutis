@@ -70,6 +70,8 @@ app (helper APK, foreground-service style)
 
 - Process model: one foreground-service process; `START_STICKY`, restarted by the system after a kill; the service rebuilds the listener and session.
 - Battery/Doze: a foreground service plus an active socket; the heartbeat defaults to 30 s (adjustable). Deep-Doze network restrictions are a documented reality (most reliable while charging or with the screen on).
+- Battery-optimization whitelist: first run guides the user to add the app to the system whitelist (the standard intent); OEM ROMs (MIUI, ColorOS, …) cannot be configured programmatically — per-vendor manual instructions ship with the docs.
+- Network-change rebinding: watch system connectivity changes (Wi-Fi switch, address change) and rebuild the listener socket; the service notification shows the current LAN address (a DHCP address change is the most common "silent death": the address in the host's configuration goes stale).
 - UI: minimal — first run generates and shows the token and LAN address (for the host configuration), a permission-request entry point, the remaining reload budget.
 
 ## 4. Channels, authentication, and the TLS relaxation
@@ -87,6 +89,19 @@ app (helper APK, foreground-service style)
 | Takeover | a new connection: authenticate first → close the old one (read no further frames) → clean up every row and proxy of the old lease → answer the new `hello`; the old connection gets 4002 |
 | Startup output | once listening, `rutis: listening on …` in logs (the service notification shows the address too) |
 
+### 4.1 Disconnects and recovery
+
+Disconnects ride the existing machinery; no new protocol:
+
+| Case | Behaviour |
+| --- | --- |
+| a network blip (seconds) | TCP recovers on its own, nothing happens; a real break is detected within the heartbeat timeout (only heartbeats find half-open connections) |
+| break detected | the device cleans up every plugin of the session (cleanups in reverse, time-limited); on the host the `droid:*` rows stop and their dependants cascade (rutis's native revocation semantics) |
+| reconnection | the host's link redials automatically (per-failure-category exponential backoff, reset after a stable session — existing `rutis-bridge` link behaviour); once connected it is a new runtime generation, rows reload in dependency order, the configuration lives host-side and survives |
+| process killed (LMK / OEM cleaners) | `START_STICKY` restarts and rebuilds the listener later (vendor-dependent, possibly minutes); the host keeps redialing, the two ends meet |
+| deep Doze | largely unaffected with a foreground service and the battery whitelist; real deep sleep shows as a disconnect, recovering automatically on screen-on / maintenance windows |
+| the plugin's view | a plugin never sees a "disconnect": the runtime translates it into rutis's existing stop/start — cleanups run in order, `apply` runs again. Whether to persist state is the plugin's own business (§5) |
+
 ## 5. Plugins: the DEX model and hot reload
 
 ### 5.1 Two sources
@@ -98,6 +113,7 @@ app (helper APK, foreground-service style)
 
 - Entry resolution as the JVM draft §8.2: `droid:contacts.ContactsPlugin` (a dot) → a fully-qualified class name; `droid:contacts` (no dot) → matched by the `rutis.json` `name`; several matches is an ambiguity error.
 - `rows.schema` is answered on the device from the declarations (built-in and uploaded share the path); when a descriptor disagrees with the actual declaration, the declaration wins with a warning.
+- **State belongs to the plugin**: disconnects, reloads, and self-restarts all lose in-memory state — that is the model's intent (plugins are rebuildable). Whether and how to persist (files, DataStore, SQLite) is the plugin author's business: the plugin runs inside the app with Android's storage APIs directly available; the runtime neither provides nor prescribes one.
 
 ### 5.2 Bounded hot reload (D8)
 
@@ -245,7 +261,7 @@ The desktop-JVM runtime (D21, [the Kotlin runtime](design-kotlin-runtime-2026-10
 
 ## 13. Open questions and the topology-B evaluation
 
-- **Heartbeat and Doze**: network availability in deep sleep varies by vendor; document honestly (most reliable charging/foreground), consider event buffering if needed.
+- **Heartbeat and Doze**: network availability in deep sleep varies by vendor; document honestly (most reliable charging/foreground/whitelisted), consider event buffering if needed. Disconnect behaviour is §4.1 — recovery is automatic; reliability depends on the device-side process staying alive.
 - **Revocation reconciliation** (§6): a 30 s period versus a more precise hook (there is no broadcast; periodic or at key operations only).
 - **Upload-endpoint abuse surface**: the same token already authenticates it; consider a content-hash allowlist or signatures (fine for dev; a public exposure demands wss and stronger pairing).
 - **The topology-B increment (core embedded in an app)**: all of A's Kotlin layer is reused (the session layer runs over rutis-bridge's existing `transport::memory`, contract unchanged); the increment is the core's NDK cross-compilation (cargo-ndk, tokio viable), JNI bootstrap and lifecycle adaptation, packaging the `.so` into an AAR, and Play DCL disclosure. The work is mostly on the Rust side; start it only with a real on-device-host need.
