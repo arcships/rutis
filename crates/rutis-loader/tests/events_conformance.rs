@@ -2,7 +2,7 @@
 //! every case of `events.expected.json`
 //! (`rutis_bridge::runtime::testing::events`) in the placements
 //! `RUTIS_EVENTS_PLACEMENTS` asks for (default `sampled`), with X each
-//! runtime language in turn.
+//! runtime language in turn. 
 //!
 //! One rutis host per language under test: a loader whose rows are the
 //! participants, the runtime `rt-x` in X's language, one runtime `rt-y-<l>`
