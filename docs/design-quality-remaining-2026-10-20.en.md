@@ -35,7 +35,7 @@ Each needs a repeatable test; when it passes, the register moves from "partly ve
 
 Acceptance: all eight are "verified", or explicitly downgraded with a locking test; the tracking issue's checkboxes are updated.
 
-Seven of the eight behaviours already exist in the code and mainly need tests; the host command for `go add` exists too, but the real Go install needs a local file GOPROXY test, while the stub only checks what the host passes. If a test finds the behaviour is wrong, fix it as a defect.
+Seven of the eight behaviours already exist in the code and mainly need tests; the host command for `go add` exists too, but the real Go install needs a local file GOPROXY test, while the stub only checks what the host passes. Until the real install test passes, this row stays "partly verified", not "verified". If a test finds the behaviour is wrong, fix it as a defect.
 
 ## 3. The agent-written plugin mainline
 
@@ -75,6 +75,8 @@ It takes names from the loader's current rows and the host service catalog; for 
 
 `kind` drives the default permission filter: `rutis_services` returns only global services from plugin rows by default; host, remote and instance-scoped services are returned only when they appear in `allow`.
 
+`Loader::services()` has one source of truth: the current rows and the host catalog; `callable` is decided only by whether a `HostDispatch` is reachable. If the two disagree, list the name with `callable = false` instead of guessing. Add a `service_names_come_from_rows_and_host_catalog` list test before the tools.
+
 Add `ServiceToolsPlugin` (an optional `loader` feature of `rutis-agent`, depending on `rutis-loader` and the `rutis-bridge` session layer; no dependency cycle):
 
 - `inject = [tools]`, registers the two tools in the `ToolRegistry`;
@@ -96,6 +98,7 @@ Ownership: `rutis-agent` is an example crate. `ServiceToolsPlugin` starts in its
 - **Plugins, including agent-written ones, are trusted by default, at the same level as hand-written plugins.** rutis provides no sandbox; stronger isolation means another process, user or container, or a remote connection. This matches the trust assumption in the quality status.
 - `ServiceToolsPlugin` exposes only services the host can already see; it does not bypass a row's `isolate` / `inject` or change a service's visibility.
 - By default only **services provided by plugin rows** are exposed; host services, remote services and instance-scoped services require an explicit `allow([...])`. The agent can immediately use the service of a plugin it just wrote, but does not get host capabilities by default. Services outside the list do not appear in `rutis_services` and `rutis_call` returns "not allowed".
+- The allowlist only controls what the agent tools can see; it does not change the plugin trust level. Plugins are still trusted by default with no sandbox. If an agent-written plugin needs a host service, the host must add it to the allowlist first.
 - Remote connections keep the existing TLS, identity and access-point rules; the agent tools add no remote entry point.
 - The agent's file and command permissions come from its existing bash / file tools; rutis neither adds nor weakens them.
 
@@ -128,6 +131,8 @@ Assertions:
 
 An agent-written plugin can grant many references or start many calls at once. Today only frame size and 64-level nesting are limited; there is no limit on references or calls. This section is parallel to the agent mainline and does not block section 3; the limits get their own PRs.
 
+Reason: the agent scenario uses a controlled test plugin that does not try to exhaust resources; resource limits are a protocol change that would slow the issue down. This order does not change today's exposure, and the limits are accepted separately.
+
 Design:
 
 - hello gains an optional `limits: { refs, calls }`; absent means unlimited, for old peers.
@@ -155,6 +160,8 @@ Not done: byte or per-plugin quotas, admission control, queue lengths. This plan
 
 1–7 are the issue mainline; 8–10 are a parallel track and do not block 1–7. Each PR does one thing; tests and documentation land with the implementation. The PR description states which behaviour it closes and on which platforms it ran.
 
+PRs 1–3 first confirm the failure-injection points: a permanently conflicting store, one failing instance copy, and cleanup that never returns. If the existing API has no injection point, add a public test API first; do not peek at internal state. PR 1 also confirms whether instance edits are really transactional; if not, split the product change out instead of mixing it into "add tests". PR 3 uses a controllable clock or a generous margin for the deadline test, so it does not turn into a real long wait and flake.
+
 ## 6. Done criteria
 
 - [ ] all eight register items are "verified", or explicitly downgraded with a locking test; the core promise has a second verification;
@@ -172,6 +179,11 @@ Resource limits are a parallel track with their own acceptance and are not a com
 | Risk | Treatment |
 | --- | --- |
 | `Loader::services()` cannot see host services that exist only in Rust's type system | List them with `callable = false`; document that a service must be exposed by name (`HostDispatch` / export) to be callable by the agent |
+| `Loader::services()` sources disagree | Use the current rows and the host catalog as the source; `callable` depends only on whether a `HostDispatch` is reachable; list disagreements as `false` and cover them with a list test |
+| Instance edits are not really transactional | PR 1 checks first; if not, split the product change out instead of calling it "adding tests" |
+| No existing failure-injection hooks | PRs 1–3 add public test APIs first (permanently conflicting store, one failing copy, cleanup that never returns); do not peek at internal state |
+| The deadline test relies on a real wait and flakes | Use a controllable clock or a generous margin, not a real long sleep |
+| The `go add` stub only checks what the host passes | Add a real install test with a local file GOPROXY; keep the row "partly verified" until it passes |
 | The tool list changes on hot swap, making scripted tests brittle | `rutis_services` is data, not a tool; the tool schema is fixed and scripts assert by service name |
 | A sync method blocks the agent | Run it on a background blocking thread; cancellation only stops the wait, an already-started call may finish in the background, never retried |
 | The agent has no calling-plugin identity | Methods that need the caller's context are refused with a model-visible error; the limitation is documented |
