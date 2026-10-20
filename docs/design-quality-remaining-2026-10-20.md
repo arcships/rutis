@@ -35,6 +35,8 @@
 
 验收：8 条全部“已验证”，或明确降级并带锁定测试；总 issue 的对应勾选更新。
 
+8 条里 7 条的产品行为已经在现有代码里，主要是补测试；`go add` 的宿主命令也在，但真正的 Go 安装需要本地文件 GOPROXY 的测试，stub 只验证宿主传参。若测试发现行为不符，按缺陷修。
+
 ## 三、agent 写插件主线
 
 ### 3.1 产品决定：两个通用工具，不是每个方法一个工具
@@ -60,6 +62,7 @@
 pub struct ServiceInfo {
     pub name: String,
     pub provider: ProviderInfo, // 行 id，或宿主
+    pub kind: ServiceKind, // 插件行 / 宿主 / 远端 / 实例
     pub methods: Option<serde_json::Value>, // { method: "sync" | "async" }
     pub callable: bool,
 }
@@ -70,12 +73,16 @@ pub struct ServiceInfo {
 - 拿得到：`callable = true`，`methods` 取 `HostDispatch::methods()`；
 - 拿不到：列出来但 `callable = false`，`rutis_call` 返回“这个服务没有按名字对外”。
 
+`kind` 用来做默认权限过滤：`rutis_services` 默认只返回插件行提供的全局服务；宿主、远端、实例内服务只有出现在 `allow` 里才返回。
+
 新增 `ServiceToolsPlugin`（`rutis-agent` 的可选 `loader` feature，依赖 `rutis-loader` 与 `rutis-bridge` 的 session；不会形成循环依赖）：
 
 - `inject = [tools]`，从 `ToolRegistry` 注册两个工具；
 - `ToolRegistry` 增加 `register_scoped`（返回 token）与 `unregister(token)`；卸载时注销这两个工具，token 保证只移除自己注册的，不会误删同名工具；driver 每轮都读一次 schema，所以注册晚一轮也能在下一轮出现；
 - `rutis_call` 通过 `HostDispatch::invoke` 调用；返回值是 future 时用现有的 settle 辅助等待，sync 方法直接返回；
 - 未知服务、未知方法、不可按名调用、参数错误都变成 `error: ...` 文本，不 panic，不影响其他工具。
+
+归属：`rutis-agent` 是示例 crate。`ServiceToolsPlugin` 先放在它的可选 feature 里，作为 agent 示例的一部分；`Loader::services()` 是核心 API。若以后要作为产品 API，再移到独立 crate。
 
 **实现约束。** 这些是第一版就定死的：
 

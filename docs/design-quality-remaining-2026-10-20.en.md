@@ -35,6 +35,8 @@ Each needs a repeatable test; when it passes, the register moves from "partly ve
 
 Acceptance: all eight are "verified", or explicitly downgraded with a locking test; the tracking issue's checkboxes are updated.
 
+Seven of the eight behaviours already exist in the code and mainly need tests; the host command for `go add` exists too, but the real Go install needs a local file GOPROXY test, while the stub only checks what the host passes. If a test finds the behaviour is wrong, fix it as a defect.
+
 ## 3. The agent-written plugin mainline
 
 ### 3.1 Product decision: two generic tools, not one tool per method
@@ -60,6 +62,7 @@ Add `Loader::services()`, returning:
 pub struct ServiceInfo {
     pub name: String,
     pub provider: ProviderInfo, // row id, or the host
+    pub kind: ServiceKind, // plugin row / host / remote / instance
     pub methods: Option<serde_json::Value>, // { method: "sync" | "async" }
     pub callable: bool,
 }
@@ -70,12 +73,16 @@ It takes names from the loader's current rows and the host service catalog; for 
 - present: `callable = true`, `methods` from `HostDispatch::methods()`;
 - absent: list it with `callable = false`; `rutis_call` says the service is not exposed by name.
 
+`kind` drives the default permission filter: `rutis_services` returns only global services from plugin rows by default; host, remote and instance-scoped services are returned only when they appear in `allow`.
+
 Add `ServiceToolsPlugin` (an optional `loader` feature of `rutis-agent`, depending on `rutis-loader` and the `rutis-bridge` session layer; no dependency cycle):
 
 - `inject = [tools]`, registers the two tools in the `ToolRegistry`;
 - `ToolRegistry` gains `register_scoped` (returning a token) and `unregister(token)`; on unload it removes exactly those two tools, and the token prevents deleting a same-named tool from someone else; the driver reads the schema every turn, so a late registration appears on the next turn;
 - `rutis_call` invokes through `HostDispatch::invoke`; a future result is awaited with the existing settle helper, a sync method returns directly;
 - unknown service, unknown method, not callable and bad arguments all become `error: ...` text; no panic, other tools unaffected.
+
+Ownership: `rutis-agent` is an example crate. `ServiceToolsPlugin` starts in its optional feature as part of the agent example; `Loader::services()` is the core API. If this becomes a product API, move it to its own crate.
 
 **Implementation constraints.** These are fixed for the first version:
 
