@@ -692,8 +692,11 @@ Found and fixed in step three: #407, #408, #409 (#419), #411 (#427), #428 (#443)
 | Item | Prerequisite |
 | --- | --- |
 | All controls for scenario H (S1 #185) | A design for "plugin services as agent tools"; decisions on isolation and permissions for agent-written plugins |
-| Resource limits on references and calls | A design first (raised in #178) |
-| emit carrying its dispatch mode, so a `serial` across the boundary runs as serial on the far side (#340) | A design for the protocol change (the conclusion of #281) |
+| Resource limits on references and calls | Design in §9.5 (draft) |
+
+### 9.5 Step four (0.16): quality close-out
+
+The scope, resource limits, residue checks, testing-tool comparison, install smoke and release gate for 0.16 are in the [0.16 quality close-out plan](design-quality-0.16-2026-10-20.en.md) (draft, 2026-10-20). It schedules the remaining P0 / P1 controls from §6, the rows still "partly" or "not met" in §1, and the remaining items in #183 together; S1 (#185) stays in waiting-for-design.
 
 ---
 
