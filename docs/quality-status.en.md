@@ -694,9 +694,9 @@ Found and fixed in step three: #407, #408, #409 (#419), #411 (#427), #428 (#443)
 | All controls for scenario H (S1 #185) | A design for "plugin services as agent tools"; decisions on isolation and permissions for agent-written plugins |
 | Resource limits on references and calls | Design in §9.5 (draft) |
 
-### 9.5 Step four (0.16): quality close-out
+### 9.5 What remains in the quality-control issue
 
-The scope, resource limits, residue checks, testing-tool comparison, install smoke and release gate for 0.16 are in the [0.16 quality close-out plan](design-quality-0.16-2026-10-20.en.md) (draft, 2026-10-20). It schedules the remaining P0 / P1 controls from §6, the rows still "partly" or "not met" in §1, and the remaining items in #183 together; S1 (#185) stays in waiting-for-design.
+The eight guarantee-register items, the agent-written plugin mainline and the reference / call limits are in the [quality-control leftovers plan](design-quality-remaining-2026-10-20.en.md) (draft, 2026-10-20). Other quality gaps get their own issues and are not folded into this plan.
 
 ---
 
