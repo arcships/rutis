@@ -408,7 +408,7 @@ async fn dev(args: &[String]) -> Result<Stopped, String> {
                             // the previous one, so a later change can retry.
                             running.replace(project.runtime(), &project.binary(build));
                             outln!(
-                                "{}: cannot restart: {error}; the previous build is kept",
+                                "{}: cannot restart: {error}; the previous build is kept and starts again on the next scan",
                                 project.runtime()
                             );
                         }
