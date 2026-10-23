@@ -692,8 +692,11 @@ Found and fixed in step three: #407, #408, #409 (#419), #411 (#427), #428 (#443)
 | Item | Prerequisite |
 | --- | --- |
 | All controls for scenario H (S1 #185) | A design for "plugin services as agent tools"; decisions on isolation and permissions for agent-written plugins |
-| Resource limits on references and calls | A design first (raised in #178) |
-| emit carrying its dispatch mode, so a `serial` across the boundary runs as serial on the far side (#340) | A design for the protocol change (the conclusion of #281) |
+| Resource limits on references and calls | Design in §9.5 (draft) |
+
+### 9.5 What remains in the quality-control issue
+
+The eight guarantee-register items, the agent-written plugin mainline and the reference / call limits are in the [quality-control leftovers plan](design-quality-remaining-2026-10-20.en.md) (draft, 2026-10-20). Other quality gaps get their own issues and are not folded into this plan.
 
 ---
 
