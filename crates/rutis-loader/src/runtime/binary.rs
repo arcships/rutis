@@ -137,9 +137,20 @@ impl Binaries {
     }
 }
 
+/// The manifest format this loader reads. A binary may write a newer one;
+/// it is refused whole rather than half-read.
+pub const MANIFEST_FORMAT: u32 = 1;
+
+fn manifest_format() -> u32 {
+    MANIFEST_FORMAT
+}
+
 /// What a binary's manifest says.
 #[derive(Clone, Debug, Deserialize)]
 pub struct BinaryManifest {
+    /// The format of this manifest; absent means [`MANIFEST_FORMAT`].
+    #[serde(default = "manifest_format")]
+    pub manifest: u32,
     /// The SDK version it was built with.
     #[serde(default)]
     pub sdk: String,
@@ -311,7 +322,15 @@ fn read_manifest(path: &Path) -> Result<BinaryManifest, String> {
             .collect();
         return Err(format!("--rutis-manifest exited with {status}: {tail}"));
     }
-    serde_json::from_slice(&out).map_err(|error| format!("it printed no manifest: {error}"))
+    let manifest: BinaryManifest =
+        serde_json::from_slice(&out).map_err(|error| format!("it printed no manifest: {error}"))?;
+    if manifest.manifest > MANIFEST_FORMAT {
+        return Err(format!(
+            "its manifest format {} is newer than this rutis reads ({MANIFEST_FORMAT})",
+            manifest.manifest
+        ));
+    }
+    Ok(manifest)
 }
 
 fn wrong_platform() -> String {
@@ -2134,6 +2153,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = manifest_script(dir.path(), "printf '{}'\nhead -c 100000 /dev/zero >&2");
         assert_eq!(read_manifest(&path).unwrap().plugin_api, 0);
+    }
+
+    /// A manifest of a format this loader does not know is refused, not
+    /// half-read: a newer binary may have changed what its fields mean.
+    #[cfg(unix)]
+    #[test]
+    fn a_manifest_from_a_newer_format_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = manifest_script(dir.path(), "printf '{\"manifest\": 2, \"pluginApi\": 99}'");
+        let error = read_manifest(&path).unwrap_err();
+        assert!(error.contains("manifest format 2"), "{error}");
+        assert!(error.contains("newer"), "{error}");
+    }
+
+    /// A manifest without a format is the first one: every binary written
+    /// before the field existed keeps its meaning.
+    #[cfg(unix)]
+    #[test]
+    fn a_manifest_without_a_format_is_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = manifest_script(dir.path(), "printf '{\"pluginApi\": 3}'");
+        assert_eq!(read_manifest(&path).unwrap().manifest, MANIFEST_FORMAT);
     }
 
     #[cfg(feature = "go")]
