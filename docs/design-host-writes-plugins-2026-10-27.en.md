@@ -206,6 +206,80 @@ Three PRs, each closed (what it replaces is removed and the docs are changed in 
 | --- | --- | --- | --- |
 | H2 | rutis-host's editable layer: `run` uses the `rows` of `rutis.json` as the editable layer, `Persist` with #805's writer; none under `dev`; the error text `this host keeps no editable configuration, …` and the write-failure line | After adding and removing rows the file is byte-for-byte right with key order kept; `--watch-config` does not count the write as a change; an edit after an outside change merges by the conflict handling; restarts as usual; rutis-host.md "Changing the configuration while it runs" says so | P2 (#805) |
 | H3 | rutis-loader's `LoaderService` with its 4 methods, provided by `LoaderPlugin`; §7's error text (replacing `no editable layer`, `no entry`, `apply failed, rolled back` with every user changed in the same PR); the `cannot reload` text written by the loader, `dev` using it | One test each in Node, Python and Go making the same calls of `create` / `reload` / `remove` / `status` after `inject`, comparing every row of §7's plugin-author table word for word; an end-to-end test each for the rows "no editable configuration" and "writing back failed"; guarantee `loader/service` added | CL5, CL17 (with C2), CL21, CL23 |
+| H3b | The loader's operations do not wait for `apply` under their lock (§11); §5's row "called in a row's own `apply`" said as §11 says it | §11.3's tests; the three guarantees reworded as §11.3 says, the existing tests passing as they are | H3 |
 | H4 | S1 (§8); a section "Managing plugins with `loader`" in rutis-host.md and plugin-api.md (both languages); the sentence in "Migrating to 0.19"; closes #185 | Passes on Linux and macOS, in nightly | H2, H3; changes the same docs as G3 and G5, not in parallel with them |
 
-H1 is this revision (the two design documents only, and rows H2–H4 added to #771).
+H1 is this revision (the two design documents only, and rows H2–H4 added to #771). H3b was added in the review of #842 (2026-10-29), before H4.
+
+## 11. H3b: the loader's operations do not wait for `apply` under their lock
+
+### 11.1 Where it is stuck
+
+Every loader operation (`reconcile`, edits such as `create`, `reload`, `flush`, creating and rebuilding instances) first takes the operation lock `op`, changes the layers and reconciles under it, then waits under it for **every** row's `apply` to end (the `settle(None)` at the end of `reconcile_inner`), and only then judges new failures, rolls back or stores the edit. So:
+
+- A row calling `loader.create` in its own `apply` (or a Rust plugin calling `Loader::create` in `apply`): the outer operation holds the lock waiting for that row's `apply`, the row waits for the lock, and both wait forever.
+- Moving the wait out of the lock alone is not enough: the inner `create` also runs `settle(None)`, whose "every row" includes the outer one, so they still wait for each other.
+- Calls from a service method or an event do not hang, as no operation waits for them then (§5).
+
+In Cordis a plugin using `ctx.loader` in `apply` is an ordinary thing to write; rutis is to allow it the same way.
+
+### 11.2 What it becomes (rutis-loader only)
+
+An operation has three stages, and the lock covers only the two that change state:
+
+1. **Plan and start (locked)**: change the layers (an edit dry-runs first, as now), compose the desired tree, work out the rows to unload, update in place or start, **register those rows as this operation's**, unload the old fibers and start the new ones (started, not waited for).
+2. **Wait (not locked)**: wait for this operation's rows only, the children they start (a group starts its children while loading), and the rows restarted because of them that no operation in progress has registered (rows using a service that was replaced, which the kernel restarts). Rows another operation registered are not waited for.
+3. **Judge and finish (locked)**: new failures are only among the rows stage 2 waited for (not failing before). None: the edit joins the pending queue and is stored (as now). Some: one **reverse edit of this change only** — the row's (and its children's) content in the editable layer put back as it was, leaving what other operations changed meanwhile — run through 1–3 again, and the error returned; the edit neither joins the queue nor is stored.
+
+Rules:
+
+- **One row at a time**: an operation whose rows another operation in progress has registered waits in stage 1 for that operation to end. Operations on different rows run at the same time.
+- **A row on itself**: a row changing itself in its own `apply` (`reload` / `remove` of itself) still waits for itself and hangs — it is registered under the outer operation, which waits for its `apply`. As out of scope says ("a row reloading or removing itself"); no check or error added.
+- **Unloading**: an old fiber's unloading starts in stage 1 and is waited for before stage 2 ("the old goes first" stays), not under the lock; a cleanup calling `loader` therefore does not hang either.
+- **`reload`**: on failure the previous resolution is put back, for that row's module name only, through 1–3 as well.
+- **An outside `reconcile`** (the host giving new layers): registers every row it changes; layers given from outside apply as they are and are not rolled back, as now.
+- **`Loader::settled()`** still waits for every row; it is for a host with no operation in progress, and called in `apply` it still waits for itself.
+- **The pending queue**: edits join it in the order they **finish** and are stored in that order; rolled-back edits do not join it. As one row is changed by one operation at a time, the edits of one row keep the order they started in. Replaying the queue after a conflict (`persist_queue`) is unchanged.
+- No change to the kernel or the protocol, no switch, and the old "put the whole layer snapshot back" rollback is not kept.
+
+### 11.3 Guarantees affected (as they will read)
+
+| Guarantee | New wording |
+| --- | --- |
+| `loader/apply-failure-rolls-back` | When the dry run passes and the new instance fails in `apply` (`create` too), **the row's (and its children's) content in the editable layer** is put back as it was and reconciled, `ApplyFailed` returned, nothing persisted; edits of other rows made at the same time are not affected. When the row put back cannot load either, `RollbackFailed`. While it rolls back the plugin and those depending on it are briefly unavailable; no seamless switch is guaranteed |
+| `loader/edit-dry-run-first` | Unchanged: an edit failing its dry run returns an error, leaves the editable layer as it was, persists nothing, restarts nothing. Added: edits of different rows may run at the same time, edits of one row run one after another; a row may change **other** rows in its own `apply` |
+| `loader/persist-queue` | Reconcile first, persist after; edits join the pending queue in the order they finish and are stored in that order, rolled-back edits do not join it; a non-conflict `save` failure returns `PersistFailed`, the edit stays in effect and queued, and the next edit or `flush()` writes the whole queue; several writers replay the queue on the latest content in order after a conflict (unchanged) |
+
+Tests (in the implementation PR):
+
+- `create` a row, `remove` a row and `reload` another row in `apply`: from a Rust plugin and from a Python plugin, each returning, with the results they have when called from a service method.
+- A row `create`d in `apply` that cannot start: only that row is rolled back; the outer row runs on.
+- Two edits of different rows at the same time, one failing: only that one is rolled back, the other stored; stored in the order they finished.
+- Two edits of one row: the second waits for the first.
+- `loader.remove` of another row in a cleanup: does not hang.
+- The existing loader tests pass as they are (`loader.rs`, `regressions.rs`, `instances.rs` and the rest).
+
+### 11.4 What developers see
+
+**Plugin authors**: `loader` can be called in `apply`, as in Cordis.
+
+```python
+async def apply(ctx, config):
+    loader = ctx.use("loader")
+    await loader.create({"id": "weather", "name": "py:weather"})   # returns "weather"
+```
+
+| Trigger | Result (word for word) |
+| --- | --- |
+| `create` a row in `apply`, and it starts | returns the row id; terminal `weather: running` |
+| `create` a row in `apply` whose `apply` raises | throws `weather: KeyError: 'units'` (as in §7), the row rolled back; whether the calling row fails depends on whether it handles the error |
+| `reload` / `remove` of **itself** in `apply` | waits forever (unchanged, out of scope) |
+| two plugins changing one row at the same time | the later waits for the earlier, each gets its own result; no new error |
+
+§7's other text is unchanged. §5's row "called in a row's own `apply`" becomes: it may be called, only not on itself.
+
+**Host owners embedding rutis (Rust)**: `Loader::create` / `update` / `remove` / `reload` may be called in a plugin's `apply`; calls changing different rows may run at the same time. `Loader::settled()` means what it means now.
+
+**People assembling plugins with rutis-host**: no change to see.
+
+Concepts to learn: none added.
