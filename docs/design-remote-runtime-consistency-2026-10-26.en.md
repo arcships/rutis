@@ -107,6 +107,7 @@ Today `gpu` and `mac` each need a separate `rutis-bridge/peer` row; with the new
 ## 7. Compatibility
 
 - Old configuration runs without changing a character; the runtime side needs no upgrade; the Rust API is unchanged.
+- The old form (`runtimes.remote` with only `name` and `language`, plus a `rutis-bridge/peer` row with `"runtime": "<name>"`, rows named with the `<name>:` prefix) is deprecated: it still works, behaves as before, and prints no warning; the guides and "Migrating to 0.19" write only the new form, and where the old form appears they say it is deprecated and point to the new one. Removing it waits for a later incompatible release, decided separately; 0.19 does not remove it.
 - Behavior changes (written into "Migrating to 0.19"): in one-connection mode, a plugin missing on the remote side changes from a whole-row `NotFound` to `Unavailable`; status lines in the new form are prefixed `runtime <name>`; many connections start producing output.
 
 ## 8. Implementation

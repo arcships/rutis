@@ -149,7 +149,7 @@ Details in `references/rutis-json.md` and `references/nodes.md`.
 
 - `language`: `python` / `py` / `go` / `swift` / `node` / `bun`.
 - One entry describes the runtime whole: `dial: <address>` (rutis dials it), `listen: <listener>` (it dials in; its `--id` is the runtime's name), or `listen` + `instances` (many, step 4b). Not `dial` with `listen`, nor `dial` with `instances`. Optional `transport` (default `websocket`) names a transport the embedding Rust program mounts.
-- The form before 0.19 (only `name` and `language`, plus a `rutis-bridge/peer` row with `"runtime": "<name>"`) still works; do not write both for one runtime (the host refuses to start).
+- The form before 0.19 (only `name` and `language`, plus a `rutis-bridge/peer` row with `"runtime": "<name>"`) is deprecated: it still works, but write the new form; do not write both for one runtime (the host refuses to start).
 - Rows are named `<runtime name>:<plugin>`; the plugin is resolved on the remote machine.
 
 ## 6. Verify

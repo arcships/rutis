@@ -206,16 +206,15 @@ A device with an address rutis can reach (a Mac or an iPad on a fixed address in
 
 ```swift
 let rutis = RutisApp(plugins: [health, device], listen: "wss://0.0.0.0:7443/rutis",
-                     id: "lab-ipad", token: token, certificate: identity)   // a SecIdentity
+                     id: "ipad", token: token, certificate: identity)   // a SecIdentity
 ```
 
-`certificate` is the TLS identity (from a PKCS#12 file with `SecPKCS12Import`, or the Keychain); `ws://` is allowed on loopback only. Port `0` asks for a free port: the `log` line `rutis: listening on …` says which, and later starts bind that port again, so the address stays the same. One connection at a time, a newer one taking over; `state` is `.connecting` while no rutis is connected, and `.connected` once a connection's rutis greeted (within 10 s, or the connection is closed). A connection must present its upgrade request within 10 s, and at most 32 upgrade at once. If the listener fails later (the network went away), it is bound again with backoff (`rutis: listening failed (…); listening again in 1s`), a connected rutis staying connected. On the rutis side, a node row links to it, as to [a runtime on another machine](nodes.en.md#a-language-runtime-on-another-machine), with `language: "swift"`:
+`certificate` is the TLS identity (from a PKCS#12 file with `SecPKCS12Import`, or the Keychain); `ws://` is allowed on loopback only. Port `0` asks for a free port: the `log` line `rutis: listening on …` says which, and later starts bind that port again, so the address stays the same. One connection at a time, a newer one taking over; `state` is `.connecting` while no rutis is connected, and `.connected` once a connection's rutis greeted (within 10 s, or the connection is closed). A connection must present its upgrade request within 10 s, and at most 32 upgrade at once. If the listener fails later (the network went away), it is bound again with backoff (`rutis: listening failed (…); listening again in 1s`), a connected rutis staying connected. On the rutis side, its `runtimes.remote` entry has `dial`, as for [a runtime on another machine](nodes.en.md#a-language-runtime-on-another-machine), with `language: "swift"` and the app's `id` as its `name`:
 
 ```json
 {
-  "runtimes": { "remote": [{ "name": "ipad", "language": "swift" }] },
+  "runtimes": { "remote": [{ "name": "ipad", "language": "swift", "dial": "wss://10.0.0.20:7443/rutis" }] },
   "rows": [
-    { "id": "ipad", "name": "rutis-bridge/peer", "config": { "peer": "lab-ipad", "dial": "wss://10.0.0.20:7443/rutis", "runtime": "ipad" } },
     { "id": "health", "name": "ipad:health" }
   ]
 }

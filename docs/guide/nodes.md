@@ -49,7 +49,7 @@
 | `import: ["calendar", "tock"]` | 把对端的服务 `calendar` 作为本节点的服务（本节点已有同名服务时拒绝）；本节点 `calendar`、`tock` 的监听器听到对端发出的这两个事件 |
 | `host: true` | 允许对端在本节点上运行这里装着的插件（只对可信的对端打开） |
 | `rows: true` | 本文件里 `peer:<对端>/<插件>` 的行在对端运行 |
-| `runtime: "<名字>"` | 对端是一个语言运行时，见下文 |
+| `runtime: "<名字>"` | 对端是一个语言运行时（已弃用：改在 `runtimes.remote` 里写 `dial` 或 `listen`，见下文） |
 
 服务跨节点时调用链保持：同步调用期间的回调、回调里再调回去，都能穿过多个节点。
 
@@ -111,11 +111,11 @@ RUTIS_TOKEN=secret RUTIS_CERT=server.pem RUTIS_KEY=server.key \
 | `dial: <地址>` | 一台，rutis 去连；对方的 `--id` 是运行时名 |
 | `listen: <监听器>` | 一台，等它连进来；对方的 `--id` 是运行时名 |
 | `listen` + `instances: <分组>` | 多台，每条连接一个实例（见[连进来的运行时](#连进来的运行时)） |
-| 都不写 | 不起连接，由一条带 `runtime` 的节点行或嵌入的程序提供会话 |
+| 都不写 | 不起连接，由嵌入的程序（或一条带 `runtime` 的节点行，已弃用）提供会话 |
 
 `dial` 与 `listen` 不能同时写，`dial` 与 `instances` 也不能（rutis 去连的只能是一台）。token 照旧：`RUTIS_TOKEN_<名字>`，没有时用 `RUTIS_TOKEN`。可选的 `transport` 选传输，默认 `websocket`；宿主自己的连接方式（中继、QUIC 等）实现一个 `Transport`，由嵌入 rutis-host 的程序挂上，`transport` 写它的名字（[rutis-host](rutis-host.md#runtimes)）。
 
-0.19 之前的写法——`runtimes.remote` 只写 `name` 与 `language`，另写一条带 `"runtime": "gpu"` 的 `rutis-bridge/peer` 行——照常可用（见[迁移到 0.19](../migration-0.19.md)）。
+0.19 之前的写法——`runtimes.remote` 只写 `name` 与 `language`，另写一条带 `"runtime": "gpu"` 的 `rutis-bridge/peer` 行——已弃用：照常可用，新配置用上面的写法，改写见[迁移到 0.19](../migration-0.19.md)。
 
 `run` 打印连接的变化，前缀是 `runtime <名>`：
 

@@ -34,13 +34,13 @@
 | `"transport": "<kind>"` | `"transport": "<kind>"`（默认 `websocket`） |
 
 - 多台（`listen` + `instances`）的写法不变。
-- **旧写法照常可用，不用改，也不会被转换。** 同一个运行时不要两种都写：`runtimes.remote` 有 `dial` 或 `listen`，又有一条 `"runtime"` 指向它的节点行时，宿主启动报错：
+- **旧写法已弃用：照常可用、行为不变，不打印警告，也不会被转换；新配置请用上面的新写法，改写按上表对照。** 删除要等以后的不兼容版本另行决定，0.19 不删。同一个运行时不要两种都写：`runtimes.remote` 有 `dial` 或 `listen`，又有一条 `"runtime"` 指向它的节点行时，宿主启动报错：
 
   ```
   remote runtime gpu: link row gpu connects it too: remove the link row, as runtimes.remote connects it itself
   ```
 
-- 旧写法里节点行的 `export`、`import`、`host`、`rows` 等字段，新写法没有：连接只用来运行这个运行时的行。还要这些字段的，继续用节点行。
+- 旧写法里节点行的 `export`、`import`、`host`、`rows` 等字段，新写法没有：连接只用来运行这个运行时的行。要在同一条连接上用这些字段的，目前只有旧写法能写（已弃用，照常可用）。
 - token 规则不变：`RUTIS_TOKEN_<名字>`，没有时用 `RUTIS_TOKEN`。新写法的一台 `listen` 没有 token 时启动报错。
 - 自建的连接方式（中继、QUIC 等）实现 `Transport`，由嵌入 rutis-host 的 Rust 程序挂上（`Embedding` 新增的 `transports`），`transport` 写它的名字；一台、多台都用它。
 

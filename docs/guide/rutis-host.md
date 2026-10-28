@@ -456,7 +456,7 @@ Node、Bun、Python 运行时里，一个服务方法一口气占住运行时 5 
     "py": { "project": "plugins", "python": ".venv/bin/python" },
     "go": { "dir": "plugins/go" },
     "swift": { "dir": "plugins/swift", "restart": "on-failure" },
-    "remote": [{ "name": "gpu", "language": "python" }]
+    "remote": [{ "name": "gpu", "language": "python", "dial": "wss://gpu.example.com/rutis" }]
   },
   "listen": [
     { "name": "public", "address": "0.0.0.0:7443", "cert": "tls/server.pem", "key": "tls/server.key" }
@@ -468,7 +468,6 @@ Node、Bun、Python 运行时里，一个服务方法一口气占住运行时 5 
     { "id": "calendar", "name": "swift:calendar" },
     { "id": "local-tool", "name": "./tools/tool.ts" },
     { "id": "office", "name": "rutis-bridge/peer", "config": { "peer": "office", "dial": "wss://office.example.com/rutis", "export": ["weather"] } },
-    { "id": "gpu", "name": "rutis-bridge/peer", "config": { "peer": "gpu", "dial": "wss://gpu.example.com/rutis", "runtime": "gpu" } },
     { "id": "embedder", "name": "gpu:embedder" }
   ]
 }
@@ -501,7 +500,7 @@ rutis.json: this file is format 2, this rutis-host reads up to 1: upgrade rutis-
 | `py` | `project`（默认 `.`）、`python`、`restart` | 启动 Python 运行时。解释器默认依次为 `$VIRTUAL_ENV/bin/python`、`<project>/.venv/bin/python`、`python3`（Windows 上为 `Scripts\python.exe` 和 `python`），它的环境里要装 `rutis` 和插件 |
 | `go` | `dir`、`binaries`、`start`（`on-demand` 默认 / `eager`）、`idle`（秒，默认 60）、`project`（默认 `.`）、`restart` | Go 插件：一个二进制一个运行时进程。`dir` 里含 Go SDK 标记的可执行文件都算（整个目录被视为受信任，应是专用目录），`binaries` 列出单个文件。运行时名由文件名得出（`netkit` → `go-netkit`）。按需启动的运行时在第一次有行用到时启动、空闲 `idle` 秒后停下（别处持有它交出的对象不算在用：停下后对这些对象的调用以 `peer-gone` 失败）；`eager` 全部启动并一直运行（不能同时写 `idle`）。换了二进制，重启宿主后生效 |
 | `swift` | 同 `go` | Swift 插件（macOS）：与 `go` 相同，针对用 Swift SDK 构建的二进制（`plugin-binary` → `swift-plugin-binary`）；见 [Swift 插件](swift-plugin.md) |
-| `remote` | `name`、`language`、`dial`、`listen`、`instances`、`transport` | 别的机器上的运行时，一条写全：`dial` 由 rutis 去连，`listen` 等它连进来，`listen` + `instances` 每条连接一个实例，见下面的[远程运行时](#远程运行时)；都不写时经 `rows` 里 `"runtime": "<name>"` 的节点行连接（0.19 之前的写法），见 [连接节点](nodes.md) |
+| `remote` | `name`、`language`、`dial`、`listen`、`instances`、`transport` | 别的机器上的运行时，一条写全：`dial` 由 rutis 去连，`listen` 等它连进来，`listen` + `instances` 每条连接一个实例，见下面的[远程运行时](#远程运行时)；都不写时不起连接（0.19 之前经 `rows` 里 `"runtime": "<name>"` 的节点行连接，这种写法已弃用，见 [迁移到 0.19](../migration-0.19.md)） |
 
 缺少运行时包时，启动失败并给出安装命令。Python 的环境不存在（`python` 指向的 `.venv/bin/python` 还没有建）、或解释器里没有 `rutis` 包时，报错写明创建环境、安装与本宿主同版本 `rutis` 的命令（`uv venv <环境>` 和 `uv pip install --python <解释器> rutis==<版本>`，或用 `python3 -m venv` 和 pip）；没有任何环境、只找到没有 `rutis` 的 `python3` 时，给出在 `<project>/.venv` 创建环境的命令，建好后宿主自动用它。
 
@@ -526,7 +525,7 @@ rutis-host: warning: rutis.json: rows use the py runtime (py:llmbox), which runt
 | 地址 | — | — | 一台，rutis 去连；运行时的 `--id` 是 `name` |
 | — | 监听器 | — | 一台，等它连进来；运行时的 `--id` 是 `name` |
 | — | 监听器 | 分组 | 多台，每条连接一个实例（见[连进来的运行时](#连进来的运行时)） |
-| — | — | — | 不起连接：由带 `"runtime": "<name>"` 的节点行或嵌入的程序提供会话 |
+| — | — | — | 不起连接：由嵌入的程序（或带 `"runtime": "<name>"` 的节点行，已弃用）提供会话 |
 
 ```json
 {

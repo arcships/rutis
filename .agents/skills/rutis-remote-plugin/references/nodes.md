@@ -51,7 +51,7 @@ The node row's `config` determines what happens over the connection. Changing `e
 | `import: ["calendar", "tock"]` | Registers the peer's `calendar` service on this node (rejected if this node already has a service with that name), and this node's listeners of `calendar` and `tock` hear the peer's emissions of them. |
 | `host: true` | Allows the peer to run plugins installed on this node. Enable only for trusted peers. |
 | `rows: true` | Runs rows named `peer:<peer>/<plugin>` from this file on the peer. |
-| `runtime: "<name>"` | Identifies the peer as a language runtime; see below. |
+| `runtime: "<name>"` | Identifies the peer as a language runtime (deprecated: write `dial` or `listen` in `runtimes.remote` instead; see below). |
 
 Calls retain their call chain across nodes: callbacks during a synchronous call, including callbacks that call back again, can cross multiple nodes.
 
@@ -113,11 +113,11 @@ One `runtimes.remote` entry describes a remote runtime whole. Who connects, and 
 | `dial: <address>` | One runtime, which rutis dials; its `--id` is the runtime's name |
 | `listen: <listener>` | One runtime, which connects in; its `--id` is the runtime's name |
 | `listen` + `instances: <group>` | Many, each connection an instance (see [Runtimes that connect in](#runtimes-that-connect-in)) |
-| none of them | No connection of its own: a node row with `runtime`, or the program embedding the host, provides its session |
+| none of them | No connection of its own: the program embedding the host (or a node row with `runtime`, deprecated) provides its session |
 
 `dial` and `listen` cannot both be set, nor `dial` and `instances` (rutis can dial only one runtime). Tokens are as before: `RUTIS_TOKEN_<NAME>`, else `RUTIS_TOKEN`. The optional `transport` picks the transport, `websocket` by default; a host's own way of connecting (a relay, QUIC, …) implements a `Transport`, which the program embedding rutis-host mounts, and `transport` names it ([rutis-host](https://github.com/arcships/rutis/blob/main/docs/guide/rutis-host.en.md#remote-runtimes)).
 
-The form before 0.19 — `runtimes.remote` with only `name` and `language`, plus a `rutis-bridge/peer` row with `"runtime": "gpu"` — still works (see [Migrating to 0.19](https://github.com/arcships/rutis/blob/main/docs/migration-0.19.en.md)).
+The form before 0.19 — `runtimes.remote` with only `name` and `language`, plus a `rutis-bridge/peer` row with `"runtime": "gpu"` — is deprecated: it still works; write new configuration as above, and see [Migrating to 0.19](https://github.com/arcships/rutis/blob/main/docs/migration-0.19.en.md) for rewriting it.
 
 `run` prints how the connections change, prefixed `runtime <name>`:
 

@@ -34,13 +34,13 @@ Before, one remote runtime took two places: a `runtimes.remote` entry and a `rut
 | `"transport": "<kind>"` | `"transport": "<kind>"` (`websocket` by default) |
 
 - Many runtimes (`listen` + `instances`) are written as before.
-- **The old form still works; nothing needs to change, and nothing is converted.** Do not write both for one runtime: a `runtimes.remote` entry with `dial` or `listen` and a node row whose `"runtime"` names it stop the host at startup:
+- **The old form is deprecated: it still works, behaves as before, prints no warning, and is not converted; write new configuration in the new form above, rewriting by the table.** Removing it waits for a later incompatible release, decided separately; 0.19 does not remove it. Do not write both for one runtime: a `runtimes.remote` entry with `dial` or `listen` and a node row whose `"runtime"` names it stop the host at startup:
 
   ```
   remote runtime gpu: link row gpu connects it too: remove the link row, as runtimes.remote connects it itself
   ```
 
-- The node row's `export`, `import`, `host`, `rows` and similar fields have no counterpart in the new form: its connection only runs that runtime's rows. Keep the node row where you need them.
+- The node row's `export`, `import`, `host`, `rows` and similar fields have no counterpart in the new form: its connection only runs that runtime's rows. Where you need them on the same connection, only the old form can write that for now (deprecated, still working).
 - Tokens are as before: `RUTIS_TOKEN_<NAME>`, else `RUTIS_TOKEN`. One runtime's `listen` without a token stops the host at startup.
 - A connection of your own (a relay, QUIC, …) implements `Transport`, which the Rust program embedding rutis-host mounts (`Embedding`'s new `transports`), and `transport` names it; one runtime and many both use it.
 

@@ -106,6 +106,7 @@ Issue：[#695](https://github.com/arcships/rutis/issues/695)（实施 [#696](htt
 ## 七、兼容
 
 - 旧配置不改一字能跑；运行时侧不需要升级；Rust API 不变。
+- 旧写法（`runtimes.remote` 只写 `name` 与 `language`，另写一条带 `"runtime": "<名>"` 的 `rutis-bridge/peer` 行，行名用 `<名>:` 前缀）已弃用：照常能用、行为不变，不打印警告；指南与《迁移到 0.19》只写新写法，旧写法处注明已弃用并指向新写法。删除要等以后的不兼容版本另行决定，0.19 不删。
 - 行为变化（写进《迁移到 0.19》）：一台模式下远端缺插件从整行 `NotFound` 改为 `Unavailable`；新写法的状态行前缀为 `runtime <名>`；多台的连接开始有输出。
 
 ## 八、实施
