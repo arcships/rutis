@@ -433,11 +433,11 @@ PR 模板中有对应的检查项。
 | `sdk/*`（§12） | 7 | 1 | 0 | 0 | 8 |
 | `host/*`（§13） | 5 | 0 | 0 | 0 | 5 |
 | `loader/*`（§14） | 38 | 4 | 0 | 0 | 42 |
-| `host/*`（§15） | 17 | 3 | 1 | 1 | 22 |
-| 合计 | 171 | 12 | 1 | 3 | 187 |
+| `host/*`（§15） | 19 | 4 | 1 | 1 | 25 |
+| 合计 | 173 | 13 | 1 | 3 | 190 |
 
 已撤回的条目（状态"已撤回（0.13）"：`boundary/5.2`–`boundary/5.5`；"已撤回（0.15.1）"：`events/scope`、`events/hub-scope`；"已撤回（0.17）"：`bridge/exported-services`）不计入。
 
-核心承诺 41 条：已验证 37，部分验证 4（D22、D28、5.8、`loader/instance-edits-all-or-none`），未验证 0。契约行为 147 条：已验证 137，部分验证 9（D5、`sdk/testing-matches-runtime`、`loader/persist-queue`、`loader/saved-layers-restore`、`loader/go-runtimes`、`host/stop-deadline`、`host/exit-codes`、`host/row-state-lines`、`swift/app-access-belongs-to-the-app`），未验证 1（`host/go-add`）。
+核心承诺 41 条：已验证 37，部分验证 4（D22、D28、5.8、`loader/instance-edits-all-or-none`），未验证 0。契约行为 150 条：已验证 139，部分验证 10（D5、`sdk/testing-matches-runtime`、`loader/persist-queue`、`loader/saved-layers-restore`、`loader/go-runtimes`、`host/stop-deadline`、`host/exit-codes`、`host/dev-debug`、`host/row-state-lines`、`swift/app-access-belongs-to-the-app`），未验证 1（`host/go-add`）。
 
 **0.10 的基线**：未验证的核心承诺 0 条，未验证的契约行为 1 条（`host/go-add`）。从 0.11 起，新登记的"未验证"条目会让契约行为的数字超过基线（Q9.4.4），所以新登记的行应当带着测试一起登记。核心承诺的划分由维护者确认，可以调整。

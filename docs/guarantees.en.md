@@ -433,11 +433,11 @@ Sources: the sections of the user documentation [rutis-host](guide/rutis-host.en
 | `sdk/*` (§12) | 7 | 1 | 0 | 0 | 8 |
 | `host/*` (§13) | 5 | 0 | 0 | 0 | 5 |
 | `loader/*` (§14) | 38 | 4 | 0 | 0 | 42 |
-| `host/*` (§15) | 17 | 3 | 1 | 1 | 22 |
-| Total | 171 | 12 | 1 | 3 | 187 |
+| `host/*` (§15) | 19 | 4 | 1 | 1 | 25 |
+| Total | 173 | 13 | 1 | 3 | 190 |
 
 Withdrawn rows (status "withdrawn (0.13)": `boundary/5.2`–`boundary/5.5`; "withdrawn (0.15.1)": `events/scope`, `events/hub-scope`; "withdrawn (0.17)": `bridge/exported-services`) are not counted.
 
-41 core promises: 37 verified, 4 partly verified (D22, D28, 5.8, `loader/instance-edits-all-or-none`), 0 not verified. 147 contract behaviours: 137 verified, 9 partly verified (D5, `sdk/testing-matches-runtime`, `loader/persist-queue`, `loader/saved-layers-restore`, `loader/go-runtimes`, `host/stop-deadline`, `host/exit-codes`, `host/row-state-lines`, `swift/app-access-belongs-to-the-app`), 1 not verified (`host/go-add`).
+41 core promises: 37 verified, 4 partly verified (D22, D28, 5.8, `loader/instance-edits-all-or-none`), 0 not verified. 150 contract behaviours: 139 verified, 10 partly verified (D5, `sdk/testing-matches-runtime`, `loader/persist-queue`, `loader/saved-layers-restore`, `loader/go-runtimes`, `host/stop-deadline`, `host/exit-codes`, `host/dev-debug`, `host/row-state-lines`, `swift/app-access-belongs-to-the-app`), 1 not verified (`host/go-add`).
 
 **0.10 baseline**: 0 unverified core promises, 1 unverified contract behaviour (`host/go-add`). From 0.11 on, a newly registered row that is "not verified" pushes the contract number above the baseline (Q9.4.4), so new rows should be registered together with their tests. The maintainer confirms which rows are core promises and may change them.
