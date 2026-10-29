@@ -97,7 +97,7 @@ loader.remove_instance(b1.plugin).await?;
 - 实例随创建它的分组 ctx 存亡：父实例关闭，或该 ctx 被重建、卸载（例如所在分组的 `isolate` 改变）时，其中的实例随子树卸载并移除（`InstanceRemoved`），由创建它们的插件或业务在新 ctx 中重新创建。
 - 实例不写入配置。进程重启后由业务重新创建，例如按数据库恢复会话时逐个 `create_instance`。
 
-### 3.3 读取一个实例内的行
+### 3.3 宿主开发者看到什么：实例内的行
 
 `loader.instance_rows(instance_id)` 返回该分组实例内存活的 `(行 id, FiberView)`，包括嵌套实例中的行，不含该实例自身的分组 fiber。顺序为配置树序、再按实例创建顺序。未知或已移除的实例返回空列表。
 

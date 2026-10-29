@@ -97,7 +97,7 @@ loader.remove_instance(b1.plugin).await?;
 - An instance goes with the group context it was created in: when a parent instance closes, or that context is rebuilt or unloaded (for example its group's `isolate` changes), every instance in it is disposed with the subtree and removed (`InstanceRemoved`). The plugins or business code that created them create them again in the new context.
 - Instances are not written to configuration. After a process restart, business logic creates them again, for example calling `create_instance` for each conversation restored from a database.
 
-### 3.3 Reading an instance's rows
+### 3.3 What host developers see: instance rows
 
 `loader.instance_rows(instance_id)` returns the live `(row id, FiberView)` pairs inside that group instance, including rows in nested instances and excluding the instance's own group fiber. The order is configuration tree order, then instance creation order. An unknown or removed instance returns an empty list.
 
