@@ -162,6 +162,58 @@ impl Loader {
         out
     }
 
+    /// Live row handles inside `instance`, including nested group instances,
+    /// in configuration order, then instance creation order. Excludes the
+    /// instance's own group fiber and returns no rows after it is removed.
+    /// Each call includes rows created since the previous call without
+    /// cloning row configuration, schemas or metadata.
+    pub fn instance_rows(&self, instance: rutis::host::InstanceId) -> Vec<(String, FiberView)> {
+        let state = self.inner.state.lock().unwrap();
+        let Some(root) = state
+            .instances
+            .iter()
+            .find_map(|(number, record)| (record.kernel == instance).then_some(*number))
+        else {
+            return Vec::new();
+        };
+        let mut scopes: Vec<_> = state
+            .instances
+            .keys()
+            .copied()
+            .filter(|number| {
+                let mut scope = Some(*number);
+                while let Some(number) = scope {
+                    if number == root {
+                        return true;
+                    }
+                    scope = state
+                        .instances
+                        .get(&number)
+                        .and_then(|record| record.parent.as_ref())
+                        .and_then(|parent| parent.scope);
+                }
+                false
+            })
+            .collect();
+        scopes.sort_unstable();
+        let mut rows = Vec::new();
+        for row in &state.desired.rows {
+            for scope in &scopes {
+                if let Some(running) = state
+                    .running
+                    .get(&Slot {
+                        row: row.id.clone(),
+                        scope: Some(*scope),
+                    })
+                    .filter(|running| running.view.instance() != instance)
+                {
+                    rows.push((row.id.clone(), running.view.clone()));
+                }
+            }
+        }
+        rows
+    }
+
     /// What the copy `entry` (one of [`Loader::entries`]) waits for: each
     /// service it injects that is missing, by name, with why when rutis
     /// knows more (a Rust service of that name whose type is not marked

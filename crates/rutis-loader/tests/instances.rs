@@ -395,6 +395,15 @@ async fn each_instance_runs_its_own_copies() {
 
     let a = s.create("A").await;
     let b = s.create("B").await;
+    let a_rows = s.loader.instance_rows(a.view.instance());
+    let b_rows = s.loader.instance_rows(b.view.instance());
+    assert_eq!(
+        a_rows.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+        ["doc-scope", "reader"]
+    );
+    assert!(a_rows
+        .iter()
+        .all(|(_, view)| b_rows.iter().all(|(_, other)| view.id != other.id)));
     assert!(
         a.report
             .iter()
@@ -440,6 +449,8 @@ async fn each_instance_runs_its_own_copies() {
     s.loader.remove_instance(a.plugin).await.unwrap();
     assert_eq!(s.take_log(), ["cleanup  A", "cleanup r A"]);
     assert_eq!(s.copies("reader").len(), 1);
+    assert!(s.loader.instance_rows(a.view.instance()).is_empty());
+    assert_eq!(s.loader.instance_rows(b.view.instance()).len(), 2);
 
     // Closing the fiber directly removes the instance too.
     b.view.shutdown().await.unwrap();
@@ -480,6 +491,31 @@ async fn nested_instances_are_created_from_inside_and_read_outer_services() {
     let s = setup(NESTED).await;
     let a = s.create("A").await;
     let _b = s.create("B").await;
+    let rows = s.loader.instance_rows(a.view.instance());
+    assert_eq!(
+        rows.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+        ["doc-scope", "creator", "page", "page-scope", "page-reader"]
+    );
+    let scoped: Vec<_> = s
+        .loader
+        .entries()
+        .into_iter()
+        .filter(|row| {
+            row.instance.as_ref().is_some_and(|instance| {
+                instance
+                    .chain
+                    .iter()
+                    .any(|(_, id)| *id == a.view.instance())
+            }) && row.view.as_ref().is_some_and(|view| view.id != a.plugin)
+        })
+        .map(|row| (row.id, row.view.unwrap().id))
+        .collect();
+    assert_eq!(
+        rows.iter()
+            .map(|(id, view)| (id.clone(), view.id))
+            .collect::<Vec<_>>(),
+        scoped
+    );
     // `creator` created a page from its own context, during its apply.
     let log = s.take_log();
     for line in [
@@ -516,7 +552,7 @@ async fn nested_instances_are_created_from_inside_and_read_outer_services() {
 #[tokio::test]
 async fn edits_reach_every_instance_or_none() {
     let s = setup(DOC).await;
-    s.create("A").await;
+    let a = s.create("A").await;
     s.create("B").await;
     s.take_log();
 
@@ -556,6 +592,11 @@ async fn edits_reach_every_instance_or_none() {
         .unwrap();
     assert_eq!(s.take_log(), ["apply x", "apply x"]);
     assert_eq!(s.copies("extra").len(), 2);
+    assert!(s
+        .loader
+        .instance_rows(a.view.instance())
+        .iter()
+        .any(|(id, _)| id == "extra"));
 
     // Disabling and removing reach every copy.
     s.loader.set_disabled("extra", true).await.unwrap();
@@ -566,6 +607,11 @@ async fn edits_reach_every_instance_or_none() {
         .all(|e| matches!(e.status, EntryStatus::Disabled)));
     s.loader.remove("extra").await.unwrap();
     assert!(s.copies("extra").is_empty());
+    assert!(!s
+        .loader
+        .instance_rows(a.view.instance())
+        .iter()
+        .any(|(id, _)| id == "extra"));
 
     // Restarting the row restarts every copy.
     s.loader.restart("reader").await.unwrap();
