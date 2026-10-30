@@ -1366,26 +1366,27 @@ When the caller abandons an async call (for example, on timeout), the call is ca
 - **Rust**: dropping the call's future cancels it.
 - How a dispatch of an event is cancelled: [events: lifecycle](#lifecycle).
 
-## Your own connection: `sessions.open`
+## Your own connection: `rutis/sessions.open`
 
-To let rutis use the plugins at the other end of a connection of your own (a relay, Bluetooth, another transport), write a connection plugin: take a connection that carries binary messages and hand it to the service `sessions`. The far end can be a language runtime, an app that installs its own plugins, or another rutis.
+To let rutis use the plugins at the other end of a connection of your own (a relay, Bluetooth, another transport), write a connection plugin: take a connection that carries binary messages and hand it to the service `rutis/sessions`. The far end can be a language runtime, an app that installs its own plugins, or another rutis.
 
 ```ts
 type Close = { kind: 'done' } | { kind: 'replaced' } | { kind: 'rejected'; reason: string }
 interface Far  { send(message: Uint8Array): void; close(why: Close): void }
 interface Near { receive(message: Uint8Array): Promise<void>; end(why: Close): void }
-sessions.open(far: Far): Near
+// the service rutis/sessions
+open(far: Far): Near
 ```
 
 ```ts
 export default definePlugin({
   name: 'relay',
-  inject: ['sessions'],
+  inject: ['rutis/sessions'],
   async apply(ctx, config: { url: string }) {
     const ws = new WebSocket(config.url)
     ws.binaryType = 'arraybuffer'
     await new Promise(ok => ws.addEventListener('open', ok, { once: true }))
-    const near = ctx.sessions.open({
+    const near = await ctx.use('rutis/sessions').open({
       send: m => ws.send(m),
       close: why => ws.close(why.kind === 'rejected' ? 4003 : why.kind === 'replaced' ? 4002 : 1000),
     })
@@ -1396,7 +1397,7 @@ export default definePlugin({
 })
 ```
 
-- Write `sessions` in `inject`; without it, `open` fails: `declare sessions in inject`.
+- Write `rutis/sessions` in `inject`; without it, `open` fails: `declare rutis/sessions in inject`. The name is under `rutis/`, as rutis's own events are, so that `sessions` stays free for the host's own services (up to 0.19.2 it was `sessions`).
 - The session hangs under the plugin that called `open`: when that plugin unloads, its sessions and the far end's plugins all unload.
 - `receive` completes once the message is in the session's receive queue; the queue holds 64 messages, and when it is full `receive` waits, which carries backpressure back to the connection.
 - The far end's plugins are named `<far id>:<plugin>` here; to have the far end run a plugin, write a row `<connection row>:<plugin>` in rutis.json (for example `relay:contacts`); while the far end is not there, that row waits.

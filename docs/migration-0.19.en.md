@@ -16,6 +16,7 @@
 - **The Kotlin SDK is not published to Maven**: it is used from source ([Kotlin](#kotlin)).
 - **Rust APIs removed and renamed**: the connection and session parts ([Rust embeddings](#rust-embeddings)), the platform cleanup ([Platform cleanup](#platform-cleanup-694)), and a filter failing in a runtime's `emit` reported as `FilterFailed` ([Error kinds](#error-kinds-879)).
 - **Tools**: `rutis-dev` is removed, `rutis-migrate` is no longer released, `rutis-host go add` is removed ([Tools](#tools)).
+- **0.19.3: the session service is renamed** from `sessions` to `rutis/sessions`, leaving `sessions` to the host ([0.19.3: the session service is renamed](#0193-the-session-service-is-renamed-986)).
 
 The rest is new, and changes nothing already written.
 
@@ -177,11 +178,11 @@ A 0.18 row `peer:<peer>/<plugin>` is not refused in 0.19: it shows `waiting for 
   | `Installed { described: Described { schema, version, integrity }, factory }`; `StaticCatalog::with(name, described, factory)` | `Installed { schema, version, factory }`; `StaticCatalog::with(name, Installed::new(factory))` |
   | rutis-loader's feature `peer` and `rutis_loader::peer` (`PeerResolver`, `PeerRows`, `PeerRowsPlugin`, `register_peer_node`, `node_schema`, `LoaderCatalog`) | removed; rows `<connection row>:<plugin>` are resolved by `runtime::SessionResolver`, `LoaderCatalog` is in `rutis_loader::runtime` |
   | `identity` of `rutis_host::host::Embedding` | removed |
-  | a connection of your own implementing `Transport` | hand over a `Channel`: `ctx.plugin(Session::new(channel))`, or `Session::handshake(&ctx, channel).await` then `ctx.plugin(greeted)`; other languages use `open` of the service `sessions` |
+  | a connection of your own implementing `Transport` | hand over a `Channel`: `ctx.plugin(Session::new(channel))`, or `Session::handshake(&ctx, channel).await` then `ctx.plugin(greeted)`; other languages use `open` of the service `rutis/sessions` |
 
 - A Rust embedding that mounts `Session` itself provides, in the root ctx, the id this end gives in the handshake: `root.provide(rutis_bridge::LocalId(id))`; without it the session fails: `the host provides no id for its sessions`. rutis-host provides it (rutis.json's `id`, `main` by default).
 
-- A connection of your own: hand over a `Channel`: write a connection plugin that calls `Session::new(channel)`; other languages use `sessions.open`.
+- A connection of your own: hand over a `Channel`: write a connection plugin that calls `Session::new(channel)`; other languages use `open` of the service `rutis/sessions`.
 
 ## Upgrade together (#695)
 
@@ -396,3 +397,33 @@ The runtime no longer dispatches events in its own process: every emission goes 
 - Tests on a device no longer use `RutisTest`: they install their own plugins with `RutisApp`, dialing a rutis on the development machine.
 - Every event is dispatched by the host: a synchronous `bail` on the Android main thread is always refused (it was allowed when this process had listeners).
 - Config is validated and its defaults filled in rutis alone; the SDK only decodes. The plugins an application installs itself with `RutisApp` are not checked by rutis: a key left out takes the constructor default, and a required key missing or a value of the wrong type fails the load with `config: …` naming the key (`config: city is required`).
+
+## 0.19.3: the session service is renamed (#986)
+
+rutis's own service for opening a session over a connection of your own, `sessions` in 0.19.0–0.19.2, is `rutis/sessions` from 0.19.3: under `rutis/`, as rutis's own events are (`rutis/row`, `rutis/service`). `sessions` is a name hosts use for services of their own (an agent's sessions, say); it is now free for them: a host can provide `sessions`, and a test can give a plugin a fake `sessions`. The old name is not kept.
+
+Who changes something: a connection plugin written in a language other than Rust (it calls `open`). Rust connection plugins (`Session::new`), `rutis-host/dial` and `rutis-host/listen` rows, and hosts mounting `Session::service()` change nothing.
+
+| 0.19.0–0.19.2 | 0.19.3 |
+| --- | --- |
+| `inject: ['sessions']`, `ctx.use('sessions').open(far)` (TypeScript, Bun) | `inject: ['rutis/sessions']`, `ctx.use('rutis/sessions').open(far)` |
+| `inject = ["sessions"]`, `ctx.use("sessions").open(far)` (Python) | `inject = ["rutis/sessions"]`, `ctx.use("rutis/sessions").open(far)` |
+| `isolate` / `inject` of a row in `rutis.json` naming `sessions` for this service | `rutis/sessions` |
+| `rutis-host status`: `  sessions: host`; `rutis-host dev: services: … loader (host), sessions (host) …` | `  rutis/sessions: host`; `… loader (host), rutis/sessions (host) …` |
+| `open` without the name in `inject`: `declare sessions in inject` | `declare rutis/sessions in inject` |
+| A host or test providing `sessions`: `cannot provide service sessions: sessions is already provided by the host` | Allowed |
+
+A connection plugin still asking for `sessions` waits, and `rutis-host check` says why:
+
+```text
+relay: waiting for sessions (no row provides it)
+```
+
+```text
+relay (file:///…/relay.mjs): cannot run: nothing provides sessions
+  inject: ["sessions"]
+  provides: {}
+  sessions: add a row that provides it
+```
+
+Rename it in `inject` and in `ctx.use`.

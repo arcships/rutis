@@ -1366,26 +1366,27 @@ async 方法的调用方放弃等待（例如超时）时，调用被取消：�
 - **Rust**：丢弃调用的 future 即取消。
 - 事件的分发怎样取消见[事件：生命周期](#生命周期)。
 
-## 自建连接：`sessions.open`
+## 自建连接：`rutis/sessions.open`
 
-要让 rutis 经一条自己的连接（中继、蓝牙、别的传输）使用对面的插件，写一个连接插件：拿到一条能收发二进制消息的连接，交给服务 `sessions`。对面可以是语言运行时、自己装插件的应用，或另一个 rutis。
+要让 rutis 经一条自己的连接（中继、蓝牙、别的传输）使用对面的插件，写一个连接插件：拿到一条能收发二进制消息的连接，交给服务 `rutis/sessions`。对面可以是语言运行时、自己装插件的应用，或另一个 rutis。
 
 ```ts
 type Close = { kind: 'done' } | { kind: 'replaced' } | { kind: 'rejected'; reason: string }
 interface Far  { send(message: Uint8Array): void; close(why: Close): void }
 interface Near { receive(message: Uint8Array): Promise<void>; end(why: Close): void }
-sessions.open(far: Far): Near
+// 服务 rutis/sessions
+open(far: Far): Near
 ```
 
 ```ts
 export default definePlugin({
   name: 'relay',
-  inject: ['sessions'],
+  inject: ['rutis/sessions'],
   async apply(ctx, config: { url: string }) {
     const ws = new WebSocket(config.url)
     ws.binaryType = 'arraybuffer'
     await new Promise(ok => ws.addEventListener('open', ok, { once: true }))
-    const near = ctx.sessions.open({
+    const near = await ctx.use('rutis/sessions').open({
       send: m => ws.send(m),
       close: why => ws.close(why.kind === 'rejected' ? 4003 : why.kind === 'replaced' ? 4002 : 1000),
     })
@@ -1396,7 +1397,7 @@ export default definePlugin({
 })
 ```
 
-- 要在 `inject` 里写 `sessions`；没写时 `open` 失败：`declare sessions in inject`。
+- 要在 `inject` 里写 `rutis/sessions`；没写时 `open` 失败：`declare rutis/sessions in inject`。名字在 `rutis/` 下，与 rutis 自己的事件一样，好让 `sessions` 留给宿主自己的服务（0.19.2 及以前叫 `sessions`）。
 - 会话挂在调用 `open` 的插件下面：这个插件卸载，它的会话与对面的插件全部卸载。
 - `receive` 在消息进入会话的接收队列后完成；队列 64 条，满了就等，背压由此传回连接。
 - 对面的插件在本端叫 `<对面 id>:<插件>`；要让对面运行一个插件，在 rutis.json 里写行 `<连接行>:<插件>`（例如 `relay:contacts`），对面不在时这一行等待。

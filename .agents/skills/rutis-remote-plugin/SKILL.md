@@ -138,7 +138,7 @@ await rutis.stop()        // unloads every plugin (latest first), then disconnec
 
 ## 4d. Or bring your own connection
 
-When the far end is reached by a way of connecting rutis does not ship (a relay, Bluetooth), write a connection plugin that hands the connection over as a session: in Rust `ctx.plugin(rutis_bridge::Session::new(channel))` (the host provides `rutis_bridge::LocalId` in the root ctx; rutis-host does), in other languages `sessions.open({ send, close })` with `inject: ['sessions']`. Details and a full example: [references/nodes.md](references/nodes.md#your-own-connection). The far end's plugins are then `<far id>:<plugin>` here; rows `<connection row>:<plugin>` run plugins there.
+When the far end is reached by a way of connecting rutis does not ship (a relay, Bluetooth), write a connection plugin that hands the connection over as a session: in Rust `ctx.plugin(rutis_bridge::Session::new(channel))` (the host provides `rutis_bridge::LocalId` in the root ctx; rutis-host does), in other languages `ctx.use('rutis/sessions').open({ send, close })` with `inject: ['rutis/sessions']`. Details and a full example: [references/nodes.md](references/nodes.md#your-own-connection). The far end's plugins are then `<far id>:<plugin>` here; rows `<connection row>:<plugin>` run plugins there.
 
 ## 5. Configure the rutis side
 
@@ -156,7 +156,7 @@ Details in `references/rutis-json.md` and `references/nodes.md`.
 - One connection row per far end: `rutis-host/dial` (`address`; rutis dials it, backing off between attempts) or `rutis-host/listen` (`listener`; far ends dial in, step 4b / 4c). The row id names the connection: the runtime's `--id`, the token `RUTIS_TOKEN_<ROW ID>`, the prefix of the output lines. No language is written: plugin names are resolved on the far end. The connection is over WebSocket.
 - Rows run on the far end are named `<connection row>:<plugin>`; the plugin is resolved on the remote machine, its config in the row.
 - `runtimes.remote` (0.18) is removed in 0.19: it is an unknown field. Local runtimes (`runtimes.node` / `py` / `go` / `swift` / `bun`) are unchanged.
-- A connection of your own (another transport, your own authentication): write a connection plugin that hands over a Channel: Rust `ctx.plugin(rutis_bridge::Session::new(channel))`; other languages call `sessions.open(far)` (see [Your own connection](references/nodes.md#your-own-connection)).
+- A connection of your own (another transport, your own authentication): write a connection plugin that hands over a Channel: Rust `ctx.plugin(rutis_bridge::Session::new(channel))`; other languages call `open(far)` of the service `rutis/sessions` (see [Your own connection](references/nodes.md#your-own-connection)).
 
 ## 6. Verify
 

@@ -144,7 +144,7 @@ fn status_says_what_a_running_host_does() {
             "  caller: starting",
             "services:",
             "  loader: host",
-            "  sessions: host",
+            "  rutis/sessions: host",
             "  slow: slow",
             "runtimes:",
             &format!("  node: running (pid {node})"),

@@ -189,7 +189,7 @@ impl Host {
 
         // The listeners and this node's id, for the rows that connect.
         let local = PeerId::new(config.id.clone()).map_err(|error| format!("id: {error}"))?;
-        // The id every session greets with, and the `sessions` service.
+        // The id every session greets with, and the `rutis/sessions` service.
         root.provide(LocalId(local.clone()))
             .map_err(|error| format!("id: {error}"))?;
         root.plugin(Session::service());

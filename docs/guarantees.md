@@ -275,6 +275,7 @@ PR 模板中有对应的检查项。CI 的 `links` 任务运行 `node tools/chec
 | `bridge/caller-row` | [在 Rust 应用里嵌入](guide/rust-host.md)「调用方的行」（#441） | `HostDispatch::invoke` 期间，`session::caller_row()` 给出发起调用的运行时行：loader 的行 id、它在运行时里的 key、它使用这个服务所在的作用域标签（在实例里是实例的）和它的 fiber 的 `Ctx`。同一个运行时的两行是两个调用方；注册在调用方 `Ctx` 上的效应在这一行卸载时撤掉，运行时照常运行；来自 Rust、来自对端节点、运行时里不属于任何行的调用（共享的租用、mount 的 hosts）或行里没声明就使用该服务的代码的调用不给出行。Node（leaf 与 Cordis 插件）、Bun、Python、Go 的行；线上格式不变（每一行的租用在它自己的作用域里，`scopes`） | 契约行为 | 已验证 | `rutis-loader/tests/caller_rows.rs::node_rows_are_callers`、`::python_rows_are_callers`、`::go_rows_are_callers`、`::bun_rows_are_callers`、`rutis-loader/tests/instance_runtimes.rs::each_instance_sees_its_own_services_across_languages`、`rutis-bridge/tests/caller_rows.rs::a_lease_for_a_row_names_it_and_a_shared_one_does_not` | 只在 `invoke` 本身里，不在它返回的 future 里 |
 | `bridge/call-service` | [在 Rust 应用里嵌入](guide/rust-host.md)「在 Rust 里按名字调用服务」（#667） | `session::call_service(ctx, name, method, args)` 调用 `ctx` 按名字看到的服务：参数（元组或列表）像别的语言的调用一样编码，结果解码成要的类型；服务声明为 `sync` 的方法在阻塞线程上执行；方法自己的错误（带 `code`）、同步方法的 panic（带它的信息）、没有这个方法、没有提供这个服务（`ServiceNotFound`）、参数不是列表都是错误 | 契约行为 | 已验证 | `rutis-bridge/tests/call_service.rs::a_service_is_called_by_name`、`::what_fails_is_an_error` | 调用不来自任何行：`caller_row()` 是 `None` |
 | `bridge/plugin-values` | [插件定义](design-plugin-values-2026-10-25.md) §五 | 插件定义按 `plugin` 引用传，宿主在握手里声明 `plugins`；它只交回定义它的运行时：发给第三个会话的那次调用失败，会话继续；交回时对方拿到原来的值。Node、Bun、Python、Go、Swift、Kotlin 只向声明了 `plugins` 的对端发出各自 SDK 的插件定义（`definePlugin`、`define_plugin`、`*rutis.Definition`、`Rutis.define` 的结果），否则那次调用失败。Rust 的参数是 `Definition` 时，先经 `plugins.read` 读出声明再调用方法；返回值经 `runtime::returned` 读出，属于提供服务的行；同一个值是同一个定义；要数据的参数照旧拒绝插件定义 | 契约行为 | 已验证 | `rutis-bridge/src/session/rpc/tests.rs::a_plugin_definition_goes_home_and_is_never_relayed`、`node/rutis-runtime/test/plugin-values.test.mjs`、`bun/rutis-bun/test/plugin-values.test.ts`、`python/rutis/tests/test_plugin_values.py`、`go/rutis/internal/peer/plugins_test.go`、`go/rutis/rutistest/plugin_values_test.go`、`swift/rutis/Tests/SelfTest/PluginValueTests.swift`、`kotlin/rutis/rutis/src/jvmTest/kotlin/arcships/rutis/PluginValuesTest.kt`、`rutis-loader/tests/plugin_values.rs` | #642，P1：Node、Bun；P2：Python、Go；P3：Swift、Kotlin |
+| `bridge/session-service` | [插件 API](guide/plugin-api.md)「自建连接」；[迁移到 0.19](migration-0.19.md)「0.19.3」 | `Session::service()` 提供服务 `rutis/sessions`，它的 `open(far)` 为任何语言的连接插件在调用它的行下挂一个会话；调用方要在 `inject` 里写 `rutis/sessions`，否则 `open` 失败：`declare rutis/sessions in inject`。`sessions` 这个名字不归 rutis：挂了 `Session::service()` 的宿主（包括 rutis-host 与 `rutis-host test`）可以自己提供 `sessions`，测试也可以给插件一个假的 `sessions` | 契约行为 | 已验证 | `rutis-bridge/src/session/plugin/open.rs::sessions_open_runs_a_session_on_the_callers_functions`、`::sessions_is_left_to_the_host`、`rutis-loader/tests/sessions_open.rs::a_node_relay_opens_a_session`、`::a_python_relay_opens_a_session`、`node/rutis/test/testing-sessions.test.mjs` | #986（0.19.3；0.19.2 及以前叫 `sessions`） |
 
 ---
 
@@ -421,16 +422,16 @@ PR 模板中有对应的检查项。CI 的 `links` 任务运行 `node tools/chec
 | `boundary/5.*`（不含已撤回的 5.2–5.5） | 3 | 1 | 0 | 0 | 4 |
 | `events/*`（§8a，不含已撤回的 `hub-scope`、`presence`） | 11 | 0 | 0 | 0 | 11 |
 | `instance/*` | 2 | 0 | 0 | 0 | 2 |
-| `bridge/*`（不含已撤回的 `exported-services`） | 29 | 0 | 0 | 1 | 30 |
+| `bridge/*`（不含已撤回的 `exported-services`） | 30 | 0 | 0 | 1 | 31 |
 | `host/*`、`dsh/*`（§11） | 2 | 0 | 0 | 0 | 2 |
 | `sdk/*`（§12） | 9 | 0 | 0 | 0 | 9 |
 | `host/*`（§13） | 5 | 0 | 0 | 0 | 5 |
 | `loader/*`、`swift/*`（§14） | 40 | 5 | 1 | 0 | 46 |
 | `host/*`（§15） | 23 | 4 | 0 | 0 | 27 |
-| 合计 | 176 | 13 | 1 | 2 | 192 |
+| 合计 | 177 | 13 | 1 | 2 | 193 |
 
 已撤回的条目（状态"已撤回（0.13）"：`boundary/5.2`–`boundary/5.5`；"已撤回（0.15.1）"：`events/scope`、`events/hub-scope`；"已撤回（0.17）"：`bridge/exported-services`；"已撤回（0.19）"：`events/presence`）不计入。
 
-核心承诺 40 条：已验证 35，部分验证 4（D22、D28、5.8、`loader/instance-edits-all-or-none`），未验证 1（`loader/remote-runtime-lease`：测试随连接插件删除，待补）。契约行为 150 条：已验证 141，部分验证 9（D5、`loader/persist-queue`、`loader/saved-layers-restore`、`loader/go-runtimes`、`swift/app-access-belongs-to-the-app`、`host/stop-deadline`、`host/exit-codes`、`host/dev-debug`、`host/row-state-lines`），未验证 0。
+核心承诺 40 条：已验证 35，部分验证 4（D22、D28、5.8、`loader/instance-edits-all-or-none`），未验证 1（`loader/remote-runtime-lease`：测试随连接插件删除，待补）。契约行为 151 条：已验证 142，部分验证 9（D5、`loader/persist-queue`、`loader/saved-layers-restore`、`loader/go-runtimes`、`swift/app-access-belongs-to-the-app`、`host/stop-deadline`、`host/exit-codes`、`host/dev-debug`、`host/row-state-lines`），未验证 0。
 
 **0.10 的基线**：未验证的核心承诺 0 条，未验证的契约行为 1 条（`host/go-add`，0.19 随命令删除）。从 0.11 起，新登记的"未验证"条目会让契约行为的数字超过基线（Q9.4.4），所以新登记的行应当带着测试一起登记。核心承诺的划分由维护者确认，可以调整。

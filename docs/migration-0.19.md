@@ -16,6 +16,7 @@
 - **Kotlin SDK 不发布到 Maven**：从源码引用（[Kotlin](#kotlin)）。
 - **Rust 接口删除与改名**：连接与会话部分（[Rust 嵌入](#rust-嵌入)）、平台清理（[平台清理](#平台清理694)），运行时 `emit` 的过滤器失败改报 `FilterFailed`（[错误类型](#错误类型879)）。
 - **工具**：`rutis-dev` 删除，`rutis-migrate` 不再发布，`rutis-host go add` 删除（[工具](#工具)）。
+- **0.19.3：会话服务改名**：`sessions` 改为 `rutis/sessions`，`sessions` 留给宿主（[0.19.3：会话服务改名](#0193会话服务改名986)）。
 
 其余是新增的功能，不改已有的写法。
 
@@ -177,11 +178,11 @@ office (rutis-bridge/peer): no plugin named "rutis-bridge/peer"
   | `Installed { described: Described { schema, version, integrity }, factory }`；`StaticCatalog::with(名, described, factory)` | `Installed { schema, version, factory }`；`StaticCatalog::with(名, Installed::new(factory))` |
   | rutis-loader 的 feature `peer` 与 `rutis_loader::peer`（`PeerResolver`、`PeerRows`、`PeerRowsPlugin`、`register_peer_node`、`node_schema`、`LoaderCatalog`） | 删；`<连接行>:<插件>` 的行由 `runtime::SessionResolver` 解析，`LoaderCatalog` 在 `rutis_loader::runtime` |
   | `rutis_host::host::Embedding` 的 `identity` | 删 |
-  | 自建连接实现 `Transport` | 交出一条 `Channel`：`ctx.plugin(Session::new(channel))`，或先 `Session::handshake(&ctx, channel).await` 再 `ctx.plugin(greeted)`；其他语言用服务 `sessions` 的 `open` |
+  | 自建连接实现 `Transport` | 交出一条 `Channel`：`ctx.plugin(Session::new(channel))`，或先 `Session::handshake(&ctx, channel).await` 再 `ctx.plugin(greeted)`；其他语言用服务 `rutis/sessions` 的 `open` |
 
 - 自己挂 `Session` 的 Rust 嵌入要在根 ctx 提供本端在握手里报的 id：`root.provide(rutis_bridge::LocalId(id))`；没有时会话失败：`the host provides no id for its sessions`。rutis-host 已经提供（rutis.json 的 `id`，默认 `main`）。
 
-- 自建连接：交出一条 `Channel`：写一个连接插件，调 `Session::new(channel)`；其他语言用 `sessions.open`。
+- 自建连接：交出一条 `Channel`：写一个连接插件，调 `Session::new(channel)`；其他语言用服务 `rutis/sessions` 的 `open`。
 
 ## 一起升级（#695）
 
@@ -396,3 +397,33 @@ Kotlin 另有两点：
 - 设备上的测试不再用 `RutisTest`：用 `RutisApp` 装自己的插件，拨到开发机上的 rutis。
 - 事件一律经宿主分发：Android 主线程上的同步 `bail` 总是被拒绝（以前本进程里有监听器时可以）。
 - 配置的校验与补默认值只在 rutis 里做，SDK 只解码。应用用 `RutisApp` 自己装的插件不经 rutis 校验：没给的键用构造参数的默认值，缺必填或类型不对时以点名键的 `config: …` 装载失败（`config: city is required`）。
+
+## 0.19.3：会话服务改名（#986）
+
+rutis 自己用来经一条自建连接打开会话的服务，0.19.0–0.19.2 叫 `sessions`，0.19.3 起叫 `rutis/sessions`：放在 `rutis/` 下，与 rutis 自己的事件（`rutis/row`、`rutis/service`）一样。`sessions` 是宿主常给自己服务起的名字（比如 Agent 的会话）；现在留给宿主：宿主可以自己提供 `sessions`，测试也可以给插件一个假的 `sessions`。旧名不保留。
+
+要改的只有：用 Rust 以外的语言写的连接插件（它调 `open`）。Rust 的连接插件（`Session::new`）、`rutis-host/dial` 与 `rutis-host/listen` 行、挂 `Session::service()` 的宿主都不用改。
+
+| 0.19.0–0.19.2 | 0.19.3 |
+| --- | --- |
+| `inject: ['sessions']`，`ctx.use('sessions').open(far)`（TypeScript、Bun） | `inject: ['rutis/sessions']`，`ctx.use('rutis/sessions').open(far)` |
+| `inject = ["sessions"]`，`ctx.use("sessions").open(far)`（Python） | `inject = ["rutis/sessions"]`，`ctx.use("rutis/sessions").open(far)` |
+| `rutis.json` 里行的 `isolate` / `inject` 为这个服务写的 `sessions` | `rutis/sessions` |
+| `rutis-host status`：`  sessions: host`；`rutis-host dev: services: … loader (host), sessions (host) …` | `  rutis/sessions: host`；`… loader (host), rutis/sessions (host) …` |
+| `inject` 里没写就调 `open`：`declare sessions in inject` | `declare rutis/sessions in inject` |
+| 宿主或测试提供 `sessions`：`cannot provide service sessions: sessions is already provided by the host` | 可以 |
+
+还在要 `sessions` 的连接插件会一直等，`rutis-host check` 说明原因：
+
+```text
+relay: waiting for sessions (no row provides it)
+```
+
+```text
+relay (file:///…/relay.mjs): cannot run: nothing provides sessions
+  inject: ["sessions"]
+  provides: {}
+  sessions: add a row that provides it
+```
+
+把 `inject` 与 `ctx.use` 里的名字改掉即可。

@@ -666,7 +666,7 @@ loop {
 
 - To have the far end run a plugin, write a row `<connection row>:<plugin>` in rutis-loader's configuration; while the far end is not there, that row waits. In Rust you can also take `Greeted` from `Session::handshake(&ctx, channel).await?`, call `greeted.handle().run(plugin, config)`, then mount it with `ctx.plugin(greeted)`.
 - Without this end's id the session fails: `the host provides no id for its sessions`. rutis-host provides it (rutis.json's `id`, `main` by default).
-- Plugins in other languages hand over a connection through the `open` of the service `sessions`; see [Plugin API: your own connection](plugin-api.en.md#your-own-connection-sessionsopen).
+- Plugins in other languages hand over a connection through the `open` of the service `rutis/sessions`; see [Plugin API: your own connection](plugin-api.en.md#your-own-connection-rutissessionsopen).
 
 With rutis-loader, the rows `<connection row>:<plugin>` are resolved by `rutis_loader::runtime::SessionResolver`: put `SessionResolver::new(&catalog)` last in the chain (`Chain::with_shared`) and `attach(&loader)` before mounting the loader. The loader gives sessions the plugins it can resolve (`rutis_loader::runtime::LoaderCatalog`), so a far rutis can have this side run them: connect only to trusted nodes. rutis-host's `rutis-host/dial` and `rutis-host/listen` rows are such connection plugins. See [Connect nodes](nodes.en.md) for concepts and security.
 
