@@ -85,7 +85,7 @@ pub struct Embedding {
     /// [`Session`] on a channel it opens).
     pub builtins: Option<RegisterBuiltins>,
     /// The file whose rows plugins may add and remove through the service
-    /// `loader`, written back into it (`run`'s `rutis.json`); without one,
+    /// `rutis/loader`, written back into it (`run`'s `rutis.json`); without one,
     /// they cannot.
     pub rows_file: Option<Arc<crate::rows_file::RowsFile>>,
     /// Also given every error the kernel reports, before the host prints

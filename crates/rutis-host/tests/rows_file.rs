@@ -1,5 +1,5 @@
 //! `run`'s `rutis.json` as the layer plugins edit through the service
-//! `loader` (#185, design "The host writes its own plugins" §五, §七): rows
+//! `rutis/loader` (#185, design "The host writes its own plugins" §五, §七): rows
 //! added and removed are written back into it, its other fields and keys
 //! as they were; `--watch-config` takes what was written as no change; a
 //! file changed meanwhile is read before the edit is made again; the rows
@@ -16,9 +16,9 @@ use std::process::Command;
 use common::process::{signal, Host};
 
 /// A Python plugin providing `maker`, which adds and removes rows through
-/// `loader` (after its `apply`, in its methods).
+/// `rutis/loader` (after its `apply`, in its methods).
 const MAKER: &str = r#"
-inject = ["loader"]
+inject = ["rutis/loader"]
 
 
 class Maker:
@@ -33,7 +33,7 @@ class Maker:
 
 
 def apply(ctx, config):
-    ctx.provide("maker", Maker(ctx.use("loader")))
+    ctx.provide("maker", Maker(ctx.use("rutis/loader")))
 "#;
 
 /// A Python plugin that does nothing.

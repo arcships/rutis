@@ -145,7 +145,7 @@ impl Drop for Serving {
     }
 }
 
-/// Answer `status` for the configuration `target` with `loader`'s status,
+/// Answer `status` for the configuration `target` with `rutis/loader`'s status,
 /// for as long as the returned value is held; and `call`, made from `root`
 /// (the host's root). `Err` says why it
 /// cannot (another host answers for the same configuration, the directory

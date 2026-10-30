@@ -130,7 +130,7 @@ rows:
   welcome: running
 services:
   greeter: greeter
-  loader: host
+  rutis/loader: host
   rutis/sessions: host
   welcome: welcome
 runtimes:
@@ -147,7 +147,7 @@ $ npx rutis-host call welcome.everyone '["Ana", "Bo"]'
 
 `call` 的每个参数是一个 JSON 值，字符串带引号（`'"Ana"'`）；结果打印成 JSON。见 [查看当前状态](#查看当前状态)、[调用一个服务](#调用一个服务)。
 
-`services` 里的 `loader`、`rutis/sessions` 不来自哪一行，是 `rutis-host` 自己提供的服务（写作 `host`）：插件用 `loader` 在宿主运行中加、删行（[用 loader 管理插件](#用-loader-管理插件)），用 `rutis/sessions` 把自己建的连接交给宿主（[远程运行时与设备](#远程运行时与设备)末尾）。组装宿主时用不到它们，也不用在 `rutis.json` 里写。
+`services` 里的 `rutis/loader`、`rutis/sessions` 不来自哪一行，是 `rutis-host` 自己提供的服务（写作 `host`）：插件用 `rutis/loader` 在宿主运行中加、删行（[用 rutis/loader 管理插件](#用-rutisloader-管理插件)），用 `rutis/sessions` 把自己建的连接交给宿主（[远程运行时与设备](#远程运行时与设备)末尾）。组装宿主时用不到它们，也不用在 `rutis.json` 里写。
 
 5. 运行中改配置：在 `rutis.json` 的 `greeter` 那一行加上 `"config": { "greeting": "Hej" }` 并保存。有 `--watch-config` 时宿主重新读这个文件，只重启变了的那一行：
 
@@ -526,11 +526,11 @@ rutis-host: reload rejected: row weather's config does not match its plugin's sc
 
 凭据在拨号和对面连进来时才从环境变量读（见 [凭据](#凭据)），所以重新读取新增的连接行也能连上。环境变量在进程运行期间不变，换 token 仍要重启宿主。
 
-插件也能经服务 `loader` 加、删行（`create`、`remove`，见 [宿主自己写插件](../design-host-writes-plugins-2026-10-27.md)）。`run` 把这些改动写回 `rutis.json`：只改 `rows`（加的行写在末尾，只写插件给出的字段，`id` 总是写上；删的行去掉），其他字段与键的顺序不变，写法与 `rutis-host add` 写的一样（两格缩进）。写回的内容不算文件变化，`--watch-config` 不因它重新读。宿主读过文件之后文件又被改过（手改、`rutis-host add`）而还没有重新读时，插件的下一次改动先读回文件里的 `rows` 并照它运行，再在它上面改，然后写回；`rows` 以外的改动照旧要 SIGUSR1 或 `--watch-config` 才生效。写不了文件时行照样加上或删掉，插件收到的错误写明 `<行>: added, but rutis.json could not be written: <原因>`（删时是 `removed`），宿主重启后就没有这一改动。`dev` 不写 `rutis.dev.json`：在 `dev` 下 `create`、`remove` 得到 `this host keeps no editable configuration, so rows cannot be added or removed`。
+插件也能经服务 `rutis/loader` 加、删行（`create`、`remove`，见 [宿主自己写插件](../design-host-writes-plugins-2026-10-27.md)）。`run` 把这些改动写回 `rutis.json`：只改 `rows`（加的行写在末尾，只写插件给出的字段，`id` 总是写上；删的行去掉），其他字段与键的顺序不变，写法与 `rutis-host add` 写的一样（两格缩进）。写回的内容不算文件变化，`--watch-config` 不因它重新读。宿主读过文件之后文件又被改过（手改、`rutis-host add`）而还没有重新读时，插件的下一次改动先读回文件里的 `rows` 并照它运行，再在它上面改，然后写回；`rows` 以外的改动照旧要 SIGUSR1 或 `--watch-config` 才生效。写不了文件时行照样加上或删掉，插件收到的错误写明 `<行>: added, but rutis.json could not be written: <原因>`（删时是 `removed`），宿主重启后就没有这一改动。`dev` 不写 `rutis.dev.json`：在 `dev` 下 `create`、`remove` 得到 `this host keeps no editable configuration, so rows cannot be added or removed`。
 
-## 用 `loader` 管理插件
+## 用 `rutis/loader` 管理插件
 
-`rutis-host` 提供一个服务 `loader`，插件用它在宿主运行中加、删行和重新加载行的代码，例如一个 agent 写出新插件、装上、改坏了知道错在哪、修好后换上、不要了删掉。任何插件写 `inject: ["loader"]` 就能用；不想让某个插件管理插件，就不放它。各语言的写法、返回值和完整的错误表见 [插件 API](plugin-api.md#用-loader-管理插件)。
+`rutis-host` 提供一个服务 `rutis/loader`，插件用它在宿主运行中加、删行和重新加载行的代码，例如一个 agent 写出新插件、装上、改坏了知道错在哪、修好后换上、不要了删掉。任何插件写 `inject: ["rutis/loader"]` 就能用；不想让某个插件管理插件，就不放它。各语言的写法、返回值和完整的错误表见 [插件 API](plugin-api.md#用-rutisloader-管理插件)。
 
 | 方法 | 做什么 | 返回 |
 | --- | --- | --- |
@@ -552,7 +552,7 @@ rutis-host: reload rejected: row weather's config does not match its plugin's sc
 | `dev` 下 `create` / `remove` | `this host keeps no editable configuration, so rows cannot be added or removed` |
 | 行已加上，但 `rutis.json` 写不了 | `weather: added, but rutis.json could not be written: <操作系统的原因>` |
 
-**`run` 写回 `rutis.json`。** 经 `loader` 加的行写在 `rows` 末尾（`id` 总是写上，其余只写插件给出的字段），删的行去掉；其他字段与键的顺序不变，`rutis-host check rutis.json` 对写回的文件与手写的一样，宿主重启后写回的行照常运行。写回的细节（`--watch-config`、文件在宿主读过之后被改过）见 [运行中改配置](#运行中改配置)。**`dev` 没有可编辑的配置**：`dev` 是开发一个插件项目，加、删行改 `rutis.dev.json`，`create`、`remove` 得到上表的错误；`reload`、`status` 照常。
+**`run` 写回 `rutis.json`。** 经 `rutis/loader` 加的行写在 `rows` 末尾（`id` 总是写上，其余只写插件给出的字段），删的行去掉；其他字段与键的顺序不变，`rutis-host check rutis.json` 对写回的文件与手写的一样，宿主重启后写回的行照常运行。写回的细节（`--watch-config`、文件在宿主读过之后被改过）见 [运行中改配置](#运行中改配置)。**`dev` 没有可编辑的配置**：`dev` 是开发一个插件项目，加、删行改 `rutis.dev.json`，`create`、`remove` 得到上表的错误；`reload`、`status` 照常。
 
 终端里看到的（[run 打印什么](#run-打印什么)的格式）：
 
@@ -564,7 +564,7 @@ rutis-host: reload rejected: row weather's config does not match its plugin's sc
 | `reload`，新代码的 `apply` 失败 | `weather: failed: KeyError: 'units'`；改好再 `reload` 后 `weather: running` |
 | `remove` | `weather: removed` |
 
-名字 `loader` 被 rutis-host 占用：`rutis.json` 里另有一行提供名叫 `loader` 的服务时，那一行以同名错误失败（`service loader is already provided by …: row <行> cannot provide it too`），终端照旧打印 `<行>: failed …`。给那一行的服务换名。
+名字 `rutis/loader` 被 rutis-host 占用：`rutis.json` 里另有一行提供名叫 `rutis/loader` 的服务时，那一行以同名错误失败（`service rutis/loader is already provided by …: row <行> cannot provide it too`），终端照旧打印 `<行>: failed …`。给那一行的服务换名。
 
 ## 用 dev 开发插件
 
@@ -589,7 +589,7 @@ rutis-host: reload rejected: row weather's config does not match its plugin's sc
 | `<行 id>: restarted (<另一行> reloaded)` | 这一行用到另一行提供的服务，随它重启了。原因也可能是 `<行> updated`、`added`、`removed`（`rutis.dev.json` 改的）、`<Go 或 Swift 运行时> restarted`，或者 `<行> restarted`：它用到的、随这次变化重启的行（`llm` 重新加载、`greeter` 用到 `llm` 时，打印 `caller: restarted (greeter restarted)`）。写出的原因一定是这一行用到的行，每一行只写一次，它自己有变化时写它的变化（`weather` 和 `llm` 一起改了时写 `caller: restarted (weather reloaded)`，不写 `weather reloaded, weather restarted`）；不知道它用到哪些行时（依赖在运行时内部，Cordis 行之间），不写原因：`<行 id>: restarted`。这一行之前没在运行、或者现在没在运行时，写 `started` 或 `stopped`，不写 `restarted` |
 | `rutis-host: reloaded rutis.dev.json (<n> rows changed)` | 重新读了 `rutis.dev.json`；后面每个变了的行一行：`<行 id>: updated (its row in rutis.dev.json changed)`、`<行 id>: added`、`<行 id>: removed`。被拒绝时：`rutis-host: reload rejected: <原因>; nothing changed` |
 | `runtime <名字>: starting again (<文件> changed)` | 停着的运行时因为这次变化重新启动；起来后打印 `runtime <名字>: running`，没起来就再打印 `runtime <名字>: down (<原因>)`。由 `restart` 重启它时打印 `runtime <名字>: down; its restart starts it again, its rows with the code as it is then (…)`；它正在启动时打印 `runtime <名字>: starting; its rows start with the code as it is then (…)` |
-| `rutis-host dev: services: forecast (weather), llm (llm), loader (host), rutis/sessions (host)` | 所有行都已运行、等待或失败后打印一次现在的服务和提供它的行（与 `rutis-host status` 的 `services` 相同），按服务名排序；宿主提供的写 `host`（例如 rutis 自己提供的 `loader`）；没有行提供服务时写 `rutis-host dev: services: none`，宿主提供的不算。之后服务变化时再打印（例如运行时在行启动之后才提供服务），每次重新加载、重新构建、重读 `rutis.dev.json` 结束后也打印，不和上次比较。它和各行状态行的先后不固定。它以 `rutis-host dev: ` 开头，不是 `<行>: <状态>` 的形式，读状态行的脚本不受影响；`run` 不打印，用 `rutis-host status` |
+| `rutis-host dev: services: forecast (weather), llm (llm), rutis/loader (host), rutis/sessions (host)` | 所有行都已运行、等待或失败后打印一次现在的服务和提供它的行（与 `rutis-host status` 的 `services` 相同），按服务名排序；宿主提供的写 `host`（例如 rutis 自己提供的 `rutis/loader`）；没有行提供服务时写 `rutis-host dev: services: none`，宿主提供的不算。之后服务变化时再打印（例如运行时在行启动之后才提供服务），每次重新加载、重新构建、重读 `rutis.dev.json` 结束后也打印，不和上次比较。它和各行状态行的先后不固定。它以 `rutis-host dev: ` 开头，不是 `<行>: <状态>` 的形式，读状态行的脚本不受影响；`run` 不打印，用 `rutis-host status` |
 | `<项目>: building`、`<项目>: built in 1.2s`、`<运行时>: rebuilt and restarted` | Go 或 Swift 项目重新构建了，运行时换上新的构建重启。构建失败时打印 `<项目>: the build failed; the last build keeps running`，后面是编译器的错误；新的构建运行不起来时打印 `<运行时>: cannot restart: <原因>; the previous build is kept` |
 
 ## 运行时结束时
@@ -628,7 +628,7 @@ rows:
   slow: running
   caller: starting
 services:
-  loader: host
+  rutis/loader: host
   rutis/sessions: host
   slow: slow
 runtimes:
@@ -683,7 +683,7 @@ $ rutis-host call forecast.week '{"days": 3}'
 | --- | --- |
 | 参数不是 JSON | `rutis-host: argument 1 is not JSON: write a string in quotes, as '"Oslo"'` |
 | 没写方法 | `rutis-host: name a method, as forecast.<method>` |
-| 没有这个服务 | `rutis-host: no row provides forcast; did you mean forecast? (services: forecast, llm, loader, rutis/sessions)` |
+| 没有这个服务 | `rutis-host: no row provides forcast; did you mean forecast? (services: forecast, llm, rutis/loader, rutis/sessions)` |
 | 提供它的行没在运行 | `rutis-host: forecast is not available (row weather waits for its runtime go-weather)` |
 | 没有这个方法 | `rutis-host: forecast has no method tomorow (methods: today, week)` |
 | 参数类型不对（提供方是 Rust 的 `#[rutis::service]`、Go、Swift、Kotlin；TypeScript、JavaScript、Bun、Python 写的方法不检查参数类型，收到的就是传来的值，类型注解只给编辑器看） | `rutis-host: forecast.today: argument 1 should be a string, got 3` |

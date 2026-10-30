@@ -356,10 +356,10 @@ greeter: built in 0.3s
 rutis-host dev: running greeter; changes reload it (Ctrl-C ends)
 ```
 
-`dev` 构建 `cmd/greeter`，作为运行时 `go-greeter` 运行它：一个二进制在宿主里是一个运行时进程，Python 的假服务在另一个运行时 `py` 里。之后每一行起来时打印 `greeter: running`、`translate: running`（两行谁先谁后不一定）；`rutis-host dev: services:` 是现在的服务、各由哪一行提供（`loader`、`rutis/sessions` 是宿主自己的服务，写 `host`：插件用 `loader` 在运行中加、删行，用 `rutis/sessions` 把自己建的连接交给宿主，写这个插件用不到它们，见 [rutis-host：用 loader 管理插件](rutis-host.md#用-loader-管理插件)），这一行在所有行都已运行、等待或失败后打印一次，之后服务变化时再打印，和各行状态行的先后不固定：
+`dev` 构建 `cmd/greeter`，作为运行时 `go-greeter` 运行它：一个二进制在宿主里是一个运行时进程，Python 的假服务在另一个运行时 `py` 里。之后每一行起来时打印 `greeter: running`、`translate: running`（两行谁先谁后不一定）；`rutis-host dev: services:` 是现在的服务、各由哪一行提供（`rutis/loader`、`rutis/sessions` 是宿主自己的服务，写 `host`：插件用 `rutis/loader` 在运行中加、删行，用 `rutis/sessions` 把自己建的连接交给宿主，写这个插件用不到它们，见 [rutis-host：用 rutis/loader 管理插件](rutis-host.md#用-rutisloader-管理插件)），这一行在所有行都已运行、等待或失败后打印一次，之后服务变化时再打印，和各行状态行的先后不固定：
 
 ```text
-rutis-host dev: services: greeter (greeter), loader (host), rutis/sessions (host), translate (translate)
+rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)
 ```
 
 另开一个终端，在项目目录里看宿主现在的状态：
@@ -371,7 +371,7 @@ rows:
   translate: running
 services:
   greeter: greeter
-  loader: host
+  rutis/loader: host
   rutis/sessions: host
   translate: translate
 runtimes:
@@ -396,8 +396,8 @@ $ npx @arcships/rutis-host call greeter.count
 greeter: building
 greeter: built in 0.3s
 go-greeter: rebuilt and restarted
-rutis-host dev: services: loader (host), rutis/sessions (host), translate (translate)
-rutis-host dev: services: greeter (greeter), loader (host), rutis/sessions (host), translate (translate)
+rutis-host dev: services: rutis/loader (host), rutis/sessions (host), translate (translate)
+rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)
 ```
 
 （重启的那一会儿，服务列表里没有 `greeter`。）
@@ -473,7 +473,7 @@ RUTIS_TOKEN_FAKES=dev-only npx @arcships/rutis-host dev
 fakes: running
 fakes: connected
 translate: running
-rutis-host dev: services: greeter (greeter), loader (host), rutis/sessions (host), translate (translate)
+rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)
 ```
 
 - `fakes` 行连上假服务的二进制；`fakes:fake-translate` 让它运行插件 `fake-translate`，这一行提供 `translate`。

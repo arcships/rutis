@@ -8,7 +8,7 @@
 - **How remote configuration is written**: `runtimes.remote`, `rutis-bridge/peer` rows and `peer:` rows are removed, written as the connection rows `rutis-host/dial` and `rutis-host/listen` instead ([Remote runtimes and devices](#remote-runtimes-and-devices-695-696-698)); the host side's tokens go by the connection row's id ([Tokens on the host side](#tokens-on-the-host-side-695)).
 - **Nodes**: node rows lose `host: true`, `export` and `import`, and giving out a token allows the other side to run plugins on this node; a Cordis application as a node (`@arcships/rutis-runtime/bridge`) is removed ([Nodes](#nodes)).
 - **Old names at the SDKs' roots removed outright**: a name moved to advanced is not found at its old place ([The SDKs' default entry points](#the-sdks-default-entry-points-692)).
-- **The service name `loader` is taken**: a row providing `loader` itself fails ([The service name `loader`](#the-service-name-loader-185)).
+- **The service name `rutis/loader` is taken** (`loader` in 0.19.0–0.19.2): a row providing `rutis/loader` itself fails ([The service name `rutis/loader`](#the-service-name-rutisloader-185)).
 - **Runtime rows and `isolate`**: an isolate sees only the providers in it, as with Rust rows ([Runtime rows and `isolate`](#runtime-rows-and-isolate-896)).
 - **Every language's test tool goes through `rutis-host test`**: the plugin runs on a real host, and `scope` and other options are removed ([TypeScript and Bun](#typescript-and-bun-plugins), [Python](#python), [Go](#go-plugins), [Swift](#swift), [Kotlin](#kotlin)).
 - **Python 3.12 at least** ([Python](#python)).
@@ -16,7 +16,7 @@
 - **The Kotlin SDK is not published to Maven**: it is used from source ([Kotlin](#kotlin)).
 - **Rust APIs removed and renamed**: the connection and session parts ([Rust embeddings](#rust-embeddings)), the platform cleanup ([Platform cleanup](#platform-cleanup-694)), and a filter failing in a runtime's `emit` reported as `FilterFailed` ([Error kinds](#error-kinds-879)).
 - **Tools**: `rutis-dev` is removed, `rutis-migrate` is no longer released, `rutis-host go add` is removed ([Tools](#tools)).
-- **0.19.3: the session service is renamed** from `sessions` to `rutis/sessions`, leaving `sessions` to the host ([0.19.3: the session service is renamed](#0193-the-session-service-is-renamed-986)).
+- **0.19.3: rutis's own services are renamed**: `loader` to `rutis/loader`, `sessions` to `rutis/sessions`, leaving both names to the host ([0.19.3: rutis's own services are renamed](#0193-rutiss-own-services-are-renamed-986)).
 
 The rest is new, and changes nothing already written.
 
@@ -140,7 +140,7 @@ A 0.18 row `peer:<peer>/<plugin>` is not refused in 0.19: it shows `waiting for 
 
 - The app installs the plugins it carries itself, their configurations in `RutisApp(configs: …)` (without one, the plugin's schema defaults), and once connected announces the services they provide, which the host registers as `<app id>:<plugin>`. On the rutis side the `<runtime>:<plugin>` rows in an `instanced` group go; one row `rutis-host/listen` (the app dials out) or `rutis-host/dial` (the app listens) stays.
 - A plugin in the app that cannot be installed (its config not matching the schema, `apply` failing, a service name rutis already has) is written only in the device's log in 0.19; the host prints nothing.
-- Rows once per device on the host (`py:coach` in an `instanced` group) are not supported any more. Instead put it on the device (a plugin in the app); or have the device's plugin provide its service as `health-<device>` and a plugin on the host listen to the `rutis/service` event, calling the service `loader` on `available: true` for `health-<device>`: `loader.create({id: "coach-<device>", name: "py:coach-one", config: {device}, inject: ["health-<device>"]})`, and `loader.remove("coach-<device>")` on `available: false`, in the event handler, not in `apply`. Full examples: [Swift apps](guide/swift-app.en.md#once-per-device), [Kotlin apps](guide/kotlin-app.en.md).
+- Rows once per device on the host (`py:coach` in an `instanced` group) are not supported any more. Instead put it on the device (a plugin in the app); or have the device's plugin provide its service as `health-<device>` and a plugin on the host listen to the `rutis/service` event, calling the service `rutis/loader` on `available: true` for `health-<device>`: `loader.create({id: "coach-<device>", name: "py:coach-one", config: {device}, inject: ["health-<device>"]})`, and `loader.remove("coach-<device>")` on `available: false`, in the event handler, not in `apply`. Full examples: [Swift apps](guide/swift-app.en.md#once-per-device), [Kotlin apps](guide/kotlin-app.en.md).
 
 ### Rust embeddings
 
@@ -273,9 +273,9 @@ Two more points for Kotlin:
 
 Not affected by the move: `definePlugin` / `define_plugin` / `Define` / `Rutis.define` at each language's root, every method on `ctx`, the testing tools, Rust. The code Swift macros and Kotlin KSP generate is updated with the SDK and needs no change. The plugin API version is unchanged: plugins built with an older SDK run on the 0.19 runtimes as before.
 
-## The service name `loader` (#185)
+## The service name `rutis/loader` (#185)
 
-A host using `LoaderPlugin` (rutis-host included) now provides a service named `loader` ([Managing plugins with `loader`](guide/plugin-api.en.md#managing-plugins-with-loader)); a row that itself provides a service named `loader` now fails with the existing error for a name already provided (`service loader is already provided by …: row <row> cannot provide it too`): rename its service.
+A host using `LoaderPlugin` (rutis-host included) now provides a service named `rutis/loader` (`loader` in 0.19.0–0.19.2, see [0.19.3: rutis's own services are renamed](#0193-rutiss-own-services-are-renamed-986); [Managing plugins with `rutis/loader`](guide/plugin-api.en.md#managing-plugins-with-rutisloader)); a row that itself provides a service named `rutis/loader` fails with the existing error for a name already provided (`service rutis/loader is already provided by …: row <row> cannot provide it too`): rename its service.
 
 ## Runtime rows and `isolate` (#896)
 
@@ -398,32 +398,49 @@ The runtime no longer dispatches events in its own process: every emission goes 
 - Every event is dispatched by the host: a synchronous `bail` on the Android main thread is always refused (it was allowed when this process had listeners).
 - Config is validated and its defaults filled in rutis alone; the SDK only decodes. The plugins an application installs itself with `RutisApp` are not checked by rutis: a key left out takes the constructor default, and a required key missing or a value of the wrong type fails the load with `config: …` naming the key (`config: city is required`).
 
-## 0.19.3: the session service is renamed (#986)
+## 0.19.3: rutis's own services are renamed (#986)
 
-rutis's own service for opening a session over a connection of your own, `sessions` in 0.19.0–0.19.2, is `rutis/sessions` from 0.19.3: under `rutis/`, as rutis's own events are (`rutis/row`, `rutis/service`). `sessions` is a name hosts use for services of their own (an agent's sessions, say); it is now free for them: a host can provide `sessions`, and a test can give a plugin a fake `sessions`. The old name is not kept.
+The two services rutis provides itself are renamed, under `rutis/`, as rutis's own events are (`rutis/row`, `rutis/service`):
 
-Who changes something: a connection plugin written in a language other than Rust (it calls `open`). Rust connection plugins (`Session::new`), `rutis-host/dial` and `rutis-host/listen` rows, and hosts mounting `Session::service()` change nothing.
+- `loader` (adding, removing and reloading rows through it, see [Managing plugins with `rutis/loader`](guide/plugin-api.en.md#managing-plugins-with-rutisloader)) is now `rutis/loader`;
+- `sessions` (handing the host a connection of your own through it, see [Your own connection](guide/plugin-api.en.md#your-own-connection-rutissessionsopen)) is now `rutis/sessions`.
+
+`loader` and `sessions` are names hosts give their own services (an agent's sessions, say); they are now the host's: the host's rows can provide them, and a test can give a plugin a fake `loader` or `sessions`. The old names are not kept, and nothing points to the new ones.
+
+Who changes something: plugins using either service, in any language: rename it in `inject` and `ctx.use` (in Go, `Inject` and `ctx.Use`). Rust connection plugins (`Session::new`), Rust hosts using `Loader` directly, `rutis-host/dial` and `rutis-host/listen` rows, and hosts mounting `Session::service()` or `LoaderPlugin` change nothing.
 
 | 0.19.0–0.19.2 | 0.19.3 |
 | --- | --- |
+| `inject: ['loader']`, `ctx.use('loader').create(row)` (TypeScript, Bun) | `inject: ['rutis/loader']`, `ctx.use('rutis/loader').create(row)` |
+| `inject = ["loader"]`, `ctx.use("loader")` (Python) | `inject = ["rutis/loader"]`, `ctx.use("rutis/loader")` |
+| `Inject: []string{"loader"}`, `ctx.Use("loader", &loader)` (Go) | `Inject: []string{"rutis/loader"}`, `ctx.Use("rutis/loader", &loader)` |
 | `inject: ['sessions']`, `ctx.use('sessions').open(far)` (TypeScript, Bun) | `inject: ['rutis/sessions']`, `ctx.use('rutis/sessions').open(far)` |
 | `inject = ["sessions"]`, `ctx.use("sessions").open(far)` (Python) | `inject = ["rutis/sessions"]`, `ctx.use("rutis/sessions").open(far)` |
-| `isolate` / `inject` of a row in `rutis.json` naming `sessions` for this service | `rutis/sessions` |
-| `rutis-host status`: `  sessions: host`; `rutis-host dev: services: … loader (host), sessions (host) …` | `  rutis/sessions: host`; `… loader (host), rutis/sessions (host) …` |
+| `isolate` / `inject` of a row in `rutis.json` naming `loader` or `sessions` for these services | `rutis/loader`, `rutis/sessions` |
+| `rutis-host call loader.status` | `rutis-host call rutis/loader.status` |
+| `rutis-host status`: `  loader: host`, `  sessions: host` | `  rutis/loader: host`, `  rutis/sessions: host` |
+| `rutis-host dev: services: greeter (greeter), loader (host), sessions (host), translate (translate)` | `rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)` |
+| `rutis-host: no row provides forcast; did you mean forecast? (services: forecast, llm, loader, sessions)` | `rutis-host: no row provides forcast; did you mean forecast? (services: forecast, llm, rutis/loader, rutis/sessions)` |
 | `open` without the name in `inject`: `declare sessions in inject` | `declare rutis/sessions in inject` |
-| A host or test providing `sessions`: `cannot provide service sessions: sessions is already provided by the host` | Allowed |
+| A row of the host providing `loader`: `service loader is already provided by …: row <row> cannot provide it too` | Allowed; a row providing `rutis/loader` fails with `service rutis/loader is already provided by …: row <row> cannot provide it too` |
+| A test giving a fake `loader` or `sessions`: `cannot provide service sessions: sessions is already provided by the host` | Allowed |
 
-A connection plugin still asking for `sessions` waits, and `rutis-host check` says why:
+A plugin still asking for an old name waits. The row state lines of `rutis-host run` and `rutis-host check` say (`maker` asks for `loader`, `relay` for `sessions`):
 
 ```text
+maker: waiting for loader (`loader` is the Rust service rutis_loader::loader::Loader, which is not exported: add #[rutis::service] to its impl)
 relay: waiting for sessions (no row provides it)
 ```
 
 ```text
+maker (file:///…/maker.mjs): cannot run: nothing provides loader
+  inject: ["loader"]
+  provides: {"maker":{"make":"async"}}
+  loader: add a row that provides it
 relay (file:///…/relay.mjs): cannot run: nothing provides sessions
   inject: ["sessions"]
   provides: {}
   sessions: add a row that provides it
 ```
 
-Rename it in `inject` and in `ctx.use`.
+The `add #[rutis::service]` of the `maker` line does not apply: rename the name to `rutis/loader`.

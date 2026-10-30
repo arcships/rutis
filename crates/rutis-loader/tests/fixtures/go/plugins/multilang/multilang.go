@@ -280,12 +280,12 @@ type MakerConfig struct {
 }
 
 // Maker runs the scenario of crates/rutis-loader/tests/loader_service.rs
-// through the host's `loader` (#185), recording what each call returned or
+// through the host's `rutis/loader` (#185), recording what each call returned or
 // threw: once started, as the calls wait for the loader's operation that
 // starts it.
 var Maker = rutis.Define(rutis.Plugin[MakerConfig]{
 	Name:   "go_maker",
-	Inject: []string{"loader", "probe"},
+	Inject: []string{"rutis/loader", "probe"},
 	Apply: func(ctx *rutis.Ctx, config MakerConfig) error {
 		p, err := probe(ctx)
 		if err != nil {
@@ -297,7 +297,7 @@ var Maker = rutis.Define(rutis.Plugin[MakerConfig]{
 			Status func(ctx context.Context) (map[string]any, error)
 			Remove func(ctx context.Context, id string) error
 		}
-		if err := ctx.Use("loader", &loader); err != nil {
+		if err := ctx.Use("rutis/loader", &loader); err != nil {
 			return err
 		}
 		record := func(label string, value string, err error) {

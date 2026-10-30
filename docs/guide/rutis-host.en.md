@@ -130,7 +130,7 @@ rows:
   welcome: running
 services:
   greeter: greeter
-  loader: host
+  rutis/loader: host
   rutis/sessions: host
   welcome: welcome
 runtimes:
@@ -147,7 +147,7 @@ $ npx rutis-host call welcome.everyone '["Ana", "Bo"]'
 
 Each argument of `call` is a JSON value, a string in quotes (`'"Ana"'`); the result prints as JSON. See [Seeing the current state](#seeing-the-current-state) and [Calling a service](#calling-a-service).
 
-`loader` and `rutis/sessions` under `services` come from no row: they are `rutis-host`'s own services (written `host`). A plugin adds and removes rows while the host runs with `loader` ([Managing plugins with loader](#managing-plugins-with-loader)), and hands the host a connection it made with `rutis/sessions` (end of [Remote runtimes and devices](#remote-runtimes-and-devices)). Assembling a host does not need them, and they are not written in `rutis.json`.
+`rutis/loader` and `rutis/sessions` under `services` come from no row: they are `rutis-host`'s own services (written `host`). A plugin adds and removes rows while the host runs with `rutis/loader` ([Managing plugins with rutis/loader](#managing-plugins-with-rutisloader)), and hands the host a connection it made with `rutis/sessions` (end of [Remote runtimes and devices](#remote-runtimes-and-devices)). Assembling a host does not need them, and they are not written in `rutis.json`.
 
 5. Change the configuration while it runs: add `"config": { "greeting": "Hej" }` to the `greeter` row in `rutis.json` and save. With `--watch-config` the host reads the file again and restarts only the row that changed:
 
@@ -526,11 +526,11 @@ Row state changes are printed by the state lines as usual. SIGUSR1, or a file ch
 
 Credentials are read from the environment when a row dials, or when a far end dials in (see [Credentials](#credentials)), so a connection row a reload adds connects too. The environment does not change while the process runs: a new token still needs a restart.
 
-Plugins can add and remove rows too, through the service `loader` (`create`, `remove`; see [The host writes its own plugins](../design-host-writes-plugins-2026-10-27.en.md)). `run` writes these changes back into `rutis.json`: only `rows` changes (a row added goes last, with only the fields the plugin gave, `id` always; a row removed goes), its other fields and the order of its keys stay, written as `rutis-host add` writes it (two-space indents). What it writes is no change to the file: `--watch-config` does not read it again for it. When the file was changed after the host read it (by hand, by `rutis-host add`) and has not been read again, a plugin's next change first reads back the file's `rows` and runs them, then makes the change on them and writes it back; a change outside `rows` still takes SIGUSR1 or `--watch-config`. When the file cannot be written, the row is added or removed all the same, and the plugin's error says `<row>: added, but rutis.json could not be written: <why>` (`removed` for a removal); a restart of the host loses the change. `dev` does not write `rutis.dev.json`: under `dev`, `create` and `remove` get `this host keeps no editable configuration, so rows cannot be added or removed`.
+Plugins can add and remove rows too, through the service `rutis/loader` (`create`, `remove`; see [The host writes its own plugins](../design-host-writes-plugins-2026-10-27.en.md)). `run` writes these changes back into `rutis.json`: only `rows` changes (a row added goes last, with only the fields the plugin gave, `id` always; a row removed goes), its other fields and the order of its keys stay, written as `rutis-host add` writes it (two-space indents). What it writes is no change to the file: `--watch-config` does not read it again for it. When the file was changed after the host read it (by hand, by `rutis-host add`) and has not been read again, a plugin's next change first reads back the file's `rows` and runs them, then makes the change on them and writes it back; a change outside `rows` still takes SIGUSR1 or `--watch-config`. When the file cannot be written, the row is added or removed all the same, and the plugin's error says `<row>: added, but rutis.json could not be written: <why>` (`removed` for a removal); a restart of the host loses the change. `dev` does not write `rutis.dev.json`: under `dev`, `create` and `remove` get `this host keeps no editable configuration, so rows cannot be added or removed`.
 
-## Managing plugins with `loader`
+## Managing plugins with `rutis/loader`
 
-`rutis-host` provides a service `loader`, with which plugins add and remove rows and load a row's code again while the host runs: an agent, say, writes a new plugin, has it loaded, is told what is wrong when it breaks it, puts the fixed version in, and removes it when done. Any plugin writing `inject: ["loader"]` can use it; to keep a plugin from managing plugins, do not add it. How each language writes it, what each method returns and the full table of errors: [Plugin API](plugin-api.en.md#managing-plugins-with-loader).
+`rutis-host` provides a service `rutis/loader`, with which plugins add and remove rows and load a row's code again while the host runs: an agent, say, writes a new plugin, has it loaded, is told what is wrong when it breaks it, puts the fixed version in, and removes it when done. Any plugin writing `inject: ["rutis/loader"]` can use it; to keep a plugin from managing plugins, do not add it. How each language writes it, what each method returns and the full table of errors: [Plugin API](plugin-api.en.md#managing-plugins-with-rutisloader).
 
 | Method | What it does | Returns |
 | --- | --- | --- |
@@ -552,7 +552,7 @@ On failure the plugin gets an error whose `message` is the text the terminal sho
 | `create` / `remove` under `dev` | `this host keeps no editable configuration, so rows cannot be added or removed` |
 | the row added, but `rutis.json` cannot be written | `weather: added, but rutis.json could not be written: <the system's reason>` |
 
-**`run` writes back into `rutis.json`.** A row added through `loader` goes at the end of `rows` (`id` always, otherwise only the fields the plugin gave), a row removed goes; the other fields and the order of keys stay, `rutis-host check rutis.json` treats the written file as a hand-written one, and the rows written run again after a restart. The details of writing back (`--watch-config`, a file changed after the host read it): [Changing the configuration while it runs](#changing-the-configuration-while-it-runs). **`dev` keeps no editable configuration**: `dev` develops one plugin project, whose rows are changed in `rutis.dev.json`; `create` and `remove` get the error above, `reload` and `status` work as usual.
+**`run` writes back into `rutis.json`.** A row added through `rutis/loader` goes at the end of `rows` (`id` always, otherwise only the fields the plugin gave), a row removed goes; the other fields and the order of keys stay, `rutis-host check rutis.json` treats the written file as a hand-written one, and the rows written run again after a restart. The details of writing back (`--watch-config`, a file changed after the host read it): [Changing the configuration while it runs](#changing-the-configuration-while-it-runs). **`dev` keeps no editable configuration**: `dev` develops one plugin project, whose rows are changed in `rutis.dev.json`; `create` and `remove` get the error above, `reload` and `status` work as usual.
 
 What the terminal shows (in the format of [What `run` prints](#what-run-prints)):
 
@@ -564,7 +564,7 @@ What the terminal shows (in the format of [What `run` prints](#what-run-prints))
 | `reload`, the new code's `apply` failed | `weather: failed: KeyError: 'units'`; once fixed and reloaded, `weather: running` |
 | `remove` | `weather: removed` |
 
-rutis-host takes the name `loader`: another row in `rutis.json` providing a service named `loader` fails with the error for a name already provided (`service loader is already provided by …: row <row> cannot provide it too`), and the terminal prints `<row>: failed …` as usual. Rename that row's service.
+rutis-host takes the name `rutis/loader`: another row in `rutis.json` providing a service named `rutis/loader` fails with the error for a name already provided (`service rutis/loader is already provided by …: row <row> cannot provide it too`), and the terminal prints `<row>: failed …` as usual. Rename that row's service.
 
 ## Developing a plugin with `dev`
 
@@ -589,7 +589,7 @@ Besides the lines of [`run`](#what-run-prints), `dev` prints:
 | `<row id>: restarted (<other row> reloaded)` | The row uses a service of the other row, and restarted with it. The cause may also be `<row> updated`, `added` or `removed` (by `rutis.dev.json`), `<Go or Swift runtime> restarted`, or `<row> restarted`: a row it uses that restarted with the change (`caller: restarted (greeter restarted)` when `llm` reloaded and `greeter` uses it). The cause named is always a row the row uses, each row once, by its own change when it had one (`caller: restarted (weather reloaded)` when `weather` and `llm` changed together, not `weather reloaded, weather restarted`); when that is not known (a dependency inside a runtime, between Cordis rows), no cause is named: `<row id>: restarted`. `started` or `stopped` instead of `restarted` when the row was not running before, or is not running now. |
 | `rutis-host: reloaded rutis.dev.json (<n> rows changed)` | `rutis.dev.json` was read again; each row that changed follows: `<row id>: updated (its row in rutis.dev.json changed)`, `<row id>: added`, `<row id>: removed`. Refused: `rutis-host: reload rejected: <reason>; nothing changed`. |
 | `runtime <name>: starting again (<files> changed)` | A runtime that was down starts again for the change; `runtime <name>: running` follows when it runs, or `runtime <name>: down (<reason>)` again. When its `restart` starts it again: `runtime <name>: down; its restart starts it again, its rows with the code as it is then (…)`; when it is starting: `runtime <name>: starting; its rows start with the code as it is then (…)`. |
-| `rutis-host dev: services: forecast (weather), llm (llm), loader (host), rutis/sessions (host)` | Once every row is running, waiting or failed, the services now and the rows providing them (as `services` in `rutis-host status`), by name; one the host provides as `host` (`loader`, which rutis provides itself, say); when no row provides one, `rutis-host dev: services: none`, whatever the host provides. Printed again whenever the services change (a runtime can provide one after its row started), and after each reload, rebuild or reading of `rutis.dev.json`, not compared with the last. It may come before or after the rows' state lines. It starts with `rutis-host dev: `, not in the form `<row>: <state>`, so scripts reading the state lines are not affected; `run` does not print it: use `rutis-host status` |
+| `rutis-host dev: services: forecast (weather), llm (llm), rutis/loader (host), rutis/sessions (host)` | Once every row is running, waiting or failed, the services now and the rows providing them (as `services` in `rutis-host status`), by name; one the host provides as `host` (`rutis/loader`, which rutis provides itself, say); when no row provides one, `rutis-host dev: services: none`, whatever the host provides. Printed again whenever the services change (a runtime can provide one after its row started), and after each reload, rebuild or reading of `rutis.dev.json`, not compared with the last. It may come before or after the rows' state lines. It starts with `rutis-host dev: `, not in the form `<row>: <state>`, so scripts reading the state lines are not affected; `run` does not print it: use `rutis-host status` |
 | `<project>: building`, `<project>: built in 1.2s`, `<runtime>: rebuilt and restarted` | A Go or Swift project was rebuilt and its runtime restarted on the build. When the build fails: `<project>: the build failed; the last build keeps running`, followed by the compiler's errors; when the new build does not run: `<runtime>: cannot restart: <reason>; the previous build is kept`. |
 
 ## When a runtime ends
@@ -628,7 +628,7 @@ rows:
   slow: running
   caller: starting
 services:
-  loader: host
+  rutis/loader: host
   rutis/sessions: host
   slow: slow
 runtimes:
@@ -683,7 +683,7 @@ $ rutis-host call forecast.week '{"days": 3}'
 | --- | --- |
 | An argument that is not JSON | `rutis-host: argument 1 is not JSON: write a string in quotes, as '"Oslo"'` |
 | No method named | `rutis-host: name a method, as forecast.<method>` |
-| No such service | `rutis-host: no row provides forcast; did you mean forecast? (services: forecast, llm, loader, rutis/sessions)` |
+| No such service | `rutis-host: no row provides forcast; did you mean forecast? (services: forecast, llm, rutis/loader, rutis/sessions)` |
 | The row providing it is not running | `rutis-host: forecast is not available (row weather waits for its runtime go-weather)` |
 | No such method | `rutis-host: forecast has no method tomorow (methods: today, week)` |
 | An argument of the wrong type (when the provider is a Rust `#[rutis::service]`, Go, Swift or Kotlin; methods written in TypeScript, JavaScript, Bun or Python do not check their arguments' types: they get the value sent, and type annotations are for the editor only) | `rutis-host: forecast.today: argument 1 should be a string, got 3` |

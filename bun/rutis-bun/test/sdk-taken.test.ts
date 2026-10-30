@@ -7,8 +7,8 @@ import taken from '../../../node/rutis/test/fixtures/taken.mjs'
 import greeter from './fixtures/sdk/greeter.ts'
 
 test('a service the host provides already fails the load that gives it', async () => {
-  const refused = await load(taken, { services: { sessions: { x: () => 7 } } }).then(() => 'loaded', (error: Error) => error.message)
-  expect(refused).toBe('rutis-test/sessions: sessions is already provided by the host')
+  const refused = await load(taken, { services: { 'rutis/sessions': { x: () => 7 } } }).then(() => 'loaded', (error: Error) => error.message)
+  expect(refused).toBe('rutis-test/rutis/sessions: rutis/sessions is already provided by the host')
 })
 
 test('the tests after it run on the same host', async () => {

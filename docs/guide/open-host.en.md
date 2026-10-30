@@ -300,7 +300,7 @@ rows:
   shout: running
 services:
   commands: host
-  loader: host
+  rutis/loader: host
   notes: host
 runtimes:
   node: running (pid 57684)
@@ -601,7 +601,7 @@ handle.remove("today").await?;                         // unloaded and removed
 
 ### Plugins that manage plugins
 
-A host using `LoaderPlugin` also provides the service `loader` by name, with the name and shapes of Cordis's `ctx.loader`: `create(row)`, `reload(id)`, `remove(id)`, `status()`. A plugin with `inject: ['loader']` uses it; a command listing the plugins, for instance:
+A host using `LoaderPlugin` also provides the service `rutis/loader` by name, with the shapes of Cordis's `ctx.loader`: `create(row)`, `reload(id)`, `remove(id)`, `status()`. A plugin with `inject: ['rutis/loader']` uses it; a command listing the plugins, for instance:
 
 <!-- example: jot-en file=jot/commands/plugins.ts -->
 ```ts
@@ -616,9 +616,9 @@ interface Commands {
 }
 
 export default definePlugin({
-  inject: ['loader', 'commands'],
+  inject: ['rutis/loader', 'commands'],
   async apply(ctx) {
-    const loader = ctx.use<Loader>('loader')
+    const loader = ctx.use<Loader>('rutis/loader')
     await ctx.use<Commands>('commands').register('plugins', async () => {
       const { rows } = await loader.status()   // called in the command, not in apply
       return rows.map(row => `${row.id}: ${row.state}`).join('\n')
@@ -638,10 +638,10 @@ plugins: running
 shout: running
 ```
 
-- Call the `loader` methods once `apply` has returned (in service methods, in events): called in a row's own `apply`, one waits for that `apply` to end, and so hangs.
+- Call the `rutis/loader` methods once `apply` has returned (in service methods, in events): called in a row's own `apply`, one waits for that `apply` to end, and so hangs.
 - `create` and `remove` change the editable layer, as the Rust methods above do; without one they fail.
 - Any plugin can `inject` it; rutis adds no permission: to keep a plugin from managing plugins, do not install that plugin.
-- The methods' arguments, results and error texts are in [Plugin API: managing plugins with `loader`](plugin-api.en.md#managing-plugins-with-loader).
+- The methods' arguments, results and error texts are in [Plugin API: managing plugins with `rutis/loader`](plugin-api.en.md#managing-plugins-with-rutisloader).
 
 ## 5. Serve plugin authors well
 
@@ -865,7 +865,7 @@ for call in &status.calls {
 # }
 ```
 
-Each row's state is `row.state` (an `EntryStatus`), which has no `Display`. For the word `rutis-host status` shows (`waiting`, `starting`, `running`, `failed`, `stopped`, `disabled`), turn the snapshot into JSON: each row's `state` is that word, the same as the `loader` service's `status()` gives plugins:
+Each row's state is `row.state` (an `EntryStatus`), which has no `Display`. For the word `rutis-host status` shows (`waiting`, `starting`, `running`, `failed`, `stopped`, `disabled`), turn the snapshot into JSON: each row's `state` is that word, the same as the `rutis/loader` service's `status()` gives plugins:
 
 ```rust,no_run
 # fn demo(handle: rutis_loader::Loader) -> Result<(), serde_json::Error> {

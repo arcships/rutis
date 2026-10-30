@@ -423,7 +423,7 @@ async fn run(args: &[String]) -> Result<Stopped, String> {
     // instead of ending it.
     let seen = rutis_host::rows_file::Seen::default();
     let mut triggers = reload::Triggers::listen(&path, watch, seen.clone())?;
-    // Its rows are the layer plugins edit through `loader`, written back.
+    // Its rows are the layer plugins edit through `rutis/loader`, written back.
     let file = rutis_host::rows_file::RowsFile::new(&path, seen);
     let mut config = file.read()?;
     config.runtimes.prefix_output = prefix;

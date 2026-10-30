@@ -291,7 +291,7 @@ fn the_dev_loop(lang: &Lang) {
     let mut host = Host::start(&["dev", "."], dir.path());
     // Once running, the services and their rows (#670).
     let services =
-        "rutis-host dev: services: llm (llm), loader (host), rutis/sessions (host), weather (weather)";
+        "rutis-host dev: services: llm (llm), rutis/loader (host), rutis/sessions (host), weather (weather)";
     expect(
         &mut host,
         &[
@@ -741,7 +741,7 @@ fn a_python_project_runs_a_typescript_fake_from_dev() {
             "plugin weather v1 applied city=Oslo in *",
             "weather: running",
             "llm: running",
-            "rutis-host dev: services: llm (llm), loader (host), rutis/sessions (host), weather (weather)",
+            "rutis-host dev: services: llm (llm), rutis/loader (host), rutis/sessions (host), weather (weather)",
         ],
     );
     signal(&host, libc::SIGTERM, false);

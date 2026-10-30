@@ -592,7 +592,7 @@ impl std::fmt::Display for Status {
     }
 }
 
-/// As data, for plugins of other languages (the service `loader`'s
+/// As data, for plugins of other languages (the service `rutis/loader`'s
 /// `status()`): `{rows: [{id, instance?, state, reason?}], services:
 /// [{name, provider}], runtimes: [{name, state, reason?, pid?}], calls:
 /// [{from, to, service, method, ms}]}`. A state is the word `Display`

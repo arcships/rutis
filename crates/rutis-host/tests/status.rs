@@ -143,7 +143,7 @@ fn status_says_what_a_running_host_does() {
             "  slow: running",
             "  caller: starting",
             "services:",
-            "  loader: host",
+            "  rutis/loader: host",
             "  rutis/sessions: host",
             "  slow: slow",
             "runtimes:",

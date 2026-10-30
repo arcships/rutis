@@ -295,7 +295,7 @@ greeter: built in 3.2s
 rutis-host dev: running greeter; changes reload it (Ctrl-C ends)
 greeter: starting
 translate: running
-rutis-host dev: services: greeter (greeter), loader (host), rutis/sessions (host), translate (translate)
+rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)
 greeter: running
 ```
 
@@ -308,7 +308,7 @@ rows:
   translate: running
 services:
   greeter: greeter
-  loader: host
+  rutis/loader: host
   rutis/sessions: host
   translate: translate
 runtimes:
@@ -330,8 +330,8 @@ $ npx @arcships/rutis-host call greeter.count
 greeter: building
 greeter: built in 1.1s
 swift-greeter: rebuilt and restarted
-rutis-host dev: services: loader (host), rutis/sessions (host), translate (translate)
-rutis-host dev: services: greeter (greeter), loader (host), rutis/sessions (host), translate (translate)
+rutis-host dev: services: rutis/loader (host), rutis/sessions (host), translate (translate)
+rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)
 ```
 
 ```console

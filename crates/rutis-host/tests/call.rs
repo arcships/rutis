@@ -195,7 +195,7 @@ fn call_in_a_dev_project_says_what_it_did() {
     );
     fails(
         &["forcast.today", "\"Oslo\""],
-        "rutis-host: no row provides forcast; did you mean forecast? (services: forecast, llm, loader, rutis/sessions)\n",
+        "rutis-host: no row provides forcast; did you mean forecast? (services: forecast, llm, rutis/loader, rutis/sessions)\n",
     );
     fails(
         &["forecast.tomorow", "\"Oslo\""],
@@ -376,6 +376,58 @@ fn call_reaches_a_python_service() {
         dir,
         runtime,
         &[(&["forecast.today", "\"Oslo\""], "\"sunny in Oslo\"\n", "")],
+    );
+}
+
+/// rutis's own services are `rutis/loader` and `rutis/sessions`: a row of
+/// the host provides `loader` and `sessions` of its own, and both are
+/// called (#986).
+/// guarantee: loader/service, bridge/session-service
+#[test]
+fn the_host_provides_loader_and_sessions_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let (dir, runtime) = (dir.path(), runtime.path());
+    common::write(
+        dir,
+        &[(
+            "agents.py",
+            "class Sessions:\n\
+             \x20   async def count(self) -> int:\n\
+             \x20       return 2\n\
+             \n\
+             class Loader:\n\
+             \x20   async def count(self) -> int:\n\
+             \x20       return 3\n\
+             \n\
+             provides = {\"sessions\": Sessions, \"loader\": Loader}\n\
+             \n\
+             def apply(ctx, config):\n\
+             \x20   ctx.provide(\"sessions\", Sessions())\n\
+             \x20   ctx.provide(\"loader\", Loader())\n",
+        )],
+    );
+    let mut py = json!({ "project": "." });
+    if let Some(python) = std::env::var_os("RUTIS_PYTHON") {
+        py["python"] = json!(python.to_str().unwrap());
+    }
+    run_config(
+        dir,
+        json!({ "py": py }),
+        json!([{ "id": "agents", "name": "py:agents" }]),
+    );
+    expect_calls(
+        dir,
+        runtime,
+        &[
+            (&["sessions.count"], "2\n", ""),
+            (&["loader.count"], "3\n", ""),
+            (
+                &["rutis/loader.nope"],
+                "",
+                "rutis-host: rutis/loader has no method nope (methods: create, reload, remove, status)\n",
+            ),
+        ],
     );
 }
 
