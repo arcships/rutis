@@ -2,14 +2,20 @@
 // The plugin that drives a test (`@arcships/rutis/testing`), in the real
 // runtime next to the plugins under test: `rutis-host test` loads it first.
 // It is a leaf plugin like any other: it uses the host's `rutis-host/test`
-// to load, update and unload rows, and `ctx.provide`, `ctx.use`, `ctx.on` and
-// the five ways to emit for the test, which reaches it on a session of its
+// to load, update and unload rows (the test's services among them, each a
+// row of its own: ./service.ts), and `ctx.use`, `ctx.on` and the five
+// ways to emit for the test, which reaches it on a session of its
 // own (the address in RUTIS_TEST_CONTROL, ./start.ts). The test's services
 // and listeners stay in the test's process: calling them here waits for the
 // test, as a call of another process's does.
 import { Client } from '../client.ts'
 import { rmSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { PLUGIN_API } from '../plugin.ts'
+import { CONTROL } from './service.ts'
+
+// The plugin a service of the test is a row of (./service.ts).
+const SERVICE = fileURLToPath(new URL('./service.ts', import.meta.url))
 
 const LEAF = Symbol.for('rutis.leaf-plugin')
 
@@ -44,7 +50,8 @@ export default Object.freeze({
       if (event?.available) providers.set(event.name, event.row)
       else providers.delete(event?.name)
     })
-    // The test's services and listeners here: name / id → withdrawal.
+    // The test's services, name → its row, and its listeners here, id →
+    // withdrawal.
     const services = new Map()
     const listeners = new Map()
     let control
@@ -70,15 +77,17 @@ export default Object.freeze({
       reported: id => harness.reported(id),
       provided: id => [...providers].filter(([, row]) => row === id).map(([name]) => name).sort(),
       methods: name => inferred(ctx.use(name)),
-      // A service of the test: each method calls the test's object.
-      provide: (name, names) => {
-        const value = Object.fromEntries(names.map(method => [method, (...args) => control.call(name, method, args)]))
-        services.set(name, ctx.provide(name, value))
+      // A service of the test, as a row of its own (./service.ts): a
+      // name rutis has already fails that row's load only. Provided here,
+      // by this plugin, it failed this plugin, and the test with it (#988).
+      provide: async (name, names) => {
+        const id = await harness.load(SERVICE, { name, methods: names }, { id: `rutis-test/${name}` })
+        services.set(name, id)
       },
-      withdraw: name => {
-        const withdraw = services.get(name)
+      withdraw: async name => {
+        const id = services.get(name)
         services.delete(name)
-        if (typeof withdraw === 'function') withdraw()
+        if (id !== undefined) await harness.unload(id)
       },
       on: (id, name, options) => {
         listeners.set(id, ctx.on(name, (...args) => control.call(id, 'call', args), options))
@@ -99,6 +108,7 @@ export default Object.freeze({
       },
       endpoint: { local: 'rutis-test' },
     })
+    globalThis[CONTROL] = control
     // The test process went (done, failed or killed): the test is over.
     // Its temporary directory goes, and this runtime ends, after which
     // `rutis-host test` stops and exits (as a driver ends a test).

@@ -18,9 +18,10 @@
 // PATH), started once per test process (platform cleanup
 // §7.5): the host checks its config and fills its defaults, gates it on
 // the services it injects, and dispatches its events; what crosses between
-// it and the test crosses between processes. The test's services, its
-// listeners (`on`) and what it emits are those of a plugin next to it in
-// the same runtime, the test tool's own. The plugin is loaded from its
+// it and the test crosses between processes. The test's listeners (`on`)
+// and what it emits are those of a plugin next to it in the same runtime,
+// the test tool's own; each of the test's services is a row of its own
+// there. The plugin is loaded from its
 // module, which must export it as default.
 
 import { createRequire } from 'node:module'
