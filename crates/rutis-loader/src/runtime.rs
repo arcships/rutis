@@ -39,7 +39,9 @@
 //!   it into its runtime while it runs, in a scope of the row's own, so the
 //!   service sees which row calls it (`rutis_bridge::session::caller_row`).
 //!   In a leaf runtime (Python) every injected name does; in Cordis the
-//!   names the catalog shares, which are all of them;
+//!   names the catalog shares, which are all of them. So do the names of
+//!   the row's own `inject` the catalog shares, in every runtime
+//!   (`Row::foreign_scope`), as a Rust row's `inject` gates that row;
 //! - the services the plugin declares it provides are published from the
 //!   row's own fiber, so Rust plugins and other runtimes' rows can inject
 //!   them. So are the ones it provides without declaring them, which a
@@ -266,6 +268,13 @@ impl JsModule {
             .filter(|(name, _)| self.catalog.is_shared(name))
             .map(|(name, instance)| (name, format!("rutis-loader/instance/{instance}")))
             .collect();
+        // A name of the row's own `inject` is leased as `Row::foreign_scope`
+        // gates the row on it: the shared ones, keyed as a declared one.
+        let (catalog, row_build) = (self.catalog.clone(), build.clone());
+        let row_inject: InjectKeyOf = Arc::new(move |name| match catalog.shares(name) {
+            true => catalog.shared_key_in(name, &row_build).ok(),
+            false => None,
+        });
         // A service the row announces is keyed as a declared one would be.
         let (catalog, build) = (self.catalog.clone(), build.clone());
         let announced: KeyOf = Arc::new(move |name| match catalog.is_shared(name) {
@@ -285,6 +294,7 @@ impl JsModule {
             scopes,
         )
         .announcing(announced)
+        .leasing_row_inject(row_inject)
         .declaring_optional(self.declared_optional.clone()))
     }
 }
@@ -311,6 +321,11 @@ pub(crate) enum RowEntry {
 /// The key a service a row announces is published under, by name.
 pub(crate) type KeyOf = Arc<dyn Fn(&str) -> Key<dyn HostDispatch> + Send + Sync>;
 
+/// The key a name of a row's own `inject` gates the row on and is leased
+/// under, by name: `None` for one the catalog does not share, which the
+/// row's runtime resolves natively (`Row::foreign_scope`).
+pub(crate) type InjectKeyOf = Arc<dyn Fn(&str) -> Option<Key<dyn HostDispatch>> + Send + Sync>;
+
 struct JsFactory {
     name: String,
     runtime: RowRuntime,
@@ -335,6 +350,8 @@ struct JsFactory {
     injects: Vec<TypeKey>,
     /// The key of each service the row announces.
     announced: KeyOf,
+    /// The key of each name of the row's own `inject` it leases.
+    row_inject: InjectKeyOf,
     /// Why a running row was refused a service it provided after loading,
     /// by its fiber: the restart that follows fails with it.
     refused: Refused,
@@ -459,6 +476,8 @@ impl JsFactory {
             scopes,
             injects,
             announced: Arc::new(host_key),
+            // Every name not registered otherwise is shared.
+            row_inject: Arc::new(|name| Some(host_key(name))),
             refused: Refused::default(),
         }
     }
@@ -466,6 +485,12 @@ impl JsFactory {
     /// Publish the services a row announces under `key(name)`.
     pub(crate) fn announcing(mut self, key: KeyOf) -> Self {
         self.announced = key;
+        self
+    }
+
+    /// Lease the names of a row's own `inject` under `key(name)`.
+    pub(crate) fn leasing_row_inject(mut self, key: InjectKeyOf) -> Self {
+        self.row_inject = key;
         self
     }
 
@@ -512,6 +537,7 @@ impl PluginFactory<Value> for JsFactory {
             scopes: self.scopes.clone(),
             injects: self.injects.clone(),
             announced: self.announced.clone(),
+            row_inject: self.row_inject.clone(),
             refused: self.refused.clone(),
         }))
     }
@@ -531,6 +557,7 @@ struct JsRow {
     scopes: Vec<(String, String)>,
     injects: Vec<TypeKey>,
     announced: KeyOf,
+    row_inject: InjectKeyOf,
     refused: Refused,
 }
 
@@ -697,12 +724,25 @@ impl JsRow {
         );
         // Who calls the services it leases (`caller_row`).
         let caller = CallerRow::new(id.clone(), key.clone(), ctx.clone());
-        // The shared services the plugin injects, registered in Cordis for
-        // as long as the row runs, each in a scope of the row's own (inside
-        // the one it isolates the name in), so their calls name the row.
-        // One served by a row of this same process is already there
+        // The shared names of the row's own `inject` gate it too
+        // (`Row::foreign_scope`), and are leased as the plugin's are.
+        let mut row_injected: Vec<(String, Key<dyn HostDispatch>)> = Vec::new();
+        for name in &inject {
+            let known = self
+                .gated
+                .iter()
+                .chain(&row_injected)
+                .any(|(gated, _)| gated == name);
+            if let Some(key) = (!known).then(|| (self.row_inject)(name)).flatten() {
+                row_injected.push((name.clone(), key));
+            }
+        }
+        // The shared services the plugin and its row inject, registered in
+        // Cordis for as long as the row runs, each in a scope of the row's
+        // own (inside the one it isolates the name in), so their calls name
+        // the row. One served by a row of this same process is already there
         // natively.
-        for (name, key) in &self.gated {
+        for (name, key) in self.gated.iter().chain(&row_injected) {
             let dispatch = ctx.require_at(key)?;
             if dispatch
                 .origin()
