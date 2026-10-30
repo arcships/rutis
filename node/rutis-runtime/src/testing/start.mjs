@@ -103,7 +103,7 @@ export async function start({ dispatch, outgoing, command = [process.execPath, .
   let control
   try {
     control = await Promise.race([
-      Process.connect(`unix:${address}`, dispatch ?? (() => { throw new Error('the test serves nothing') }), undefined, { local: 'test' }, { outgoing }),
+      Process.connect(`unix:${address}`, dispatch ?? (() => { throw new Error('the test serves nothing') }), undefined, { local: 'test' }, { outgoing, answersWaiting: true }),
       failed,
     ])
   } catch (error) {

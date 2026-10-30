@@ -11,7 +11,7 @@ export class Process {
 
   // `ended`: an Int32Array on a SharedArrayBuffer whose first element the
   // I/O worker sets to 1 once the channel ends, whatever this thread does.
-  constructor({ channel, dispatch, settled, endpoint, inline, holds, report, owner, within, outgoing, ended } = {}) {
+  constructor({ channel, dispatch, settled, endpoint, inline, holds, report, owner, within, outgoing, answersWaiting, ended } = {}) {
     const { port1, port2 } = new MessageChannel()
     this.#port = port1
     this.#session = new Session({
@@ -26,6 +26,7 @@ export class Process {
       owner,
       within,
       outgoing,
+      answersWaiting,
       pump: done => {
         const sequence = Atomics.load(this.#signal, 0)
         let packet
@@ -51,7 +52,7 @@ export class Process {
   }
   // `endpoint` ({ local, expected? }): this side's endpoint id and the far end's;
   // `options`: the session's `inline`, `holds`, `report`,
-  // `owner`, `within` and `outgoing`.
+  // `owner`, `within`, `outgoing` and `answersWaiting`.
   static async connect(channel, dispatch, settled, endpoint, options = {}) {
     const process = new Process({ channel, dispatch, settled, endpoint, ...options })
     try { await process.#session.ready; return process }

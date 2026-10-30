@@ -1233,6 +1233,8 @@ The `t` that `load` and `h.load` return:
 
 `PluginTestError`: what the test tool refuses: a load that fails (its text is the row's status, as the host prints it, such as `weather: config: city is required`), a plugin it cannot load.
 
+The test and the plugin may call each other at the same time: the test calling a function the plugin handed it (a callback) while the plugin calls one of the test's services. A side that waits for the other runs the other's call meanwhile, under Node as under Bun, and both return. So one of the test's services may be called while the test is inside a call of the plugin's: do not hold a lock of the test's across such a call.
+
 ### The Python test tool
 
 `rutis.testing`:
