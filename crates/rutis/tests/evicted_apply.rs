@@ -1,6 +1,8 @@
 //! A generation the driver pre-cancelled (eviction, restart, update,
 //! dispose, shutdown) is not a failed load: it unloads to `Pending` and the
-//! queued intent or the dependency's return reloads it (#968). A returned
+//! queued intent or the dependency's return reloads it (#968); under a
+//! dispose or shutdown it unloads to `Disposed` instead (#983, see
+//! `terminal_cleanup.rs`). A returned
 //! error is the plugin answering the cancellation and is not reported; a
 //! panic is a bug and still goes to the error sink. A genuine failure — the
 //! token was not cancelled by the driver — stays sticky `Failed`, and a

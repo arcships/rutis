@@ -1044,6 +1044,13 @@ impl FiberInner {
     /// A returned error there is the plugin answering the cancellation and
     /// is not reported, but a panic is a bug in the plugin: it still goes to
     /// the error sink, as a non-terminal unload's cleanup errors do (#968).
+    /// When the stop is terminal (a dispose of this fiber or a shutdown of
+    /// its subtree is registered: both set the terminal task, the shutdown
+    /// under the admission lock taken here) the generation unloads to
+    /// `Disposed` instead, as the queued Dispose or Shutdown would: its
+    /// cleanup errors stay on the fiber and that dispose or shutdown returns
+    /// them (#983). A root shutdown ends the fiber through its parent's
+    /// cascading dispose, as it does an `Active` one.
     async fn fail_load(
         this: &Arc<Self>,
         error: Error,
@@ -1053,17 +1060,21 @@ impl FiberInner {
             let _admission = this.ctx.shared().admission.lock().unwrap();
             let mut tr = this.transition.lock().unwrap();
             if tr.pre_cancelled {
-                true
+                Some(if tr.terminal_task.is_some() {
+                    NextState::Disposed
+                } else {
+                    NextState::Pending
+                })
             } else {
                 Self::set_state(this, &mut tr, FiberState::Unloading);
-                false
+                None
             }
         };
-        if pre_cancelled {
+        if let Some(next) = pre_cancelled {
             if error.is_panic() {
                 (this.ctx.error_sink())(error.shared());
             }
-            Self::unload(this, NextState::Pending).await;
+            Self::unload(this, next).await;
             return;
         }
         this.flush_status();
