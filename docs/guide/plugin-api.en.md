@@ -735,7 +735,7 @@ The host controls when a plugin runs:
 
 Services obtained in `apply` remain valid while the plugin is running, so the plugin does not need to handle a service disappearing midway through its work.
 
-A host using `rutis-host` or `LoaderPlugin` provides the service `loader` (`create`, `reload`, `remove`, `status`; see [The host writes its own plugins](../design-host-writes-plugins-2026-10-27.en.md)). Its methods are called after `apply` returns (in a service method or an event): called in a row's own `apply`, they wait until that `apply` ends, so they hang. To mount child plugins in `apply`, use `ctx.plugin` (Rust; Cordis plugins in Node).
+A host using `rutis-host` or `LoaderPlugin` provides the service `rutis/loader` (`create`, `reload`, `remove`, `status`; see [The host writes its own plugins](../design-host-writes-plugins-2026-10-27.en.md)). Its methods are called after `apply` returns (in a service method or an event): called in a row's own `apply`, they wait until that `apply` ends, so they hang. To mount child plugins in `apply`, use `ctx.plugin` (Rust; Cordis plugins in Node).
 
 A service name has one provider in rutis: when another plugin (any language, any node) already provides a service of that name, the plugin providing it later fails (to load, or, when it provides it after loading, at that point), and the error names both, for example `service weather is already provided by row forecast: row weather cannot provide it too`. Only that plugin fails: the others, those in its runtime included, keep using the provider they had. An undeclared service appears only once its plugin runs; plugins depending on it wait for it as usual, and `rutis-host check` reports such a dependency with a warning, `nothing declares <service>; it may be provided at runtime by …`, not as a failure (with `check --strict`, as one: see [Checking a configuration](rutis-host.en.md#checking-a-configuration)). The same for one provided from a thread or goroutine before `apply` returns: the host has handled it before the plugin has loaded, and a clash fails the load.
 
@@ -743,9 +743,9 @@ When the host stops, it unloads every plugin, each cleanup runs once, and then t
 
 Cleanups have a deadline: when the host stops, the `--shutdown-timeout` of `rutis-host` (10 seconds by default, see [rutis-host](rutis-host.en.md#stopping-and-exit-status)); when the host went away, the runtime uses the same time (`rutis-host` passes it to its runtimes in the `RUTIS_SHUTDOWN_TIMEOUT` environment variable; 10 seconds without it). A cleanup not finished by then, and those after it, are not waited for: the runtime writes a line saying so on stderr and exits with status 1. So work that must happen should not rely on cleanup alone, and a cleanup should not wait without end. In Node and Bun, a cleanup that blocks synchronously (an endless loop) holds the thread, and the deadline cannot interrupt it.
 
-## Managing plugins with `loader`
+## Managing plugins with `rutis/loader`
 
-A host using `rutis-host` or `LoaderPlugin` provides a service `loader`: with it a plugin adds a row, loads a row's code again, removes a row and reads the current state, to the same effect as writing and changing rows in `rutis.json` by hand. It is an ordinary service: `inject: ["loader"]`, then `ctx.use("loader")`; any plugin in any language can use it, and the platform adds no permission or limit (to keep a plugin from managing plugins, do not add it). Design: [The host writes its own plugins](../design-host-writes-plugins-2026-10-27.en.md).
+A host using `rutis-host` or `LoaderPlugin` provides a service `rutis/loader`: with it a plugin adds a row, loads a row's code again, removes a row and reads the current state, to the same effect as writing and changing rows in `rutis.json` by hand. It is an ordinary service: `inject: ["rutis/loader"]`, then `ctx.use("rutis/loader")`; any plugin in any language can use it, and the platform adds no permission or limit (to keep a plugin from managing plugins, do not add it). Design: [The host writes its own plugins](../design-host-writes-plugins-2026-10-27.en.md).
 
 | Method | Arguments | Returns |
 | --- | --- | --- |
@@ -756,7 +756,7 @@ A host using `rutis-host` or `LoaderPlugin` provides a service `loader`: with it
 
 `create` is all or nothing: a new row that cannot start (its module not found, a syntax error, its config not matching the schema, `apply` throwing) is not left behind. On `reload`, when the new code cannot load (a syntax or import error), the previous version keeps running; when the new code fails in `apply`, the row runs the new code and fails with that error until it is fixed and reloaded again (as [`rutis-host dev`](rutis-host.en.md#developing-a-plugin-with-dev) reloads).
 
-**When to call it.** The methods of `loader` are called after `apply` returns: in a service method, in an event. A row calling `create`, `reload` or `remove` in its own `apply` waits until that `apply` ends, so it hangs, and nothing reports it. To mount child plugins in `apply`, use `ctx.plugin` (Rust; Cordis plugins in Node): they belong to the row and are unloaded with it.
+**When to call it.** The methods of `rutis/loader` are called after `apply` returns: in a service method, in an event. A row calling `create`, `reload` or `remove` in its own `apply` waits until that `apply` ends, so it hangs, and nothing reports it. To mount child plugins in `apply`, use `ctx.plugin` (Rust; Cordis plugins in Node): they belong to the row and are unloaded with it.
 
 Python:
 
@@ -776,10 +776,10 @@ class Maker:
 
 
 def apply(ctx, config):
-    ctx.provide("maker", Maker(ctx.use("loader")))
+    ctx.provide("maker", Maker(ctx.use("rutis/loader")))
 
 
-plugin = define_plugin(apply, name="maker", inject=["loader"])
+plugin = define_plugin(apply, name="maker", inject=["rutis/loader"])
 ```
 
 TypeScript:
@@ -796,9 +796,9 @@ interface Loader {
 
 export default definePlugin({
   name: 'maker',
-  inject: ['loader'],
+  inject: ['rutis/loader'],
   apply(ctx) {
-    const loader = ctx.use<Loader>('loader')
+    const loader = ctx.use<Loader>('rutis/loader')
     ctx.provide('maker', {
       step: async () => {
         const row = await loader.create({ name: 'py:weather' })
@@ -809,7 +809,7 @@ export default definePlugin({
 })
 ```
 
-Go (`Inject: []string{"loader"}`):
+Go (`Inject: []string{"rutis/loader"}`):
 
 ```go
 var loader struct {
@@ -818,7 +818,7 @@ var loader struct {
 	Status func(ctx context.Context) (map[string]any, error)
 	Remove func(ctx context.Context, id string) error
 }
-if err := ctx.Use("loader", &loader); err != nil {
+if err := ctx.Use("rutis/loader", &loader); err != nil {
 	return err
 }
 // In a service method:
@@ -840,9 +840,9 @@ row, err := loader.Create(ctx, map[string]any{"name": "py:weather"})
 | `create` / `remove`, the host keeps no editable configuration | `this host keeps no editable configuration, so rows cannot be added or removed` | — |
 | `create` took effect but was not stored | `weather: added, but rutis.json could not be written: <the system's reason>` (`removed` for a removal) | runs; gone after a restart of the host |
 
-**Where changes are kept.** `rutis-host run` writes rows added and removed back into `rutis.json` (only `rows` changes; see [Managing plugins with `loader`](rutis-host.en.md#managing-plugins-with-loader)); `rutis-host dev` and an embedding host without a `Persist` keep no editable configuration: `create` and `remove` get the error above, `reload` and `status` work as usual.
+**Where changes are kept.** `rutis-host run` writes rows added and removed back into `rutis.json` (only `rows` changes; see [Managing plugins with `rutis/loader`](rutis-host.en.md#managing-plugins-with-rutisloader)); `rutis-host dev` and an embedding host without a `Persist` keep no editable configuration: `create` and `remove` get the error above, `reload` and `status` work as usual.
 
-**The name `loader` taken.** A service name has one provider, so another row also providing a service named `loader` fails with the error for a name already provided: `service loader is already provided by …: row <row> cannot provide it too`. Rename that row's service.
+**The name `rutis/loader` taken.** A service name has one provider, so another row also providing a service named `rutis/loader` fails with the error for a name already provided: `service rutis/loader is already provided by …: row <row> cannot provide it too`. Rename that row's service.
 
 ## Plugins in one runtime share its process
 
@@ -1368,26 +1368,27 @@ When the caller abandons an async call (for example, on timeout), the call is ca
 - **Rust**: dropping the call's future cancels it.
 - How a dispatch of an event is cancelled: [events: lifecycle](#lifecycle).
 
-## Your own connection: `sessions.open`
+## Your own connection: `rutis/sessions.open`
 
-To let rutis use the plugins at the other end of a connection of your own (a relay, Bluetooth, another transport), write a connection plugin: take a connection that carries binary messages and hand it to the service `sessions`. The far end can be a language runtime, an app that installs its own plugins, or another rutis.
+To let rutis use the plugins at the other end of a connection of your own (a relay, Bluetooth, another transport), write a connection plugin: take a connection that carries binary messages and hand it to the service `rutis/sessions`. The far end can be a language runtime, an app that installs its own plugins, or another rutis.
 
 ```ts
 type Close = { kind: 'done' } | { kind: 'replaced' } | { kind: 'rejected'; reason: string }
 interface Far  { send(message: Uint8Array): void; close(why: Close): void }
 interface Near { receive(message: Uint8Array): Promise<void>; end(why: Close): void }
-sessions.open(far: Far): Near
+// the service rutis/sessions
+open(far: Far): Near
 ```
 
 ```ts
 export default definePlugin({
   name: 'relay',
-  inject: ['sessions'],
+  inject: ['rutis/sessions'],
   async apply(ctx, config: { url: string }) {
     const ws = new WebSocket(config.url)
     ws.binaryType = 'arraybuffer'
     await new Promise(ok => ws.addEventListener('open', ok, { once: true }))
-    const near = ctx.sessions.open({
+    const near = await ctx.use('rutis/sessions').open({
       send: m => ws.send(m),
       close: why => ws.close(why.kind === 'rejected' ? 4003 : why.kind === 'replaced' ? 4002 : 1000),
     })
@@ -1398,7 +1399,7 @@ export default definePlugin({
 })
 ```
 
-- Write `sessions` in `inject`; without it, `open` fails: `declare sessions in inject`.
+- Write `rutis/sessions` in `inject`; without it, `open` fails: `declare rutis/sessions in inject`. The name is under `rutis/`, as rutis's own events are, so that `sessions` stays free for the host's own services (up to 0.19.2 it was `sessions`).
 - The session hangs under the plugin that called `open`: when that plugin unloads, its sessions and the far end's plugins all unload.
 - `receive` completes once the message is in the session's receive queue; the queue holds 64 messages, and when it is full `receive` waits, which carries backpressure back to the connection.
 - The far end's plugins are named `<far id>:<plugin>` here; to have the far end run a plugin, write a row `<connection row>:<plugin>` in rutis.json (for example `relay:contacts`); while the far end is not there, that row waits.

@@ -236,7 +236,7 @@ pub async fn dev(args: &[String]) -> Result<Stopped, String> {
 
 /// The services and the rows providing them, as `Loader::status()` has
 /// them: `rutis-host dev: services: forecast (weather), llm (llm)`, by
-/// name; `host` for one the host provides (`loader`); `none` when no row
+/// name; `host` for one the host provides (`rutis/loader`); `none` when no row
 /// provides one, whatever the host does.
 fn services_line(loader: &rutis_loader::Loader) -> String {
     let status = loader.status();

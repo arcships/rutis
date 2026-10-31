@@ -243,11 +243,11 @@ bunx --bun rutis-host dev
 rutis-host dev: running greeter; changes reload it (Ctrl-C ends)
 greeter: starting
 translate: running
-rutis-host dev: services: greeter (greeter), loader (host), sessions (host), translate (translate)
+rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)
 greeter: running
 ```
 
-`greeter` 等 `translate` 就绪后才启动。`services` 那一行是现在的服务和提供它的行；`loader` 是宿主自己提供的。这一行在所有行都已运行、等待或失败后打印一次，之后服务变化时再打印，和各行状态行的先后不固定。
+`greeter` 等 `translate` 就绪后才启动。`services` 那一行是现在的服务和提供它的行；`rutis/loader` 是宿主自己提供的。这一行在所有行都已运行、等待或失败后打印一次，之后服务变化时再打印，和各行状态行的先后不固定。
 
 `dev` 运行时，另开一个终端，在项目目录里看现在有哪些服务、由哪一行提供，再调一次 `greeter.hello`：
 
@@ -258,8 +258,8 @@ rows:
   translate: running
 services:
   greeter: greeter
-  loader: host
-  sessions: host
+  rutis/loader: host
+  rutis/sessions: host
   translate: translate
 runtimes:
   bun: running (pid 66997)
@@ -277,7 +277,7 @@ $ bunx --bun rutis-host call greeter.count
 
 ```text
 greeter: reloaded (src/index.ts changed)
-rutis-host dev: services: greeter (greeter), loader (host), sessions (host), translate (translate)
+rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)
 ```
 
 ```console

@@ -251,7 +251,7 @@ Replace `rutis.dev.json` with two rows:
 - The row with the plugin's id (`greeter`) is this project's plugin itself; `config` is its configuration.
 - The other row is the fake `translate`; `name` says where that plugin is.
 
-<!-- example: typescript-en run until="rutis-host dev: services: greeter (greeter), loader (host), sessions (host), translate (translate)" -->
+<!-- example: typescript-en run until="rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)" -->
 ```bash
 npx rutis-host dev
 ```
@@ -260,11 +260,11 @@ npx rutis-host dev
 rutis-host dev: running greeter; changes reload it (Ctrl-C ends)
 greeter: starting
 translate: running
-rutis-host dev: services: greeter (greeter), loader (host), sessions (host), translate (translate)
+rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)
 greeter: running
 ```
 
-`greeter` runs once `translate` is available; the lines may come in another order. The `rutis-host dev: services:` line lists the services now and the row providing each (`loader` comes from the host); it is printed once every row is running, waiting or failed, and again whenever the services change, before or after the rows' state lines. While `dev` runs, in another terminal in the project directory, look at the state and call `greeter` once:
+`greeter` runs once `translate` is available; the lines may come in another order. The `rutis-host dev: services:` line lists the services now and the row providing each (`rutis/loader` comes from the host); it is printed once every row is running, waiting or failed, and again whenever the services change, before or after the rows' state lines. While `dev` runs, in another terminal in the project directory, look at the state and call `greeter` once:
 
 ```console
 $ npx rutis-host status
@@ -273,8 +273,8 @@ rows:
   translate: running
 services:
   greeter: greeter
-  loader: host
-  sessions: host
+  rutis/loader: host
+  rutis/sessions: host
   translate: translate
 runtimes:
   node: running (pid 63145)
@@ -292,7 +292,7 @@ Change the code: in `src/index.ts`, change `` `, ${name}!` `` to `` `, ${name}! 
 
 ```text
 greeter: reloaded (src/index.ts changed)
-rutis-host dev: services: greeter (greeter), loader (host), sessions (host), translate (translate)
+rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)
 ```
 
 Call it again: it returns `"Bonjour, Ada! Welcome."`. Only the row whose files changed reloads; a change to `rutis.dev.json` also takes effect while it runs. Ctrl-C ends `dev`. All of `dev`'s rules are in [rutis-host: developing a plugin with `dev`](rutis-host.en.md#developing-a-plugin-with-dev).

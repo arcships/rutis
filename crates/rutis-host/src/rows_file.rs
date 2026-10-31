@@ -1,5 +1,5 @@
 //! `run`'s `rutis.json` as the loader's editable layer: rows plugins add
-//! or remove through the service `loader` are written back into its
+//! or remove through the service `rutis/loader` are written back into its
 //! `rows`, its other fields and the order of its keys as they were
 //! (`docs/design-host-writes-plugins-2026-10-27.md` §五).
 

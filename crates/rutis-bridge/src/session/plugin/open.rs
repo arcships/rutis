@@ -1,4 +1,4 @@
-//! `sessions.open(far)`: a session for a connection plugin of any language
+//! `rutis/sessions.open(far)`: a session for a connection plugin of any language
 //! (`docs/design-remote-session-2026-10-28.md` §5.2). The caller hands its
 //! end as `far = { send(bytes), close({ kind, reason? }) }` and gets
 //! `near = { receive(bytes), end({ kind, reason? }) }`; the session is
@@ -29,7 +29,11 @@ use crate::session::{caller_row, code, host_key, Error, HostDispatch};
 
 use super::{Session, NAME};
 
-/// The root plugin serving `sessions` ([`Session::service`]).
+/// The name of the service: under `rutis/`, as rutis's own events are, so
+/// that `sessions` stays the host's (#986).
+const SERVICE: &str = "rutis/sessions";
+
+/// The root plugin serving `rutis/sessions` ([`Session::service`]).
 pub(super) struct Sessions;
 
 impl DynPlugin for Sessions {
@@ -44,7 +48,7 @@ impl DynPlugin for Sessions {
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, RutisError>> {
         Box::pin(async move {
             ctx.provide_at(
-                host_key("sessions"),
+                host_key(SERVICE),
                 Arc::new(Service {
                     tokio: tokio::runtime::Handle::current(),
                 }),
@@ -54,7 +58,7 @@ impl DynPlugin for Sessions {
     }
 }
 
-/// The service `sessions`.
+/// The service `rutis/sessions`.
 pub(super) struct Service {
     tokio: tokio::runtime::Handle,
 }
@@ -63,7 +67,7 @@ impl HostDispatch for Service {
     fn invoke(&self, method: &str, args: Value) -> Reply {
         match method {
             "open" => self.open(args),
-            _ => Err(Error::no_method("sessions", method, vec!["open"])),
+            _ => Err(Error::no_method(SERVICE, method, vec!["open"])),
         }
     }
 
@@ -94,8 +98,8 @@ impl Service {
         let caller = caller_row().ok_or_else(|| {
             Error::binding(
                 code::NOT_DECLARED,
-                "declare sessions in inject".into(),
-                Some(json!({ "service": "sessions" })),
+                format!("declare {SERVICE} in inject"),
+                Some(json!({ "service": SERVICE })),
             )
         })?;
         // A record of functions (Python), or an object whose methods they
@@ -106,7 +110,7 @@ impl Service {
                 close: function(&mut fields, "close", "far")?,
             },
             Some(Value::Reference(object)) if object.is_object() => Far::Object(object),
-            _ => return Err(bad("sessions.open needs far = { send, close }".into())),
+            _ => return Err(bad("rutis/sessions.open needs far = { send, close }".into())),
         };
         let (channel, near) = far_channel(far, self.tokio.clone());
         caller.ctx().plugin(Session::new(channel));
@@ -436,13 +440,13 @@ mod tests {
         root
     }
 
-    /// A connection plugin of another language: `sessions.open` with its
+    /// A connection plugin of another language: `rutis/sessions.open` with its
     /// `send` and `close`, its messages fed to `near.receive`. The session
     /// is mounted below it, and its end calls `close` with `done`.
     #[tokio::test(flavor = "multi_thread")]
     async fn sessions_open_runs_a_session_on_the_callers_functions() {
         let (relay, office) = (kernel("relay"), kernel("office"));
-        within("sessions", async {
+        within("rutis/sessions", async {
             (&relay.plugin(super::super::Session::service()))
                 .await
                 .unwrap()
@@ -487,11 +491,11 @@ mod tests {
             ]))
         };
         let args = Value::List(vec![far]);
-        let service = relay.get_at(&host_key("sessions")).unwrap();
+        let service = relay.get_at(&host_key(SERVICE)).unwrap();
 
         let refused = service.invoke("open", args.clone()).err().unwrap();
         assert_eq!(refused.code(), Some(code::NOT_DECLARED));
-        assert_eq!(refused.to_string(), "declare sessions in inject");
+        assert_eq!(refused.to_string(), "declare rutis/sessions in inject");
 
         let (row, row_ctx) = plugin(&relay, "connection", false);
         let caller = CallerRow::new("connection", "connection", row_ctx);
@@ -541,5 +545,31 @@ mod tests {
             closed.lock().unwrap().clone().unwrap(),
             json!([{ "kind": "done" }])
         );
+    }
+
+    /// The service is `rutis/sessions`, so a host that mounts it can still
+    /// provide a service of its own named `sessions` (#986).
+    /// guarantee: bridge/session-service
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sessions_is_left_to_the_host() {
+        let root = kernel("host");
+        within("rutis/sessions", async {
+            (&root.plugin(super::super::Session::service()))
+                .await
+                .unwrap()
+        })
+        .await;
+        root.provide_at(
+            host_key("sessions"),
+            Arc::new(Clock) as Arc<dyn HostDispatch>,
+        )
+        .unwrap();
+        assert!(root.get_at(&host_key(SERVICE)).is_some());
+        let now: String = within("the host's sessions", async {
+            call_service(&root, "sessions", "get", ()).await
+        })
+        .await
+        .unwrap();
+        assert_eq!(now, "noon");
     }
 }

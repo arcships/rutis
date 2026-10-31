@@ -1,4 +1,4 @@
-//! The service `loader` (#185): plugins of Node, Python and Go add rows,
+//! The service `rutis/loader` (#185): plugins of Node, Python and Go add rows,
 //! reload their code, read the state and remove them by name, and every
 //! failure throws the text rutis prints for people, with the row in
 //! `data`: each line of §7 of the design, word for word.
@@ -29,7 +29,7 @@ const PY_MAKER: &str = r#"
 import asyncio
 import pathlib
 
-inject = ["loader", "probe"]
+inject = ["rutis/loader", "probe"]
 HERE = pathlib.Path(__file__).parent
 
 V1 = 'inject = ["probe"]\n\n\ndef apply(ctx, config):\n    ctx.use("probe").record("weather v1")\n'
@@ -87,7 +87,7 @@ async def script(loader, probe):
 
 
 def apply(ctx, config):
-    tasks.append(asyncio.get_running_loop().create_task(script(ctx.use("loader"), ctx.use("probe"))))
+    tasks.append(asyncio.get_running_loop().create_task(script(ctx.use("rutis/loader"), ctx.use("probe"))))
 "#;
 
 /// The same scenario in Node.
@@ -104,10 +104,10 @@ const STRICT = 'from rutis import define_plugin\n\n\ndef apply(ctx, config):\n  
   'plugin = define_plugin(apply, config={"type": "object", "properties": {"units": {"enum": ["metric", "imperial"]}}})\n'
 
 export default definePlugin({
-  inject: ['loader', 'probe'],
+  inject: ['rutis/loader', 'probe'],
   config: { type: 'object', properties: { dir: { type: 'string' } } },
   apply(ctx, config) {
-    const loader = ctx.use('loader')
+    const loader = ctx.use('rutis/loader')
     const probe = ctx.use('probe')
     const write = (name, text) => writeFileSync(join(config.dir, name), text)
     const row = (name) => ({ id: name, name: `py:${name}` })
@@ -155,7 +155,7 @@ export default definePlugin({
 const PY_EDITS: &str = r#"
 import asyncio
 
-inject = ["loader", "probe"]
+inject = ["rutis/loader", "probe"]
 tasks = []
 
 
@@ -172,7 +172,7 @@ async def script(loader, probe):
 
 
 def apply(ctx, config):
-    tasks.append(asyncio.get_running_loop().create_task(script(ctx.use("loader"), ctx.use("probe"))))
+    tasks.append(asyncio.get_running_loop().create_task(script(ctx.use("rutis/loader"), ctx.use("probe"))))
 "#;
 
 const PY_TINY: &str = "def apply(ctx, config):\n    pass\n";
@@ -372,7 +372,7 @@ async fn run_scenario(name: &str, config: Value) {
     fixture.root.shutdown().await.unwrap();
 }
 
-/// A Python plugin manages rows through `loader`, every line of §7 word
+/// A Python plugin manages rows through `rutis/loader`, every line of §7 word
 /// for word.
 /// guarantee: loader/service
 #[tokio::test(flavor = "multi_thread")]

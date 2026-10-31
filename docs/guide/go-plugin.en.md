@@ -356,10 +356,10 @@ greeter: built in 0.3s
 rutis-host dev: running greeter; changes reload it (Ctrl-C ends)
 ```
 
-`dev` builds `cmd/greeter` and runs it as the runtime `go-greeter`: a binary is one runtime process in the host, and the Python fake is in another runtime, `py`. Then each row prints `greeter: running`, `translate: running` as it comes up (in either order); `rutis-host dev: services:` gives the services there are now and the row providing each (`loader` and `sessions` are the host's own services, written `host`: a plugin adds and removes rows while the host runs with `loader`, and hands the host a connection it made with `sessions`; this plugin does not need them, see [rutis-host: Managing plugins with loader](rutis-host.en.md#managing-plugins-with-loader)); it is printed once every row is running, waiting or failed, and again whenever the services change, before or after the rows' state lines:
+`dev` builds `cmd/greeter` and runs it as the runtime `go-greeter`: a binary is one runtime process in the host, and the Python fake is in another runtime, `py`. Then each row prints `greeter: running`, `translate: running` as it comes up (in either order); `rutis-host dev: services:` gives the services there are now and the row providing each (`rutis/loader` and `rutis/sessions` are the host's own services, written `host`: a plugin adds and removes rows while the host runs with `rutis/loader`, and hands the host a connection it made with `rutis/sessions`; this plugin does not need them, see [rutis-host: Managing plugins with rutis/loader](rutis-host.en.md#managing-plugins-with-rutisloader)); it is printed once every row is running, waiting or failed, and again whenever the services change, before or after the rows' state lines:
 
 ```text
-rutis-host dev: services: greeter (greeter), loader (host), sessions (host), translate (translate)
+rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)
 ```
 
 In another terminal, in the project directory, see the host's state:
@@ -371,8 +371,8 @@ rows:
   translate: running
 services:
   greeter: greeter
-  loader: host
-  sessions: host
+  rutis/loader: host
+  rutis/sessions: host
   translate: translate
 runtimes:
   go-greeter: running (pid 63269)
@@ -396,8 +396,8 @@ Change the code: in `plugin.go`, change `"!"` to `"!!"` and save. `dev` rebuilds
 greeter: building
 greeter: built in 0.3s
 go-greeter: rebuilt and restarted
-rutis-host dev: services: loader (host), sessions (host), translate (translate)
-rutis-host dev: services: greeter (greeter), loader (host), sessions (host), translate (translate)
+rutis-host dev: services: rutis/loader (host), rutis/sessions (host), translate (translate)
+rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)
 ```
 
 (While it restarts, `greeter` is missing from the services.)
@@ -473,7 +473,7 @@ Besides the lines above, it prints that the row `fakes` connected:
 fakes: running
 fakes: connected
 translate: running
-rutis-host dev: services: greeter (greeter), loader (host), sessions (host), translate (translate)
+rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)
 ```
 
 - The row `fakes` connects to the fake's binary; `fakes:fake-translate` has it run the plugin `fake-translate`, and that row provides `translate`.

@@ -239,7 +239,7 @@ uv run rutis-host dev
 rutis-host dev: running greeter; changes reload it (Ctrl-C ends)
 greeter: starting
 translate: running
-rutis-host dev: services: greeter (greeter), loader (host), sessions (host), translate (translate)
+rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)
 greeter: running
 ```
 
@@ -254,8 +254,8 @@ rows:
   translate: running
 services:
   greeter: greeter
-  loader: host
-  sessions: host
+  rutis/loader: host
+  rutis/sessions: host
   translate: translate
 runtimes:
   py: running (pid 55011)
@@ -273,7 +273,7 @@ A change to the code reloads it: change the `!` that `hello` returns to `!!` and
 
 ```text
 greeter: reloaded (src/greeter/__init__.py changed)
-rutis-host dev: services: greeter (greeter), loader (host), sessions (host), translate (translate)
+rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)
 ```
 
 `call greeter.hello '"Ada"'` now gives `"Bonjour, Ada!!"`. Only the row whose file changed reloads; a change to `rutis.dev.json` takes effect while it runs too. When another module of the plugin's package changes (`src/greeter/helpers.py`, with `from .helpers import …` in `__init__.py`), the package is imported again with it, and `dev` prints `greeter: reloaded (src/greeter/helpers.py changed)`; modules outside the plugin's package (another top-level module, a package installed in the environment) are not imported again: after changing one, restart `dev`. So keep helper code in the plugin's package. See [Developing a plugin with `dev`](rutis-host.en.md#developing-a-plugin-with-dev).

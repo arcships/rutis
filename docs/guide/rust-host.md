@@ -665,7 +665,7 @@ loop {
 
 - 要让对面运行一个插件，在 rutis-loader 的配置里写行 `<连接行>:<插件>`，对面不在时这一行等待；Rust 里也可以用 `Session::handshake(&ctx, channel).await?` 拿到 `Greeted`，`greeted.handle().run(插件, 配置)`，再 `ctx.plugin(greeted)` 装上。
 - 本端 id 没有提供时，会话失败：`the host provides no id for its sessions`。rutis-host 已经提供（rutis.json 的 `id`，默认 `main`）。
-- 别的语言的插件经服务 `sessions` 的 `open` 交出连接，见 [插件 API：自建连接](plugin-api.md#自建连接sessionsopen)。
+- 别的语言的插件经服务 `rutis/sessions` 的 `open` 交出连接，见 [插件 API：自建连接](plugin-api.md#自建连接rutissessionsopen)。
 
 用 rutis-loader 时，`<连接行>:<插件>` 的行由 `rutis_loader::runtime::SessionResolver` 解析：`SessionResolver::new(&catalog)` 放在解析链最后（`Chain::with_shared`），挂上加载器之前 `attach(&loader)`。加载器把自己能解析的插件提供给会话（`rutis_loader::runtime::LoaderCatalog`），所以对面的 rutis 可以让这里运行它们：只连可信的节点。rutis-host 的 `rutis-host/dial`、`rutis-host/listen` 行就是这样的连接插件。概念与安全见 [连接节点](nodes.md)。
 

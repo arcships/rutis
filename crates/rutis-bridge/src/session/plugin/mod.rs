@@ -40,7 +40,7 @@ use crate::session::rpc::Connection;
 use crate::session::Error;
 
 /// The plugin name of every session, and of the root plugin that serves
-/// `sessions`.
+/// `rutis/sessions`.
 const NAME: &str = "rutis-bridge/session";
 
 /// How long a far end may take to greet.
@@ -80,11 +80,11 @@ impl Session {
         }
     }
 
-    /// The root plugin serving the service `sessions` to plugins of every
-    /// language: `sessions.open(far)` mounts a session below the calling
+    /// The root plugin serving the service `rutis/sessions` to plugins of
+    /// every language: `open(far)` mounts a session below the calling
     /// row, on a channel made of `far = { send, close }` and the returned
     /// `near = { receive, end }` (`docs/design-remote-session-2026-10-28.md`
-    /// §5.2). The caller declares `sessions` in its `inject`. The host
+    /// §5.2). The caller declares `rutis/sessions` in its `inject`. The host
     /// mounts it once, on its root.
     pub fn service() -> impl DynPlugin {
         open::Sessions

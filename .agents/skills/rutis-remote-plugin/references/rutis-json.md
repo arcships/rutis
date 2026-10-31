@@ -183,7 +183,7 @@ Language runtimes on other machines and apps on devices connecting in are writte
 - The two plugins take no other config fields: `check` reports a misspelled field by the schema.
 - How the connections change: [What `run` prints](https://github.com/arcships/rutis/blob/main/docs/guide/rutis-host.en.md#what-run-prints); their state now: `connections` in [Seeing the current state](https://github.com/arcships/rutis/blob/main/docs/guide/rutis-host.en.md#seeing-the-current-state); the far end's runtime commands: [Connect nodes](https://github.com/arcships/rutis/blob/main/docs/guide/nodes.en.md#a-language-runtime-on-another-machine).
 - 0.18's `runtimes.remote` is removed in 0.19: written, it is an unknown field; how to change it: [Migrating to 0.19](https://github.com/arcships/rutis/blob/main/docs/migration-0.19.en.md).
-- A connection of your own (another transport, your own authentication): hand over a Channel: write a connection plugin that calls `Session::new(channel)`; other languages use the service `sessions`' `open`. See [Embed in a Rust application](https://github.com/arcships/rutis/blob/main/docs/guide/rust-host.en.md) and the [plugin API](https://github.com/arcships/rutis/blob/main/docs/guide/plugin-api.en.md).
+- A connection of your own (another transport, your own authentication): hand over a Channel: write a connection plugin that calls `Session::new(channel)`; other languages use the service `rutis/sessions`' `open`. See [Embed in a Rust application](https://github.com/arcships/rutis/blob/main/docs/guide/rust-host.en.md) and the [plugin API](https://github.com/arcships/rutis/blob/main/docs/guide/plugin-api.en.md).
 
 ## Credentials
 

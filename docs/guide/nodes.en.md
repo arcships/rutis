@@ -168,7 +168,7 @@ A Cordis application joins rutis by running its plugins in the Node runtime (`<p
 
 ## Your own connection
 
-Write your own way of connecting (a relay, Bluetooth, another transport) as a connection plugin: take a connection that carries binary messages and hand it over as a session. In Rust, hand over a `Channel`: `ctx.plugin(rutis_bridge::Session::new(channel))` (see [Rust host: nodes](rust-host.en.md#nodes)); in other languages, call `open` of the service `sessions` (see [Plugin API: your own connection](plugin-api.en.md#your-own-connection-sessionsopen)). The far end's plugins are named `<far id>:<plugin>` here; to have the far end run a plugin, write a row `<connection row>:<plugin>`.
+Write your own way of connecting (a relay, Bluetooth, another transport) as a connection plugin: take a connection that carries binary messages and hand it over as a session. In Rust, hand over a `Channel`: `ctx.plugin(rutis_bridge::Session::new(channel))` (see [Rust host: nodes](rust-host.en.md#nodes)); in other languages, call `open` of the service `rutis/sessions` (see [Plugin API: your own connection](plugin-api.en.md#your-own-connection-rutissessionsopen)). The far end's plugins are named `<far id>:<plugin>` here; to have the far end run a plugin, write a row `<connection row>:<plugin>`.
 
 ## Security
 

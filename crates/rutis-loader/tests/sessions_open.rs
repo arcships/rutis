@@ -1,8 +1,9 @@
 //! A connection plugin of another language (`docs/design-remote-session-2026-10-28.md`
 //! §5.2): a Node row and a Python row `relay` open a session with
-//! `sessions.open({ send, close })` over the Rust service `wire`, one end
+//! `rutis/sessions.open({ send, close })` over the Rust service `wire`, one end
 //! of a memory channel whose other end is a session in the kernel
 //! `office`; the row `relay:contacts` then runs `contacts` there.
+//! guarantee: bridge/session-service
 #![cfg(feature = "runtimes")]
 
 mod common;
@@ -160,9 +161,9 @@ impl HostDispatch for Wire {
 const JS_RELAY: &str = r#"
 import { definePlugin } from 'PLUGIN'
 export default definePlugin({
-  inject: ['sessions', 'wire'],
+  inject: ['rutis/sessions', 'wire'],
   async apply(ctx) {
-    const sessions = ctx.use('sessions'), wire = ctx.use('wire')
+    const sessions = ctx.use('rutis/sessions'), wire = ctx.use('wire')
     const near = await sessions.open({
       send: m => wire.send(m),
       close: () => {},
@@ -175,7 +176,7 @@ export default definePlugin({
 const PY_RELAY: &str = r#"
 import inspect
 
-inject = ["sessions", "wire"]
+inject = ["rutis/sessions", "wire"]
 
 
 async def settled(value):
@@ -185,7 +186,7 @@ async def settled(value):
 
 
 async def apply(ctx, config):
-    sessions = ctx.use("sessions")
+    sessions = ctx.use("rutis/sessions")
     wire = ctx.use("wire")
 
     async def send(message):
@@ -202,7 +203,7 @@ async def apply(ctx, config):
     await settled(wire.subscribe(receive))
 "#;
 
-/// rutis `main` with `sessions`, `wire` and the rows `relay` (named
+/// rutis `main` with `rutis/sessions`, `wire` and the rows `relay` (named
 /// `relay`) and `relay:contacts`, `relay` on the local runtime `runtime`:
 /// one session resolver for the runtime's rows and the connection's
 /// (with `npm`, the Node names on the runtime too).
@@ -246,7 +247,7 @@ async fn main(
 
 fn catalog() -> ServiceCatalog {
     let mut catalog = ServiceCatalog::new();
-    for name in ["sessions", "wire"] {
+    for name in ["rutis/sessions", "wire"] {
         catalog.register_shared(name);
     }
     catalog

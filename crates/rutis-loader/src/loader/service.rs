@@ -1,4 +1,4 @@
-//! The loader as the service `loader`, for plugins of every language: add
+//! The loader as the service `rutis/loader`, for plugins of every language: add
 //! a row, reload its code, remove it, read the state (the design "The host
 //! writes its own plugins", #185). The same name and shapes as Cordis's
 //! `ctx.loader`; Rust plugins keep using [`Loader`] itself.
@@ -11,7 +11,7 @@ use super::{EntryStatus, Loader, NewEntry};
 use crate::error::Failure;
 use crate::LoaderError;
 
-/// What `LoaderPlugin` provides by name as `loader`.
+/// What `LoaderPlugin` provides by name as `rutis/loader`.
 pub(crate) struct LoaderService(pub(crate) Loader);
 
 /// A row for `create`, written as a row of `rutis.json` is.
@@ -30,7 +30,7 @@ pub struct RowOptions {
     pub inject: Vec<String>,
 }
 
-/// What a `loader` method throws: its message is what rutis prints for
+/// What a `rutis/loader` method throws: its message is what rutis prints for
 /// people (which row, why, where); `row` is the row it is about.
 #[derive(Debug, serde::Serialize)]
 pub struct Error {
@@ -56,7 +56,7 @@ impl Error {
     }
 }
 
-#[rutis::service(name = "loader")]
+#[rutis::service(name = "rutis/loader")]
 impl LoaderService {
     /// Add a row and start it; its id, generated (8 hex digits) when
     /// `options` has none. All or nothing: a row that cannot start is not

@@ -238,13 +238,13 @@ The 0.18 way (one `py:coach` in an `instanced` group, one per device) is not sup
   })
   ```
 
-  The plugin `coach` on the host listens to the framework event `rutis/service` (its argument `{ name, scope, available, row }`, see [the plugin API: framework events](plugin-api.en.md#framework-events-rutis)): when a `health-<device>` appears (`available: true`), it adds a row `coach-<device>` for that device through the service `loader`, running `py:coach-one`, a plugin minding one device; when it is withdrawn (`available: false`), it removes the row. The `loader` methods are called in the event handler, not in `apply` (called in a row's own `apply`, they wait for that `apply` to finish, and hang):
+  The plugin `coach` on the host listens to the framework event `rutis/service` (its argument `{ name, scope, available, row }`, see [the plugin API: framework events](plugin-api.en.md#framework-events-rutis)): when a `health-<device>` appears (`available: true`), it adds a row `coach-<device>` for that device through the service `rutis/loader`, running `py:coach-one`, a plugin minding one device; when it is withdrawn (`available: false`), it removes the row. The `rutis/loader` methods are called in the event handler, not in `apply` (called in a row's own `apply`, they wait for that `apply` to finish, and hang):
 
   ```python
   from rutis import define_plugin
 
   def apply(ctx, config):
-      loader = ctx.use("loader")
+      loader = ctx.use("rutis/loader")
 
       async def seen(event):
           name = event["name"]
@@ -259,7 +259,7 @@ The 0.18 way (one `py:coach` in an `instanced` group, one per device) is not sup
 
       ctx.on("rutis/service", seen)
 
-  coach = define_plugin(apply, inject=["loader"])
+  coach = define_plugin(apply, inject=["rutis/loader"])
   ```
 
   `py:coach-one` gets its device's service with `ctx.use(f"health-{config['device']}")`. The two devices' service names differ, so neither is refused; each device has a row `coach-<device>`, seen in `rutis-host status`.

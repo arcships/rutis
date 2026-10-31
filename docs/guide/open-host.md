@@ -300,7 +300,7 @@ rows:
   shout: running
 services:
   commands: host
-  loader: host
+  rutis/loader: host
   notes: host
 runtimes:
   node: running (pid 57684)
@@ -601,7 +601,7 @@ handle.remove("today").await?;                         // 卸载并删掉
 
 ### 插件管理插件
 
-用 `LoaderPlugin` 的宿主还按名字提供服务 `loader`，与 Cordis 的 `ctx.loader` 同名同形：`create(row)`、`reload(id)`、`remove(id)`、`status()`。插件 `inject: ['loader']` 就能用，比如一个列出插件的命令：
+用 `LoaderPlugin` 的宿主还按名字提供服务 `rutis/loader`，与 Cordis 的 `ctx.loader` 同形：`create(row)`、`reload(id)`、`remove(id)`、`status()`。插件 `inject: ['rutis/loader']` 就能用，比如一个列出插件的命令：
 
 <!-- example: jot file=jot/commands/plugins.ts -->
 ```ts
@@ -616,9 +616,9 @@ interface Commands {
 }
 
 export default definePlugin({
-  inject: ['loader', 'commands'],
+  inject: ['rutis/loader', 'commands'],
   async apply(ctx) {
-    const loader = ctx.use<Loader>('loader')
+    const loader = ctx.use<Loader>('rutis/loader')
     await ctx.use<Commands>('commands').register('plugins', async () => {
       const { rows } = await loader.status()   // 在命令里调用，不在 apply 里
       return rows.map(row => `${row.id}: ${row.state}`).join('\n')
@@ -638,10 +638,10 @@ plugins: running
 shout: running
 ```
 
-- `loader` 的方法在 `apply` 返回之后调用（服务方法、事件里）：在一行自己的 `apply` 里调用会等到这个 `apply` 结束，所以会卡住。
+- `rutis/loader` 的方法在 `apply` 返回之后调用（服务方法、事件里）：在一行自己的 `apply` 里调用会等到这个 `apply` 结束，所以会卡住。
 - `create` 与 `remove` 改的是可编辑层，和上面的 Rust 方法一样；没有可编辑层时失败。
 - 任何插件都能 `inject` 它，rutis 不加权限：不想让某个插件管理插件，就不装那个插件。
-- 各方法的参数、返回值与出错文字见 [插件 API：用 `loader` 管理插件](plugin-api.md#用-loader-管理插件)。
+- 各方法的参数、返回值与出错文字见 [插件 API：用 `rutis/loader` 管理插件](plugin-api.md#用-rutisloader-管理插件)。
 
 ## 5. 服务好插件作者
 
@@ -865,7 +865,7 @@ for call in &status.calls {
 # }
 ```
 
-每一行的状态是 `row.state`（`EntryStatus`），它没有 `Display`。要 `rutis-host status` 里的那个词（`waiting`、`starting`、`running`、`failed`、`stopped`、`disabled`），把快照转成 JSON：每一行的 `state` 就是它，与服务 `loader` 的 `status()` 给插件的相同：
+每一行的状态是 `row.state`（`EntryStatus`），它没有 `Display`。要 `rutis-host status` 里的那个词（`waiting`、`starting`、`running`、`failed`、`stopped`、`disabled`），把快照转成 JSON：每一行的 `state` 就是它，与服务 `rutis/loader` 的 `status()` 给插件的相同：
 
 ```rust,no_run
 # fn demo(handle: rutis_loader::Loader) -> Result<(), serde_json::Error> {

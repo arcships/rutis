@@ -8,7 +8,7 @@
 - **远程配置的写法**：`runtimes.remote`、`rutis-bridge/peer` 行与 `peer:` 行删除，改为连接行 `rutis-host/dial`、`rutis-host/listen`（[远程运行时与设备](#远程运行时与设备695696698)）；宿主一侧的 token 按连接行的 id 取（[宿主一侧的 token](#宿主一侧的-token695)）。
 - **节点**：节点行去掉 `host: true`、`export`、`import`，给出 token 就允许对方在本节点运行插件；Cordis 应用作为节点（`@arcships/rutis-runtime/bridge`）删除（[节点](#节点)）。
 - **SDK 根上的旧名直接删**：移到 advanced 的名字在旧位置找不到（[SDK 的默认入口](#sdk-的默认入口692)）。
-- **服务名 `loader` 被占**：自己提供 `loader` 的行失败（[服务名 `loader`](#服务名-loader185)）。
+- **服务名 `rutis/loader` 被占**（0.19.0–0.19.2 是 `loader`）：自己提供 `rutis/loader` 的行失败（[服务名 `rutis/loader`](#服务名-rutisloader185)）。
 - **运行时的行与 `isolate`**：隔离里只看得到隔离里的提供者，与 Rust 行一致（[运行时的行与 `isolate`](#运行时的行与-isolate896)）。
 - **各语言的测试工具改走 `rutis-host test`**：插件跑在真实的宿主上，`scope` 等选项删除（[TypeScript 与 Bun](#typescript-与-bun-插件)、[Python](#python)、[Go](#go-插件)、[Swift](#swift)、[Kotlin](#kotlin)）。
 - **Python 最低 3.12**（[Python](#python)）。
@@ -16,6 +16,7 @@
 - **Kotlin SDK 不发布到 Maven**：从源码引用（[Kotlin](#kotlin)）。
 - **Rust 接口删除与改名**：连接与会话部分（[Rust 嵌入](#rust-嵌入)）、平台清理（[平台清理](#平台清理694)），运行时 `emit` 的过滤器失败改报 `FilterFailed`（[错误类型](#错误类型879)）。
 - **工具**：`rutis-dev` 删除，`rutis-migrate` 不再发布，`rutis-host go add` 删除（[工具](#工具)）。
+- **0.19.3：rutis 自己的服务改名**：`loader` 改为 `rutis/loader`，`sessions` 改为 `rutis/sessions`，这两个名字留给宿主（[0.19.3：rutis 自己的服务改名](#0193rutis-自己的服务改名986)）。
 
 其余是新增的功能，不改已有的写法。
 
@@ -139,7 +140,7 @@ office (rutis-bridge/peer): no plugin named "rutis-bridge/peer"
 
 - 应用自己装它带的插件，配置写进 `RutisApp(configs: …)`（不写时用插件 Schema 的默认值），连上后报出它们提供的服务，宿主注册为 `<应用的 id>:<插件>`。rutis 一侧 `instanced` 分组里的 `<运行时>:<插件>` 行删掉，只留一行 `rutis-host/listen`（应用拨出）或 `rutis-host/dial`（应用监听）。
 - 应用里的插件装不上（配置不合 Schema、`apply` 失败、服务名在 rutis 上已有）时，0.19 只在设备的日志里写出，宿主上不打印。
-- 宿主上"每台设备一份"的行（`instanced` 分组里的 `py:coach`）不再支持。改法：把它放到设备上（应用里的一个插件）；或者设备上的插件以 `health-<设备>` 为名提供服务，宿主上的一个插件监听 `rutis/service` 事件，在 `health-<设备>` `available: true` 时调用服务 `loader`：`loader.create({id: "coach-<设备>", name: "py:coach-one", config: {device}, inject: ["health-<设备>"]})`，`available: false` 时 `loader.remove("coach-<设备>")`；在事件处理里调用，不在 `apply` 里。完整例子见 [Swift 应用](guide/swift-app.md#每台设备各算一份)、[Kotlin 应用](guide/kotlin-app.md)。
+- 宿主上"每台设备一份"的行（`instanced` 分组里的 `py:coach`）不再支持。改法：把它放到设备上（应用里的一个插件）；或者设备上的插件以 `health-<设备>` 为名提供服务，宿主上的一个插件监听 `rutis/service` 事件，在 `health-<设备>` `available: true` 时调用服务 `rutis/loader`：`loader.create({id: "coach-<设备>", name: "py:coach-one", config: {device}, inject: ["health-<设备>"]})`，`available: false` 时 `loader.remove("coach-<设备>")`；在事件处理里调用，不在 `apply` 里。完整例子见 [Swift 应用](guide/swift-app.md#每台设备各算一份)、[Kotlin 应用](guide/kotlin-app.md)。
 
 ### Rust 嵌入
 
@@ -177,11 +178,11 @@ office (rutis-bridge/peer): no plugin named "rutis-bridge/peer"
   | `Installed { described: Described { schema, version, integrity }, factory }`；`StaticCatalog::with(名, described, factory)` | `Installed { schema, version, factory }`；`StaticCatalog::with(名, Installed::new(factory))` |
   | rutis-loader 的 feature `peer` 与 `rutis_loader::peer`（`PeerResolver`、`PeerRows`、`PeerRowsPlugin`、`register_peer_node`、`node_schema`、`LoaderCatalog`） | 删；`<连接行>:<插件>` 的行由 `runtime::SessionResolver` 解析，`LoaderCatalog` 在 `rutis_loader::runtime` |
   | `rutis_host::host::Embedding` 的 `identity` | 删 |
-  | 自建连接实现 `Transport` | 交出一条 `Channel`：`ctx.plugin(Session::new(channel))`，或先 `Session::handshake(&ctx, channel).await` 再 `ctx.plugin(greeted)`；其他语言用服务 `sessions` 的 `open` |
+  | 自建连接实现 `Transport` | 交出一条 `Channel`：`ctx.plugin(Session::new(channel))`，或先 `Session::handshake(&ctx, channel).await` 再 `ctx.plugin(greeted)`；其他语言用服务 `rutis/sessions` 的 `open` |
 
 - 自己挂 `Session` 的 Rust 嵌入要在根 ctx 提供本端在握手里报的 id：`root.provide(rutis_bridge::LocalId(id))`；没有时会话失败：`the host provides no id for its sessions`。rutis-host 已经提供（rutis.json 的 `id`，默认 `main`）。
 
-- 自建连接：交出一条 `Channel`：写一个连接插件，调 `Session::new(channel)`；其他语言用 `sessions.open`。
+- 自建连接：交出一条 `Channel`：写一个连接插件，调 `Session::new(channel)`；其他语言用服务 `rutis/sessions` 的 `open`。
 
 ## 一起升级（#695）
 
@@ -272,9 +273,9 @@ Kotlin 另有两点：
 
 入口移动不影响：每种语言根上的 `definePlugin` / `define_plugin` / `Define` / `Rutis.define`，`ctx` 上的所有方法，测试工具，Rust。Swift 宏与 Kotlin KSP 生成的代码随 SDK 一起更新，不用改。插件 API 版本不变，用旧 SDK 构建的插件在 0.19 的运行时上照常运行。
 
-## 服务名 `loader`（#185）
+## 服务名 `rutis/loader`（#185）
 
-用 `LoaderPlugin` 的宿主（包括 rutis-host）现在提供一个名叫 `loader` 的服务（[用 `loader` 管理插件](guide/plugin-api.md#用-loader-管理插件)）；自己也提供名叫 `loader` 的服务的行，现在以已有的同名错误（`service loader is already provided by …: row <行> cannot provide it too`）失败，给它的服务改名。
+用 `LoaderPlugin` 的宿主（包括 rutis-host）现在提供一个名叫 `rutis/loader` 的服务（0.19.0–0.19.2 叫 `loader`，见 [0.19.3：rutis 自己的服务改名](#0193rutis-自己的服务改名986)；[用 `rutis/loader` 管理插件](guide/plugin-api.md#用-rutisloader-管理插件)）；自己也提供名叫 `rutis/loader` 的服务的行，以已有的同名错误（`service rutis/loader is already provided by …: row <行> cannot provide it too`）失败，给它的服务改名。
 
 ## 运行时的行与 `isolate`（#896）
 
@@ -396,3 +397,50 @@ Kotlin 另有两点：
 - 设备上的测试不再用 `RutisTest`：用 `RutisApp` 装自己的插件，拨到开发机上的 rutis。
 - 事件一律经宿主分发：Android 主线程上的同步 `bail` 总是被拒绝（以前本进程里有监听器时可以）。
 - 配置的校验与补默认值只在 rutis 里做，SDK 只解码。应用用 `RutisApp` 自己装的插件不经 rutis 校验：没给的键用构造参数的默认值，缺必填或类型不对时以点名键的 `config: …` 装载失败（`config: city is required`）。
+
+## 0.19.3：rutis 自己的服务改名（#986）
+
+rutis 自己提供的两个服务改了名，放到 `rutis/` 下，与 rutis 自己的事件（`rutis/row`、`rutis/service`）一样：
+
+- `loader`（经它加、删、重新加载行，见 [用 `rutis/loader` 管理插件](guide/plugin-api.md#用-rutisloader-管理插件)）改为 `rutis/loader`；
+- `sessions`（经它把自建的连接交给宿主，见 [自建连接](guide/plugin-api.md#自建连接rutissessionsopen)）改为 `rutis/sessions`。
+
+`loader`、`sessions` 是宿主常给自己服务起的名字（比如 Agent 的会话），现在留给宿主：宿主的行可以提供它们，测试也可以给插件假的 `loader`、`sessions`。旧名不保留，也不提示新名。
+
+要改的只有用这两个服务的插件（任何语言）：把 `inject` 与 `ctx.use`（Go 是 `Inject` 与 `ctx.Use`）里的名字改掉。Rust 的连接插件（`Session::new`）、直接用 `Loader` 的 Rust 宿主、`rutis-host/dial` 与 `rutis-host/listen` 行、挂 `Session::service()` 或 `LoaderPlugin` 的宿主都不用改。
+
+| 0.19.0–0.19.2 | 0.19.3 |
+| --- | --- |
+| `inject: ['loader']`，`ctx.use('loader').create(row)`（TypeScript、Bun） | `inject: ['rutis/loader']`，`ctx.use('rutis/loader').create(row)` |
+| `inject = ["loader"]`，`ctx.use("loader")`（Python） | `inject = ["rutis/loader"]`，`ctx.use("rutis/loader")` |
+| `Inject: []string{"loader"}`，`ctx.Use("loader", &loader)`（Go） | `Inject: []string{"rutis/loader"}`，`ctx.Use("rutis/loader", &loader)` |
+| `inject: ['sessions']`，`ctx.use('sessions').open(far)`（TypeScript、Bun） | `inject: ['rutis/sessions']`，`ctx.use('rutis/sessions').open(far)` |
+| `inject = ["sessions"]`，`ctx.use("sessions").open(far)`（Python） | `inject = ["rutis/sessions"]`，`ctx.use("rutis/sessions").open(far)` |
+| `rutis.json` 里行的 `isolate` / `inject` 为这两个服务写的 `loader`、`sessions` | `rutis/loader`、`rutis/sessions` |
+| `rutis-host call loader.status` | `rutis-host call rutis/loader.status` |
+| `rutis-host status`：`  loader: host`、`  sessions: host` | `  rutis/loader: host`、`  rutis/sessions: host` |
+| `rutis-host dev: services: greeter (greeter), loader (host), sessions (host), translate (translate)` | `rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)` |
+| `rutis-host: no row provides forcast; did you mean forecast? (services: forecast, llm, loader, sessions)` | `rutis-host: no row provides forcast; did you mean forecast? (services: forecast, llm, rutis/loader, rutis/sessions)` |
+| `inject` 里没写就调 `open`：`declare sessions in inject` | `declare rutis/sessions in inject` |
+| 宿主的行提供 `loader`：`service loader is already provided by …: row <行> cannot provide it too` | 可以；提供 `rutis/loader` 的行以 `service rutis/loader is already provided by …: row <行> cannot provide it too` 失败 |
+| 测试给 `loader` 或 `sessions` 假服务：`cannot provide service sessions: sessions is already provided by the host` | 可以 |
+
+还在要旧名的插件一直等。`rutis-host run` 的行状态与 `rutis-host check` 是这样（`maker` 要 `loader`，`relay` 要 `sessions`）：
+
+```text
+maker: waiting for loader (`loader` is the Rust service rutis_loader::loader::Loader, which is not exported: add #[rutis::service] to its impl)
+relay: waiting for sessions (no row provides it)
+```
+
+```text
+maker (file:///…/maker.mjs): cannot run: nothing provides loader
+  inject: ["loader"]
+  provides: {"maker":{"make":"async"}}
+  loader: add a row that provides it
+relay (file:///…/relay.mjs): cannot run: nothing provides sessions
+  inject: ["sessions"]
+  provides: {}
+  sessions: add a row that provides it
+```
+
+`maker` 那一行说的 `add #[rutis::service]` 不适用：把名字改成 `rutis/loader` 即可。

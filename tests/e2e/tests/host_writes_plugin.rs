@@ -1,10 +1,10 @@
 //! S1, the host writes its own plugin (#185; design "The host writes its
 //! own plugins" §八): a Python plugin `maker`, standing in for an agent,
 //! writes a plugin `weather`, has the host load it through the service
-//! `loader`, breaks it and is told why while the old version keeps
+//! `rutis/loader`, breaks it and is told why while the old version keeps
 //! serving, fixes it, and removes it.
 //!
-//! `maker` injects `loader`, provides `maker`, and `step(n)` does step `n`
+//! `maker` injects `rutis/loader`, provides `maker`, and `step(n)` does step `n`
 //! of a fixed script. The test drives it with `rutis-host call maker.step
 //! <n>` and uses the new service with `rutis-host call weather.today
 //! '"Oslo"'`.
@@ -30,7 +30,7 @@ use serde_json::{json, Value};
 const MAKER: &str = r#"
 import pathlib
 
-inject = ["loader"]
+inject = ["rutis/loader"]
 WEATHER = pathlib.Path(__file__).parent / "weather.py"
 
 V1 = '''class Weather:
@@ -83,7 +83,7 @@ class Maker:
 
 
 def apply(ctx, config):
-    ctx.provide("maker", Maker(ctx.use("loader")))
+    ctx.provide("maker", Maker(ctx.use("rutis/loader")))
 "#;
 
 /// `rutis-host call <args>` in the project, started (not waited for).
@@ -151,7 +151,7 @@ fn a_plugin_writes_loads_fixes_and_removes_a_plugin_while_the_host_runs() {
     assert!(s.path("weather.py").is_file());
     assert_eq!(
         seen,
-        json!({ "rows": ["maker"], "services": ["loader", "maker", "sessions"] })
+        json!({ "rows": ["maker"], "services": ["maker", "rutis/loader", "rutis/sessions"] })
     );
 
     // 2: the row is added, runs, and is written into rutis.json.
@@ -217,7 +217,7 @@ fn a_plugin_writes_loads_fixes_and_removes_a_plugin_while_the_host_runs() {
     let seen = result(&s, &["maker.step", "6"]);
     assert_eq!(
         seen,
-        json!({ "rows": ["maker"], "services": ["loader", "maker", "sessions"] })
+        json!({ "rows": ["maker"], "services": ["maker", "rutis/loader", "rutis/sessions"] })
     );
     expect_line(&mut host, "weather: removed");
     assert_eq!(
@@ -229,7 +229,8 @@ fn a_plugin_writes_loads_fixes_and_removes_a_plugin_while_the_host_runs() {
         (
             Some(1),
             String::new(),
-            "rutis-host: no row provides weather (services: loader, maker, sessions)\n".into()
+            "rutis-host: no row provides weather (services: maker, rutis/loader, rutis/sessions)\n"
+                .into()
         )
     );
 

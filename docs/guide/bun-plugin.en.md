@@ -243,11 +243,11 @@ bunx --bun rutis-host dev
 rutis-host dev: running greeter; changes reload it (Ctrl-C ends)
 greeter: starting
 translate: running
-rutis-host dev: services: greeter (greeter), loader (host), sessions (host), translate (translate)
+rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)
 greeter: running
 ```
 
-`greeter` starts once `translate` is available. The `services` line lists the services there are now and the row providing each; the host itself provides `loader`. It is printed once every row is running, waiting or failed, and again whenever the services change, before or after the rows' state lines.
+`greeter` starts once `translate` is available. The `services` line lists the services there are now and the row providing each; the host itself provides `rutis/loader`. It is printed once every row is running, waiting or failed, and again whenever the services change, before or after the rows' state lines.
 
 While `dev` runs, in another terminal in the project's directory, see which services there are and which row provides each, then call `greeter.hello` once:
 
@@ -258,8 +258,8 @@ rows:
   translate: running
 services:
   greeter: greeter
-  loader: host
-  sessions: host
+  rutis/loader: host
+  rutis/sessions: host
   translate: translate
 runtimes:
   bun: running (pid 66997)
@@ -277,7 +277,7 @@ Change `src/index.ts` and save it (say `${name}!` to `${name}.`): `dev` reloads 
 
 ```text
 greeter: reloaded (src/index.ts changed)
-rutis-host dev: services: greeter (greeter), loader (host), sessions (host), translate (translate)
+rutis-host dev: services: greeter (greeter), rutis/loader (host), rutis/sessions (host), translate (translate)
 ```
 
 ```console
