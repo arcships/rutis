@@ -1233,6 +1233,8 @@ fn mount(at: &Ctx, definition: &Definition) -> Result {
 
 `PluginTestError`：测试工具拒绝的事：装载失败（文字是这一行的状态，与宿主打印的相同，如 `weather: config: city is required`）、不能装载的插件。
 
+测试与插件可以同时调用对方：测试调用插件交给它的函数（回调）的同时，插件调用测试提供的服务。等着对方的一边在等待时执行对方的调用，Node 与 Bun 下都一样，两边都返回。所以测试还在插件的一次调用里时，测试提供的服务也可能被调用：不要在这样的调用期间持有测试自己的锁。
+
 ### Python 的测试工具
 
 `rutis.testing`：

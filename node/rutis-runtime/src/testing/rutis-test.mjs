@@ -102,6 +102,11 @@ export default Object.freeze({
       // emit of a service call that returned): the test, waiting for them,
       // answers nothing meanwhile (#984).
       inline: SYNCHRONOUS,
+      // Each side may wait for the other on two call chains at once: the
+      // test calling a callback of a plugin's while that plugin calls one
+      // of the test's services. Each runs the other's synchronous calls
+      // while it waits (#987).
+      answersWaiting: true,
     })
     // The test process went (done, failed or killed): the test is over.
     // Its temporary directory goes, and this runtime ends, after which

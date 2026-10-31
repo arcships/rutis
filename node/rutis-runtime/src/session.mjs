@@ -203,7 +203,7 @@ class RemotePromise extends Promise {
 // The transport owns I/O; every decoder, reference table and callback stays on
 // the owning JS thread, including while a synchronous caller pumps its chain.
 export class Session {
-  #send; #pump; #dispatch; #abort; #settled; #inline; #holds; #report; #owner; #within; #outgoing
+  #send; #pump; #dispatch; #abort; #settled; #inline; #holds; #report; #owner; #within; #outgoing; #answersWaiting
   #next = 0; #received = 0; #ref = 0; #pending = new Map(); #sites = new Map(); #exports = new Map(); #identities = new WeakMap()
   #imports = new Map(); #proxies = new WeakMap(); #finalizer
   #closed; #handshake = false; #resolveReady; #rejectReady
@@ -226,7 +226,7 @@ export class Session {
   // beyond the session's, such as the contract.
   // `report(line, details?)`: where a session-end loss is reported (local
   // emits still queued, #546); a no-op when not configured.
-  constructor({ send, pump, dispatch, abort, settled, endpoint, inline, holds, report = () => {}, owner, within, outgoing, maxMessage = MAX_MESSAGE }) {
+  constructor({ send, pump, dispatch, abort, settled, endpoint, inline, holds, report = () => {}, owner, within, outgoing, answersWaiting = false, maxMessage = MAX_MESSAGE }) {
     this.#send = send; this.#pump = pump; this.#dispatch = dispatch; this.#abort = abort; this.#settled = settled
     // `owner()`: whose code is running now (the runtime's row, #688), kept
     // with each function or object exported; `within(owner, run)` runs a
@@ -245,6 +245,12 @@ export class Session {
     // goes out; the function it returns is called once its reply comes (or
     // the session ends). A test tool keeps its process running meanwhile.
     this.#outgoing = typeof outgoing === 'function' ? outgoing : undefined
+    // `answersWaiting`: while a synchronous call waits, a call the far end
+    // waits for synchronously runs too, also of another call chain. Held
+    // back, it would wait for this side's call, and this side for it, for
+    // ever. Only the test tool's two sessions (the test process's and its
+    // driver's), which no host is between to see such a cycle (#987).
+    this.#answersWaiting = answersWaiting === true
     this.#inline = new Set(inline ?? [])
     if (!ENDPOINT_ID.test(endpoint?.local)) throw new Error(`invalid endpoint id ${endpoint?.local}`)
     this.#endpoint = endpoint; this.#local = `${endpoint.local}:`
@@ -670,7 +676,7 @@ export class Session {
         if (other.key === job.key) return
       }
     }
-    if (this.#waiting.length && !this.#waiting.some(id => job.frame.path.includes(id))) return
+    if (this.#waiting.length && !this.#waiting.some(id => job.frame.path.includes(id)) && !(this.#answersWaiting && job.frame.sync === true)) return
     this.#queued.delete(job)
     this.#execute(job.frame, job.args, job.entry, job.business)
   }

@@ -8,6 +8,7 @@ import { host, load } from '../../../node/rutis/src/testing.mjs'
 import greeter from './fixtures/sdk/greeter.ts'
 import events from './fixtures/sdk/events.ts'
 import warmer from './fixtures/sdk/warmer.ts'
+import crossing from '../../../node/rutis/test/fixtures/crossing.mjs'
 
 test('a plugin runs with the SDK test tool', async () => {
   const t = await load(greeter, { config: { greeting: 'Hi' }, services: { clock: { now: () => 7 } } })
@@ -50,5 +51,15 @@ test('the SDK test tool passes objects with methods by reference under Bun', asy
   const value = { n: 1 }
   expect(await service.data(value)).toBe(2)
   expect(value.n).toBe(1)
+  await t.unload()
+})
+
+// The test calls a callback of the plugin while the plugin calls a service
+// of the test (#987): Bun's sessions run every incoming call while they
+// wait, so under Bun neither side waits for the other for ever.
+test('a callback of the plugin while the plugin calls a service of the test, under Bun', async () => {
+  const scope = { withLock: (callback: () => unknown) => callback() }
+  const t = await load(crossing, { services: { files: { open: () => scope }, other: { ping: () => 'pong' } } })
+  expect(await t.service('probe').go()).toEqual(['got', 'pong'])
   await t.unload()
 })
