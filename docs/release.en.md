@@ -72,6 +72,10 @@ Expected behavior: the dialer prints `clock: <n>` every second. After a network 
 
 The nightly stress workflow also runs two soak tests (repeated link disconnect/reconnect and repeated process start/exit) and checks that file descriptor and thread counts do not grow and all processes are reaped.
 
+## 0.19.3
+
+0.19.3 is a patch release: it fixes a few bugs found after 0.19.2 (the cleanup errors of #983, the TypeScript test tools of #987 and #988, the guide example of #984), and renames rutis's own two services as the maintainers decided (#986: `loader` → `rutis/loader`, `sessions` → `rutis/sessions`). All packages are at 0.19.3; see [the release notes](releases/0.19.3.en.md). The rename is the only **breaking** change; how to change is in [Migration to 0.19](migration-0.19.en.md) "0.19.3". The rest stays compatible with 0.19.2: `cargo-semver-checks` compares with 0.19.2 and accepts no breaking Rust API change (no signature changes in this release). `format` of `rutis.json` stays 1 and no configuration changes: the persisted sample is copied from 0.19.2 and its expectations are unchanged; dsh's user layer has not changed, so `cordis.patch.yml` is copied as is. The protocol is unchanged and there is no new capability; the release gate's cross-version tests (`RUTIS_E2E_ONLY_OLDER=1`) meet 0.19.2. The Kotlin SDK, as in 0.19.0, is not published to Maven Central (the `maven` job skips as usual).
+
 ## 0.19.2
 
 0.19.2 is a patch release: it fixes bugs that gave wrong results, hung or made memory blow up (the memory peak of #977, the loads cancelled early of #968, the third item of #934, the third and fourth items of #935, #938, #933, #932, #965, #922), and fills in what the 0.19.0 evaluation had to guess from the documentation (#939). All packages are at 0.19.2; see [the release notes](releases/0.19.2.en.md). There is no migration guide: no API is removed or renamed.
