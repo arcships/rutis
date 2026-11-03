@@ -29,7 +29,7 @@ jobs:
   # Orchestration only: on the self-hosted macOS runners but for a release
   # (the repository variable GATE_RUNNER switches it, docs/ci.md §10).
   plan:
-    runs-on: ${{ startsWith(github.ref, 'refs/tags/') && 'ubuntu-24.04' || fromJSON(vars.GATE_RUNNER || '["self-hosted","macOS","ARM64"]') }}
+    runs-on: ${{ startsWith(github.ref, 'refs/tags/') && fromJSON(vars.RELEASE_RUNNER || '"ubuntu-latest"') || fromJSON(vars.GATE_RUNNER || '["self-hosted","macOS","ARM64"]') }}
     outputs:
       binaries: ${{ steps.plan.outputs.binaries }}
       wheels: ${{ steps.plan.outputs.wheels }}
@@ -159,7 +159,7 @@ jobs:
   # made from the binaries above, as published.
   packages:
     needs: binaries
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(vars.RELEASE_RUNNER || '"ubuntu-latest"') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
