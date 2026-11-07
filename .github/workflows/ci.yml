@@ -477,6 +477,7 @@ jobs:
           distribution: temurin
           java-version: '17'
       - name: the Kotlin conformance jar
+        id: kotlin
         working-directory: kotlin/rutis
         run: |
           # Retried: a download that fails halfway (the runners' networks)
@@ -1870,8 +1871,12 @@ jobs:
             LOADER_TESTS=$(bash tools/platform-tests.sh crates/rutis-loader $PURE_TESTS_LOADER $WINDOWS_SKIP_TESTS_LOADER)
           fi
           cargo test -p rutis-loader --all-features --no-fail-fast $LOADER_TESTS
+      # The Kotlin row needs the jar this job builds above: without it (an
+      # earlier step failed) every test that starts a runtime would panic with
+      # `RUTIS_TEST_RUNTIMES lists kotlin, but java does not run`, burying the
+      # first failure under a page of red that says nothing.
       - name: cargo test (rutis-bridge, all features)
-        if: '!cancelled()'
+        if: "!cancelled() && steps.kotlin.outcome == 'success'"
         env:
           RUTIS_TEST_RUNTIMES: go,kotlin,node,python
           ALL: ${{ needs.changes.outputs.all }}
