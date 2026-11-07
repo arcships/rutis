@@ -1,11 +1,11 @@
 package rutistest
 
 import (
-	"bufio"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -83,9 +83,8 @@ func loopback(path, driver string) (net.Conn, <-chan error, error) {
 				return
 			}
 			_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-			reader := bufio.NewReader(conn)
-			line, err := reader.ReadString('\n')
-			if err != nil || strings.TrimSuffix(line, "\n") != token || reader.Buffered() > 0 {
+			line, ok := readTokenLine(conn)
+			if !ok || line != token {
 				conn.Close()
 				continue
 			}
@@ -103,6 +102,37 @@ func loopback(path, driver string) (net.Conn, <-chan error, error) {
 		}
 		return nil, nil, fmt.Errorf("rutis-host test: %w", err)
 	}
+}
+
+// readTokenLine reads the one-time token line from `conn`, a byte at a time:
+// a buffered reader would also take what the far end sends right after the
+// token — its greeting, which it writes before it reads (#239) — and the
+// session that follows would find those bytes gone. Sending anything but a
+// token line (a longer line, or a byte that is not there within the
+// deadline) fails, as a connection this tool did not start should.
+func readTokenLine(conn net.Conn) (string, bool) {
+	var line strings.Builder
+	one := make([]byte, 1)
+	for {
+		if _, err := io.ReadFull(conn, one); err != nil {
+			return "", false
+		}
+		if one[0] == '\n' {
+			return line.String(), line.Len() > 0
+		}
+		// What this tool writes is lowercase hex (`hex.EncodeToString` of 16
+		// bytes): anything else is not the connection it started, and reading
+		// on would be reading a stranger's protocol.
+		if line.Len() >= 64 || !isTokenByte(one[0]) {
+			return "", false
+		}
+		line.WriteByte(one[0])
+	}
+}
+
+// isTokenByte: a byte a token line is made of.
+func isTokenByte(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f')
 }
 
 // run starts `command`, its output on this process's standard error;
