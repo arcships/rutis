@@ -143,6 +143,17 @@ struct UnloadOrderTests {
         })
         let listening = try await RutisTest.load(plugin, config: "listening")
         let closing = try await listening.load(config: "closing")
+        // A plain emission first, from the row that stays: the listener and
+        // its registration in the host work, so a failure after the unload is
+        // about the unload path and not about the wiring (#1088: the two
+        // failures said only `[] != ["listening:bye"]`, which does not tell
+        // those apart).
+        try await listening.emit("t/bye", "before")
+        for _ in 0..<100 where !heard.all.contains("listening:before") {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(heard.all.contains("listening:before"), "an emission before the unload reaches the other row")
+        heard.removeAll { $0.hasSuffix(":before") }
         try await closing.unload()
         for _ in 0..<100 where !heard.all.contains("listening:bye") {
             try await Task.sleep(nanoseconds: 50_000_000)

@@ -89,6 +89,7 @@ final class Lines: @unchecked Sendable {
     private let lock = NSLock()
     private var lines: [String] = []
     func add(_ line: String) { lock.withLock { lines.append(line) } }
+    func removeAll(where matches: (String) -> Bool) { lock.withLock { lines.removeAll(where: matches) } }
     var all: [String] { lock.withLock { lines } }
 }
 
