@@ -2,7 +2,7 @@
 
 [中文](quality-status.md) · [Quality standard](quality-standard.en.md)
 
-Status: kept up to date with the code. Last updated: 2026-10-12 (end of step two / 0.10), baseline `main` `f8ce69b` (before the 0.10 release). Previous: 2026-10-10, baseline `a8733d4` (after 0.8.0).
+Status: kept up to date with the code. Last updated: 2026-11-08 (formal-verification rebaseline), baseline `main` `cf4ebebe`. Previous: 2026-10-12, baseline `f8ce69b` (end of step two / 0.10).
 Companion to: [Quality standard](quality-standard.en.md). This document maps the standard, clause by clause, to the current implementation: which clauses are met, which partly, what is missing and how it will be added. The standard describes rules that stay the same; the file names, test names, issue numbers and versions here change with the implementation. Which tests verify each guarantee is in the [guarantee register](guarantees.en.md).
 
 ---
@@ -618,15 +618,26 @@ From `node tools/ci-stats.mjs 40 ci.yml --since 2026-10-11`. Jobs were being mov
 | Q12.4 | ~~On main, runs are grouped by ref, so not every merge gets its own complete result~~: the standard now has the nightly run check every commit since the last one (#369); met |
 | Q12.6 | The median for ordinary code PRs is 15.6 minutes (§8.3) against a 10-minute target; a week of data with the self-hosted runners settled is needed to judge |
 | Q12.7 | In full runs the single-machine and two-machine reproducibility checks both run |
-| Q12.1 | Nightly lacks TLC; weekly lacks longer host soaks and benchmarks (the hour-long host soak S8 now runs nightly, #192). A real network (S5 with containers + netem) now runs nightly (report only, #341 → #433). The baseline with the newest Cordis plugins now runs nightly (report only, #190 → #429). Fuzzing and model checking now run nightly (#179 → #425) |
+| Q12.1 | The old record said nightly lacked TLC, but current CI runs the `specs` job on PRs that change `specs/**`; nightly runs it only when the corresponding paths changed (or a workflow/configuration path that triggers the full plan changed), while Monday's weekly run unconditionally runs all existing models. The full model matrix, trace validation and cross-language conformance still need one daily/release report. Weekly still lacks longer host soaks and benchmarks (the hour-long host soak S8 now runs nightly, #192). A real network (S5 with containers + netem) now runs nightly (report only, #341 → #433); the newest Cordis-plugin baseline also runs nightly (report only, #190 → #429); fuzzing and the existing models run in stress/nightly (#179 → #425) |
 
 ## 9. Plan
 
-Ordered by risk level, P0 first; within a level, infrastructure other work depends on first. Aligned with the current release plan. #183 tracks progress.
+Ordered by risk level, P0 first; within a level, infrastructure other work depends on first. Aligned with the current release plan. Progress follows #183 and the [formal-verification redesign](design-formal-verification-2026-11-08.en.md); the old 0.11–0.14 schedule is no longer the current plan.
 
-Rescheduled (2026-10-17): 0.11 ships only what is already on main (leaf events #343, cross-language value types #308, remote runtimes dialing out #382–#384), released as soon as possible; step three moves to **0.12**, together with #230, #273 and #274. The former 0.12 (new runtimes) and 0.13 (app hosting) become 0.13 and 0.14.
+As of 2026-11-08, formal verification is organised into four layers with these dependencies:
 
-### 9.1 Step one (0.8.1 → 0.9): infrastructure and P0s that already happened — done
+| Layer | Main issues | Current gate and dependency |
+| --- | --- | --- |
+| A. Protocol foundations | #635, #634 | Unify session frame/handshake/error/reference/cancellation/limit rules first, then clean up old sources and build the rule tracker |
+| B. Concurrency and lifecycle | #622, #613, #630 | Depends on A; #1025 first models and deterministically tests marker commit/admission |
+| C. Cross-process deployment | #613, #624 | Depends on A and B; TLA+ proves the design, trace validation checks real executions, and conformance cases cover each language |
+| D. Inputs and long-term reliability | #631, #639 | Depends on the rules from A, B and C; property/fuzz testing, Kani/Miri, virtual clocks, ordinary tests and E2E cover model boundaries |
+
+#634 is shared tracking and close-out work, not another feature. In 0.22, first verify #1025's high-risk close semantics; complete cross-language and long-run coverage follows these dependencies. Do not bring #1040 back into 0.22 or 0.23.
+
+The following §§9.1–9.3 are retained only as historical quality-plan records, not as the current release schedule. “Done” there describes the acceptance conclusion at that time; it does not replace the new four-layer evidence of rules, models, traces and cross-implementation conformance.
+
+### 9.1 Historical record: step one (0.8.1 → 0.9) — infrastructure and P0s that already happened
 
 | Item | Risks covered | issue → PR |
 | --- | --- | --- |
@@ -686,13 +697,22 @@ Found and fixed in step three: #407, #408, #409 (#419), #411 (#427), #428 (#443)
 
 "CI changes §8.6 steps 3–4" (splitting the dylib jobs on Linux, CI measurements), formerly in step three, were done in #213.
 
-### 9.4 Waiting for design
+### 9.4 Current formal-verification work
 
-| Item | Prerequisite |
-| --- | --- |
-| All controls for scenario H (S1 #185) | A design for "plugin services as agent tools"; decisions on isolation and permissions for agent-written plugins |
-| Resource limits on references and calls | A design first (raised in #178) |
-| emit carrying its dispatch mode, so a `serial` across the boundary runs as serial on the far side (#340) | A design for the protocol change (the conclusion of #281) |
+The old “waiting for design” list is no longer the current schedule. The current design and implementation boundaries are in the [formal-verification redesign](design-formal-verification-2026-11-08.en.md), closing around these eight issues:
+
+| Layer/work | Issue | Status and next step |
+| --- | --- | --- |
+| Protocol baseline and rule tracker | #635, #634 | In progress: unify current frame/handshake/error/reference/cancellation/limit rules and mark each current, superseded or explicitly not guaranteed |
+| Event, call and lifecycle models | #613 | In progress: extend TLA+ and reconcile the existing cross-runtime-sync and remote-lease models |
+| Rust implementation interleavings | #622 | In progress: extend shuttle, prioritising #1025 marker commit/admission, root/subtree close and cleanup exactly once |
+| Non-Rust runtime scheduling | #630 | In progress: controlled scheduling/static-check columns for applicable Node, Bun, Python, Go, Swift and Kotlin runtimes |
+| Trace and conformance | #624 | In progress: compare real execution traces with models and add applicable language columns; not merely check that a case exists |
+| Property, fuzz, Kani/Miri | #631 | In progress: cover values, frames, events, routing, configuration and reference input spaces |
+| Conformance and ordinary tests | #639 | In progress: add the 161 rule cases, the 18 ordinary tests formal methods cannot cover and virtual-clock timing cases |
+| Shared close-out | #634 | In progress: maintain the rule → evidence → implementation → platform traceability and release status |
+
+#1040 remains deferred; do not bring the service-announcement policy back into 0.22 or 0.23.
 
 ---
 

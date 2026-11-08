@@ -2,7 +2,7 @@
 
 [中文](guarantees.md) · [Quality standard](quality-standard.en.md) · [Quality status](quality-status.en.md)
 
-Status: being filled in (#181). This registry lists rutis's core promises and contract behaviours, one row each: number, source, content, level, status, and the verification. The rules come from the [quality standard](quality-standard.en.md) §3 (levels of promise) and §9.4 (Q9.4.1–Q9.4.4).
+Status: being filled in (#181). This registry lists rutis's core promises and contract behaviours, one row each: number, source, content, level, status, and the verification. The rules come from the [quality standard](quality-standard.en.md) §3 (levels of promise) and §9.4 (Q9.4.1–Q9.4.4). The [formal-verification redesign](design-formal-verification-2026-11-08.en.md) resets the baseline; until #635/#634 rebuild the current specification and tracker, existing rows do not mean the new architecture has complete coverage.
 
 The registry is **maintained by hand**: it is not extracted from the design documents, and CI does not check that it matches the tests (too many false alarms, and more upkeep than it is worth; to be reconsidered past 300 rows). It stays correct because PR authors and reviewers update it with each change (§5).
 
