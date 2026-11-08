@@ -4,6 +4,7 @@
 // ../testing-heard.test.mjs, which stops it if it hangs.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import util from 'node:util'
 import { host } from '../../src/testing.mjs'
 import teller from './teller.mjs'
 
@@ -23,8 +24,12 @@ test('synchronous calls while the test\'s listener is called', async () => {
     t.on('teller/other', () => {})()
     h.emit('teller/other')
     h.filter(() => true).emit('teller/other')
-    assert.equal(h.bail('teller/other'), undefined)
-    assert.equal(h.filter(() => true).bail('teller/other'), undefined)
+    // The value in the failure: one CI run got a `{code: …}` back from
+    // `bail` and said only that they were not equal (#1091).
+    const bailed = h.bail('teller/other')
+    assert.equal(bailed, undefined, util.inspect(bailed, { depth: 4 }))
+    const filtered = h.filter(() => true).bail('teller/other')
+    assert.equal(filtered, undefined, util.inspect(filtered, { depth: 4 }))
   }
   for (let i = 0; i < 200 && !told.length; i++) await new Promise(resolve => setTimeout(resolve, 5))
   assert.deepEqual(told, ['Ada'])

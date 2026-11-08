@@ -370,11 +370,26 @@ async fn run_says_why_the_later_apps_service_is_refused() {
     let mut lee = App::new("dial", &address, "lee-iphone", "shared");
     lee.command("start").await;
     tokio::task::block_in_place(|| {
-        host.0.wait_lines(&[
-            "phone: connected lee-iphone",
-            "lee-iphone:device: device is provided here by row kim-iphone:device: \
-             not registered from lee-iphone",
-        ])
+        host.0
+            .wait_line(|line| (line == "phone: connected lee-iphone").then_some(()))
+    });
+    // The two sessions register in whichever order the host gets to them —
+    // `phone: connected <name>` is printed when the connection is up, before
+    // the app's row and its `device` are in the table — so the refusal names
+    // the row that got there first, either of them. What is asserted is the
+    // refusal itself: the second `device` is refused, and it says which row
+    // provides the name and which row it was refused from (#985).
+    tokio::task::block_in_place(|| {
+        host.0.wait_line(|line| {
+            let refused = |from: &str, provider: &str| {
+                line == format!(
+                    "{from}:device: device is provided here by row {provider}:device: \
+                     not registered from {from}"
+                )
+            };
+            (refused("lee-iphone", "kim-iphone") || refused("kim-iphone", "lee-iphone"))
+                .then_some(())
+        })
     });
     kim.command("quit").await;
     lee.command("quit").await;
