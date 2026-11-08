@@ -191,14 +191,38 @@ async fn shutting_down_a_loading_plugin_returns_its_cleanup_error() {
 /// guarantee: core/D7
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shutting_down_the_root_reports_a_loading_plugins_cleanup_error_once() {
-    for _ in 0..64 {
+    for round in 0..64 {
         let (root, view, applies, errors) = mount().await;
+        // The states this round went through, sampled while the shutdown
+        // runs: the one nightly run that failed here (`stress`, 2026-11-05)
+        // said only `left != right`, which is not enough to tell a state the
+        // contract does not allow from one this test stopped looking at too
+        // early (#1080).
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sampler = {
+            let seen = seen.clone();
+            let view = view.clone();
+            tokio::spawn(async move {
+                loop {
+                    seen.lock()
+                        .unwrap()
+                        .push(format!("{:?}", view.state().state));
+                    tokio::time::sleep(Duration::from_micros(200)).await;
+                }
+            })
+        };
 
         tokio::time::timeout(LIMIT, root.shutdown())
             .await
             .expect("shutdown returns")
             .unwrap();
-        assert_eq!(view.state().state, FiberState::Disposed);
+        sampler.abort();
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            view.state().state,
+            FiberState::Disposed,
+            "round {round}, the states seen: {seen:?}"
+        );
         assert_eq!(applies.load(Ordering::SeqCst), 1);
         assert_eq!(messages(&errors), vec![ROLLBACK.to_string()]);
     }
