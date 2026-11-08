@@ -233,23 +233,32 @@ fn check_all() -> BTreeMap<String, Vec<Reported>> {
     }
 
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let output = Command::new(cargo)
-        .current_dir(&root)
-        .args([
-            "check",
-            "--bins",
-            "--keep-going",
-            "--offline",
-            "--quiet",
-            "--message-format=json",
-        ])
-        .arg("--target-dir")
-        .arg(root.join("target"))
-        .env_remove("CARGO_TARGET_DIR")
-        .env_remove("RUSTC_WRAPPER")
-        .env_remove("RUSTC_WORKSPACE_WRAPPER")
-        .output()
-        .expect("cargo runs");
+    let check = |offline: bool| {
+        let mut command = Command::new(&cargo);
+        command
+            .current_dir(&root)
+            .args(["check", "--bins", "--keep-going", "--quiet"])
+            .arg("--message-format=json")
+            .arg("--target-dir")
+            .arg(root.join("target"))
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("RUSTC_WRAPPER")
+            .env_remove("RUSTC_WORKSPACE_WRAPPER");
+        if offline {
+            command.arg("--offline");
+        }
+        command.output().expect("cargo runs")
+    };
+    // `--offline` first: the scratch crate depends on this checkout, whose
+    // packages the run that built this test already fetched. A machine whose
+    // cache lacks one of them (the pinned `tokio`, say) used to fail the whole
+    // test with `failed to download … --offline was specified`, which says
+    // nothing about the messages under test: then it goes to the network
+    // once, as any other build may.
+    let mut output = check(true);
+    if !output.status.success() && downloads_failed(&output.stderr) {
+        output = check(false);
+    }
     let stdout = String::from_utf8(output.stdout).unwrap();
     let mut reported: BTreeMap<String, Vec<Reported>> = BTreeMap::new();
     for line in stdout.lines() {
