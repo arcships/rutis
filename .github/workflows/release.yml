@@ -459,12 +459,19 @@ jobs:
           api="https://api.github.com/repos/$GITHUB_REPOSITORY"
           auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json"
                 -H "X-GitHub-Api-Version: 2022-11-28")
-          id=$(curl -sS "${auth[@]}" "$api/releases/tags/$GITHUB_REF_NAME" | jq -r '.id // empty')
+          # HTTP/1.1, and retried: the API answers HTTP/2 with
+          # `curl: (92) HTTP/2 stream 1 was not closed cleanly:
+          # PROTOCOL_ERROR` now and then, which failed 0.21.0's release after
+          # every package had gone out (the release itself is created by
+          # hand from the same assets). A release that is already there is
+          # kept: `releases/tags` finds it, an asset that is up is skipped.
+          api_call() { curl -sS --http1.1 --retry 5 --retry-delay 2 --retry-all-errors "${auth[@]}" "$@"; }
+          id=$(api_call "$api/releases/tags/$GITHUB_REF_NAME" | jq -r '.id // empty')
           if [ -z "$id" ]; then
             id=$(jq -n --arg tag "$GITHUB_REF_NAME" --arg name "rutis $GITHUB_REF_NAME" \
                   --rawfile body "$RUNNER_TEMP/notes.md" \
                   '{tag_name: $tag, name: $name, body: $body}' |
-              curl -sS "${auth[@]}" -X POST --data-binary @- "$api/releases" | jq -r '.id // empty')
+              api_call -X POST --data-binary @- "$api/releases" | jq -r '.id // empty')
           fi
           if [ -z "$id" ]; then
             echo "could not create the release $GITHUB_REF_NAME" >&2
@@ -472,11 +479,11 @@ jobs:
           fi
           for file in dist/rutis-host-*; do
             name=$(basename "$file")
-            if [ -n "$(curl -sS "${auth[@]}" "$api/releases/$id/assets?name=$name" | jq -r 'if type == "array" then (.[0].id // "") else (.id // "") end')" ]; then
+            if [ -n "$(api_call "$api/releases/$id/assets?name=$name" | jq -r 'if type == "array" then (.[0].id // "") else (.id // "") end')" ]; then
               echo "$name is uploaded already"
               continue
             fi
-            curl -sS --fail-with-body "${auth[@]}" -X POST \
+            api_call --fail-with-body -X POST \
               -H "Content-Type: application/octet-stream" \
               --data-binary @"$file" "$api/releases/$id/assets?name=$name" > /dev/null
           done

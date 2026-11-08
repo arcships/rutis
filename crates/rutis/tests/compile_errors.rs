@@ -193,6 +193,13 @@ fn author_mistakes_are_reported_in_the_authors_terms() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// Whether `cargo`'s stderr says it stopped because `--offline` kept it from
+/// downloading a dependency, rather than because the program under test did
+/// not compile.
+fn downloads_failed(stderr: &[u8]) -> bool {
+    String::from_utf8_lossy(stderr).contains("--offline was specified")
+}
+
 /// Writes the scratch crate, checks every bin, and returns the errors by
 /// bin, in the order rustc reported them.
 fn check_all() -> BTreeMap<String, Vec<Reported>> {
