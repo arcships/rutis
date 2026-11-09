@@ -7,6 +7,8 @@ TLC explores every interleaving of a remote runtime's lease, takeover by a newer
 - `RemoteLease.tla`: a listening remote runtime and the two controller links that dial it (the scope of the issue);
 - `AccessPoint.tla`: far ends dialing a `rutis-host/listen` row: handshakes side by side, one session per id, a newer connection of the same id replacing the older, and the dialers' reconnection rules.
 
+**Reconciliation (2026-11-09).** The model still has the scope of #210: stopping is terminal, cleanup is instantaneous, and liveness is checked only in runs without faults. [#615](https://github.com/arcships/rutis/issues/615)'s Swift / Kotlin / Cordis-node takeover and redial, app-host stop-then-start, the cleanup deadline (Node / Bun kill after 5 s), and liveness after faults are not in the model; the correspondence table stops at Python / Go / Node / Bun. The model's semantics are unchanged.
+
 ## Design and code it corresponds to
 
 | Part of the model | Design | Implementation |

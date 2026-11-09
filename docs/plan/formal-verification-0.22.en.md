@@ -1,0 +1,82 @@
+# 0.22 formal-coverage execution plan
+
+Status: active. Date: 2026-11-09.
+Scope decision: 0.23 is merged into 0.22. The 0.23 milestone issues #613, #622, #624, #630, #631, #634, #635, #639 and #776 join #1025 in 0.22's release scope. #1040 stays deferred and is not brought back by the merge.
+Basis: [formal-verification redesign](../design-formal-verification-2026-11-08.en.md), [0.22 roadmap](../roadmap-0.22-2026-11-08.en.md), [quality standard](../quality-standard.en.md) §3, §8, §9.4, §11.
+
+This document only arranges work and gaps; it changes no behaviour. Nothing new is visible to developers. When an item is implemented, its design document's "What developers see" is the acceptance text.
+
+## 1. Workstreams
+
+| ID | Scope | Issues | Deliverable | Depends on | Status |
+| --- | --- | --- | --- | --- | --- |
+| WS0 | Baseline, roadmap merge, gap register | #776, #634 | This plan; roadmap and quality-status revisions | — | In progress |
+| WS1 | #1025 event close admission: marker, publication, `Entry::live`, race tests, benchmark | #1025, #622 | Code, deterministic tests, benchmark result | WS0 | Core done, verifying |
+| WS2 | Current session protocol specification: frames, handshake, calls, references, cancellation, malformed frames, limits, unknown fields | #635 | `docs/protocol-session.md` and `.en.md`; old designs point to it; gap list | WS0 | First version done; unknown fields decided (call-scoped) |
+| WS3 | Rule list and tracking table: source, plain promise, evidence, mutation, status, gap | #634 | `docs/formal-trace/` and a statistics script; `guarantees.md` linked | WS2 partly | First version done, 264 rows; full 1368 not extracted |
+| WS4 | TLA+ models of the protocol design: event close admission, cross-runtime sync, remote lease, row and call lifecycle | #613 | New `specs/` model or reconciled old models, `expected.txt`, `run.sh`, README | WS2 | First slice done, README/CI finishing |
+| WS5 | Real-execution trace and conformance: channel/frame trace validation, applicable implementation columns | #624 | Validator, positive/negative cases, gap list | WS2, WS4 | First slice done |
+| WS6 | Controlled scheduling and static checks for non-Rust runtimes | #630 | Evidence per applicable language; reasons for not applicable | WS2 | First slice done |
+| WS7 | Property tests, fuzzing, Kani, Miri, virtual clocks | #631, #639 | Property tests, fuzz targets, timing cases, Kani/Miri conclusions | WS2 | First slice done |
+| WS8 | Close-out: tracking table to zero gaps, release gate, CI reports | #634 | Release check result and unverified list | All | Not started |
+
+## 2. Order and gates
+
+First stage (now, in parallel):
+
+1. WS1 lands the race test and model before the core change; the core change must be independently revertible.
+2. WS2 writes the current specification first. When specification and code disagree, the specification changes first, not the code.
+3. WS3 builds the table skeleton and links the existing `guarantees.md`; rules are extracted from specifications and the guarantee register, not from memory.
+4. WS4 reconciles `specs/cross-runtime-sync` and `specs/remote-lease` first, then adds the event-close model.
+5. WS5 starts with allowed-sequence validation for the channel trace; frame level and cross-implementation columns follow.
+6. WS6 and WS7 start with languages and tools available on this machine; Swift/Kotlin and dedicated-runner items are recorded as environment gaps.
+
+Second stage (after the first stage has runnable evidence):
+
+- WS4 fills in the event, row-lifecycle, call-lifecycle and node-hosted-row models;
+- WS5 connects real traces to leases, host-gone, sync-cycles, AccessEvent and cross-language conformance;
+- WS7 covers every timing promise with virtual clocks;
+- WS8 closes the tracking table item by item.
+
+Release gate: per design §10 and quality standard Q13.1, every applicable rule in the tracking table has a current source, implementation evidence, applicability matrix and status; the number of unverified core promises is zero; model, trace, conformance, property/fuzz, virtual-clock, platform and long-run results all exist.
+
+## 3. Gaps and blockers
+
+| ID | Gap/blocker | Impact | Handling |
+| --- | --- | --- | --- |
+| G1 | Old unknown-field behaviour: Rust ended the whole session, the other six ignored the field | The error scope was too large, or implementations disagreed | Decided B: reject, but fail only that call; Rust implements it (`bad-frame`, `hello` fails the handshake, `release`/`cancel` ignore), the other six still ignore — see G11 |
+| G11 | Node, Bun, Python, Go, Swift and Kotlin still silently ignore unknown fields; they have no call-level `bad-frame` refusal | The same frame with a new field behaves differently on Rust and the others | #635 cross-implementation gap: each language refuses at the frame envelope/id level and adds shared cases; until then the tracker records only Rust as partially verified |
+| G2 | #634's 1368-rule inventory exists only in issue comments; the repository has no extractable source | The tracking table cannot claim completeness | WS3 builds the schema and a full `guarantees.md` mapping; rule extraction becomes a script or data file; until then the status is "partial" |
+| G3 | `release_transient` removes a child outside `Shared.admission` | The marker set can miss a member | WS1 moves the detach under admission; keeping it lock-free requires proving `alive=false` is set first plus a concurrent test |
+| G4 | No shuttle model for event close admission; a std atomic marker gives shuttle no switch point | Cannot explore marker-publication/`Entry::live` races | WS1 uses `crate::sync::AtomicBool` for the marker, or adds `switch_point()` at the read; the model must fail when the order is wrong |
+| G5 | This machine has no Swift or Kotlin toolchain; Fray/Lincheck, TSan and simulators need their runners | WS6 cannot produce Swift/Kotlin evidence here | WS6 added four Node frame-pump cases; Bun/Python/Go are inventory-only; Swift/Kotlin are recorded as CI/device gaps, never as passing |
+| G6 | `formal-trace.md` has only channel-level trace (direction, length, end), no frame payload | WS5 cannot reuse production trace for frame-level validation | Test fixtures decode frame bytes; production trace keeps sizes only, per design §1 |
+| G7 | Existing TLA+ models cover only `cross-runtime-sync` and `remote-lease`; no event or row-lifecycle models | WS4 cannot claim complete coverage | Reconcile old models first, then add a minimal `specs/event-close/`; event models follow #613 in batches |
+| G8 | 0.22's release scope grows from one performance change to the whole four-layer programme | The release date no longer follows one performance change | The roadmap moves to staged gates; WS8 judges only by the tracking table, not by "tests ran" |
+| G9 | In Node/Bun, if a business frame was admitted but not run when the session closes, `drain()` can never settle | A runtime process keeps a hung promise, diverging from Python | WS6 reproduced it; fix by `#finish()` on every discarded task in `close()` or by settling `#draining`, with a regression test |
+| G10 | `formal-trace.md` §1/§3.0 still treats the `objects` capability as a non-guarantee for passing objects; the new session specification says protocol 4 has no `objects` capability and all six implementations accept objects | Two current documents give different rules for the same behaviour; the tracker cannot decide a status | WS2 rechecks the code; after confirmation, change `formal-trace.md`, `guarantees.md` and the tracker; do not keep both statements |
+
+## 4. File ownership (to avoid conflicts in parallel work)
+
+| Workstream | Owned/primary files |
+| --- | --- |
+| WS1 | `crates/rutis/src/fiber.rs`, `crates/rutis/src/ctx.rs`, `crates/rutis/src/bus/table.rs`, `crates/rutis/src/fiber/shuttle_tests.rs`, `crates/rutis-loader/tests/close_cpu.rs`, new close-admission tests |
+| WS2 | `docs/protocol-session.md` and `.en.md`, `docs/design-protocol-plugins-2026-09-25.*`, `docs/design-protocol-plugin-mount.*` |
+| WS3 | `docs/formal-trace/**`, the link column in `docs/guarantees.md`, the statistics script |
+| WS4 | `specs/**` |
+| WS5 | `crates/rutis-bridge/tests/trace_validation.rs`, trace-reading helpers under `crates/rutis-bridge/src/channel/` (no protocol change) |
+| WS6 | tests and scripts under `node/`, `bun/`, `python/`, `go/` |
+| WS7 | new property-test files, `fuzz/fuzz_targets/`, virtual-clock test files |
+
+Conflict rule: `Cargo.toml` in a shared crate, `session/protocol.rs` and `bus.rs` are edited by WS1 or the main thread. Another workstream that needs them reports first instead of editing.
+
+## 5. Log
+
+- 2026-11-09: unknown fields were decided as "reject, but fail only that call" (`hello` fails the handshake, `release`/`cancel` ignore them). Rust implements it and returns `bad-frame`; the other six still ignore them, tracked as G11.
+- 2026-11-09: 0.23 merged into 0.22; this plan created; WS1, WS2, WS3, WS4, WS5, WS6 and WS7 started in parallel.
+- 2026-11-09: WS1 implemented the marker publication, `Entry::live`, root/subtree paths and the `release_transient` lock; four deterministic race cases and one shuttle model pass; the model fails when the publication order is broken. Local release `close_cpu`: 1000 instances create in 17.55 s and close in 11.15 s, thresholds pass, and the issue's ≤30s creation target is met on this machine; `queued_emits_memory` passes at about 1938 B per queued emit.
+- 2026-11-09: WS2 finished the first session protocol specification (82 `SESS-*` rules, both languages); the unknown-field conflict is still undecided.
+- 2026-11-09: WS3 finished the first tracker version: 264 rows (210 registry + 54 hand-written), `node tools/formal-trace.mjs --check` reports zero problems; the 1368 protocol rules are not extracted yet.
+- 2026-11-09: WS4 finished the first `specs/event-close/` model; all seven configurations end as `expected.txt` says (healthy 2,263,040 distinct/21s, tree 688,580/12s, drain 31,488/1s; four mutations violate their expected invariants).
+- 2026-11-09: WS5 landed the channel/frame trace validator, 11 tests pass; WS7 landed the grant-rollback property tests, 6 tests pass and mutations are caught; WS6 landed four Node frame-pump cases and reproduced the Node/Bun `drain()` hang (G9).
+- 2026-11-09: all seven workstreams have their first slice done or in verification; WS8 (close-out, CI wiring, full rule extraction) has not started.

@@ -5,7 +5,6 @@ use crate::session::Error;
 
 /// Who speaks at the far end, for diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Implementation {
     pub name: String,
     pub version: String,
@@ -24,12 +23,7 @@ pub(crate) enum Kind {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(
-    tag = "type",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub(crate) enum WireValue {
     Undefined,
     Data(Value),
@@ -85,7 +79,6 @@ impl WireValue {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct Failure {
     pub name: String,
     pub message: String,
@@ -152,7 +145,7 @@ impl From<Failure> for Error {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "op", rename_all = "snake_case")]
 pub(crate) enum Frame {
     /// Opens a session: the version, the endpoint, its implementation and
     /// its capabilities.

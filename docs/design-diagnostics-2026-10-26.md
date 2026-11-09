@@ -101,6 +101,7 @@ site: {
 | `bad-argument` | 参数个数或类型不对 | `{service, method, argument, expected}` |
 | `bad-value` | 值传不过去，或消息超过上限 | `{argument?, part, reason, limit?}`（`reason` 是 [#936](https://github.com/arcships/rutis/issues/936) 加上的：`non-finite`、`cycle`、`too-deep`、`type`、`tag`、`limit`；`part` 多一个 `payload`，是事件的参数） |
 | `bad-result` | 收到的返回值解不开（[#936](https://github.com/arcships/rutis/issues/936)）：消息是解码器自己的那句，前面只有 `<服务>.<方法>: the result: ` | `{service, method, expected}`（对象的方法为 `{object, method, expected}`） |
+| `bad-frame` | 收到的调用帧带本端不认识的字段（[会话协议规格](protocol-session.md) §9）；只失败该调用，`hello` 失败握手 | `{op, fields}`（`fields` 是字段路径） |
 | `peer-gone` | 调用进行中对面的运行时退出或断开 | `{runtime, reason}` |
 | `bad-config` | 这一行的配置不符合插件的 Schema（[配置 Schema 设计](design-config-schema-2026-10-27.md) §5.2 加的一行） | `{issues: [{path, message}]}`（`path` 的每一项是键或下标） |
 

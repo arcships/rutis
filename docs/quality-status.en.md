@@ -2,7 +2,7 @@
 
 [中文](quality-status.md) · [Quality standard](quality-standard.en.md)
 
-Status: kept up to date with the code. Last updated: 2026-11-08 (formal-verification rebaseline), baseline `main` `cf4ebebe`. Previous: 2026-10-12, baseline `f8ce69b` (end of step two / 0.10).
+Status: kept up to date with the code. Last updated: 2026-11-09 (0.23 merged into 0.22, execution plan and first evidence), baseline `main` `2452baee`. Previous: 2026-11-08, baseline `cf4ebebe` (formal-verification rebaseline).
 Companion to: [Quality standard](quality-standard.en.md). This document maps the standard, clause by clause, to the current implementation: which clauses are met, which partly, what is missing and how it will be added. The standard describes rules that stay the same; the file names, test names, issue numbers and versions here change with the implementation. Which tests verify each guarantee is in the [guarantee register](guarantees.en.md).
 
 ---
@@ -633,7 +633,7 @@ As of 2026-11-08, formal verification is organised into four layers with these d
 | C. Cross-process deployment | #613, #624 | Depends on A and B; TLA+ proves the design, trace validation checks real executions, and conformance cases cover each language |
 | D. Inputs and long-term reliability | #631, #639 | Depends on the rules from A, B and C; property/fuzz testing, Kani/Miri, virtual clocks, ordinary tests and E2E cover model boundaries |
 
-#634 is shared tracking and close-out work, not another feature. In 0.22, first verify #1025's high-risk close semantics; complete cross-language and long-run coverage follows these dependencies. Do not bring #1040 back into 0.22 or 0.23.
+#634 is shared tracking and close-out work, not another feature. 0.23 is merged into 0.22: 0.22 completes both #1025's high-risk close-semantics verification and the full four-layer coverage. The execution plan is the [formal-coverage execution plan](plan/formal-verification-0.22.en.md). Do not bring #1040 back into 0.22.
 
 The following §§9.1–9.3 are retained only as historical quality-plan records, not as the current release schedule. “Done” there describes the acceptance conclusion at that time; it does not replace the new four-layer evidence of rules, models, traces and cross-implementation conformance.
 
@@ -703,16 +703,16 @@ The old “waiting for design” list is no longer the current schedule. The cur
 
 | Layer/work | Issue | Status and next step |
 | --- | --- | --- |
-| Protocol baseline and rule tracker | #635, #634 | In progress: unify current frame/handshake/error/reference/cancellation/limit rules and mark each current, superseded or explicitly not guaranteed |
-| Event, call and lifecycle models | #613 | In progress: extend TLA+ and reconcile the existing cross-runtime-sync and remote-lease models |
-| Rust implementation interleavings | #622 | In progress: extend shuttle, prioritising #1025 marker commit/admission, root/subtree close and cleanup exactly once |
-| Non-Rust runtime scheduling | #630 | In progress: controlled scheduling/static-check columns for applicable Node, Bun, Python, Go, Swift and Kotlin runtimes |
-| Trace and conformance | #624 | In progress: compare real execution traces with models and add applicable language columns; not merely check that a case exists |
-| Property, fuzz, Kani/Miri | #631 | In progress: cover values, frames, events, routing, configuration and reference input spaces |
-| Conformance and ordinary tests | #639 | In progress: add the 161 rule cases, the 18 ordinary tests formal methods cannot cover and virtual-clock timing cases |
-| Shared close-out | #634 | In progress: maintain the rule → evidence → implementation → platform traceability and release status |
+| Protocol baseline and rule tracker | #635, #634 | In progress: first session protocol specification (`docs/protocol-session.md`) written; first tracker version has 265 rows (not the full 1368). Unknown fields are decided: reject but fail only that call (`bad-frame`); Rust implements it, the other six still ignore them (cross-implementation gap) |
+| Event, call and lifecycle models | #613 | First slice done: all seven `specs/event-close/` configurations end as expected and four mutations are caught; reconciling cross-runtime-sync/remote-lease and the event/row/call-lifecycle models remain |
+| Rust implementation interleavings | #622 | Core done, verifying: #1025 marker publication, `Entry::live`, four deterministic race cases and the shuttle model pass; Loading-owner, `once` and remote-entry remain |
+| Non-Rust runtime scheduling | #630 | First slice done: four Node frame-pump cases; Bun/Python/Go are inventory-only; Swift/Kotlin lack toolchains here and are recorded as environment gaps |
+| Trace and conformance | #624 | First slice done: Rust channel/frame validator with 11 cases; leases, host-gone, sync-cycles and cross-language columns remain |
+| Property, fuzz, Kani/Miri | #631 | First slice done: six grant-rollback cases with proptest and mutation checks; Kani/Miri are not installed and fuzz targets were not run, so they are not reported as passing |
+| Conformance and ordinary tests | #639 | In progress: the gap inventory is incomplete; the 161 conformance cases, 18 ordinary tests and virtual-clock cases are not wired yet |
+| Shared close-out | #634 | In progress: the tracker and checker run (`node tools/formal-trace.mjs --check` reports zero problems); CI wiring and the full rule extraction remain |
 
-#1040 remains deferred; do not bring the service-announcement policy back into 0.22 or 0.23.
+#1040 remains deferred; do not bring the service-announcement policy back into 0.22.
 
 ---
 

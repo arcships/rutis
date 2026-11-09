@@ -2,7 +2,7 @@
 
 [English](design-event-close-admission-2026-11-08.en.md)
 
-Status: 草案，尚未实现。日期：2026-11-08。
+Status: 核心已实现，验证中。日期：2026-11-08；2026-11-09 实现 marker 发布、`Entry::live`、确定性竞态测试和 shuttle 模型。
 Issue：[ #1025 ](https://github.com/arcships/rutis/issues/1025)。实施 issue：#1025-core、#1025-tests、#1025-benchmark（将在 0.22 计划中拆出）。
 
 ## 1. 现状与要解决的问题
@@ -25,9 +25,9 @@ shutdown 已在标记子树并开始关闭时持有 `Shared.admission`（`crates
 
 ## 3. 精确规则
 
-**这些规则的状态。** 规则 1-7、9-10 都是**提案，尚未验证**的设计要求，不是当前实现保证。规则 8 将当前已有的 `ErrorKind::Closed` 证据与另行标记的 listener delivery 提案放在一起。本节任何规则都必须等 §6 所列源码审查和竞态测试通过后，才能改为当前保证。
+**这些规则的状态。** 2026-11-09 已实现规则 1、2、5 的核心：`mark_subtree_lineage` / `publish_subtree_closing` 的两阶段发布、`release_transient` 持锁摘除、root 子树标记、`Entry::live` 只读 owner marker，以及 `Entry::start` 的 `CallFlight` 顺序。确定性测试见 `crates/rutis-loader/tests/event_close_admission.rs`，shuttle 模型见 `crates/rutis/src/fiber/shuttle_tests.rs`。规则 3、6、7、8、9 的 Loading-owner、`once`、remote-entry、跨进程和重载覆盖尚未全部落地，因此本节仍不把规则写成“当前保证”；等 §6 的全部门槛通过后再改状态。
 
-1. **提案，尚未验证。** 非 root 子树关闭前，shutdown 必须在 `Shared.admission` 下收集当前所有 descendant，并按 postorder（叶到根）为全部成员写 `lineage_closed=true`。然后写现有 `closing=true` 并调用 `pre_cancel`，最后调用 `begin_subtree_shutdown_locked`。fiber 创建和子树收集使用 `Shared.admission`；但 `release_transient` 当前在未持有该锁时从 `parent.children` 摘除 child（`crates/rutis/src/fiber.rs:1507-1514`），因此实现必须让该脱离也持锁，或证明脱离开始后该 fiber 不可能再被接纳。没有这两种证明之一，不得声称集合已固定。
+1. **提案，尚未验证。** 非 root 子树关闭前，shutdown 必须在 `Shared.admission` 下收集当前所有 descendant，并按 postorder（叶到根）为全部成员写 `lineage_closed=true`。然后写现有 `closing=true` 并调用 `pre_cancel`，最后调用 `begin_subtree_shutdown_locked`。fiber 创建和子树收集使用 `Shared.admission`；`release_transient` 已在同一锁下从 `parent.children` 摘除 child（`crates/rutis/src/fiber.rs:1477-1500`），测试见 `crates/rutis-loader/tests/event_close_admission.rs`，模型见 `crates/rutis/src/fiber/shuttle_tests.rs`。实现：`mark_subtree_lineage` / `publish_subtree_closing`（`crates/rutis/src/fiber.rs:2172-2226`）。
 2. **提案，尚未验证。** root shutdown 对 root 加全部 descendant 执行相同 marker pass，再写 `Shared.closing=true`，对 root/descendant 执行 pre-cancel 并提交现有关闭意图。即使旧 root shutdown 只写 `Shared.closing`，root descendant 也必须被标记。
 3. **提案，尚未验证。** 在 shared root 已关闭时创建的 fiber 以 disposed 和 `lineage_closed=true` 开始。永久关闭 marker 不会在 restart/update 时清除；新 fiber 获取新的 marker。
 4. **提案，尚未验证。** marker pass 是关闭接纳边界：最终 `Entry::live` marker load 在完成前的调用可以接纳并正常等待；完成后的检查不得再接纳。必须固定两种竞态： (a) `Entry::start` 在 marker pass 完成前完成最终 `live()`，调用被接纳并必须 drain；(b) marker pass 先完成，最终 `live()` 随后失败，`CallFlight` 被释放且 listener 不运行。snapshot 可能持有 stale entry，但 `Entry::start` 是权威的最终检查。已接纳的 callback 可能在 owner marker 提交后开始，但必须按既有规则 drain；提交后不得有新的 callback 被接纳。由于该提交点晚于当前实现第一次写 `closing` 的时间，实现测试还必须记录 marker pass 是否扩大了接纳窗口。
@@ -77,6 +77,15 @@ shutdown 已在标记子树并开始关闭时持有 `Shared.admission`（`crates
 2. **事件竞态测试（#1025-tests）。** 增加确定性 parent→child listener 测试：完成 parent shutdown 的 marker pass 后，立即从不相关的 open context emit，断言 child 调用次数为零；增加 root shutdown、嵌套 subtree、sibling、Loading-owner、重复 shutdown 和 remote-entry 覆盖。利用测试 selection hook 选中 entry，在 `Entry::start` 前 shutdown，断言最终 marker check 跳过；验证已在途 callback 仍 drain。提案完成门槛：sync、`emit`、`serial`、`parallel`、`bail`、waterfall 均不会在 commit 后接纳新的 callback；已接纳 callback 即使在 commit 后开始，也按既有规则 drain。
 3. **Benchmark 与 CI（#1025-benchmark）。** 运行 `cargo test -p rutis-loader --release --test close_cpu -- --nocapture`；对比 creation/close CPU 和 queued-emits memory。验收 job 是 `.github/workflows/stress.yml:381-417` 的 Ubuntu 24.04 release job，依次运行 `close_cpu` 和 `queued_emits_memory`；summary 必须保留两项结果。只用实测值更新 0.22 performance record/CI summary。提案完成门槛：记录 issue 工作负载的创建耗时目标（≤30 秒）；自动测试继续比较既有 `CREATE_RATIO`、`CLOSE_RATIO`、`IDLE_SHARE` 阈值，close CPU 不回归，并保持 queued-emits memory 结果。
 4. **文档/release（#1025-docs）。** 保持本文档与英文对应稿同步；加入 0.22 release-note 条目，并链接不变的事件关闭保证。提案完成门槛：双语审查确认没有暗示新的开发者可见行为。
+
+### 2026-11-09 进展
+
+- **core：** `FiberInner::lineage_closed` 在 spawn 时按初始 closed 状态初始化；非 root 和 root shutdown 都在 `Shared.admission` 下先收集固定子树、写完所有 marker，再发布 `closing` / `Shared.closing`；`release_transient` 的 child 摘除已持同一把锁。
+- **测试：** `cargo test -p rutis-loader --test event_close_admission` 4 个用例通过：五种 dispatch mode 的 commit-后跳过、root 跳过、嵌套/sibling、已接纳回调 drain。
+- **模型：** `shuttle_lineage_marker_precedes_closing` 通过；把 `publish_subtree_closing` 放到 `mark_subtree_lineage` 之前，模型立即报“this node is closing while its lineage marker is clear”。
+- **模型：** `specs/event-close/run.sh` 的 7 个配置全部按 `expected.txt` 结束：`close-healthy` 2,263,040 个不同状态、21 秒，`close-tree` 688,580 个、12 秒，`close-drain` 31,488 个、1 秒；4 个变异分别违反 `ClosingImpliesMarked`、`CommittedStaysOut`（两次）和 `CleanupOnce`。
+- **benchmark（本机 release，Linux x86-64）：** 100 个 instance 创建 150.60 ms、关闭 119.06 ms；1000 个 instance 创建 17.55 s、关闭 11.15 s。`CREATE_RATIO`、`CLOSE_RATIO`、`IDLE_SHARE` 阈值全部通过；issue 的 ≤30 秒创建目标在本机达到。CI 的 `stress.yml` `cpu` job 仍需记录同一组数字。
+- **仍缺：** Loading-owner、`once`、remote-entry、重复 shutdown 的专项用例；CI stress job；release notes。完成这些之前，规则保持“提案，尚未验证”。
 
 ## 7. 设计哲学检查
 

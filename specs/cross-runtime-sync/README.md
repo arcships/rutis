@@ -4,6 +4,8 @@
 
 用 TLC 穷举"多个语言运行时经 Rust 宿主互相同步调用"的交错，回答多语言设计 §九 留下的问题：两个候选策略哪个能消除卡死。对应 issue #208，质量规范 Q11.2、Q6.2.8、Q6.8.3，现状 §7.1（风险 P10、C6）。
 
+**对账（2026-11-09）。** 模型仍是 #535 时的等待图：没有 [#614](https://github.com/arcships/rutis/issues/614) 的 Go / Swift / Kotlin `Profile`（`stacked = false`）、宿主工作线程、`bail` / `waterfall` 同步分发、取消和异步等待结果的分发。多语言设计 §九 已在 2026-10-14 记录 Swift / Kotlin 声明 `sync-wait`、不声明 `sync-stack`；模型没有这两列。模型语义未改。
+
 ## 对应的设计和代码
 
 | 模型部分 | 设计 | 实现 |

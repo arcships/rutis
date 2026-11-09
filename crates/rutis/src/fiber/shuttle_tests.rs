@@ -39,9 +39,13 @@ use shuttle::sync::atomic::AtomicBool;
 use shuttle::thread;
 use tokio::sync::mpsc;
 
-use super::{complete_intent, join_task, post_join_to, Intent, TransitionTask};
+use super::{
+    complete_intent, join_task, mark_subtree_lineage, post_join_to, publish_subtree_closing,
+    CloseTree, Intent, TransitionTask,
+};
 use crate::effect::{run_cleanups, Effect, EffectRecord};
 use crate::error::{Error, ErrorKind};
+use crate::sync::{switch_point, AtomicBool as SyncBool, Mutex as SyncMutex};
 
 /// Iterations of each scheduler: `RUTIS_SHUTTLE_ITERATIONS`, or 1000.
 fn iterations() -> usize {
@@ -217,4 +221,141 @@ fn shuttle_concurrent_dispose_cleans_up_exactly_once() {
             );
         }
     });
+}
+
+/// Model 4, the subtree-close marker pass (#1025): a closer collects a fixed
+/// tree, writes every `lineage_closed` marker, and only then publishes the
+/// existing `closing` flags. A reader that sees an ancestor closing while its
+/// own marker is still clear would admit a call after the close boundary.
+///
+/// The model runs the kernel's own [`mark_subtree_lineage`] /
+/// [`publish_subtree_closing`] through [`CloseTree`], so changing the
+/// two-phase order in the kernel changes this model too. The deliberate
+/// mutation for review: call `publish_subtree_closing` before
+/// `mark_subtree_lineage` (or publish closing per member inside the marker
+/// loop); the readers then report an ancestor-closed/child-live window.
+#[test]
+fn shuttle_lineage_marker_precedes_closing() {
+    explore(|| {
+        let (root, nodes) = model_tree();
+        let done = Arc::new(SyncBool::new(false));
+        let readers: Vec<_> = nodes
+            .iter()
+            .map(|node| {
+                let node = node.clone();
+                let done = done.clone();
+                thread::spawn(move || {
+                    while !done.load(Ordering::SeqCst) {
+                        if let Some(why) = close_window(&node) {
+                            panic!("{why}");
+                        }
+                        switch_point();
+                    }
+                })
+            })
+            .collect();
+
+        let closer = {
+            let root = root.clone();
+            let done = done.clone();
+            thread::spawn(move || {
+                switch_point();
+                let subtree = mark_subtree_lineage(&root);
+                // The kernel publishes `Shared.closing` between the two
+                // passes for a root. A subtree has no shared flag; this
+                // switch point stands in for the end of the marker pass.
+                switch_point();
+                publish_subtree_closing(&subtree);
+                done.store(true, Ordering::SeqCst);
+            })
+        };
+
+        closer.join().unwrap();
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        for node in &nodes {
+            assert!(
+                node.lineage_closed.load(Ordering::SeqCst),
+                "a member of the fixed subtree was not marked"
+            );
+            assert!(
+                node.closing.load(Ordering::SeqCst),
+                "a member of the fixed subtree was not closed"
+            );
+        }
+    });
+}
+
+/// The model's fiber: parent link, children, and the two markers the kernel
+/// publishes (`crate::sync` makes the atomics switch points under shuttle).
+struct ModelFiber {
+    parent: Option<Weak<ModelFiber>>,
+    children: SyncMutex<Vec<Arc<ModelFiber>>>,
+    lineage_closed: SyncBool,
+    closing: SyncBool,
+}
+
+impl ModelFiber {
+    fn new(parent: Option<Weak<ModelFiber>>) -> Self {
+        Self {
+            parent,
+            children: SyncMutex::new(Vec::new()),
+            lineage_closed: SyncBool::new(false),
+            closing: SyncBool::new(false),
+        }
+    }
+}
+
+impl CloseTree for ModelFiber {
+    fn close_children(&self) -> Vec<Arc<Self>> {
+        self.children.lock().unwrap().clone()
+    }
+
+    fn mark_lineage(&self) {
+        self.lineage_closed.store(true, Ordering::SeqCst);
+    }
+
+    fn publish_closing(&self) {
+        self.closing.store(true, Ordering::SeqCst);
+    }
+}
+
+fn model_tree() -> (Arc<ModelFiber>, Vec<Arc<ModelFiber>>) {
+    let root = Arc::new(ModelFiber::new(None));
+    let left = Arc::new(ModelFiber::new(Some(Arc::downgrade(&root))));
+    let right = Arc::new(ModelFiber::new(Some(Arc::downgrade(&root))));
+    let nested = Arc::new(ModelFiber::new(Some(Arc::downgrade(&left))));
+    root.children
+        .lock()
+        .unwrap()
+        .extend([left.clone(), right.clone()]);
+    left.children.lock().unwrap().push(nested.clone());
+    (root.clone(), vec![root, left, right, nested])
+}
+
+/// `Some(reason)` when this node could admit a call after a close boundary:
+/// its own closing flag or an ancestor's close is visible, and its own marker
+/// is still clear when read after that observation. The marker is re-read
+/// after the close flags, so a node marked concurrently does not look like a
+/// window.
+fn close_window(node: &Arc<ModelFiber>) -> Option<String> {
+    let own_closing = node.closing.load(Ordering::SeqCst);
+    let mut ancestor_closed = false;
+    let mut current = node.parent.as_ref().and_then(Weak::upgrade);
+    while let Some(parent) = current {
+        if parent.closing.load(Ordering::SeqCst) || parent.lineage_closed.load(Ordering::SeqCst) {
+            ancestor_closed = true;
+            break;
+        }
+        current = parent.parent.as_ref().and_then(Weak::upgrade);
+    }
+    if (own_closing || ancestor_closed) && !node.lineage_closed.load(Ordering::SeqCst) {
+        return Some(if own_closing {
+            "this node is closing while its lineage marker is clear".to_string()
+        } else {
+            "an ancestor is closed while this node's marker is clear".to_string()
+        });
+    }
+    None
 }

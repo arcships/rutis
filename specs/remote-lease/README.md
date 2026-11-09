@@ -7,6 +7,8 @@
 - `RemoteLease.tla`：监听的远端运行时，和拨号连它的两个控制方 link（issue 的原始范围）；
 - `AccessPoint.tla`：远端拨入 `rutis-host/listen` 的一行：握手并行、每个 id 一个 session、同 id 的新连接顶替旧的，以及拨出方的重连规则。
 
+**对账（2026-11-09）。** 模型仍按 #210 的范围：停止是终态、清理瞬时、活性只在无故障运行里检查。[#615](https://github.com/arcships/rutis/issues/615) 列出的 Swift / Kotlin / Cordis 节点的接管与再拨、应用托管停止后再开始、清理截止（Node / Bun 的 5 秒强杀）、故障之后的活性尚未并入模型；对应表也只列到 Python / Go / Node / Bun。模型语义未改。
+
 ## 对应的设计和代码
 
 | 模型部分 | 设计 | 实现 |

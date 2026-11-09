@@ -1,0 +1,8 @@
+# configuration  expected TLC outcome (see README.md)
+close-healthy ok
+close-tree ok
+close-drain ok
+close-mut-early-closing violated:ClosingImpliesMarked
+close-mut-missed-member violated:CommittedStaysOut
+close-mut-ignores-marker violated:CommittedStaysOut
+close-mut-reclose violated:CleanupOnce

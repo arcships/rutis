@@ -4,6 +4,8 @@
 
 TLC explores every interleaving of language runtimes calling each other synchronously through the Rust host, to answer the question left open in §九 of the multi-language design: which of the two candidate policies removes the deadlocks. Issue #208; quality standard Q11.2, Q6.2.8, Q6.8.3; status §7.1 (risks P10, C6).
 
+**Reconciliation (2026-11-09).** The model still has the wait graph as of #535: it lacks [#614](https://github.com/arcships/rutis/issues/614)'s Go / Swift / Kotlin `Profile` (`stacked = false`), the host's worker threads, `bail` / `waterfall` synchronous dispatch, cancellation, and async calls that carry a marked chain. Multi-language design §9 has recorded since 2026-10-14 that Swift / Kotlin declare `sync-wait` and not `sync-stack`; the model has no such columns. The model's semantics are unchanged.
+
 ## Design and code it corresponds to
 
 | Part of the model | Design | Implementation |

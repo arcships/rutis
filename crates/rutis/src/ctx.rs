@@ -16,8 +16,8 @@ use crate::error::{
     default_sink, Error, ErrorKind, ErrorSink, ServiceReadError, ServiceReadFailure,
 };
 use crate::fiber::{
-    join_task, spawn_fiber, DisposeWaitError, FiberInner, FiberState, FiberView, Intent, PluginId,
-    TransitionTask,
+    join_task, mark_subtree_lineage, publish_subtree_closing, spawn_fiber, DisposeWaitError,
+    FiberInner, FiberState, FiberView, Intent, PluginId, TransitionTask,
 };
 use crate::host::CtxHost;
 use crate::internal::CtxInternal;
@@ -1324,15 +1324,25 @@ impl crate::host::CtxHost for Ctx {
             } else {
                 let task = TransitionTask::new();
                 *slot = Some(task.clone());
+                let root = self.root_view();
+                let subtree = match &root {
+                    Some(root) => {
+                        // Root shutdown uses the same marker pass as a
+                        // subtree shutdown (#1025): mark the whole tree
+                        // before publishing `Shared.closing`, so
+                        // `Entry::live` never sees an ancestor closed while
+                        // its own marker is still clear.
+                        mark_subtree_lineage(&root.inner)
+                    }
+                    None => Vec::new(),
+                };
                 self.0.shared.closing.store(true, Ordering::SeqCst);
-                if let Some(root) = self.root_view() {
-                    // Like subtree shutdown: descendants are cancelled before
-                    // the root waits for its instance events to drain.
-                    root.inner.pre_cancel();
-                    root.inner.cancel_descendants();
-                    root.inner.post(Intent::Shutdown(task.clone()));
-                } else {
-                    task.complete(Some(Arc::new(ErrorKind::Closed)));
+                publish_subtree_closing(&subtree);
+                match root {
+                    Some(root) => {
+                        root.inner.post(Intent::Shutdown(task.clone()));
+                    }
+                    None => task.complete(Some(Arc::new(ErrorKind::Closed))),
                 }
                 task
             }
