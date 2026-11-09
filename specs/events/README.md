@@ -96,7 +96,7 @@ TLC 2.19（tla2tools v1.7.4），Temurin 21.0.12，32 核，`-workers 4`，2026-
 | `emit-mut-reply-async` | 读到 emit 回复后过一步才记为已回复（#513 之前） | 违反 `FastPathByFrame` | 反例即停 | <1 s |
 | `emit-mut-unload` | 行卸载时不丢弃排队的 emit（#536 之前） | 违反 `UnloadedRowEmitsNothing` | 反例即停 | 1 s |
 | `link-healthy` | 两次提供、宣告早于提供、另一个族引起的快照 | 通过 | 14,042 | 1 s |
-| `link-mut-accept-unlocked` | 接受的查代次与插入之间解锁（`link.rs` `accept` 的现状） | 违反 `CurrentOffer` | 反例即停 | 1 s |
+| `link-mut-accept-unlocked` | 接受的查代次与插入之间解锁（修复前 `link.rs` `accept` 的行为；当前实现已在同一把锁内重检） | 违反 `CurrentOffer` | 反例即停 | 1 s |
 | `link-mut-bare-id` | 公告 id 不带 epoch，只按 id 替换（EVP-9-17） | 违反 `CurrentOffer` | 反例即停 | 1 s |
 | `link-mut-offer-race` | 没有 `events` 的快照撤下全部条目（#593 之前） | 违反 `CurrentOffer` | 反例即停 | <1 s |
 | `link-mut-echo` | 宿主把引进的条目再宣告回去 | 违反 `NoEcho` | 反例即停 | 1 s |
@@ -114,7 +114,7 @@ TLC 2.19（tla2tools v1.7.4），Temurin 21.0.12，32 核，`-workers 4`，2026-
 - **`emit-mut-held`**：`E1` 在 `L1` 的调用被等待扣住；`R1` 读到回复后，快速路径上的 `E2` 立刻开始 `L1` 的调用；等待结束后 `E1` 的调用才跑。同一个发出方的两次 emit，在 `L1` 上 `E2` 先开始，`EmitOrder` 不成立（#557 之前）。
 - **`emit-mut-reply-async`**：`R1` 已经读到 `E1` 的回复帧，但过一步才记为已回复；等待链在这之间发出 `E2`，运行时仍把它送去宿主。`FastPathByFrame` 不成立（#513 之前）。
 - **`emit-mut-unload`**：行卸载时不丢弃排队的 emit；过滤器之后回答，`E1`/`E2` 仍开始调用，`UnloadedRowEmitsNothing` 不成立（#536 之前）。
-- **`link-mut-accept-unlocked`**：接受 `<<1,2>>` 的查代次做完、插入之前，宿主处理了版本更高的、`events: 2` 的快照（撤下旧提供）；插入随后把 `<<1,2>>` 放回表里。连接安静下来后，表里多出一个对端当前提供没有宣告的条目，`CurrentOffer` 不成立。`link.rs` 的 `accept()` 现在就是这样：查代次在锁内，登记条目在锁外，插入在另一次锁内。
+- **`link-mut-accept-unlocked`**：接受 `<<1,2>>` 的查代次做完、插入之前，宿主处理了版本更高的、`events: 2` 的快照（撤下旧提供）；插入随后把 `<<1,2>>` 放回表里。连接安静下来后，表里多出一个对端当前提供没有宣告的条目，`CurrentOffer` 不成立。修复前的 `link.rs` `accept()` 就是这样：查代次在锁内，登记条目在锁外，插入在另一次锁内。当前实现用 `gone` 边界在插入的同一把锁内重检，并有 `an_entry_of_an_offer_gone_while_it_registered_is_not_taken` 回归测试；变异配置仍按修复前行为构造，用来守住这个窗口。
 - **`link-mut-bare-id`**：公告 id 不带 epoch，宿主只按 id 替换；对端重新提供后，旧提供下宣告、新提供不再有的条目留在表里，`CurrentOffer` 不成立（EVP-9-17）。
 - **`link-mut-offer-race`**：一个没有 `events` 的快照撤下全部条目；一个先于它的提供到达的宣告被这次撤下带走，即使它的提供还没被列出（#593 之前）。
 - **`link-mut-echo`**：宿主把从对端接受的条目宣告回去，`NoEcho` 不成立。
@@ -123,7 +123,7 @@ TLC 2.19（tla2tools v1.7.4），Temurin 21.0.12，32 核，`-workers 4`，2026-
 
 - 按当前规格，`EventsHost.tla` 的定义与规格例子一致；`EventsTable.tla` 的四个安全性质在穷举范围内成立：同一进程里先登记后发出（两条路径）、撤下后不再开始调用、同一对条目处处同一先后、`rows.load` 回复前登记已被接受；新会话必须先后收到 elsewhere 全集。
 - `EventsEmit.tla` 的两个顺序性质与行卸载性质在它的场景里成立；三个修复前的行为都被找到反例：被扣住的调用被后来的快速路径 emit 抢先、读到回复后晚一步记账、卸载不丢弃排队的 emit。
-- `EventsLink.tla`：只保留最高版本的快照、旧提供的条目按 epoch 撤下、先于提供到达的宣告保留，这三条在当前规则下成立；不带 epoch 的 id（EVP-9-17）和 `accept()` 解锁窗口各有一个反例。
+- `EventsLink.tla`：只保留最高版本的快照、旧提供的条目按 epoch 撤下、先于提供到达的宣告保留，这三条在当前规则下成立；不带 epoch 的 id（EVP-9-17）和修复前 `accept()` 的解锁窗口各有一个反例；`accept()` 的窗口现在由实现回归测试守住。
 - 模型没有证明的（按 issue #613 的范围）：2 个运行时 × 2 行的同一配置、跨进程调用的因果、前缀条目、作用域、值、错误、取消、宿主的 per-row emit 队列、`R2a` 的交叠执行、多跳节点、`python-deferred` 和 `before-future-reply` 两个配置。它们要么在 README 的“简化”里，要么没有建；不能把这个目录当成 #613 的完整证据。
 
 ## 怎么运行

@@ -89,6 +89,10 @@ struct LinkState {
     /// The latest epoch of the peer's offer of `events` seen here: what the
     /// peer announced under an older one is gone.
     seen: u64,
+    /// No entry announced under an offer before `gone` is taken here or
+    /// stays. It can be ahead of `seen`: a snapshot that no longer lists
+    /// `events` withdraws the offer it showed last, and names no newer one.
+    gone: u64,
     /// The latest epoch of the peer's offer of `events` its offers showed
     /// (`link.offers`). `seen` can be ahead of it: an announcement can come
     /// before its offer, which the peer announces on a task.
@@ -246,7 +250,7 @@ impl Link {
     /// if that offer is already gone (the entry is not taken), else the
     /// entries of older offers, gone now.
     fn announced_under(state: &mut LinkState, epoch: u64) -> Option<Vec<Disposer>> {
-        if epoch < state.seen {
+        if epoch < state.gone {
             return None;
         }
         Some(Self::newer(state, epoch))
@@ -262,8 +266,9 @@ impl Link {
     }
 
     /// Take out the accepted entries announced under an offer before
-    /// `epoch`.
+    /// `epoch`: those offers are gone here.
     fn older_than(state: &mut LinkState, epoch: u64) -> Vec<Disposer> {
+        state.gone = state.gone.max(epoch);
         let ids: Vec<String> = state
             .accepted
             .keys()
@@ -303,9 +308,10 @@ impl Link {
                 announced.name
             )));
         }
-        // Of an offer already gone: it is not taken. Of a newer one than
-        // seen so far (its announcement may come before the offer): the
-        // older offers' entries are gone.
+        // Of an offer already gone (a newer one seen, or the one shown
+        // withdrawn): it is not taken. Of a newer one than seen so far (its
+        // announcement may come before the offer): the older offers' entries
+        // are gone.
         if let Some(epoch) = epoch_of(&announced.id) {
             let Some(gone) = Self::announced_under(&mut self.state.lock().unwrap(), epoch) else {
                 return Ok(Value::Undefined);
@@ -353,17 +359,39 @@ impl Link {
             );
         }
         if !disposers.is_empty() {
-            let previous = self
-                .state
-                .lock()
-                .unwrap()
-                .accepted
-                .insert(announced.id, disposers);
-            for disposer in previous.into_iter().flatten() {
+            // The entry is registered and not in `accepted` yet: a test
+            // pauses here, where a snapshot can be seen meanwhile.
+            #[cfg(test)]
+            tests::ACCEPTING.with(|hook| {
+                if let Some(hook) = hook.borrow().as_ref() {
+                    hook();
+                }
+            });
+            for disposer in Self::kept(&self.state, &announced.id, disposers)
+                .into_iter()
+                .flatten()
+            {
                 dispose_now(disposer);
             }
         }
         Ok(Value::Undefined)
+    }
+
+    /// The entries accepted for the announcement `id` in place: those they
+    /// replace, or those just accepted, if the offer they were announced
+    /// under went while they registered (disposed by the caller).
+    ///
+    /// The epoch is checked before the entries register and they are put in
+    /// after, in another critical section: an offer seen gone between the
+    /// two withdrew the older ones, which these were not in `accepted` to
+    /// go with. Put in without the check again, an entry of an offer gone
+    /// stays (`CurrentOffer`, the model's `acceptUnlocked`).
+    fn kept(state: &Mutex<LinkState>, id: &str, disposers: Vec<Disposer>) -> Option<Vec<Disposer>> {
+        let mut state = state.lock().unwrap();
+        match epoch_of(id) {
+            Some(epoch) if epoch < state.gone => Some(disposers),
+            _ => state.accepted.insert(id.to_owned(), disposers),
+        }
     }
 
     fn forget(&self, ids: Value) -> Reply {
@@ -617,7 +645,147 @@ impl DynPlugin for NodeEvents {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
+
+    thread_local! {
+        /// Runs in `accept` between the entry's registration and its place
+        /// in `accepted`, where the offer it was checked under can go.
+        pub(super) static ACCEPTING: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    }
+
+    /// Answers every call with nothing.
+    struct Quiet;
+    impl crate::session::Dispatch for Quiet {
+        fn invoke(&self, _: &Connection, _: &str, _: &str, _: Value) -> Reply {
+            Ok(Value::Undefined)
+        }
+    }
+
+    /// A link to a peer, over a session that answers nothing.
+    fn link(ctx: &Ctx, peer: &str) -> Link {
+        let (near, _far) = crate::memory::pair();
+        let connection = Connection::open(
+            near,
+            Arc::new(Quiet),
+            crate::session::rpc::Endpoint::rust(PeerId::new("rust").unwrap()),
+        )
+        .unwrap();
+        Link {
+            ctx: ctx.clone(),
+            peer: PeerId::new(peer).unwrap(),
+            connection: connection.downgrade(),
+            scope: Vec::new(),
+            origin: next_origin(),
+            state: Mutex::default(),
+        }
+    }
+
+    /// The peer announces one of its entries, under `id`.
+    fn announced(id: &str, name: &str) -> Value {
+        Value::Data(json!({ "id": id, "name": name, "kind": "any" }))
+    }
+
+    /// Runs `accept` of `id` (announced as `name`), with `meanwhile` run in
+    /// the window between the epoch's check and the entry's place in
+    /// `accepted` — where the peer's offers can show a newer one.
+    fn accept_with(
+        link: &Arc<Link>,
+        id: &str,
+        name: &str,
+        meanwhile: impl Fn(&Link) + 'static,
+    ) -> Reply {
+        let (link, paused) = (Arc::clone(link), Arc::clone(link));
+        ACCEPTING.with(|hook| *hook.borrow_mut() = Some(Box::new(move || meanwhile(&paused))));
+        let out = link.accept(announced(id, name));
+        ACCEPTING.with(|hook| hook.borrow_mut().take());
+        out
+    }
+
+    /// The names in the bus's table, waiting for them to be `want` (a
+    /// disposer runs its effect on a task) and up to 1 s: the names found.
+    async fn names_until(ctx: &Ctx, want: &[&str]) -> Vec<String> {
+        let mut names = Vec::new();
+        for _ in 0..200 {
+            let (snapshot, watching) = ctx.events().watch_table(ctx, |_| {}).unwrap();
+            names = snapshot.iter().map(|entry| entry.name.clone()).collect();
+            dispose_now(watching);
+            if names.len() == want.len()
+                && names.iter().zip(want).all(|(found, want)| found == want)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        names
+    }
+
+    /// guarantee: events/node-links
+    /// The epoch of an announcement is checked before its entry registers,
+    /// and the entry is put in `accepted` after, in another critical
+    /// section. A newer offer of the peer seen between the two withdraws
+    /// the entries of the older one; the one in flight was not there to go
+    /// with them, and put in without the check again it stays — a table
+    /// with an entry the peer's current offer does not announce
+    /// (`CurrentOffer`, `specs/events/link-mut-accept-unlocked`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_entry_of_an_offer_gone_while_it_registered_is_not_taken() {
+        let root = Ctx::root().unwrap();
+        // The peer offers `events` as epoch 1.
+        let link = Arc::new(link(&root, "peer"));
+        assert!(Link::offer_now(&mut link.state.lock().unwrap(), Some(1)).is_empty());
+        // Its entry `1.1` is checked; before it is in, the peer offers
+        // `events` anew, as epoch 2: what it announced under 1 is gone.
+        accept_with(&link, "1.1", "t/x", |link| {
+            let gone = Link::offer_now(&mut link.state.lock().unwrap(), Some(2));
+            assert!(gone.is_empty(), "1.1 is not in yet to go with them");
+        })
+        .unwrap();
+        assert!(
+            link.state.lock().unwrap().accepted.is_empty(),
+            "an entry of an offer gone is not taken"
+        );
+        assert_eq!(
+            names_until(&root, &[]).await,
+            Vec::<String>::new(),
+            "nor is it in the bus"
+        );
+    }
+
+    /// guarantee: events/node-links
+    /// The offer shown last, withdrawn while an entry of it registers: the
+    /// entry is not taken either, though no newer offer was seen. `gone`,
+    /// not `seen`, tells: a snapshot without `events` names no offer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_entry_of_the_offer_shown_then_withdrawn_is_not_taken() {
+        let root = Ctx::root().unwrap();
+        let link = Arc::new(link(&root, "peer"));
+        assert!(Link::offer_now(&mut link.state.lock().unwrap(), Some(1)).is_empty());
+        // Another family changes, and the snapshot no longer lists
+        // `events`: the offer it showed is withdrawn.
+        accept_with(&link, "1.1", "t/x", |link| link.peer_offer(None)).unwrap();
+        assert!(link.state.lock().unwrap().accepted.is_empty());
+        assert_eq!(names_until(&root, &[]).await, Vec::<String>::new());
+    }
+
+    /// guarantee: events/node-links
+    /// An announcement of the offer shown is taken: its entry is in
+    /// `accepted` and in the bus while the offer is, and taken out when the
+    /// offer goes.
+    #[tokio::test]
+    async fn an_announcement_of_the_offer_shown_is_taken() {
+        let root = Ctx::root().unwrap();
+        let link = Arc::new(link(&root, "peer"));
+        assert!(Link::offer_now(&mut link.state.lock().unwrap(), Some(1)).is_empty());
+        accept_with(&link, "1.1", "t/x", |_| {}).unwrap();
+        assert!(link.state.lock().unwrap().accepted.contains_key("1.1"));
+        assert_eq!(names_until(&root, &["t/x"]).await, vec!["t/x".to_owned()]);
+        // The offer goes: the entry with it, in `accepted` and in the bus.
+        link.peer_offer(None);
+        assert!(link.state.lock().unwrap().accepted.is_empty());
+        assert_eq!(names_until(&root, &[]).await, Vec::<String>::new());
+    }
 
     /// guarantee: events/node-links
     /// The peer's `events.on` can come before its `link.offers` (the offer
@@ -648,6 +816,8 @@ mod tests {
         // The offer shown is withdrawn: its entry goes.
         assert_eq!(Link::offer_now(&mut state, None).len(), 1);
         assert!(state.accepted.is_empty());
+        // An announcement of that offer, come late, is not taken either.
+        assert!(Link::announced_under(&mut state, 3).is_none());
         // Offered anew; an entry of the newer offer, come first, stays
         // when the older one is seen withdrawn.
         accept(&mut state, "5.1");
