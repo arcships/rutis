@@ -1,0 +1,31 @@
+# configuration                     expected TLC outcome (see README.md)
+#
+# EventsHost.tla is definitions only: host-defs checks them on the examples
+# of the spec, in one state.
+host-defs ok
+#
+# EventsTable.tla
+table-healthy ok
+table-sees-all violated:SeesAll
+table-ended ok
+table-restart ok
+table-order ok
+table-mut-local-order violated:OneOrder
+table-mut-out-of-order violated:WithdrawnStaysOut
+table-mut-stale-fast violated:WithdrawnStaysOut
+table-mut-load-reply violated:RunningRowHeard
+table-mut-fresh violated:NoDispatchBeforeElsewhere
+#
+# EventsEmit.tla
+emit-r2a ok
+emit-r2b ok
+emit-mut-held violated:EmitOrder
+emit-mut-reply-async violated:FastPathByFrame
+emit-mut-unload violated:UnloadedRowEmitsNothing
+#
+# EventsLink.tla
+link-healthy ok
+link-mut-accept-unlocked violated:CurrentOffer
+link-mut-bare-id violated:CurrentOffer
+link-mut-offer-race violated:CurrentOffer
+link-mut-echo violated:NoEcho

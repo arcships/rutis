@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Run TLC on the configurations of this directory and compare each outcome
 # with expected.txt. `lease-*.cfg` check RemoteLease.tla, `access-*.cfg`
-# AccessPoint.tla.
+# AccessPoint.tla. The configurations #615 added: `lease-takeover`
+# (authentication before the close), `lease-cleanup-deadline` (a cleanup
+# deadline), `lease-app-restart` (stop then start), `access-static-revoke`
+# (a revoked static listen link), and their mutations.
 #   TLA2TOOLS=/path/to/tla2tools.jar ./run.sh [name ...]
 # Needs Java 11+ on PATH (for example `mise exec java@temurin-21 -- ./run.sh`).
 # tla2tools.jar: https://github.com/tlaplus/tlaplus/releases/tag/v1.7.4

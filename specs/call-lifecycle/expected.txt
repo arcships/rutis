@@ -1,8 +1,17 @@
 # configuration  expected TLC outcome (see README.md)
 call-healthy ok
 call-progress ok
+call-backpressure-before deadlock
+call-backpressure-after ok
+call-cancel-reply ok
+call-cancel-no-reply ok
+call-gap-cancel-table violated:CancelledEntriesDrain
+call-sync-abandon ok
 call-mut-cancel-closes violated:CancelKeepsSession
 call-mut-late-reply-twice violated:SettlesAtMostOnce
+call-mut-late-reply-keeps-grant violated:GrantsConserved
 call-mut-close-leaks violated:ClosedClearsTables
 call-mut-reuse-id violated:NoIdReuse
 call-mut-reuse-id-settles violated:OwnReply
+call-mut-abandon-drops violated:AbandonKeepsSession
+call-mut-abandon-leaks violated:AbandonedCallsClean

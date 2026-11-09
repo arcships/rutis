@@ -2,16 +2,22 @@
 (***************************************************************************)
 (* A remote runtime that listens, and the controllers that dial it: the    *)
 (* lease of the runtime, takeover by a newer connection, reconnecting and  *)
-(* a link stopping.                                                        *)
+(* a link stopping; a listening runtime that stops and starts again (an    *)
+(* app hosting its plugins, #615).                                         *)
 (*                                                                         *)
 (* Design: docs/design-remote-plugins-2026-10-03.md §3.2 (retry, link       *)
-(* stop), §4.4 (lease, takeover order); docs/design-remote-runtime-dial-    *)
-(* 2026-10-14.md §六 (retry).                                               *)
+(* stop), §4.4 (lease, takeover order: authenticate → close the old        *)
+(* session → clean the old lease → answer the new hello); docs/design-     *)
+(* remote-runtime-dial-2026-10-14.md §六 (retry); docs/design-remote-      *)
+(* session-2026-10-28.md §4.2/§4.3 (session end, app hosting).             *)
 (* Implementation modelled: crates/rutis-host/src/connect/dial.rs (the     *)
 (* `rutis-host/dial` row: attempt, handshake, install, unloaded, back off; *)
 (* the controller); python/rutis/rutis/__main__.py `serve`,               *)
-(* go/rutis/listen.go `listen`, node/rutis-runtime/src/serve.mjs `serve`    *)
-(* (the runtime). README.md next to this file lists the simplifications.   *)
+(* go/rutis/internal/runtime/listen.go `listen`, node/rutis-runtime/src/   *)
+(* serve.mjs `serve`, swift/rutis/Sources/Rutis/Remote/Listen.swift and    *)
+(* kotlin/.../internal/remote/Listen.kt `Listening` (the runtime,          *)
+(* including app hosting).                                                 *)
+(* README.md next to this file lists the simplifications.                  *)
 (*                                                                         *)
 (* Connection <<c, n>> is the n-th connection controller c dialed. Each    *)
 (* direction of a connection is FIFO; frames are delayed arbitrarily long. *)
@@ -25,12 +31,23 @@ CONSTANTS
     MaxConns,     \* connections each controller may dial (1 + reconnects)
     MaxLoads,     \* rows a controller loads on one session
     Healthy,      \* TRUE: no stop, timeout or lost connection
+    Cleanup,      \* how a takeover cleans the old lease:
+                  \* "instant" (one step) or "deadline" (start, then finish
+                  \* or be killed when the deadline passes)
+    Auth,         \* where a connection is authenticated: "upgrade" folds
+                  \* it into the dial; "step" makes it a step the runtime
+                  \* takes before it may close the old session
+    MaxRounds,    \* rounds of the listening runtime (1: no stop/start)
     Mutation      \* "none", or a deliberate bug (README, "Mutations")
 
 ASSUME MaxConns \in Nat \ {0} /\ MaxLoads \in Nat
 ASSUME Healthy \in BOOLEAN
+ASSUME Cleanup \in {"instant", "deadline"}
+ASSUME Auth \in {"upgrade", "step"}
+ASSUME MaxRounds \in Nat \ {0}
 ASSUME Mutation \in {"none", "startBeforeClean", "readOld", "stopKeepsRetry",
-                     "lateHello", "waitForOld"}
+                     "lateHello", "waitForOld", "killLeavesRows",
+                     "staleRound"}
 
 VARIABLES
     lst,      \* lst[c]: "connecting" | "greeting" | "ready" | "waiting" | "stopped"
@@ -41,22 +58,35 @@ VARIABLES
     cs,       \* cs[k]: controller side of k: "none" | "open" | "closed"
     toR,      \* toR[k]: frames sent on k to the runtime, not read yet
     toC,      \* toC[k]: frames sent on k to the controller, not read yet
+    authq,    \* connections the listener accepted, not authenticated yet
     rs,       \* rs[k]: runtime side: "none" | "queued" | "serving" | "closed" | "done"
-    accq,     \* connections the listener accepted, not taken yet
+    accq,     \* authenticated connections the listener accepted, not taken yet
     rcur,     \* connection whose session the runtime runs (or replaces)
     rnew,     \* the connection a takeover is for
-    rphase,   \* "idle" | "closing" | "cleaning" | "starting" (and mutations')
+    rphase,   \* "idle" | "closing" | "cleaning" | "starting" | "stopping"
+              \* (and mutations')
+    rround,   \* the listening runtime's current round
+    rstopped, \* the runtime stopped (it may start again, MaxRounds)
+    pending,  \* a start was asked for while the runtime was stopping
+    kround,   \* kround[k]: the runtime round that accepted k
     rows,     \* rows loaded on the runtime: [lease, by]
     ghost     \* observations for the invariants
 
-vars == <<lst, cur, ndial, sent, stopped, cs, toR, toC, rs, accq,
-          rcur, rnew, rphase, rows, ghost>>
+vars == <<lst, cur, ndial, sent, stopped, cs, toR, toC, authq, rs, accq,
+          rcur, rnew, rphase, rround, rstopped, pending, kround, rows, ghost>>
 ctl == <<lst, cur, ndial, sent, stopped>>
-rt == <<rs, accq, rcur, rnew, rphase, rows>>
+rt == <<rs, authq, accq, rcur, rnew, rphase, rround, rstopped, pending,
+        kround, rows>>
 
 Conns == Controllers \X (1..MaxConns)
 NoConn == <<"none", 0>>
 Cur(c) == <<c, cur[c]>>
+
+\* The connections waiting in a queue.
+QueueSet(q) == {q[i] : i \in 1..Len(q)}
+
+\* Whether the listening runtime accepts dials now.
+Closed == rstopped \/ rphase = "stopping"
 
 \* Whether each side still reads k.
 ReadsC(k) == cs[k] = "open" \/ Mutation = "lateHello"
@@ -76,25 +106,35 @@ CloseC(k) ==
 Dial(c) ==
     /\ lst[c] = "connecting"
     /\ ndial[c] < MaxConns
+    /\ ~Closed
     /\ LET n == ndial[c] + 1
            k == <<c, n>>
        IN /\ ndial' = [ndial EXCEPT ![c] = n]
           /\ cur' = [cur EXCEPT ![c] = n]
           /\ sent' = [sent EXCEPT ![c] = 0]
-          \* The upgrade succeeded (the runtime's token check): the
-          \* runtime's listener queues the connection; the link opens its
-          \* session (`Greet::open`; its own hello is read by whichever
-          \* session the runtime starts on k, and is left out).
+          \* The upgrade succeeded: the runtime's listener queues the
+          \* connection; the link opens its session (`Greet::open`; its own
+          \* hello is read by whichever session the runtime starts on k, and
+          \* is left out). With Auth = "step" the runtime checks the
+          \* connection as a step before the queue the takeover reads; with
+          \* "upgrade" that check is part of the upgrade.
           /\ cs' = [cs EXCEPT ![k] = "open"]
           /\ rs' = [rs EXCEPT ![k] = "queued"]
-          /\ accq' = Append(accq, k)
+          /\ kround' = [kround EXCEPT ![k] = rround]
+          /\ IF Auth = "step"
+             THEN /\ authq' = Append(authq, k)
+                  /\ UNCHANGED accq
+             ELSE /\ accq' = Append(accq, k)
+                  /\ UNCHANGED authq
           /\ lst' = [lst EXCEPT ![c] = "greeting"]
           /\ ghost' = [ghost EXCEPT !.dialAfterStop = @ \/ stopped[c]]
-    /\ UNCHANGED <<stopped, toR, toC, rcur, rnew, rphase, rows>>
+    /\ UNCHANGED <<stopped, toR, toC, rcur, rnew, rphase, rround, rstopped,
+                   pending, rows>>
 
-\* The dial itself fails (connection refused, network down): retryable.
+\* The dial itself fails (connection refused, network down, the runtime
+\* stopped): retryable.
 DialFails(c) ==
-    /\ ~Healthy
+    /\ ~Healthy \/ Closed
     /\ lst[c] = "connecting"
     /\ ndial[c] < MaxConns
     /\ ndial' = [ndial EXCEPT ![c] = @ + 1]
@@ -129,8 +169,8 @@ CRecv(c, n) ==
               /\ cur' = [cur EXCEPT ![c] = n]
               /\ UNCHANGED <<cs, toR, ghost>>
          [] f = "close" /\ cs[k] = "open" ->
-              \* The session ended (replaced: 4002, or the runtime ended
-              \* it): retryable; the peer is withdrawn.
+              \* The session ended (replaced: 4002, the runtime stopped, or
+              \* the runtime ended it): retryable; the peer is withdrawn.
               /\ CloseC(k)
               /\ lst' = [lst EXCEPT ![c] = IF cur[c] = n /\ @ \in {"greeting", "ready"}
                                            THEN "waiting" ELSE @]
@@ -173,8 +213,9 @@ Stop(c) ==
 
 (***************************************************************************)
 (* Runtime: one controller at a time; a newer connection takes over        *)
-(* (§4.4): close the old session's channel and read none of its frames ->  *)
-(* clean the old lease -> answer the new hello.                            *)
+(* (§4.4): authenticate → close the old session's channel and read none of *)
+(* its frames → clean the old lease (finishing, or killed at the deadline) *)
+(* → answer the new hello.                                                 *)
 (***************************************************************************)
 SendC(k, f) == toC' = [toC EXCEPT ![k] = IF ReadsC(k) THEN Append(@, f) ELSE @]
 
@@ -185,8 +226,31 @@ StartSession(k) ==
     /\ rs' = [rs EXCEPT ![k] = "serving"]
     /\ SendC(k, "hello")
 
+\* 1. Authenticate: a connection the runtime does not accept is closed
+\* before it can touch the session it serves.
+AuthPass(k) ==
+    /\ Auth = "step"
+    /\ authq /= <<>>
+    /\ k = Head(authq)
+    /\ authq' = Tail(authq)
+    /\ accq' = Append(accq, k)
+    /\ UNCHANGED <<ctl, cs, toR, toC, rs, rcur, rnew, rphase, rround,
+                   rstopped, pending, kround, rows, ghost>>
+
+AuthRefuse(k) ==
+    /\ Auth = "step"
+    /\ authq /= <<>>
+    /\ k = Head(authq)
+    /\ authq' = Tail(authq)
+    /\ rs' = [rs EXCEPT ![k] = "done"]
+    /\ SendC(k, "close")
+    /\ Unread(k)
+    /\ UNCHANGED <<ctl, cs, accq, rcur, rnew, rphase, rround, rstopped,
+                   pending, kround, rows, ghost>>
+
 TakeNext ==
     /\ rphase = "idle"
+    /\ ~rstopped
     /\ accq /= <<>>
     /\ accq' = Tail(accq)
     /\ LET k == Head(accq) IN
@@ -197,9 +261,10 @@ TakeNext ==
        ELSE /\ rnew' = k
             /\ rphase' = "closing"
             /\ UNCHANGED <<rs, toC, rcur>>
-    /\ UNCHANGED <<ctl, cs, toR, rows, ghost>>
+    /\ UNCHANGED <<ctl, cs, toR, authq, rround, rstopped, pending, kround,
+                   rows, ghost>>
 
-\* 1. Close the old channel (4002, "replaced"); no frame of it is read any
+\* 2. Close the old channel (4002, "replaced"); no frame of it is read any
 \* more. waitForOld: stop reading, but leave closing to the old controller.
 TakeoverClose ==
     /\ rphase = "closing"
@@ -207,32 +272,64 @@ TakeoverClose ==
     /\ IF Mutation = "waitForOld" THEN UNCHANGED toC ELSE SendC(rcur, "close")
     /\ Unread(rcur)
     /\ rphase' = IF Mutation = "startBeforeClean" THEN "startEarly" ELSE "cleaning"
-    /\ UNCHANGED <<ctl, cs, accq, rcur, rnew, rows, ghost>>
+    /\ UNCHANGED <<ctl, cs, authq, accq, rcur, rnew, rround, rstopped, pending,
+                   kround, rows, ghost>>
 
-\* 2. Clean the old lease: every row and proxy of the old session goes.
+\* 3a. The old lease is cleaned in one step (Cleanup = "instant").
 TakeoverClean ==
     /\ rphase = "cleaning"
+    /\ Cleanup = "instant"
     /\ Mutation = "waitForOld" => cs[rcur] = "closed"
     /\ rows' = {r \in rows : r.lease /= rcur}
     /\ rs' = [rs EXCEPT ![rcur] = "done"]
     /\ rphase' = "starting"
-    /\ UNCHANGED <<ctl, cs, toR, toC, accq, rcur, rnew, ghost>>
+    /\ UNCHANGED <<ctl, cs, toR, toC, authq, accq, rcur, rnew, rround,
+                   rstopped, pending, kround, ghost>>
 
-\* 3. Only then the new session starts and answers its hello.
+\* 3b. Cleanup finishes within its deadline.
+CleanDone ==
+    /\ rphase = "cleaning"
+    /\ Cleanup = "deadline"
+    /\ rows' = {r \in rows : r.lease /= rcur}
+    /\ rs' = [rs EXCEPT ![rcur] = "done"]
+    /\ rphase' = "starting"
+    /\ UNCHANGED <<ctl, cs, toR, toC, authq, accq, rcur, rnew, rround,
+                   rstopped, pending, kround, ghost>>
+
+\* 3c. The deadline passes: the runtime kills the old session, truncating
+\* its cleanups. The lease goes with the killed session; a late "cleaned"
+\* never reaches the new one. killLeavesRows: the kill leaves the old rows
+\* behind, so the new lease is not alone.
+CleanTimeout ==
+    /\ rphase = "cleaning"
+    /\ Cleanup = "deadline"
+    /\ ~ghost.killed
+    /\ ghost' = [ghost EXCEPT !.killed = TRUE]
+    /\ IF Mutation = "killLeavesRows"
+       THEN UNCHANGED rows
+       ELSE rows' = {r \in rows : r.lease /= rcur}
+    /\ rs' = [rs EXCEPT ![rcur] = "done"]
+    /\ rphase' = "starting"
+    /\ UNCHANGED <<ctl, cs, toR, toC, authq, accq, rcur, rnew, rround,
+                   rstopped, pending, kround>>
+
+\* 4. Only then the new session starts and answers its hello.
 TakeoverStart ==
     /\ rphase = "starting"
     /\ StartSession(rnew)
     /\ rcur' = rnew
     /\ rnew' = NoConn
     /\ rphase' = "idle"
-    /\ UNCHANGED <<ctl, cs, toR, accq, rows, ghost>>
+    /\ UNCHANGED <<ctl, cs, toR, authq, accq, rround, rstopped, pending,
+                   kround, rows, ghost>>
 
-\* startBeforeClean: steps 2 and 3 swapped.
+\* startBeforeClean: steps 3 and 4 swapped.
 StartEarly ==
     /\ rphase = "startEarly"
     /\ StartSession(rnew)
     /\ rphase' = "cleanLate"
-    /\ UNCHANGED <<ctl, cs, toR, accq, rcur, rnew, rows, ghost>>
+    /\ UNCHANGED <<ctl, cs, toR, authq, accq, rcur, rnew, rround, rstopped,
+                   pending, kround, rows, ghost>>
 
 CleanLate ==
     /\ rphase = "cleanLate"
@@ -241,7 +338,70 @@ CleanLate ==
     /\ rcur' = rnew
     /\ rnew' = NoConn
     /\ rphase' = "idle"
-    /\ UNCHANGED <<ctl, cs, toR, toC, accq, ghost>>
+    /\ UNCHANGED <<ctl, cs, toR, toC, authq, accq, rround, rstopped, pending,
+                   kround, ghost>>
+
+(***************************************************************************)
+(* The listening runtime stops and starts again (an app hosting its        *)
+(* plugins, RutisApp.start/stop): stop closes the current session and the  *)
+(* connections accepted but not served, cleans the lease, accepts no more; *)
+(* start opens a new round. A start asked for while the stop is cleaning   *)
+(* up runs once that is done; a start while running is no step.            *)
+(***************************************************************************)
+RuntimeStop ==
+    /\ MaxRounds > 1
+    /\ ~ghost.stopped
+    /\ rphase = "idle"
+    /\ rphase' = "stopping"
+    /\ IF Mutation = "staleRound"
+       THEN /\ UNCHANGED <<authq, accq>>
+            /\ toC' = [j \in Conns |-> IF j = rcur /\ ReadsC(j)
+                                    THEN Append(toC[j], "close") ELSE toC[j]]
+            /\ rs' = [k \in Conns |-> IF k = rcur THEN "closed" ELSE rs[k]]
+       ELSE /\ authq' = <<>>
+            /\ accq' = <<>>
+            /\ toC' = [j \in Conns |-> IF (j \in QueueSet(authq) \/ j \in QueueSet(accq)
+                                       \/ j = rcur) /\ ReadsC(j)
+                                    THEN Append(toC[j], "close") ELSE toC[j]]
+            /\ rs' = [k \in Conns |-> IF k = rcur \/ k \in QueueSet(authq)
+                                           \/ k \in QueueSet(accq)
+                                      THEN "closed" ELSE rs[k]]
+    /\ toR' = [j \in Conns |-> IF j = rcur THEN <<>> ELSE toR[j]]
+    /\ ghost' = [ghost EXCEPT !.stopped = TRUE]
+    /\ UNCHANGED <<ctl, cs, rcur, rnew, rround, rstopped, pending, kround,
+                   rows>>
+
+\* The stop's cleanup is done. A start asked for meanwhile opens the next
+\* round at once; otherwise the runtime stays stopped until StartNow.
+StopClean ==
+    /\ rphase = "stopping"
+    /\ rows' = {}
+    /\ rcur' = NoConn
+    /\ rnew' = NoConn
+    /\ rphase' = "idle"
+    /\ IF pending
+       THEN /\ rround' = rround + 1
+            /\ pending' = FALSE
+            /\ UNCHANGED rstopped
+       ELSE /\ rstopped' = TRUE
+            /\ UNCHANGED <<rround, pending>>
+    /\ UNCHANGED <<ctl, cs, toR, toC, authq, accq, rs, kround, ghost>>
+
+StartNow ==
+    /\ rstopped
+    /\ rround < MaxRounds
+    /\ rround' = rround + 1
+    /\ rstopped' = FALSE
+    /\ UNCHANGED <<ctl, cs, toR, toC, authq, accq, rs, rcur, rnew, rphase,
+                   pending, kround, rows, ghost>>
+
+StartWhileStopping ==
+    /\ rphase = "stopping"
+    /\ ~pending
+    /\ rround < MaxRounds
+    /\ pending' = TRUE
+    /\ UNCHANGED <<ctl, cs, toR, toC, authq, accq, rs, rcur, rnew, rphase,
+                   rround, rstopped, kround, rows, ghost>>
 
 \* The runtime reads the next frame of a session it serves. readOld: it
 \* still reads a replaced session, and applies what it reads to the rows
@@ -265,7 +425,8 @@ RRead(k) ==
               /\ rows' = {r \in rows : r.lease /= k}
               /\ rs' = [rs EXCEPT ![k] = "done"]
               /\ rcur' = NoConn
-    /\ UNCHANGED <<ctl, cs, toC, accq, rnew, rphase, ghost>>
+    /\ UNCHANGED <<ctl, cs, toC, authq, accq, rnew, rphase, rround, rstopped,
+                   pending, kround, ghost>>
 
 (***************************************************************************)
 Init ==
@@ -277,13 +438,18 @@ Init ==
     /\ cs = [k \in Conns |-> "none"]
     /\ toR = [k \in Conns |-> <<>>]
     /\ toC = [k \in Conns |-> <<>>]
+    /\ authq = <<>>
     /\ rs = [k \in Conns |-> "none"]
     /\ accq = <<>>
     /\ rcur = NoConn
     /\ rnew = NoConn
     /\ rphase = "idle"
+    /\ rround = 1
+    /\ rstopped = FALSE
+    /\ pending = FALSE
+    /\ kround = [k \in Conns |-> 1]
     /\ rows = {}
-    /\ ghost = [dialAfterStop |-> FALSE]
+    /\ ghost = [dialAfterStop |-> FALSE, killed |-> FALSE, stopped |-> FALSE]
 
 Controller(c) ==
     \/ Dial(c) \/ DialFails(c) \/ Retry(c) \/ SendLoad(c) \/ Lose(c)
@@ -291,9 +457,10 @@ Controller(c) ==
     \/ \E n \in 1..MaxConns : CRecv(c, n)
 
 Runtime ==
-    \/ TakeNext \/ TakeoverClose \/ TakeoverClean \/ TakeoverStart
-    \/ StartEarly \/ CleanLate
-    \/ \E k \in Conns : RRead(k)
+    \/ TakeNext \/ TakeoverClose \/ TakeoverClean \/ CleanDone \/ CleanTimeout
+    \/ TakeoverStart \/ StartEarly \/ CleanLate
+    \/ RuntimeStop \/ StopClean \/ StartNow \/ StartWhileStopping
+    \/ \E k \in Conns : AuthPass(k) \/ AuthRefuse(k) \/ RRead(k)
 
 Next == Runtime \/ \E c \in Controllers : Controller(c)
 
@@ -318,6 +485,9 @@ OneLease == Cardinality({k \in Conns : Leased(k)}) <= 1
 \* A command of one session never acts on another session's lease.
 OldCommandsStayOld == \A r \in rows : r.by = r.lease
 
+\* The runtime answers the new hello only after the old lease is gone.
+CleanBeforeHello == rphase = "starting" => rows = {}
+
 \* A stopped link never dials again and keeps no session.
 StoppedStaysDown ==
     /\ ~ghost.dialAfterStop
@@ -328,6 +498,24 @@ StoppedStaysDown ==
 \* handshake result never revives a session the link gave up on.
 ReadyIsCurrent ==
     \A c \in Controllers : lst[c] = "ready" => cur[c] > 0 /\ cs[Cur(c)] = "open"
+
+\* A stopped runtime serves nothing and holds no lease; nothing it accepted
+\* before the stop is served after it.
+RuntimeStopped ==
+    rstopped =>
+        /\ rcur = NoConn /\ rnew = NoConn /\ rphase = "idle"
+        /\ rows = {} /\ authq = <<>> /\ accq = <<>>
+
+\* The runtime serves, and is about to serve, only connections of its
+\* current round; a start while a stop cleans up opens the next round only
+\* after the old one is gone. A controller may still be ready on a
+\* connection the runtime closed, until it reads the close.
+RestartIsFresh ==
+    /\ (rcur /= NoConn => kround[rcur] = rround)
+    /\ \A k \in QueueSet(accq) \cup QueueSet(authq) : kround[k] = rround
+    /\ \A c \in Controllers : lst[c] = "ready" =>
+          cur[c] > 0 /\
+          (kround[Cur(c)] = rround \/ rs[Cur(c)] \in {"closed", "done"})
 
 \* Liveness: some controller is ready on the session the runtime serves.
 Held == \E c \in Controllers : lst[c] = "ready" /\ rs[Cur(c)] = "serving"

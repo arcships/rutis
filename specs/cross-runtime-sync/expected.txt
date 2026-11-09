@@ -1,4 +1,5 @@
 # configuration  expected TLC outcome (see README.md)
+# Baseline: the wait graph as of #535 (entries, chain, put aside, stack order).
 current-2node deadlock
 current-1node deadlock
 current-1node-1python ok
@@ -19,3 +20,19 @@ policy-b-2node-depth4 ok
 current-posts deadlock
 policy-b-posts ok
 policy-b-posts-node ok
+# #614: the wait graph as waits.rs has it, runtimes with a thread per call,
+# synchronous dispatches, giving up a call locally, calls the host cannot see,
+# session end, and SYN-9-3.
+threaded-policy-b ok
+unmarked-policy-b deadlock
+bail-policy-b deadlock
+waterfall-policy-b ok
+bail-recorded ok
+emit-unchained ok
+host-call ok
+before-host-call ok
+abandon-policy-b violated:NoFalseCycle
+hidden-policy-b violated:ChainRecognised
+async-policy-b violated:NoFalseCycle
+nested-service violated:NeverNested
+end-session ok

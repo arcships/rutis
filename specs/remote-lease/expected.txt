@@ -12,3 +12,11 @@ access-lose ok
 access-all ok
 access-mut-accept-before-release violated:OnePluginSetPerId
 access-mut-stop-keeps-retry violated:StoppedStaysDown
+lease-takeover ok
+lease-cleanup-deadline ok
+lease-mut-kill-leaves-rows violated:OneLease
+lease-app-restart ok
+lease-mut-stale-round violated:RestartIsFresh
+access-static-revoke ok
+access-mut-revoke-installs violated:RevokedStaysOut
+access-mut-revoke-unregisters violated:StaysRegistered

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Run TLC on the configurations of this directory and compare each outcome
-# with expected.txt. Every `call-*.cfg` checks CallLifecycle.tla.
+# with expected.txt. Every `call-*.cfg` checks CallLifecycle.tla. An outcome
+# is `ok`, `deadlock` (TLC's deadlock check), or `violated:<name>` for an
+# invariant or the liveness property.
 #   TLA2TOOLS=/path/to/tla2tools.jar ./run.sh [name ...]
 # Needs Java 11+ on PATH (for example `mise exec java@temurin-21 -- ./run.sh`).
 # tla2tools.jar: https://github.com/tlaplus/tlaplus/releases/tag/v1.7.4
@@ -30,6 +32,8 @@ for name in "${names[@]}"; do
     got=$(echo "$inv" | awk '{print "violated:" $3}')
   elif grep -q '^Error: Temporal properties were violated' "$log"; then
     got=violated:liveness
+  elif grep -q '^Error: Deadlock reached' "$log"; then
+    got=deadlock
   elif grep -q '^Model checking completed. No error has been found' "$log"; then
     got=ok
   else
