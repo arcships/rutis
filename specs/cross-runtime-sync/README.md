@@ -96,8 +96,8 @@ TLC 2.19（tla2tools v1.7.4），Temurin 21，16 核；`MaxRoots = 2`、`MaxDept
 | `policy-b-2node-seq` | n1, n2, p；每个活动 2 次调用，链 ≤ 2 | 通过 | 2,549,258 | 19 s |
 | `policy-b-acts` | n1, n2, p | 违反 `NeverCycle`（预期：B 会触发） | 408 | <1 s |
 | `current-posts` | n, p, q（p、q 可重入）；2 个顶层调用、1 次发出 | **卡死**（反例 5） | 334,773 | 2 s |
-| `policy-b-posts` | 同 `current-posts`，策略 B 带入口 | 通过 | 14,429,655 | 2 min |
-| `policy-b-posts-node` | n, p, q（p 不可重入，`q` 可重入），策略 B | 通过 | 6,361,544 | 39 s |
+| `policy-b-posts` | 同 `current-posts`，策略 B 带入口；`MaxDepth=2` 的 CI 规模 | 通过 | 1,152,323 | 本地 32 核 16 s，CI 4 核估计 1–2 min |
+| `policy-b-posts-node` | n, p, q（p 不可重入，`q` 可重入），策略 B；`MaxDepth=2` 的 CI 规模 | 通过 | 641,339 | 本地 32 核 10 s，CI 4 核估计 1–2 min |
 | `threaded-policy-b` | n, g, p（g 一个调用一个线程） | 通过 | 62,128 | <1 s |
 | `unmarked-policy-b` | n, g, p；g 不声明 `sync-wait` | **死锁**（反例 9，明确不保证） | 762 | <1 s |
 | `bail-policy-b` | r, t；`bail` 分发，Rust 不记分发本身 | **死锁**（反例 6） | 449 | <1 s |
@@ -114,7 +114,7 @@ TLC 2.19（tla2tools v1.7.4），Temurin 21，16 核；`MaxRoots = 2`、`MaxDept
 
 "通过"指穷举完成：无死锁，所列不变式全部成立；这些行的状态数是确定的。死锁和不变式被违反的行，TLC 找到第一个反例就停，状态数取决于搜索的先后，每次运行都可能不同，只作参考。
 
-表里前 20 行是 #535 时的结果和状态数。这次扩展后记录多了字段（`kind`、`entry`、`real`、`mk`），同样的配置状态数会略增；开发过程中重跑过这些配置（`policy-b-posts`、`policy-b-posts-node` 除外），结果都和表里一致，状态数没有逐个更新。新增的配置都跑完了，每个 1 分钟以内。
+表里前 20 行是 #535 时的结果和状态数。这次扩展后记录多了字段（`kind`、`entry`、`real`、`mk`），同样的配置状态数会略增；开发过程中重跑过这些配置，结果都和表里一致；`policy-b-posts`、`policy-b-posts-node` 为适配 CI 把 `MaxDepth` 从 3 降到 2，表里是缩小后的状态数。新增的配置都跑完了，每个 1 分钟以内。
 
 `current-1node-1python` 支持多语言设计 §九 里"一个 Node 和一个 Python 之间不会卡死"的说法。`policy-b-2node-seq` 在链 ≤ 3 时 10 分钟内状态数超过 4,400 万仍在增长，所以缩到链 ≤ 2。
 
@@ -181,7 +181,7 @@ TLA2TOOLS=/tmp/tla2tools.jar mise exec java@temurin-21 -- specs/cross-runtime-sy
 java -cp /tmp/tla2tools.jar tlc2.TLC -workers auto -config bail-policy-b.cfg CrossRuntimeSync.tla
 ```
 
-新加的配置每个 1 分钟内跑完；`policy-b-posts` 约 2 分钟，`policy-b-1node-3roots`、`policy-b-2node-seq` 十几秒。
+新加的配置每个 1 分钟内跑完；`policy-b-posts`、`policy-b-posts-node` 缩到 `MaxDepth=2` 后本地十几秒，CI 4 核估计 1–2 分钟；`policy-b-1node-3roots`、`policy-b-2node-seq` 十几秒。
 
 ## 维护
 

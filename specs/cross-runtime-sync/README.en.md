@@ -96,8 +96,8 @@ TLC 2.19 (tla2tools v1.7.4), Temurin 21, 16 cores; `MaxRoots = 2`, `MaxDepth = 3
 | `policy-b-2node-seq` | n1, n2, p; 2 calls per activation, chains ≤ 2 | pass | 2,549,258 | 19 s |
 | `policy-b-acts` | n1, n2, p | `NeverCycle` violated (expected: B fires) | 408 | <1 s |
 | `current-posts` | n, p, q (p, q reentrant); 2 top-level calls, 1 emit | **deadlock** (counterexample 5) | 334,773 | 2 s |
-| `policy-b-posts` | as `current-posts`, policy B with entries | pass | 14,429,655 | 2 min |
-| `policy-b-posts-node` | n, p, q (p non-reentrant, `q` reentrant), policy B | pass | 6,361,544 | 39 s |
+| `policy-b-posts` | as `current-posts`, policy B with entries; CI size with `MaxDepth=2` | pass | 1,152,323 | 16 s on 32 cores; estimated 1–2 min on CI 4 cores |
+| `policy-b-posts-node` | n, p, q (p non-reentrant, `q` reentrant), policy B; CI size with `MaxDepth=2` | pass | 641,339 | 10 s on 32 cores; estimated 1–2 min on CI 4 cores |
 | `threaded-policy-b` | n, g, p (g a thread per call) | pass | 62,128 | <1 s |
 | `unmarked-policy-b` | n, g, p; g does not declare `sync-wait` | **deadlock** (counterexample 9, explicit non-guarantee) | 762 | <1 s |
 | `bail-policy-b` | r, t; a `bail` dispatch Rust does not record | **deadlock** (counterexample 6) | 449 | <1 s |
@@ -114,7 +114,7 @@ TLC 2.19 (tla2tools v1.7.4), Temurin 21, 16 cores; `MaxRoots = 2`, `MaxDepth = 3
 
 "Pass" means exhaustive: no deadlock, all listed invariants hold; state counts on these rows are exact. On deadlock and violation rows TLC stops at the first counterexample, so the count depends on the order of the search and varies between runs; treat it as indicative.
 
-The first 20 rows are the #535 results and state counts. Records now carry more fields (`kind`, `entry`, `real`, `mk`), so the same configurations take somewhat more states; these were rerun during the extension (`policy-b-posts` and `policy-b-posts-node` excepted) and every result matched the table, but the counts were not updated row by row. Every new configuration was run to completion within a minute.
+The first 20 rows are the #535 results and state counts. Records now carry more fields (`kind`, `entry`, `real`, `mk`), so the same configurations take somewhat more states; these were rerun during the extension and every result matched the table; `policy-b-posts` and `policy-b-posts-node` use `MaxDepth=2` for CI and the table shows the reduced counts. Every new configuration was run to completion within a minute.
 
 `current-1node-1python` backs the statement in §9 of the multi-language design that one Node and one Python runtime do not deadlock. With chains ≤ 3, `policy-b-2node-seq` passed 44 million states in 10 minutes and was still growing, so it runs with chains ≤ 2.
 
@@ -181,7 +181,7 @@ TLA2TOOLS=/tmp/tla2tools.jar mise exec java@temurin-21 -- specs/cross-runtime-sy
 java -cp /tmp/tla2tools.jar tlc2.TLC -workers auto -config bail-policy-b.cfg CrossRuntimeSync.tla
 ```
 
-Each new configuration finishes within a minute; `policy-b-posts` takes about 2 minutes, `policy-b-1node-3roots` and `policy-b-2node-seq` a dozen or so seconds.
+Each new configuration finishes within a minute; `policy-b-posts` and `policy-b-posts-node` take about ten seconds locally after reducing to `MaxDepth=2` (estimated 1–2 minutes on CI 4 cores); `policy-b-1node-3roots` and `policy-b-2node-seq` take a dozen or so seconds.
 
 ## Maintenance
 
