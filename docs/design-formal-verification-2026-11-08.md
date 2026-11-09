@@ -300,6 +300,7 @@ rutis 最近连续修改了事件、跨运行时调用、远程租约、节点�
 - [质量规范](quality-standard.md) §3、§8、§9.4、§11
 - [质量执行现状](quality-status.md)
 - [保证登记表](guarantees.md)
+- [会话追踪契约](formal-trace.md)
 - [设计模型目录](../specs/README.md)
 - [跨运行时同步调用模型](../specs/cross-runtime-sync/README.md)
 - [远程租约模型](../specs/remote-lease/README.md)

@@ -300,6 +300,7 @@ Implementation is complete when every applicable rule in the tracker has a curre
 - [Quality standard](quality-standard.en.md) §§3, 8, 9.4 and 11
 - [Quality status](quality-status.en.md)
 - [Guarantee registry](guarantees.en.md)
+- [Session trace contract](formal-trace.en.md)
 - [Design-model directory](../specs/README.md)
 - [Cross-runtime synchronous-call model](../specs/cross-runtime-sync/README.md)
 - [Remote-lease model](../specs/remote-lease/README.md)
