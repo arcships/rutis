@@ -72,6 +72,7 @@ Status：执行中。日期：2026-11-09。
 
 ## 5. 执行记录
 
+- 2026-11-09：`events::link::accept` 旧提供回插已修（`gone` 边界 + 插入同锁重检，2 个确定性回归测试）；`cross-runtime-sync` 的“已标记链异步调用”疑点发现帧上无法区分“发起即不管”和“之后 await”，先回退代码改动，待协议加信号后再改。
 - 2026-11-09：TLA+ 九块全部落地：`specs/events/` 四模块 21 配置、`specs/peer-rows/` 7 配置、`row-lifecycle` 22 配置、`call-lifecycle` 16 配置、`remote-lease` 21 配置、`cross-runtime-sync` 新配置；模型发现 bail 分发盲区、本地放弃不发 cancel、已标记链异步调用误判、link accept 旧代次回插等疑点。
 - 2026-11-09：第三批：shuttle 增至 9 个模型（新增 root dispose/shutdown、依赖驱逐）；`specs/call-lifecycle` 7 个配置按预期结束；trace 验证器 23 个用例；cargo-fuzz 实际跑 session_frame/websocket_upgrade/error_graph/local_lines 共 4 个目标、无 crash。
 - 2026-11-09：第二批代码落地：shuttle 增至 7 个模型（新增 effect 登记/dispose、在途卸载、并发子树关闭）；`specs/row-lifecycle` 9 个配置按预期结束；trace 验证器 16 个用例；值/帧/坏帧属性 5 个；Node/Bun/Python/Go 实现未知字段调用级 `bad-frame`；#634 协议规则 1368 条导入追踪表（1817 行），rule tracker 检查进 CI。
