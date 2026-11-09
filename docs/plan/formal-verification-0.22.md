@@ -14,7 +14,7 @@ Status：执行中。日期：2026-11-09。
 | WS1 | #1025 事件关闭接纳：marker、发布、Entry::live、竞态测试、benchmark | #1025、#622 | 代码、确定性测试、benchmark 结果 | WS0 | 核心完成，验证中 |
 | WS2 | 现行会话协议规格：帧、握手、调用、引用、取消、畸形帧、上限、未知字段 | #635 | `docs/protocol-session.md` 与 `.en.md`；旧设计改为引用；规格缺口清单 | WS0 | 第一版完成；未知字段已定（调用级失败） |
 | WS3 | 规则清单与追踪表：每条规则的来源、人话承诺、证据、变异、状态、缺口 | #634 | `docs/formal-trace/` 与统计脚本；`guarantees.md` 接上 | WS2 部分输入 | 第一版完成，1817 行（含 1368 条协议规则）；未按现行规格逐条复核 |
-| WS4 | 协议设计的 TLA+ 模型：事件关闭接纳、跨运行时同步、远程租约、行与调用生命周期 | #613 | `specs/` 新模型或对账后的旧模型、`expected.txt`、`run.sh`、README | WS2 | 首块完成：event-close + row-lifecycle；事件/调用/节点模型待补 |
+| WS4 | 协议设计的 TLA+ 模型：事件关闭接纳、跨运行时同步、远程租约、行与调用生命周期 | #613 | `specs/` 新模型或对账后的旧模型、`expected.txt`、`run.sh`、README | WS2 | 首块完成：event-close + row-lifecycle + call-lifecycle；事件/节点模型待补 |
 | WS5 | 真实执行 trace 与一致性：通道/帧 trace 验证、适用实现列 | #624 | 验证器、正反用例、缺口清单 | WS2、WS4 | 首块完成：16 个用例；上限、leases、host-gone、sync-cycles 待补 |
 | WS6 | 非 Rust 运行时可控调度与静态检查 | #630 | 每个适用语言的证据；不适用写原因 | WS2 | 首块完成 |
 | WS7 | 属性、模糊、Kani、Miri、虚拟时钟 | #631、#639 | 属性测试、模糊目标、计时用例、Kani/Miri 结论 | WS2 | 首块完成：引用回滚 6 + 值/帧/坏帧属性 5；Kani/Miri/fuzz 未跑 |
@@ -72,6 +72,8 @@ Status：执行中。日期：2026-11-09。
 
 ## 5. 执行记录
 
+- 2026-11-09：第三批：shuttle 增至 9 个模型（新增 root dispose/shutdown、依赖驱逐）；`specs/call-lifecycle` 7 个配置按预期结束；trace 验证器 23 个用例；cargo-fuzz 实际跑 session_frame/websocket_upgrade/error_graph/local_lines 共 4 个目标、无 crash。
+- 2026-11-09：第二批代码落地：shuttle 增至 7 个模型（新增 effect 登记/dispose、在途卸载、并发子树关闭）；`specs/row-lifecycle` 9 个配置按预期结束；trace 验证器 16 个用例；值/帧/坏帧属性 5 个；Node/Bun/Python/Go 实现未知字段调用级 `bad-frame`；#634 协议规则 1368 条导入追踪表（1817 行），rule tracker 检查进 CI。
 - 2026-11-09：未知字段规则定为“拒绝、但只失败该调用”（`hello` 失败握手，`release`/`cancel` 忽略）。Rust 已实现并以 `bad-frame` 返回；其他六种仍忽略，记为 G11。
 - 2026-11-09：0.23 并入 0.22；建立本计划；WS1、WS2、WS3、WS4、WS5、WS6、WS7 并行启动。
 - 2026-11-09：WS1 的 marker 发布、`Entry::live`、root/子树路径和 `release_transient` 锁已实现；4 个确定性竞态用例和 1 个 shuttle 模型通过；把发布顺序写错时模型失败。本机 release `close_cpu`：1000 个 instance 创建 17.55 s、关闭 11.15 s，阈值通过，issue 的 ≤30 秒创建目标在本机达到；`queued_emits_memory` 通过，每个排队 emit 约 1938 B。

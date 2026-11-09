@@ -1,0 +1,8 @@
+# configuration  expected TLC outcome (see README.md)
+call-healthy ok
+call-progress ok
+call-mut-cancel-closes violated:CancelKeepsSession
+call-mut-late-reply-twice violated:SettlesAtMostOnce
+call-mut-close-leaks violated:ClosedClearsTables
+call-mut-reuse-id violated:NoIdReuse
+call-mut-reuse-id-settles violated:OwnReply

@@ -31,37 +31,56 @@
 //! - §3.6, limits: a frame is within the channel's message limit, because a
 //!   session checks before writing it. So an over-limit value fails its
 //!   call and leaves no frame; a message over the limit that reaches the
-//!   carrier ends the channel, which the channel trace shows.
-//! - §3.8, replacement: the replaced channel closes before the new session
-//!   greets, and a reply arriving on the replacement cannot settle a call
-//!   of the session it replaced.
+//!   carrier ends the channel, which the channel trace shows. The two are
+//!   different results, and the trace records only the size either way.
+//! - §3.8, replacement: a replaced channel closes with `replaced` and its
+//!   session's ending is retryable; a rejected identity and an
+//!   incompatible version are not. A replacement is a new session, its
+//!   calls numbered from 1 again; a reply on it for an id the session it
+//!   replaced opened is not a reply in it. What ends a session is
+//!   classified by the error's kind, never by its text
+//!   (`crates/rutis-host/src/connect/session.rs:56-61`). The host's own
+//!   order — a newer connection is installed only after the older session
+//!   unloaded (`crates/rutis-host/src/connect/listen.rs:4-10`, tested
+//!   there) — is not visible in a channel trace beyond the old channel's
+//!   close.
 //!
-//! Every allowed trace here was produced by a real channel or session, but
-//! the repeated close and the repeated end, which no run here makes. Every
-//! forbidden one is that same trace with one event changed, or a literal
-//! sequence. The product trace stays size-only: the fixture decodes frames,
-//! the trace does not, because messages carry configuration. Each
-//! forbidden case is one this validator's rule for it rejects: delete the
-//! rule and the case is accepted, failing the test.
+//! Every allowed trace here was produced by a real channel or session, or
+//! is the literal sequence of a replacement, whose two channels are
+//! checked apart, as are the repeated close and the repeated end no run
+//! here makes. Every forbidden one is that same trace with one event
+//! changed, or a literal sequence. The product trace stays size-only: the
+//! fixture decodes frames, the trace does not, because messages carry
+//! configuration. Each forbidden case is one this validator's rule for it
+//! rejects: delete the rule and the case is accepted, failing the test.
 //!
 //! Not checked here, and gaps of #624: path forwarding, the wait graph, the
-//! outbound backlog limit (`SessionOptions::outbound_limit`, of a session
-//! the host makes, not of a channel), which reference kinds a frame may
-//! name (a `get` of a function is the far end's own refusal), and the
-//! access point's own log (`specs/remote-lease/AccessPoint.tla`). 4002 and
-//! 4003 are checked through a memory channel, whose `Close` maps them; the
-//! WebSocket close codes themselves are `crates/rutis-bridge/tests/
-//! websocket.rs` (feature `websocket`, not built here).
+//! outbound backlog limit (`SessionOptions::outbound_limit`: only a host
+//! makes a session with it, `Connection::open_with` is not public), which
+//! reference kinds a frame may name (a `get` of a function is the far end's
+//! own refusal), the access point's own log
+//! (`specs/remote-lease/AccessPoint.tla`), and the host's install order,
+//! which no channel event carries. 4002 and 4003 are checked through a
+//! memory channel, whose `Close` maps them; the WebSocket close codes
+//! themselves are `crates/rutis-bridge/tests/websocket.rs` (feature
+//! `websocket`, not built here). The retry classes are the ones
+//! `crates/rutis-host/src/connect/session.rs:56-61` and the Go dialer
+//! (`go/rutis/internal/runtime/dial.go`, `sessionFailure`) decide by; this
+//! file checks the endings those classes are made from.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use rutis::host::CtxHost;
+use rutis::Ctx;
 use rutis_bridge::channel::trace::{trace, Sink};
-use rutis_bridge::channel::{Channel, ChannelError, Close, PeerId, Receiver};
+use rutis_bridge::channel::{Channel, ChannelError, Close, Closer, PeerId, Receiver, Sender};
 use rutis_bridge::session::{
-    Connection, Dispatch, Endpoint, Error, Reply, Value, ENDPOINT_PROTOCOL,
+    Connection, Dispatch, Endpoint, Error, Handshake, Reply, Value, ENDPOINT_PROTOCOL,
 };
+use rutis_bridge::{LocalId, Session};
 use rutis_test_support::{until, within};
 use serde_json::{json, Value as Json};
 
@@ -1979,4 +1998,683 @@ fn failures_outside_the_protocol_are_rejected() {
             .map(|failure| &failure.graph),
         Some(&Graph::Bad)
     );
+}
+
+// ------------------------------------------------------ §3.6, the limits
+
+/// `channel` whose sending side takes at most `limit` bytes and says so,
+/// as the local and WebSocket transports do: a session reads `max_message`
+/// and checks what it would send before writing it, so a value over the
+/// limit fails only its call (#675).
+fn limited(channel: Channel, limit: usize) -> Channel {
+    struct Limited {
+        inner: Box<dyn Sender>,
+        limit: usize,
+    }
+    impl Sender for Limited {
+        fn send(&mut self, message: &[u8]) -> Result<(), ChannelError> {
+            if message.len() > self.limit {
+                return Err(ChannelError::Closed {
+                    reason: format!("the channel takes at most {} bytes", self.limit),
+                });
+            }
+            self.inner.send(message)
+        }
+        fn max_message(&self) -> Option<usize> {
+            Some(self.limit)
+        }
+    }
+    Channel {
+        sender: Box::new(Limited {
+            inner: channel.sender,
+            limit,
+        }),
+        receiver: channel.receiver,
+        closer: channel.closer,
+    }
+}
+
+/// `channel` whose carrier refuses a message over `limit` although the
+/// session was not told a limit (`max_message` is `None`): the message the
+/// session wrote reaches the carrier, which refuses it; the failed send
+/// ends the channel and the session. That is not how a value over a
+/// checked limit fails its call.
+fn refusing(channel: Channel, limit: usize) -> Channel {
+    struct Refusing {
+        inner: Box<dyn Sender>,
+        limit: usize,
+    }
+    impl Sender for Refusing {
+        fn send(&mut self, message: &[u8]) -> Result<(), ChannelError> {
+            if message.len() > self.limit {
+                return Err(ChannelError::Closed {
+                    reason: format!(
+                        "the carrier refused {} bytes, over its limit of {} bytes",
+                        message.len(),
+                        self.limit
+                    ),
+                });
+            }
+            self.inner.send(message)
+        }
+    }
+    Channel {
+        sender: Box::new(Refusing {
+            inner: channel.sender,
+            limit,
+        }),
+        receiver: channel.receiver,
+        closer: channel.closer,
+    }
+}
+
+/// §3.6: the session checks a frame against the channel's limit before it
+/// writes it. A value over the limit fails only its call: no frame is
+/// written, the session goes on, and the call after it is answered. The
+/// trace records the size only; the refused value never reaches it. The
+/// same rule rejects a frame over the limit that a trace decodes, and
+/// takes one of exactly the limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_value_over_the_channels_limit_fails_only_its_call() {
+    const LIMIT: usize = 1024;
+    const PAYLOAD: &str = "over-limit-value-";
+    let log = Log::default();
+    let frames = Decoded::default();
+    let (ours, theirs) = rutis_bridge::memory::pair();
+    let ours = instrumented(limited(ours, LIMIT), "main", "node", &log, &frames);
+    let theirs = instrumented(theirs, "node", "main", &log, &frames);
+    let caller = Connection::open(
+        ours,
+        Arc::new(Echo),
+        Endpoint::rust(id("main")).expect(id("node")),
+    )
+    .unwrap();
+    let callee = Connection::open(
+        theirs,
+        Arc::new(Echo),
+        Endpoint::rust(id("node")).expect(id("main")),
+    )
+    .unwrap();
+    within("the caller's greeting", caller.ready())
+        .await
+        .unwrap();
+    within("the callee's greeting", callee.ready())
+        .await
+        .unwrap();
+
+    let big = json!(PAYLOAD.repeat(64));
+    let error = within(
+        "the call whose argument is over the limit",
+        caller.invoke_async("svc", "echo", Value::List(vec![Value::Data(big)])),
+    )
+    .await
+    .unwrap_err();
+    match &error {
+        Error::Value { message, reason } => {
+            assert_eq!(reason, &Some("limit"), "{message}");
+            assert!(
+                message.starts_with("svc.echo: argument 1 cannot be sent: the message would be ")
+                    && message.ends_with(" bytes, over the limit of 1024 bytes"),
+                "{message}"
+            );
+        }
+        other => panic!("a value error expected, got {other:?}"),
+    }
+    assert_eq!(error.code(), Some("bad-value"));
+    assert!(
+        caller.close_reason().is_none(),
+        "a value over the limit fails its call, not the session"
+    );
+    let answer = within(
+        "the call after the refused one",
+        caller.invoke_async("svc", "echo", Value::Data(json!("small"))),
+    )
+    .await
+    .unwrap();
+    assert_eq!(answer.json().unwrap(), json!("small"));
+    caller.close(Error::Transport("done".into()));
+    within("the callee ending", callee.closed()).await;
+    within("the caller ending", caller.closed()).await;
+
+    let lines = log.lines();
+    assert!(
+        lines.iter().all(|line| !line.contains(PAYLOAD)),
+        "the trace carries sizes, never the value: {lines:?}"
+    );
+    let checked = accepted(&lines);
+    assert_eq!(checked.last["main"], State::Closed);
+    for event in checked
+        .events("main")
+        .iter()
+        .chain(checked.events("node").iter())
+    {
+        if let Event::Sent(bytes) | Event::Received(bytes) = event {
+            assert!(
+                *bytes <= LIMIT,
+                "a frame over the channel's limit is in the trace: {lines:?}"
+            );
+        }
+    }
+
+    let all = frames.all();
+    let checked = check_frames(&all, &[("main", "node")], Some(LIMIT))
+        .unwrap_or_else(|violation| panic!("an allowed frame sequence was rejected: {violation}"));
+    assert_eq!(checked.unanswered(), 0, "{all:?}");
+    // The refused call was numbered and never written; the call after it
+    // carries the id after the one no frame has.
+    assert_eq!(
+        ops(&frames.from("main")),
+        [("hello", None), ("invoke", Some("main:2"))],
+        "the call over the limit left no frame"
+    );
+    assert!(
+        !all.iter()
+            .any(|frame| frame.id.as_deref() == Some("main:1")),
+        "the refused call's id is not on the wire: {all:?}"
+    );
+
+    // §3.6 rule: a frame over the channel's limit is not in an allowed
+    // trace, because the session checks before writing it.
+    let over = format!(
+        r#"{{"op":"invoke","id":"main:1","path":[],"target":"svc","method":"echo","args":{{"type":"data","value":{}}}}}"#,
+        json!(PAYLOAD.repeat(64))
+    );
+    let violation = rejected_frames(
+        &decoded(&[("main", HELLO_MAIN), ("main", &over)]),
+        &[("main", "node")],
+        Some(LIMIT),
+    );
+    assert_eq!(violation.at, 1, "{violation}");
+    assert!(
+        violation
+            .why
+            .contains("over the channel's limit of 1024 bytes"),
+        "{violation}"
+    );
+    // The boundary: a frame of exactly the limit is within it.
+    let mut exact = serde_json::to_string(&json!({
+        "op": "invoke",
+        "id": "main:1",
+        "path": [],
+        "target": "svc",
+        "method": "echo",
+        "args": {"type": "undefined"},
+    }))
+    .unwrap();
+    assert!(exact.len() < LIMIT);
+    exact.push_str(&" ".repeat(LIMIT - exact.len()));
+    assert_eq!(exact.len(), LIMIT);
+    let checked = checked_frames(
+        &decoded(&[("main", HELLO_MAIN), ("main", &exact)]),
+        &[("main", "node")],
+        Some(LIMIT),
+    );
+    assert_eq!(
+        checked.unanswered(),
+        1,
+        "the call of the frame at the limit is in the trace"
+    );
+}
+
+/// §3.6: a message over the limit that reaches the carrier ends the
+/// channel, and with it the session: the failure is a transport one, not
+/// the call's. The session was not told the limit (`max_message` is
+/// `None`), so it wrote the frame; the carrier refused it. This is the
+/// other result from the value checked before writing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_the_carrier_refuses_ends_the_session() {
+    const LIMIT: usize = 1024;
+    let log = Log::default();
+    let frames = Decoded::default();
+    let (ours, theirs) = rutis_bridge::memory::pair();
+    let ours = instrumented(refusing(ours, LIMIT), "main", "node", &log, &frames);
+    let theirs = instrumented(theirs, "node", "main", &log, &frames);
+    let caller = Connection::open(
+        ours,
+        Arc::new(Echo),
+        Endpoint::rust(id("main")).expect(id("node")),
+    )
+    .unwrap();
+    let callee = Connection::open(
+        theirs,
+        Arc::new(Echo),
+        Endpoint::rust(id("node")).expect(id("main")),
+    )
+    .unwrap();
+    within("the caller's greeting", caller.ready())
+        .await
+        .unwrap();
+    within("the callee's greeting", callee.ready())
+        .await
+        .unwrap();
+
+    let error = within(
+        "the call whose argument the carrier refuses",
+        caller.invoke_async("svc", "echo", Value::Data(json!("z".repeat(2 * LIMIT)))),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, Error::Transport(_)),
+        "a carrier refusal is the session's failure, not a value error: {error:?}"
+    );
+    assert!(
+        error.to_string().contains("over its limit of 1024 bytes"),
+        "{error}"
+    );
+    let reason = caller.close_reason().expect("the session ended");
+    assert!(matches!(reason, Error::Transport(_)), "{reason:?}");
+    within("the callee ending", callee.closed()).await;
+    within("the caller ending", caller.closed()).await;
+
+    let lines = log.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("main: send failed: the carrier refused")),
+        "{lines:?}"
+    );
+    let checked = accepted(&lines);
+    assert_eq!(checked.last["main"], State::Closed);
+    assert!(
+        checked
+            .events("main")
+            .iter()
+            .any(|event| matches!(event, Event::SendFailed(_))),
+        "{lines:?}"
+    );
+    // The refused frame never reached the far end: what it read is the
+    // greeting, and no frame over the limit is in the trace.
+    let all = frames.all();
+    assert_eq!(
+        ops(&frames.from("main")),
+        [("hello", None)],
+        "the frame the carrier refused crossed nothing"
+    );
+    checked_frames(&all, &[("main", "node")], Some(LIMIT));
+}
+
+// ------------------------------------------- §3.8, the endings and retrying
+
+/// How an ended session is classified for retrying: by the kind of the
+/// error, never by its text (`crates/rutis-host/src/connect/session.rs:56-61`,
+/// `go/rutis/internal/runtime/dial.go` `sessionFailure`). Another protocol
+/// version or format cannot be retried until the configuration changes; a
+/// refused identity is an authentication failure; anything else, being
+/// replaced too, is retryable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Retry {
+    Retryable,
+    AuthRejected,
+    Incompatible,
+}
+
+fn retry(error: &Error) -> Retry {
+    match error {
+        Error::Handshake(Handshake::Incompatible(_)) => Retry::Incompatible,
+        Error::Handshake(Handshake::IdentityMismatch(_)) => Retry::AuthRejected,
+        _ => Retry::Retryable,
+    }
+}
+
+/// `channel` whose closes all say `why` in place of `Done`, as a host makes
+/// a replaced connection close as replaced
+/// (`crates/rutis-host/src/connect/listen.rs:204-220`). A session closes
+/// its side as `Done` while the host closes the channel as replaced or
+/// rejected; the memory channel sets a close's reason on its two directions
+/// one after the other (`crates/rutis-bridge/src/memory/mod.rs:145-154`), so
+/// the two closes can reach the far end as different reasons — it can read
+/// the end of the stream where the trace says replaced. One reason for both
+/// closes is what the far end of one close gets on a carrier that closes
+/// once, as the WebSocket does.
+fn one_reason(channel: Channel, why: Close) -> Channel {
+    struct OneReason {
+        inner: Arc<dyn Closer>,
+        why: Close,
+    }
+    impl Closer for OneReason {
+        fn close(&self, why: Close) {
+            let why = match why {
+                Close::Done => self.why.clone(),
+                why => why,
+            };
+            self.inner.close(why);
+        }
+    }
+    Channel {
+        sender: channel.sender,
+        receiver: channel.receiver,
+        closer: Arc::new(OneReason {
+            inner: channel.closer,
+            why,
+        }),
+    }
+}
+
+/// §3.8: the far end is replaced by a newer connection of its id. Its
+/// channel closes as replaced (4002 on WebSocket), the session ends with
+/// the channel's reason, and that ending is retryable: a dialer connects
+/// again by its backoff. Nothing crosses the channel after the close.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replaced_connection_is_a_retryable_ending() {
+    let log = Log::default();
+    let frames = Decoded::default();
+    let (ours, theirs) = rutis_bridge::memory::pair();
+    let ours = instrumented(ours, "main", "node", &log, &frames);
+    let theirs = instrumented(theirs, "node", "main", &log, &frames);
+    let theirs = one_reason(theirs, Close::Replaced);
+    let node_closer = theirs.closer.clone();
+    let caller = Connection::open(
+        ours,
+        Arc::new(Echo),
+        Endpoint::rust(id("main")).expect(id("node")),
+    )
+    .unwrap();
+    let callee = Connection::open(
+        theirs,
+        Arc::new(Echo),
+        Endpoint::rust(id("node")).expect(id("main")),
+    )
+    .unwrap();
+    within("the caller's greeting", caller.ready())
+        .await
+        .unwrap();
+    within("the callee's greeting", callee.ready())
+        .await
+        .unwrap();
+
+    node_closer.close(Close::Replaced);
+    within("the callee ending", callee.closed()).await;
+    within("the caller ending", caller.closed()).await;
+
+    let ended = caller.close_reason().expect("the caller's session ended");
+    assert_eq!(
+        ended.to_string(),
+        "replaced by a new connection",
+        "callee ended with {:?}; lines {:?}",
+        callee.close_reason(),
+        log.lines()
+    );
+    assert_eq!(retry(&ended), Retry::Retryable);
+    let lines = log.lines();
+    let checked = accepted(&lines);
+    assert_eq!(checked.last["main"], State::Closed);
+    assert_eq!(checked.last["node"], State::Closed);
+    assert!(
+        checked.events("node").contains(&Event::ClosedReplaced),
+        "the far end was told it was replaced: {lines:?}"
+    );
+    let all = frames.all();
+    let checked = checked_frames(&all, &[("main", "node")], None);
+    assert_eq!(checked.unanswered(), 0, "{all:?}");
+}
+
+/// §3.8: a replacement is a new session on a new channel. Its calls are
+/// its own, numbered from 1 again; an id the replaced session opened is
+/// not one the replacement opened, so a reply on the replacement for it
+/// settles nothing there. The old channel closes as `replaced`, and the
+/// two channels' frames are checked apart. The host's install after the
+/// old session unloads is its own order (`crates/rutis-host/src/connect/
+/// listen.rs:4-10`, tested there as
+/// `a_newer_connection_replaces_the_older_after_the_older_fully_unloaded`);
+/// what it leaves in a channel trace is the old channel's close, which is
+/// what this case carries.
+#[test]
+fn a_replacement_is_a_new_session_numbering_from_one() {
+    const OLD_CALL_1: &str = r#"{"op":"invoke","id":"main:1","path":[],"target":"t","method":"m","args":{"type":"undefined"}}"#;
+    const OLD_RETURN_1: &str = r#"{"op":"return","id":"main:1","value":{"type":"undefined"}}"#;
+    const OLD_CALL_2: &str = r#"{"op":"invoke","id":"main:2","path":[],"target":"t","method":"m","args":{"type":"undefined"}}"#;
+    const OLD_RETURN_2: &str = r#"{"op":"return","id":"main:2","value":{"type":"undefined"}}"#;
+    const STALE_RETURN: &str = r#"{"op":"return","id":"main:2","value":{"type":"undefined"}}"#;
+    let old = [
+        ("main-1", HELLO_MAIN),
+        ("node-1", HELLO_NODE),
+        ("main-1", OLD_CALL_1),
+        ("node-1", OLD_RETURN_1),
+        ("main-1", OLD_CALL_2),
+        ("node-1", OLD_RETURN_2),
+    ];
+    let sessions = [("main-1", "node-1"), ("main-2", "node-2")];
+
+    let mut rows: Vec<(&str, &str)> = old.to_vec();
+    rows.extend([
+        ("main-2", HELLO_MAIN),
+        ("node-2", HELLO_NODE),
+        ("main-2", INVOKE),
+        ("node-2", RETURN),
+    ]);
+    let frames = decoded(&rows);
+    let checked = checked_frames(&frames, &sessions, None);
+    assert_eq!(checked.unanswered(), 0, "{frames:?}");
+    let sent_by = |end: &str| -> Vec<Frame> {
+        frames
+            .iter()
+            .filter(|frame| frame.from == end)
+            .cloned()
+            .collect()
+    };
+    assert_eq!(
+        ops(&sent_by("main-1")),
+        [
+            ("hello", None),
+            ("invoke", Some("main:1")),
+            ("invoke", Some("main:2")),
+        ]
+    );
+    assert_eq!(
+        ops(&sent_by("main-2")),
+        [("hello", None), ("invoke", Some("main:1"))],
+        "a replacement numbers its calls from 1 again"
+    );
+
+    // The trace of the two channels: the old closes as replaced, and the
+    // replacement's frames follow on its own channel.
+    let lines = [
+        "main-1: sent 49 bytes",
+        "node-1: sent 49 bytes",
+        "main-1: sent 80 bytes",
+        "node-1: sent 40 bytes",
+        "main-1: sent 80 bytes",
+        "node-1: sent 40 bytes",
+        "main-1: closed: replaced",
+        "node-1: closed: replaced",
+        "main-2: sent 49 bytes",
+        "node-2: sent 49 bytes",
+        "main-2: sent 80 bytes",
+        "node-2: sent 40 bytes",
+    ];
+    let checked = accepted(&lines);
+    assert_eq!(checked.last["main-1"], State::Closed);
+    assert_eq!(
+        checked.events("main-1").last(),
+        Some(&Event::ClosedReplaced)
+    );
+    assert_eq!(checked.last["main-2"], State::Open);
+
+    // A reply for an id only the replaced session opened is not a reply in
+    // the replacement: it settles no call there.
+    let mut rows: Vec<(&str, &str)> = old.to_vec();
+    rows.extend([
+        ("main-2", HELLO_MAIN),
+        ("node-2", HELLO_NODE),
+        ("main-2", INVOKE),
+        ("node-2", STALE_RETURN),
+    ]);
+    let violation = rejected_frames(&decoded(&rows), &sessions, None);
+    assert_eq!(violation.at, 9, "{violation}");
+    assert!(
+        violation.why.contains("no frame of this session opened"),
+        "{violation}"
+    );
+}
+
+/// §3.8: an identity refused after the channel was established
+/// (`Close::Rejected`, 4003 on WebSocket) ends the session as an endpoint
+/// mismatch: an authentication failure, not a retryable one. The text is
+/// not what decides it: a reason reading `incompatible` or `retry` is
+/// still an identity refusal.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_identity_is_an_authentication_failure() {
+    let log = Log::default();
+    let frames = Decoded::default();
+    let (ours, theirs) = rutis_bridge::memory::pair();
+    let ours = instrumented(ours, "main", "node", &log, &frames);
+    let theirs = instrumented(theirs, "node", "main", &log, &frames);
+    let theirs = one_reason(
+        theirs,
+        Close::Rejected("incompatible: temporary, retry".into()),
+    );
+    let node_closer = theirs.closer.clone();
+    let caller = Connection::open(
+        ours,
+        Arc::new(Echo),
+        Endpoint::rust(id("main")).expect(id("node")),
+    )
+    .unwrap();
+    let callee = Connection::open(
+        theirs,
+        Arc::new(Echo),
+        Endpoint::rust(id("node")).expect(id("main")),
+    )
+    .unwrap();
+    within("the caller's greeting", caller.ready())
+        .await
+        .unwrap();
+    within("the callee's greeting", callee.ready())
+        .await
+        .unwrap();
+
+    node_closer.close(Close::Rejected("incompatible: temporary, retry".into()));
+    within("the callee ending", callee.closed()).await;
+    within("the caller ending", caller.closed()).await;
+
+    let ended = caller.close_reason().expect("the caller's session ended");
+    assert!(
+        matches!(ended, Error::Handshake(Handshake::IdentityMismatch(_))),
+        "{ended:?}"
+    );
+    assert_eq!(
+        ended.to_string(),
+        "endpoint mismatch: rejected: incompatible: temporary, retry"
+    );
+    assert_eq!(
+        retry(&ended),
+        Retry::AuthRejected,
+        "classified by type, never by text"
+    );
+    let lines = log.lines();
+    let checked = accepted(&lines);
+    assert_eq!(checked.last["main"], State::Closed);
+    assert!(
+        checked.events("main").iter().any(
+            |event| matches!(event, Event::ReceiveFailed(reason) if reason.starts_with("rejected: "))
+        ),
+        "{lines:?}"
+    );
+    let all = frames.all();
+    checked_frames(&all, &[("main", "node")], None);
+}
+
+/// §3.8 and §3.2: a far end speaking protocol 3 is incompatible — a dialer
+/// stops retrying it until the configuration changes — and its greeting is
+/// no greeting of protocol 4, so the frame validator rejects the trace the
+/// channel carried. The channel trace itself is allowed: its end is a
+/// normal close.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_version_three_greeting_fails_as_incompatible() {
+    let log = Log::default();
+    let frames = Decoded::default();
+    let (ours, theirs) = rutis_bridge::memory::pair();
+    let ours = instrumented(ours, "main", "node", &log, &frames);
+    let mut theirs = instrumented(theirs, "node", "main", &log, &frames);
+    let caller = Connection::open(
+        ours,
+        Arc::new(Echo),
+        Endpoint::rust(id("main")).expect(id("node")),
+    )
+    .unwrap();
+    let far = std::thread::spawn(move || {
+        let hello = read_frame(&mut theirs);
+        assert_eq!(hello["op"], "hello");
+        write_frame(
+            &mut theirs,
+            json!({ "op": "hello", "version": 3, "endpoint": "node" }),
+        );
+        theirs.receiver.recv()
+    });
+
+    let error = within("the handshake", caller.ready()).await.unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "incompatible session: the far end speaks protocol 3, this side 4: upgrade the far end"
+    );
+    assert_eq!(retry(&error), Retry::Incompatible);
+    within("the caller ending", caller.closed()).await;
+    let ended = within(
+        "the far end's channel",
+        tokio::task::spawn_blocking(move || far.join().unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ended, Ok(None), "the channel closed with Done");
+
+    let lines = log.lines();
+    let checked = accepted(&lines);
+    assert_eq!(checked.last["main"], State::Closed);
+    let all = frames.all();
+    let violation = rejected_frames(&all, &[("main", "node")], None);
+    assert_eq!(violation.at, 1, "{violation}");
+    assert!(
+        violation
+            .why
+            .contains("a greeting speaks protocol 4, not Some(3)"),
+        "{violation}"
+    );
+}
+
+/// §3.8 and §3.2: a far end that never greets gives up after 10 s with
+/// `the far end did not greet in time`; a transport ending, retryable like
+/// a replacement, not an incompatible session. The channel's own trace is
+/// the greeting then its close; no frame of a session was exchanged.
+#[tokio::test(start_paused = true)]
+async fn a_far_end_that_never_greets_times_out_as_retryable() {
+    let root = Ctx::root().unwrap();
+    root.provide(LocalId(id("main"))).unwrap();
+    let log = Log::default();
+    let frames = Decoded::default();
+    let (ours, theirs) = rutis_bridge::memory::pair();
+    let ours = instrumented(ours, "main", "node", &log, &frames);
+    let theirs = instrumented(theirs, "node", "main", &log, &frames);
+    let started = tokio::time::Instant::now();
+    let error = match Session::handshake(&root, ours).await {
+        Err(error) => error,
+        Ok(_) => panic!("a far end that never greets is not a session"),
+    };
+    assert_eq!(error.to_string(), "the far end did not greet in time");
+    assert_eq!(retry(&error), Retry::Retryable);
+    assert_eq!(started.elapsed(), Duration::from_secs(10));
+
+    let (first, second) = within(
+        "the far end",
+        tokio::task::spawn_blocking(move || {
+            let mut theirs = theirs;
+            (read_frame(&mut theirs), theirs.receiver.recv())
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["op"], "hello");
+    assert_eq!(second, Ok(None), "the channel closed with Done");
+
+    let lines = log.lines();
+    let checked = accepted(&lines);
+    assert_eq!(checked.last["main"], State::Closed);
+    let main = frames.from("main");
+    assert_eq!(ops(&main), [("hello", None)]);
+    assert_eq!(
+        checked.events("main").first(),
+        Some(&Event::Sent(main[0].bytes)),
+        "the trace records the greeting's size"
+    );
+    checked_frames(&frames.all(), &[("main", "node")], None);
 }
