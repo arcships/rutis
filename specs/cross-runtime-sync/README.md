@@ -100,7 +100,7 @@ TLC 2.19（tla2tools v1.7.4），Temurin 21，16 核；`MaxRoots = 2`、`MaxDept
 | `policy-b-posts-node` | n, p, q（p 不可重入，`q` 可重入），策略 B；`MaxDepth=2` 的 CI 规模 | 通过 | 641,339 | 本地 32 核 10 s，CI 4 核估计 1–2 min |
 | `threaded-policy-b` | n, g, p（g 一个调用一个线程） | 通过 | 62,128 | <1 s |
 | `unmarked-policy-b` | n, g, p；g 不声明 `sync-wait` | **死锁**（反例 9，明确不保证） | 762 | <1 s |
-| `bail-policy-b` | r, t；`bail` 分发，Rust 不记分发本身 | **死锁**（反例 6） | 449 | <1 s |
+| `bail-policy-b` | r, t；`bail` 分发，Rust 不记分发本身（修复前行为；当前实现已带链） | **死锁**（反例 6） | 449 | <1 s |
 | `waterfall-policy-b` | r, t；`waterfall` 分发 | 通过 | 3,277 | <1 s |
 | `bail-recorded` | r, t；`bail`，Rust 把分发记成一跳 | 通过 | 3,494 | <1 s |
 | `emit-unchained` | n, p, q；`emit` 的监听器调用不带链（`EmitChain` FALSE），1 个顶层 | 通过 | 69,591 | 2 s |
@@ -108,7 +108,7 @@ TLC 2.19（tla2tools v1.7.4），Temurin 21，16 核；`MaxRoots = 2`、`MaxDept
 | `before-host-call` | 同上，#597 之前（记为入口） | 通过 | 5,208 | <1 s |
 | `abandon-policy-b` | n, g, p；g 本地放弃一次同步调用 | **违反 `NoFalseCycle`**（反例 7） | 71,002 | 1 s |
 | `hidden-policy-b` | n, p, q；p 从别的线程发同步调用 | **违反 `ChainRecognised`**（反例 10，明确不保证） | 772 | <1 s |
-| `async-policy-b` | n, p, q；已标记链上的异步调用 | **违反 `NoFalseCycle`**（反例 8） | 29,660 | 1 s |
+| `async-policy-b` | n, p, q；已标记链上的异步调用（实现保留保守记边，已知误报） | **违反 `NoFalseCycle`**（反例 8） | 29,660 | 1 s |
 | `nested-service` | p1, p2 | 违反 `NeverNested`（预期，SYN-9-3） | 118 | <1 s |
 | `end-session` | n1, n2, p；允许会话结束 | 通过 | 84,695 | 1 s |
 
@@ -132,11 +132,11 @@ TLC 2.19（tla2tools v1.7.4），Temurin 21，16 核；`MaxRoots = 2`、`MaxDept
 3. **不改写 `path`**（`current-norebase`）。n1 和 n2 都在等各自的 `node:1`；n1 的调用转到 n2 时 `path` 是 `["node:1"]`，n2 把它当成自己的 `node:1` 链上的调用，嵌套执行了。现在的 `rebase` 防止的正是这个。
 4. **A 拒绝不会卡死的调用**（`policy-a-refusals`）。n1 同步调用 n2，n2 空闲，没有任何别的调用，A 仍然拒绝。
 5. **投递压在等待上面**（`current-posts`）。n 同步调用 p 的 `x`，`x` 同步调用 q；这时 q 自己发出一个事件，监听器在 p，Rust 把监听器的调用投递给 p；p 可重入，把它压在 `x` 上面执行；监听器同步调用 n，n 在等 `x`，把它放到一边。`x` 被压在下面，n 等 `x`、`x` 等监听器、监听器等 n。没有调用方等这次投递，旧的图里没有它，环查不出来；把它记为入口后（`policy-b-posts`），监听器的调用被拒绝。监听器调用不带调用链时（`emit-unchained`，#561）这个规模下环仍然查得到：那次的边来自"放到一边"和栈顺序，不靠发出方的链。
-6. **同步分发上的一块盲区**（`bail-policy-b`，2026-11-09）。r（不可重入）发一次 `bail`：r 等这次分发，宿主调 t 的监听器并等它，监听器同步调用 r。`waits.rs` 不把这次分发记成一跳，`bail` 的监听器调用也不带调用链（`Mode::Bail` 分支没有压入 `Waiting`），所以 r 不认识这个回调、把它放到一边；r 等分发、分发等监听器、监听器等 r。策略 B 看不到这条环，卡死。
+6. **同步分发上的一块盲区**（`bail-policy-b`，2026-11-09）。r（不可重入）发一次 `bail`：r 等这次分发，宿主调 t 的监听器并等它，监听器同步调用 r。模型按“`waits.rs` 不把分发记成一跳、监听器调用不带链”建，于是 r 不认识回调、把它放到一边，策略 B 卡死。实测当前合规运行时已经把分发调用号放进监听器调用的 `path`（等价 `bail-recorded`）；`bail-policy-b` 是修复前配置。只有发送 `events.dispatch` 的运行时未声明 `sync-wait`（旧 SDK/不合规运行时，`unmarked-policy-b`、SYN-9-26）才退化成这条盲区，写成明确不保证。
    - `waterfall-policy-b` 是同一形状的 `waterfall-sync`：它的调用回发出方时带发出方那次等待的链，r 把回调嵌套执行，通过。
-   - `bail-recorded` 是候选修法：Rust 把这次分发的调用号放进监听器调用的 `path`（相当于把分发本身记成一跳），r 认得回调，通过。结论：`bail` 分发要在等待图里可见，否则协议里"每个同步调用都参加等待环检测"对 `bail` 不成立。
+   - `bail-recorded` 对应当前实现：Rust 把这次分发的调用号放进监听器调用的 `path`（相当于把分发本身记成一跳），r 认得回调，通过。结论：`bail` 分发要在等待图里可见；合规运行时已满足，未声明 `sync-wait` 的运行时不在检查内。
 7. **本地放弃之后留着的那条边**（`abandon-policy-b`）。Go 的 context、Swift 的 Task、Kotlin 的中断放弃一个同步调用时不发 `cancel`：调用方的线程接着跑，宿主表里那条调用还在，直到回复到达。图里它仍然是"这个运行时发出的调用"，于是 B 可能因为一条没人再等的边拒绝一次本来能完成的调用（违反 `NoFalseCycle`）。修法是放弃时发 `cancel`（#561 已定的规则），或者接受误报。
-8. **已标记链上的异步调用**（`async-policy-b`，854bef5d）。调用方不等这次异步调用，但它在已标记的链上，`waits.rs` 仍把它记成一跳。n 在等一次调用，p 的异步调用进入 n 时被放到一边，Rust 的图里却是"n 发出的调用"加上这条新调用，于是一次不会卡死的调用被拒绝（违反 `NoFalseCycle`）。要修就得在调用帧上区分"同步等待"和"发出即不管"。
+8. **已标记链上的异步调用**（`async-policy-b`，854bef5d）。调用方不等这次异步调用，但它在已标记的链上，`waits.rs` 仍把它记成一跳。n 在等一次调用，p 的异步调用进入 n 时被放到一边，Rust 的图里却是"n 发出的调用"加上这条新调用，于是一次不会卡死的调用被拒绝（违反 `NoFalseCycle`）。实现暂时保留 854bef5d 的保守记边：帧上只有 `sync`，无法区分“发出即不管”和“之后才 await”，去掉会漏掉真实等待边（对象中继的同步环测试会挂）。因此当前把这条当已知误报，等协议加“是否等待结果”的信号后再改。
 9. **没有声明 `sync-wait` 的运行时**（`unmarked-policy-b`，SYN-9-26）。g 的同步调用不带 `sync`，宿主不登记，整个会话在检测之外；n → g → p → n 的环查不出来，卡死。这是**明确不保证**（旧版 SDK 与以前一样可能卡死，但不误报）。
 10. **别的线程发起的同步调用**（`hidden-policy-b`）。Python 经 `run_coroutine_threadsafe` 从另一个线程发同步调用，帧上没有 `sync`，宿主看不见这条等待；调用进入正在等的不可重入运行时时被放到一边，`ChainRecognised` 被违反（卡死的第一步）。这是**明确不保证**。
 11. **可重入运行时中途被调**（`nested-service`，SYN-9-3）。p1 同步调用 p2 的服务；p2 在同一调用里又同步调用 p1；p1 的另一个活动同步调用 p2，p2 可重入，把这次调用嵌套在执行中的调用上面。`NeverNested` 被违反，这是**明确不保证**——"调用 rutis 服务时不要持有锁"无法强制，模型用一条预期被违反的性质把它钉住。
