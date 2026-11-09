@@ -13,12 +13,12 @@ This document only arranges work and gaps; it changes no behaviour. Nothing new 
 | WS0 | Baseline, roadmap merge, gap register | #776, #634 | This plan; roadmap and quality-status revisions | — | In progress |
 | WS1 | #1025 event close admission: marker, publication, `Entry::live`, race tests, benchmark | #1025, #622 | Code, deterministic tests, benchmark result | WS0 | Core done, verifying |
 | WS2 | Current session protocol specification: frames, handshake, calls, references, cancellation, malformed frames, limits, unknown fields | #635 | `docs/protocol-session.md` and `.en.md`; old designs point to it; gap list | WS0 | First version done; unknown fields decided (call-scoped) |
-| WS3 | Rule list and tracking table: source, plain promise, evidence, mutation, status, gap | #634 | `docs/formal-trace/` and a statistics script; `guarantees.md` linked | WS2 partly | First version done, 264 rows; full 1368 not extracted |
-| WS4 | TLA+ models of the protocol design: event close admission, cross-runtime sync, remote lease, row and call lifecycle | #613 | New `specs/` model or reconciled old models, `expected.txt`, `run.sh`, README | WS2 | First slice done, README/CI finishing |
-| WS5 | Real-execution trace and conformance: channel/frame trace validation, applicable implementation columns | #624 | Validator, positive/negative cases, gap list | WS2, WS4 | First slice done |
+| WS3 | Rule list and tracking table: source, plain promise, evidence, mutation, status, gap | #634 | `docs/formal-trace/` and a statistics script; `guarantees.md` linked | WS2 partly | First version done, 1817 rows (including 1368 protocol rules); not yet rechecked against the current specification |
+| WS4 | TLA+ models of the protocol design: event close admission, cross-runtime sync, remote lease, row and call lifecycle | #613 | New `specs/` model or reconciled old models, `expected.txt`, `run.sh`, README | WS2 | First slice done: event-close and row-lifecycle; event/call/node models remain |
+| WS5 | Real-execution trace and conformance: channel/frame trace validation, applicable implementation columns | #624 | Validator, positive/negative cases, gap list | WS2, WS4 | First slice done: 16 cases; limits, leases, host-gone, sync-cycles remain |
 | WS6 | Controlled scheduling and static checks for non-Rust runtimes | #630 | Evidence per applicable language; reasons for not applicable | WS2 | First slice done |
-| WS7 | Property tests, fuzzing, Kani, Miri, virtual clocks | #631, #639 | Property tests, fuzz targets, timing cases, Kani/Miri conclusions | WS2 | First slice done |
-| WS8 | Close-out: tracking table to zero gaps, release gate, CI reports | #634 | Release check result and unverified list | All | Not started |
+| WS7 | Property tests, fuzzing, Kani, Miri, virtual clocks | #631, #639 | Property tests, fuzz targets, timing cases, Kani/Miri conclusions | WS2 | First slice done: six grant-rollback + five value/frame/bad-frame properties; Kani/Miri/fuzz not run |
+| WS8 | Close-out: tracking table to zero gaps, release gate, CI reports | #634 | Release check result and unverified list | All | In progress: tracker check is in CI; release gate not started |
 
 ## 2. Order and gates
 
@@ -45,7 +45,7 @@ Release gate: per design §10 and quality standard Q13.1, every applicable rule 
 | ID | Gap/blocker | Impact | Handling |
 | --- | --- | --- | --- |
 | G1 | Old unknown-field behaviour: Rust ended the whole session, the other six ignored the field | The error scope was too large, or implementations disagreed | Decided B: reject, but fail only that call; Rust implements it (`bad-frame`, `hello` fails the handshake, `release`/`cancel` ignore), the other six still ignore — see G11 |
-| G11 | Node, Bun, Python, Go, Swift and Kotlin still silently ignore unknown fields; they have no call-level `bad-frame` refusal | The same frame with a new field behaves differently on Rust and the others | #635 cross-implementation gap: each language refuses at the frame envelope/id level and adds shared cases; until then the tracker records only Rust as partially verified |
+| G11 | Swift and Kotlin still silently ignore unknown fields; they have no call-level `bad-frame` refusal | The same frame with a new field behaves differently on Rust/Node/Bun/Python/Go and on Swift/Kotlin | Node, Bun, Python and Go are done; Swift/Kotlin need their toolchains and decoder changes, so the tracker records only the five implemented runtimes |
 | G2 | #634's 1368-rule inventory exists only in issue comments; the repository has no extractable source | The tracking table cannot claim completeness | WS3 builds the schema and a full `guarantees.md` mapping; rule extraction becomes a script or data file; until then the status is "partial" |
 | G3 | `release_transient` removes a child outside `Shared.admission` | The marker set can miss a member | WS1 moves the detach under admission; keeping it lock-free requires proving `alive=false` is set first plus a concurrent test |
 | G4 | No shuttle model for event close admission; a std atomic marker gives shuttle no switch point | Cannot explore marker-publication/`Entry::live` races | WS1 uses `crate::sync::AtomicBool` for the marker, or adds `switch_point()` at the read; the model must fail when the order is wrong |

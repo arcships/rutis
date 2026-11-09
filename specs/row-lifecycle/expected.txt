@@ -1,0 +1,10 @@
+# configuration  expected TLC outcome (see README.md)
+row-healthy ok
+row-reconnect ok
+row-cleanup ok
+row-mut-accept-before-clean violated:NewSessionOnlyAfterSweep
+row-mut-accept-before-clean-loads violated:OneRowPerName
+row-mut-read-old violated:NoRowsAfterSweep
+row-mut-keyed-by-row violated:OwnFramesOnly
+row-mut-reclean violated:CleanupOnce
+row-mut-keep-rows violated:liveness

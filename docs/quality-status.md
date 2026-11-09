@@ -703,12 +703,12 @@ E2E 发现并修复：#225、#226（#261、#217）。Node 最低版本降到 22�
 
 | 层/工作 | issue | 状态和下一步 |
 | --- | --- | --- |
-| 协议基线与规则追踪 | #635、#634 | 进行中：会话协议规格第一版（`docs/protocol-session.md`）已写入；追踪表第一版 265 行（非全量 1368 条）。未知字段已定：拒绝但只失败该调用（`bad-frame`），Rust 已实现，其他六种仍忽略（跨实现缺口） |
+| 协议基线与规则追踪 | #635、#634 | 进行中：会话协议规格第一版（`docs/protocol-session.md`）已写入；追踪表第一版 265 行（非全量 1368 条）。未知字段已定：拒绝但只失败该调用（`bad-frame`），Rust/Node/Bun/Python/Go 已实现，Swift/Kotlin 仍忽略（跨实现缺口） |
 | 事件、调用、生命周期模型 | #613 | 首块完成：`specs/event-close/` 的 7 个配置按预期结束，4 个变异被捕获；cross-runtime-sync、remote-lease 对账和事件/行/调用生命周期模型仍待补 |
-| Rust 实现交错 | #622 | 核心完成，验证中：#1025 的 marker 发布、`Entry::live`、4 个确定性竞态用例和 shuttle 模型通过；Loading-owner、`once`、remote-entry 待补 |
+| Rust 实现交错 | #622 | 核心完成，验证中：#1025 的 marker 发布、`Entry::live`、7 个确定性竞态用例和 7 个 shuttle 模型通过（新增登记/dispose、在途卸载、并发子树关闭）；Loading-owner、`once`、remote-entry、根 dispose/重启、依赖驱逐、emit 链待补 |
 | 非 Rust 运行时调度 | #630 | 首块完成：Node 帧泵 4 个用例；Bun/Python/Go 只有现状盘点；Swift/Kotlin 本机无工具链，登记为环境缺口 |
-| trace 与一致性 | #624 | 首块完成：Rust 通道/帧验证器 11 个用例；leases、host-gone、sync-cycles 和跨语言列待补 |
-| 属性、模糊、Kani/Miri | #631 | 首块完成：引用授予回滚 6 个用例（含 proptest 和变异验证）；Kani/Miri 本机未安装，fuzz 目标未跑，不写成通过 |
+| trace 与一致性 | #624 | 首块完成：Rust 通道/帧验证器 16 个用例（引用计数、错误图、调用范围）；上限、leases、host-gone、sync-cycles 和跨语言列待补 |
+| 属性、模糊、Kani/Miri | #631 | 首块完成：引用授予回滚 6 个用例、值/帧/坏帧属性 5 个（proptest + corpus 重放）；Kani/Miri 本机未安装，cargo-fuzz 未跑，不写成通过 |
 | 一致性与普通测试 | #639 | 进行中：缺口清单未完成；161 条一致性用例、18 条普通测试和虚拟时钟计时用例尚未接入 |
 | 统一收口 | #634 | 进行中：追踪表与检查脚本可跑（`node tools/formal-trace.mjs --check` 零问题）；CI 接入和全量规则抽取未完成 |
 

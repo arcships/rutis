@@ -269,7 +269,7 @@
 
 实现：`crates/rutis-bridge/src/session/rpc.rs` 的 `parse_frame` / `reject_unknown_fields`；测试 `unknown_frame_fields_fail_only_their_call`、`an_unknown_field_in_hello_fails_the_handshake`。
 
-`SESS-67` **当前（其他六种，尚未一致）。** Node、Bun、Python、Go、Swift、Kotlin 目前忽略未知字段并继续；它们还没有 `bad-frame` 的调用级拒绝，属 #635 的跨实现缺口。规则本身按 `SESS-66`；各实现的适用列在追踪表里登记。
+`SESS-67` **当前（Node、Bun、Python、Go）。** 这四种运行时已实现 `SESS-66` 的调用级拒绝；Swift、Kotlin 仍忽略未知字段并继续，属 #635 的跨实现缺口。规则本身按 `SESS-66`；各实现的适用列在追踪表里登记。
 
 `SESS-68` **已取代。** 两种旧行为：Rust 把未知字段当整帧畸形、结束会话；其他六种无差别忽略。两种都由 `SESS-66` 取代。
 

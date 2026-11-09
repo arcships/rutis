@@ -703,12 +703,12 @@ The old “waiting for design” list is no longer the current schedule. The cur
 
 | Layer/work | Issue | Status and next step |
 | --- | --- | --- |
-| Protocol baseline and rule tracker | #635, #634 | In progress: first session protocol specification (`docs/protocol-session.md`) written; first tracker version has 265 rows (not the full 1368). Unknown fields are decided: reject but fail only that call (`bad-frame`); Rust implements it, the other six still ignore them (cross-implementation gap) |
+| Protocol baseline and rule tracker | #635, #634 | In progress: first session protocol specification (`docs/protocol-session.md`) written; first tracker version has 265 rows (not the full 1368). Unknown fields are decided: reject but fail only that call (`bad-frame`); Rust/Node/Bun/Python/Go implement it, Swift/Kotlin still ignore them (cross-implementation gap) |
 | Event, call and lifecycle models | #613 | First slice done: all seven `specs/event-close/` configurations end as expected and four mutations are caught; reconciling cross-runtime-sync/remote-lease and the event/row/call-lifecycle models remain |
-| Rust implementation interleavings | #622 | Core done, verifying: #1025 marker publication, `Entry::live`, four deterministic race cases and the shuttle model pass; Loading-owner, `once` and remote-entry remain |
+| Rust implementation interleavings | #622 | Core done, verifying: #1025 marker publication, `Entry::live`, seven deterministic race cases and seven shuttle models pass (new: effect registration/dispose, in-flight unload, concurrent subtree shutdown); Loading-owner, `once`, remote-entry, root dispose/restart, dependency eviction and the emit chain remain |
 | Non-Rust runtime scheduling | #630 | First slice done: four Node frame-pump cases; Bun/Python/Go are inventory-only; Swift/Kotlin lack toolchains here and are recorded as environment gaps |
-| Trace and conformance | #624 | First slice done: Rust channel/frame validator with 11 cases; leases, host-gone, sync-cycles and cross-language columns remain |
-| Property, fuzz, Kani/Miri | #631 | First slice done: six grant-rollback cases with proptest and mutation checks; Kani/Miri are not installed and fuzz targets were not run, so they are not reported as passing |
+| Trace and conformance | #624 | First slice done: Rust channel/frame validator with 16 cases (reference counts, error graphs, call scope); limits, leases, host-gone, sync-cycles and cross-language columns remain |
+| Property, fuzz, Kani/Miri | #631 | First slice done: six grant-rollback cases plus five value/frame/bad-frame properties (proptest and corpus replay); Kani/Miri are not installed and cargo-fuzz was not run, so they are not reported as passing |
 | Conformance and ordinary tests | #639 | In progress: the gap inventory is incomplete; the 161 conformance cases, 18 ordinary tests and virtual-clock cases are not wired yet |
 | Shared close-out | #634 | In progress: the tracker and checker run (`node tools/formal-trace.mjs --check` reports zero problems); CI wiring and the full rule extraction remain |
 

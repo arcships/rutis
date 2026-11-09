@@ -701,6 +701,92 @@ test('an error answering a call has the caller\'s stack, and a rethrow adds it',
   peer.close()
 })
 
+// protocol §9 (#635): an unknown field in a call frame fails only that call.
+test('a call frame with an unknown field fails only that call', async () => {
+  const seen = []
+  const { peer, sent, fault } = harness((_, method) => { seen.push(method); return 42 })
+  peer.receive({ ...invoke(1, 'first'), trace: 'x' })
+  const refused = decodeError(sent.at(-1).error)
+  assert.equal(sent.at(-1).op, 'throw')
+  assert.equal(sent.at(-1).id, 'rust:1')
+  assert.equal(refused.name, 'BindingError')
+  assert.equal(refused.code, 'bad-frame')
+  assert.equal(refused.message, 'unknown field "trace" in invoke')
+  assert.deepEqual(refused.data, { op: 'invoke', fields: ['trace'] })
+  // A field nested in a value is named by its path.
+  peer.receive({ op: 'invoke', id: 'rust:2', path: [], target: 'test', method: 'second', args: { type: 'record', value: { x: { type: 'undefined', extra: 1 } } } })
+  const nested = decodeError(sent.at(-1).error)
+  assert.equal(nested.message, 'unknown field "args.value.x.extra" in invoke')
+  assert.deepEqual(nested.data, { op: 'invoke', fields: ['args.value.x.extra'] })
+  // The session goes on: a valid call runs.
+  peer.receive(invoke(3, 'third'))
+  await Promise.resolve()
+  assert.deepEqual(seen, ['third'])
+  assert.equal(sent.at(-1).op, 'return')
+  assert.equal(sent.at(-1).value.value, 42)
+  assert.equal(fault(), undefined)
+  peer.close()
+})
+
+// protocol §9 (#635): a reply carrying an unknown field fails only the call
+// waiting for it; the session goes on.
+test('a return with an unknown field fails only the call waiting for it', async () => {
+  const { peer, sent, fault } = harness(() => 42)
+  const waiting = peer.invokeAsync('test', 'm', [])
+  peer.receive({ op: 'return', id: sent.at(-1).id, value: data(1), extra: true })
+  await assert.rejects(waiting, error => {
+    assert.equal(error.name, 'BindingError')
+    assert.equal(error.code, 'bad-frame')
+    assert.equal(error.message, 'unknown field "extra" in return')
+    assert.deepEqual(error.data, { op: 'return', fields: ['extra'] })
+    return true
+  })
+  const next = peer.invokeAsync('test', 'm', [])
+  peer.receive({ op: 'return', id: sent.at(-1).id, value: data(2) })
+  assert.equal(await next, 2)
+  assert.equal(fault(), undefined)
+  peer.close()
+})
+
+test('a throw with an unknown field fails only the call waiting for it', async () => {
+  const { peer, sent, fault } = harness(() => 42)
+  const waiting = peer.invokeAsync('test', 'm', [])
+  peer.receive({ op: 'throw', id: sent.at(-1).id, error: { name: 'TypeError', message: 'no' }, extra: 1 })
+  const error = await waiting.catch(error => error)
+  assert.equal(error.code, 'bad-frame')
+  assert.equal(error.message, 'unknown field "extra" in throw')
+  assert.equal(fault(), undefined)
+  peer.close()
+})
+
+// protocol §9 (#635): `cancel` and `release` have no call to fail; their
+// extra fields are ignored and the frame is handled as usual.
+test('cancel and release ignore unknown fields', async () => {
+  const { peer, sent, fault } = harness(() => () => 1)
+  peer.receive(invoke(1, 'get')); await Promise.resolve()
+  const reference = sent.at(-1).value.value.id
+  peer.receive({ op: 'cancel', id: 'rust:99', extra: 1 })
+  peer.receive({ op: 'release', reference, count: 1, extra: 1 })
+  peer.receive(invoke(2, 'get')); await Promise.resolve()
+  assert.equal(sent.at(-1).op, 'return')
+  assert.equal(fault(), undefined)
+  peer.close()
+})
+
+// protocol §9 (#635): an unknown field in `hello` fails the handshake and
+// ends the session, saying which field.
+test('an unknown field in hello fails the handshake', async () => {
+  let fault
+  const peer = new Session({
+    endpoint: { local: 'node' }, dispatch: () => {},
+    send: () => {}, pump: () => {}, abort: error => { fault = error },
+  })
+  peer.receive({ op: 'hello', version: ENDPOINT_PROTOCOL, endpoint: 'rust', capabilities: [], extra: 1 })
+  const message = 'incompatible session: unknown field "extra" in hello'
+  await assert.rejects(peer.ready, error => error.category === 'incompatible' && error.message === message)
+  assert.equal(fault?.message, message)
+})
+
 // objects-case(node): cancel
 // objects-case(node): holder-killed-releases
 // An object passed by reference: a call of its method the caller gives up

@@ -85,7 +85,7 @@ shutdown 已在标记子树并开始关闭时持有 `Shared.admission`（`crates
 - **模型：** `shuttle_lineage_marker_precedes_closing` 通过；把 `publish_subtree_closing` 放到 `mark_subtree_lineage` 之前，模型立即报“this node is closing while its lineage marker is clear”。
 - **模型：** `specs/event-close/run.sh` 的 7 个配置全部按 `expected.txt` 结束：`close-healthy` 2,263,040 个不同状态、21 秒，`close-tree` 688,580 个、12 秒，`close-drain` 31,488 个、1 秒；4 个变异分别违反 `ClosingImpliesMarked`、`CommittedStaysOut`（两次）和 `CleanupOnce`。
 - **benchmark（本机 release，Linux x86-64）：** 100 个 instance 创建 150.60 ms、关闭 119.06 ms；1000 个 instance 创建 17.55 s、关闭 11.15 s。`CREATE_RATIO`、`CLOSE_RATIO`、`IDLE_SHARE` 阈值全部通过；issue 的 ≤30 秒创建目标在本机达到。CI 的 `stress.yml` `cpu` job 仍需记录同一组数字。
-- **仍缺：** Loading-owner、`once`、remote-entry、重复 shutdown 的专项用例；CI stress job；release notes。完成这些之前，规则保持“提案，尚未验证”。
+- **仍缺：** Loading-owner、`once`、remote-entry 的专项用例；CI stress job；release notes。完成这些之前，规则保持“提案，尚未验证”。
 
 ## 7. 设计哲学检查
 

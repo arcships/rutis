@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { readFileSync } from 'node:fs'
 import { encode } from './codec.mjs'
-import { encodeError, decodeError, callSite } from './errors.mjs'
+import { encodeError, decodeError, callSite, bindingError } from './errors.mjs'
 import { VALUE_CAPABILITIES, ValueError, base64Decode, base64Encode, bytesOf, checkKeys, checkText, constructedTag, describe, instantFromText, instantText, keyOf, tagOf, undeclared } from './values.mjs'
 
 // Values with behaviour cross by reference, so their identity and state stay
@@ -77,12 +77,78 @@ export function versionMismatch(far, local, implementation) {
 export const CAPABILITIES = ['sync-stack', ...VALUE_CAPABILITIES]
 export const ENDPOINT_ID = /^[a-z0-9-]+$/
 
+// The fields each frame op defines (#635). A field outside them is not a
+// session error: a call frame fails only its call, a greeting fails the
+// handshake, and `release`/`cancel` ignore the extras (protocol §9).
+const FRAME_FIELDS = Object.freeze({
+  hello: ['op', 'version', 'endpoint', 'implementation', 'capabilities'],
+  invoke: ['op', 'id', 'path', 'target', 'method', 'args', 'sync'],
+  call: ['op', 'id', 'path', 'reference', 'method', 'args', 'sync'],
+  get: ['op', 'id', 'path', 'reference', 'property', 'sync'],
+  await: ['op', 'id', 'path', 'reference', 'sync'],
+  return: ['op', 'id', 'value'],
+  throw: ['op', 'id', 'error'],
+  release: ['op', 'reference', 'count'],
+  cancel: ['op', 'id'],
+})
+// The field paths a frame carries beyond the ones its op defines. `data`
+// values and error graphs are arbitrary JSON and are not inspected.
+function unknownFrameFields(frame) {
+  if (frame === null || typeof frame !== 'object' || Array.isArray(frame)) return []
+  const op = typeof frame.op === 'string' ? frame.op : ''
+  if (!Object.hasOwn(FRAME_FIELDS, op)) return []
+  const allowed = FRAME_FIELDS[op], out = []
+  for (const key of Object.keys(frame).sort()) if (!allowed.includes(key)) out.push(key)
+  if (op === 'hello') unknownObjectFields(frame.implementation, ['name', 'version'], 'implementation', out)
+  else if (op === 'invoke' || op === 'call' || op === 'get' || op === 'await') unknownValueFields(frame.args, 'args', out)
+  else if (op === 'return') unknownValueFields(frame.value, 'value', out)
+  else if (op === 'throw') unknownObjectFields(frame.error, ['name', 'message', 'graph'], 'error', out)
+  return out
+}
+function unknownObjectFields(value, allowed, path, out) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return
+  for (const key of Object.keys(value).sort()) if (!allowed.includes(key)) out.push(`${path}.${key}`)
+}
+// A `WireValue`: `{type, value}`, with further fields only in a reference.
+function unknownValueFields(value, path, out) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return
+  for (const key of Object.keys(value).sort()) if (key !== 'type' && key !== 'value') out.push(`${path}.${key}`)
+  if (typeof value.type !== 'string' || !Object.hasOwn(value, 'value')) return
+  const content = value.value
+  switch (value.type) {
+    case 'list':
+    case 'set':
+      if (Array.isArray(content)) content.forEach((item, index) => unknownValueFields(item, `${path}.value[${index}]`, out))
+      break
+    case 'map':
+      if (Array.isArray(content)) content.forEach((pair, index) => {
+        if (Array.isArray(pair)) pair.forEach((item, part) => unknownValueFields(item, `${path}.value[${index}][${part}]`, out))
+      })
+      break
+    case 'record':
+      if (content !== null && typeof content === 'object' && !Array.isArray(content)) {
+        for (const [name, item] of Object.entries(content).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) unknownValueFields(item, `${path}.value.${name}`, out)
+      }
+      break
+    case 'reference':
+      unknownObjectFields(content, ['id', 'home', 'kind', 'origin'], `${path}.value`, out)
+      break
+  }
+}
+const quotedFields = fields => fields.map(field => `"${field}"`).join(', ')
+// The error a call gets when its frame carried a field this side does not
+// know (#635): code `bad-frame`, data `{op, fields}`.
+const badFrame = (op, fields) => bindingError('bad-frame', `unknown field ${quotedFields(fields)} in ${op}`, { op, fields })
+
 // What a far end's hello says of it, or why it is refused:
 // an error whose `category` says what it means for a link or a dialer
 // (incompatible: stop; auth-rejected: retry slowly). `endpoint` is this
 // side's ({ local, expected?, verified? }).
 export function greetingOf(frame, endpoint) {
   const fail = (category, message) => Object.assign(new Error(message), { category })
+  // Unknown fields are not a session error (#635): the greeting fails.
+  const ignored = unknownFrameFields(frame)
+  if (ignored.length) throw fail('incompatible', `incompatible session: unknown field ${quotedFields(ignored)} in hello`)
   if (frame.version !== ENDPOINT_PROTOCOL) throw fail('incompatible', `incompatible session: ${versionMismatch(frame.version, ENDPOINT_PROTOCOL, frame.implementation)}`)
   const far = frame.endpoint
   if (typeof far !== 'string' || !ENDPOINT_ID.test(far)) throw fail('incompatible', 'incompatible session: the far end named no valid endpoint')
@@ -707,6 +773,15 @@ export class Session {
         this.#handshake = true; this.#resolveReady(); return
       }
       if (!this.#handshake) throw new Error('request before protocol handshake')
+      // #635: unknown fields do not end the session. A reply's fails only
+      // the call waiting for it; `release`/`cancel` ignore theirs.
+      const ignored = unknownFrameFields(frame)
+      if (ignored.length && (frame.op === 'return' || frame.op === 'throw')) {
+        if (frame.op === 'throw' && (typeof frame.error?.name !== 'string' || typeof frame.error.message !== 'string')) throw new Error('invalid error')
+        const pending = this.#pending.get(frame.id)
+        if (!pending) throw new Error('response for unknown call')
+        this.#pending.delete(frame.id); this.#sites.delete(frame.id); pending({ ok: false, value: badFrame(frame.op, ignored) }); return
+      }
       if (frame.op === 'return' || frame.op === 'throw') {
         // Decode/pin before admitting a subsequent release frame.
         if (frame.op === 'throw' && (typeof frame.error?.name !== 'string' || typeof frame.error.message !== 'string')) throw new Error('invalid error')
@@ -736,6 +811,13 @@ export class Session {
       if (frame.op === 'invoke' && (typeof frame.target !== 'string' || typeof frame.method !== 'string')) throw new Error('invalid target or method')
       if (frame.op === 'call' && frame.method !== undefined && typeof frame.method !== 'string') throw new Error('invalid method')
       if (frame.op === 'get' && typeof frame.property !== 'string') throw new Error('invalid property')
+      // The call frame carries a field this side does not know: only this
+      // call fails, with `bad-frame` (#635).
+      if (ignored.length) {
+        this.#signals.delete(frame.id)
+        this.#write({ op: 'throw', id: frame.id, error: encodeError(badFrame(frame.op, ignored)) })
+        return
+      }
       let decoded
       this.#decodingFor = frame.id
       try { decoded = frame.op === 'await' || frame.op === 'get' ? { value: undefined } : this.#decodeValue(frame.args, true) } finally { this.#decodingFor = undefined }

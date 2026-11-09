@@ -581,8 +581,92 @@ def _described(op: str, fields: dict) -> str:
     return "an awaited result"
 
 
+# The fields each `op` defines (session protocol §2.1); any other field is
+# unknown to this side (§9). `args` and `value` are values, whose own shape is
+# inspected below; `data` and an error graph are arbitrary JSON, not inspected.
+_ALLOWED_FIELDS = {
+    "hello": ("op", "version", "endpoint", "implementation", "capabilities"),
+    "invoke": ("op", "id", "path", "target", "method", "args", "sync"),
+    "call": ("op", "id", "path", "reference", "method", "args", "sync"),
+    "get": ("op", "id", "path", "reference", "property", "sync"),
+    "await": ("op", "id", "path", "reference", "sync"),
+    "return": ("op", "id", "value"),
+    "throw": ("op", "id", "error"),
+    "release": ("op", "reference", "count"),
+    "cancel": ("op", "id"),
+}
+
+
+def _quoted_fields(fields: list) -> str:
+    """`fields` as an error message quotes them: `"x", "y"`."""
+    return ", ".join(f'"{field}"' for field in fields)
+
+
+def _unknown_fields(frame: Any) -> list:
+    """The field paths `frame` carries beyond the ones its `op` defines
+    (session protocol §9): top-level keys (`trace`) and, inside the parts
+    whose shape the protocol knows, their fields (`args.value.x`,
+    `error.extra`). An unknown `op` has no table and is left to the usual
+    frame check."""
+    if not isinstance(frame, dict):
+        return []
+    op = frame.get("op")
+    allowed = _ALLOWED_FIELDS.get(op) if isinstance(op, str) else None
+    if allowed is None:
+        return []
+    out = [key for key in sorted(frame) if key not in allowed]
+    if op == "hello":
+        _unknown_object_fields(frame.get("implementation"), ("name", "version"), "implementation", out)
+    elif op in ("invoke", "call", "get", "await"):
+        _unknown_value_fields(frame.get("args"), "args", out)
+    elif op == "return":
+        _unknown_value_fields(frame.get("value"), "value", out)
+    elif op == "throw":
+        _unknown_object_fields(frame.get("error"), ("name", "message", "graph"), "error", out)
+    return out
+
+
+def _unknown_object_fields(value: Any, allowed: tuple, path: str, out: list) -> None:
+    if not isinstance(value, dict):
+        return
+    for key in sorted(value):
+        if key not in allowed:
+            out.append(f"{path}.{key}")
+
+
+def _unknown_value_fields(value: Any, path: str, out: list) -> None:
+    """The fields a `WireValue` carries beyond `type`/`value` and, inside a
+    reference, beyond its four fields (session protocol §2.2)."""
+    if not isinstance(value, dict):
+        return
+    for key in sorted(value):
+        if key not in ("type", "value"):
+            out.append(f"{path}.{key}")
+    kind = value.get("type")
+    if not isinstance(kind, str) or "value" not in value:
+        return
+    content = value["value"]
+    if kind in ("list", "set"):
+        if isinstance(content, list):
+            for index, item in enumerate(content):
+                _unknown_value_fields(item, f"{path}.value[{index}]", out)
+    elif kind == "map":
+        if isinstance(content, list):
+            for index, pair in enumerate(content):
+                if isinstance(pair, list):
+                    for part, item in enumerate(pair):
+                        _unknown_value_fields(item, f"{path}.value[{index}][{part}]", out)
+    elif kind == "record":
+        if isinstance(content, dict):
+            for name in sorted(content):
+                _unknown_value_fields(content[name], f"{path}.value.{name}", out)
+    elif kind == "reference":
+        _unknown_object_fields(content, ("id", "home", "kind", "origin"), f"{path}.value", out)
+
+
 BAD_VALUE = "bad-value"
 PEER_GONE = "peer-gone"
+BAD_FRAME = "bad-frame"
 
 
 def _coded(error: BaseException, code: str, data: Any) -> BaseException:
@@ -591,6 +675,14 @@ def _coded(error: BaseException, code: str, data: Any) -> BaseException:
     by the code, never by the text."""
     error.code = code
     error.data = data
+    return error
+
+
+def _bad_frame(op: str, fields: list) -> BindingError:
+    """The error a call gets when its frame carried a field this side does
+    not know (session protocol §9): code `bad-frame`, data `{op, fields}`."""
+    error = BindingError(f"unknown field {_quoted_fields(fields)} in {op}")
+    _coded(error, BAD_FRAME, {"op": op, "fields": list(fields)})
     return error
 
 
@@ -1670,7 +1762,13 @@ class Peer:
 
     def _receive(self, frame: dict) -> None:
         op = frame.get("op")
+        # Unknown fields fail by the frame's scope, never the session (#635,
+        # session protocol §9): the handshake for `hello`, the call for a call
+        # or reply frame, nothing for `release`/`cancel`.
+        unknown = _unknown_fields(frame)
         if op == "hello":
+            if unknown:
+                raise ValueError(f"incompatible session: unknown field {_quoted_fields(unknown)} in hello")
             if self._handshake:
                 raise ValueError("duplicate protocol handshake")
             self._greet(frame)
@@ -1686,6 +1784,18 @@ class Peer:
                 isinstance(error, dict) and isinstance(error.get("name"), str) and isinstance(error.get("message"), str)
             ):
                 raise ValueError("invalid error")
+            if unknown:
+                # Only the call waiting for this reply fails; the value is not
+                # decoded, as rutis-bridge does not decode it either.
+                call = frame.get("id")
+                finish = self._pending.pop(call, None)
+                if finish is not None:
+                    finish((False, _bad_frame(op, unknown)))
+                    return
+                if call in self._cancelled:
+                    self._cancelled.discard(call)
+                    return
+                raise ValueError("response for unknown call")
             # A value this side refuses fails the call waiting for it.
             ok, value = self._decode_checked(frame["value"]) if op == "return" else (False, decode_error(frame["error"]))
             call = frame.get("id")
@@ -1727,7 +1837,6 @@ class Peer:
             or not _SEQUENCE.match(call[len(self._remote):])
             or not isinstance(path, list)
             or not all(isinstance(item, str) for item in path)
-            or call in path
         ):
             raise ValueError("invalid invocation")
         sequence = int(call[len(self._remote):])
@@ -1740,6 +1849,13 @@ class Peer:
             raise ValueError("invalid method")
         if op == "get" and not isinstance(frame.get("property"), str):
             raise ValueError("invalid property")
+        if unknown:
+            # The extra field fails this call alone; its id was taken above,
+            # as a call's is, so a repeat does not run it later.
+            self._send({"op": "throw", "id": call, "error": encode_error(_bad_frame(op, unknown))})
+            return
+        if call in path:
+            raise ValueError("invalid invocation")
         args = None
         if op in ("invoke", "call"):
             self._decoding_for = call

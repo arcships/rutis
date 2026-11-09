@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rutis::events::SyncCall;
-use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberView};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberState, FiberView};
 use rutis::internal::CtxInternal;
 use rutis::{Ctx, Error, Event};
 use serde::{Deserialize, Serialize};
@@ -299,5 +299,80 @@ async fn accepted_listener_drains_after_subtree_shutdown() {
     dispatch.await.unwrap().unwrap();
     shutdown.await.unwrap();
     assert!(done.load(Ordering::SeqCst), "the admitted call drained");
+    root.shutdown().await.unwrap();
+}
+
+/// A fiber created after the root closed starts disposed; its listener would
+/// never be admitted.
+/// guarantee: events/lifecycle
+#[tokio::test]
+async fn a_fiber_created_after_root_shutdown_is_disposed() {
+    let root = Ctx::root().unwrap();
+    root.shutdown().await.unwrap();
+    let view = root.plugin(Apply("after-close", |ctx: &Ctx| {
+        ctx.on_sync::<Ping>(|_, _| Ok(Some("late".to_string())))?;
+        Ok(())
+    }));
+    assert_eq!(view.state().state, FiberState::Disposed);
+    assert!(view.state().error.is_some());
+}
+
+/// A normal generation restart does not set the permanent marker: the same
+/// fiber serves the next generation until it is actually shut down.
+/// guarantee: events/lifecycle
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_generation_restart_keeps_the_marker_clear_until_shutdown() {
+    let root = Ctx::root().unwrap();
+    let calls = counter();
+    let heard = calls.clone();
+    let view = child(&root, "reload", move |ctx| {
+        ctx.on_sync::<Ping>(listener(heard.clone()))?;
+        Ok(())
+    })
+    .await;
+    view.restart().await.unwrap();
+    root.emit(Ping(0)).unwrap();
+    rutis_test_support::until(
+        || calls.load(Ordering::SeqCst) == 1,
+        "the listener runs in the new generation",
+    )
+    .await;
+    view.shutdown().await.unwrap();
+    root.emit(Ping(1)).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the listener ran after the permanent close"
+    );
+    root.shutdown().await.unwrap();
+}
+
+/// Calling shutdown twice shares one task; the listener is not called after
+/// the first commit.
+/// guarantee: events/lifecycle
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_subtree_shutdown_is_idempotent() {
+    let root = Ctx::root().unwrap();
+    let calls = counter();
+    let heard = calls.clone();
+    let view = child(&root, "twice", move |ctx| {
+        ctx.on_sync::<Ping>(listener(heard.clone()))?;
+        Ok(())
+    })
+    .await;
+    root.serial(Ping(0)).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let first = view.shutdown();
+    let second = view.shutdown();
+    first.await.unwrap();
+    second.await.unwrap();
+    root.emit(Ping(1)).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the listener ran after the repeated shutdown"
+    );
     root.shutdown().await.unwrap();
 }

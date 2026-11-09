@@ -21,6 +21,8 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/debug"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -355,7 +357,7 @@ func (p *Peer) read() {
 			p.fault(HostGone(errors.New("it sent a message that is not JSON")))
 			return
 		}
-		if err := p.receive(&f); err != nil {
+		if err := p.receive(&f, unknownFrameFields(message)); err != nil {
 			p.fault(err)
 			return
 		}
@@ -1370,7 +1372,151 @@ type frame struct {
 	Error          json.RawMessage `json:"error"`
 }
 
-func (p *Peer) receive(f *frame) error {
+// frameFields lists the fields each op defines (docs/protocol-session.md §9):
+// a field beyond them is unknown, and is handled by the frame's scope, not by
+// ending the session.
+var frameFields = map[string][]string{
+	"hello":   {"op", "version", "endpoint", "implementation", "capabilities"},
+	"invoke":  {"op", "id", "path", "target", "method", "args", "sync"},
+	"call":    {"op", "id", "path", "reference", "method", "args", "sync"},
+	"get":     {"op", "id", "path", "reference", "property", "sync"},
+	"await":   {"op", "id", "path", "reference", "sync"},
+	"return":  {"op", "id", "value"},
+	"throw":   {"op", "id", "error"},
+	"release": {"op", "reference", "count"},
+	"cancel":  {"op", "id"},
+}
+
+// unknownFrameFields is the field paths `message` carries beyond the ones its
+// op defines (docs/protocol-session.md §9), in the order rutis-bridge reports
+// them: top-level keys first, sorted, then the fields inside the parts whose
+// shape the protocol knows. A frame whose op is not one of the nine has none:
+// it ends the session anyway. `data` values and error graphs are arbitrary
+// JSON and are not inspected.
+func unknownFrameFields(message []byte) []string {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(message, &object) != nil || object == nil {
+		return nil
+	}
+	var op string
+	_ = json.Unmarshal(object["op"], &op)
+	allowed, known := frameFields[op]
+	if !known {
+		return nil
+	}
+	var out []string
+	for _, key := range sortedKeys(object) {
+		if !slices.Contains(allowed, key) {
+			out = append(out, key)
+		}
+	}
+	switch op {
+	case "hello":
+		unknownObjectFields(object["implementation"], []string{"name", "version"}, "implementation", &out)
+	case "invoke", "call", "get", "await":
+		unknownValueFields(object["args"], "args", &out)
+	case "return":
+		unknownValueFields(object["value"], "value", &out)
+	case "throw":
+		unknownObjectFields(object["error"], []string{"name", "message", "graph"}, "error", &out)
+	}
+	return out
+}
+
+// unknownValueFields appends the fields beyond `{type, value}` a wire value at
+// `path` carries, and those of the values it holds: `args.value[0]`,
+// `args.value.x.extra` (a record's entry `x`), `args.value.extra` (a
+// reference).
+func unknownValueFields(raw json.RawMessage, path string, out *[]string) {
+	var value map[string]json.RawMessage
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil || value == nil {
+		return
+	}
+	for _, key := range sortedKeys(value) {
+		if key != "type" && key != "value" {
+			*out = append(*out, path+"."+key)
+		}
+	}
+	var kind string
+	if json.Unmarshal(value["type"], &kind) != nil {
+		return
+	}
+	content := value["value"]
+	switch kind {
+	case "list", "set":
+		var items []json.RawMessage
+		if json.Unmarshal(content, &items) != nil {
+			return
+		}
+		for i, item := range items {
+			unknownValueFields(item, fmt.Sprintf("%s.value[%d]", path, i), out)
+		}
+	case "map":
+		var pairs []json.RawMessage
+		if json.Unmarshal(content, &pairs) != nil {
+			return
+		}
+		for i, pair := range pairs {
+			var parts []json.RawMessage
+			if json.Unmarshal(pair, &parts) != nil {
+				continue
+			}
+			for part, item := range parts {
+				unknownValueFields(item, fmt.Sprintf("%s.value[%d][%d]", path, i, part), out)
+			}
+		}
+	case "record":
+		var entries map[string]json.RawMessage
+		if json.Unmarshal(content, &entries) != nil {
+			return
+		}
+		for _, name := range sortedKeys(entries) {
+			unknownValueFields(entries[name], path+".value."+name, out)
+		}
+	case "reference":
+		unknownObjectFields(content, []string{"id", "home", "kind", "origin"}, path+".value", out)
+	}
+}
+
+// unknownObjectFields appends the fields of the object `raw` beyond `allowed`.
+func unknownObjectFields(raw json.RawMessage, allowed []string, path string, out *[]string) {
+	var object map[string]json.RawMessage
+	if len(raw) == 0 || json.Unmarshal(raw, &object) != nil || object == nil {
+		return
+	}
+	for _, key := range sortedKeys(object) {
+		if !slices.Contains(allowed, key) {
+			*out = append(*out, path+"."+key)
+		}
+	}
+}
+
+func sortedKeys(object map[string]json.RawMessage) []string {
+	keys := make([]string, 0, len(object))
+	for key := range object {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// quotedFields is the fields of an unknown-field error: `"a", "b"`.
+func quotedFields(fields []string) string {
+	quoted := make([]string, len(fields))
+	for i, field := range fields {
+		quoted[i] = `"` + field + `"`
+	}
+	return strings.Join(quoted, ", ")
+}
+
+// badFrame is what a call gets when its frame carries a field this side does
+// not know (docs/protocol-session.md §9): code `bad-frame`, data {op, fields}.
+func badFrame(op string, fields []string) error {
+	return NewCoded("BindingError", "bad-frame", map[string]any{"op": op, "fields": fields},
+		"unknown field %s in %s", quotedFields(fields), op)
+}
+
+func (p *Peer) receive(f *frame, ignored []string) error {
 	p.mu.Lock()
 	if p.closeErr != nil {
 		p.mu.Unlock()
@@ -1378,6 +1524,11 @@ func (p *Peer) receive(f *frame) error {
 	}
 	if f.Op == "hello" {
 		defer p.mu.Unlock()
+		if len(ignored) > 0 {
+			// A greeting with a field this side does not know fails the
+			// handshake: nothing after it can be taken.
+			return fmt.Errorf("%w: unknown field %s in hello", ErrIncompatible, quotedFields(ignored))
+		}
 		if p.handshake {
 			return errors.New("duplicate protocol handshake")
 		}
@@ -1392,12 +1543,38 @@ func (p *Peer) receive(f *frame) error {
 		p.mu.Unlock()
 		return errors.New("request before protocol handshake")
 	}
+	if len(ignored) > 0 && callOp(f.Op) {
+		// A field this side does not know is not a session error
+		// (docs/protocol-session.md §9): it fails the call it belongs to,
+		// and only that. `release` and `cancel` have no call to fail: their
+		// extras are ignored and the frame is taken by its known fields.
+		id, _, err := p.admitted(f)
+		if err != nil {
+			p.mu.Unlock()
+			return err
+		}
+		// The shape of the frame is checked first: a field of the wrong type
+		// ends the session whether or not another one is unknown.
+		if _, _, err := p.callFields(f); err != nil {
+			p.mu.Unlock()
+			return err
+		}
+		p.mu.Unlock()
+		// Answered here, on the reading goroutine, as rutis-bridge does: no
+		// later frame is read before the throw is written.
+		p.respondTo(id, nil, badFrame(f.Op, ignored), nil, "")
+		return nil
+	}
 	switch f.Op {
 	case "return", "throw":
 		var id string
 		if err := json.Unmarshal(f.ID, &id); err != nil {
 			p.mu.Unlock()
 			return errors.New("invalid response")
+		}
+		if len(ignored) > 0 {
+			// Only the call waiting for this reply fails.
+			return p.settleReply(id, result{err: badFrame(f.Op, ignored)})
 		}
 		var outcome result
 		if f.Op == "return" {
@@ -1416,26 +1593,7 @@ func (p *Peer) receive(f *frame) error {
 		} else {
 			outcome.err = decodeError(f.Error)
 		}
-		waiter, ok := p.pending[id]
-		if !ok {
-			// A late reply to a call of ours given up (cancelled, or a
-			// notification) is dropped; any other is a fault.
-			p.mu.Unlock()
-			if p.issued(id) {
-				return nil
-			}
-			return errors.New("response for unknown call")
-		}
-		delete(p.pending, id)
-		answered := p.answered[id]
-		delete(p.answered, id)
-		p.mu.Unlock()
-		if answered != nil {
-			// Here, before the next frame: what that frame starts sees it.
-			_, _ = protect(func() (any, error) { answered(outcome); return nil, nil })
-		}
-		waiter <- outcome
-		return nil
+		return p.settleReply(id, outcome)
 	case "cancel":
 		var id string
 		if json.Unmarshal(f.ID, &id) != nil {
@@ -1485,6 +1643,31 @@ func (p *Peer) receive(f *frame) error {
 		}
 	}
 	go p.execute(job)
+	return nil
+}
+
+// settleReply hands `outcome` to the call waiting for `id`, and drops a late
+// reply to a call of ours given up (cancelled, or a notification); any other
+// reply to a call this side did not make is a fault. p.mu is held, and is
+// released here.
+func (p *Peer) settleReply(id string, outcome result) error {
+	waiter, ok := p.pending[id]
+	if !ok {
+		p.mu.Unlock()
+		if p.issued(id) {
+			return nil
+		}
+		return errors.New("response for unknown call")
+	}
+	delete(p.pending, id)
+	answered := p.answered[id]
+	delete(p.answered, id)
+	p.mu.Unlock()
+	if answered != nil {
+		// Here, before the next frame: what that frame starts sees it.
+		_, _ = protect(func() (any, error) { answered(outcome); return nil, nil })
+	}
+	waiter <- outcome
 	return nil
 }
 
@@ -1581,42 +1764,76 @@ type job struct {
 	then func() (any, error)
 }
 
-// invocation validates an incoming call; p.mu is held.
-func (p *Peer) invocation(f *frame) (*job, error) {
+// callOp reports whether `op` is one of the frames that name a call.
+func callOp(op string) bool {
+	return op == "invoke" || op == "call" || op == "get" || op == "await"
+}
+
+// admitted reads an incoming call's id and path, and takes the id as a
+// completed call's (so sending it again does not run it); p.mu is held. A
+// frame it cannot place ends the session. What the path may hold is checked
+// by invocation, after the frame's unknown fields have had their say
+// (docs/protocol-session.md §9).
+func (p *Peer) admitted(f *frame) (string, []string, error) {
 	invalid := errors.New("invalid invocation")
-	if f.Op != "invoke" && f.Op != "call" && f.Op != "get" && f.Op != "await" {
-		return nil, invalid
-	}
 	var id string
 	var path []string
 	if json.Unmarshal(f.ID, &id) != nil || json.Unmarshal(f.Path, &path) != nil || f.Path == nil || string(f.Path) == "null" {
-		return nil, invalid
+		return "", nil, invalid
 	}
 	if !strings.HasPrefix(id, p.remote) || !sequence.MatchString(id[len(p.remote):]) {
+		return "", nil, invalid
+	}
+	seq, err := strconv.ParseUint(id[len(p.remote):], 10, 64)
+	if err != nil || seq <= p.received || seq > MaxSafe {
+		return "", nil, errors.New("invalid or repeated invocation identity")
+	}
+	p.received = seq
+	return id, path, nil
+}
+
+// callFields reads a call's method and property, and checks what its op
+// requires of them (an `invoke` names a target and a method); p.mu is held. A
+// frame it cannot read ends the session.
+func (p *Peer) callFields(f *frame) (*string, string, error) {
+	var method *string
+	if len(f.Method) > 0 && string(f.Method) != "null" {
+		var name string
+		if json.Unmarshal(f.Method, &name) != nil {
+			return nil, "", errors.New("invalid method")
+		}
+		method = &name
+	}
+	var property string
+	if f.Op == "get" {
+		if json.Unmarshal(f.Property, &property) != nil {
+			return nil, "", errors.New("invalid property")
+		}
+	}
+	if f.Op == "invoke" && (f.Target == nil || method == nil) {
+		return nil, "", errors.New("invalid invocation")
+	}
+	return method, property, nil
+}
+
+// invocation validates an incoming call; p.mu is held.
+func (p *Peer) invocation(f *frame) (*job, error) {
+	invalid := errors.New("invalid invocation")
+	if !callOp(f.Op) {
 		return nil, invalid
+	}
+	id, path, err := p.admitted(f)
+	if err != nil {
+		return nil, err
 	}
 	for _, item := range path {
 		if item == id {
 			return nil, invalid
 		}
 	}
-	seq, err := strconv.ParseUint(id[len(p.remote):], 10, 64)
-	if err != nil || seq <= p.received || seq > MaxSafe {
-		return nil, errors.New("invalid or repeated invocation identity")
-	}
-	p.received = seq
 	j := &job{op: f.Op, id: id, path: path}
-	if len(f.Method) > 0 && string(f.Method) != "null" {
-		var method string
-		if json.Unmarshal(f.Method, &method) != nil {
-			return nil, errors.New("invalid method")
-		}
-		j.method = &method
-	}
-	if f.Op == "get" {
-		if json.Unmarshal(f.Property, &j.property) != nil {
-			return nil, errors.New("invalid property")
-		}
+	if j.method, j.property, err = p.callFields(f); err != nil {
+		return nil, err
 	}
 	if f.Op == "invoke" || f.Op == "call" {
 		d := &decoding{call: id, arguments: true}
@@ -1631,9 +1848,6 @@ func (p *Peer) invocation(f *frame) (*job, error) {
 	}
 	switch {
 	case f.Op == "invoke":
-		if f.Target == nil || j.method == nil {
-			return nil, invalid
-		}
 		j.target = *f.Target
 		j.business = j.target != ""
 	default:

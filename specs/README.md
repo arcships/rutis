@@ -16,6 +16,7 @@
 | --- | --- |
 | [`cross-runtime-sync/`](cross-runtime-sync/README.md) | 跨运行时同步调用与死锁策略（多语言设计 §五、§九） |
 | [`remote-lease/`](remote-lease/README.md) | 远端租约接管、link 重连与注册撤销，含接入点（远程插件 §3.2、§4.4；拨出稿 §五、§六） |
+| [`row-lifecycle/`](row-lifecycle/README.md) | 运行时会话中的行：加载、卸载、`rows.ended`/`rows.failed`、断线与同 id 重连、旧会话的行清理完再回答新 hello（会话追踪契约 §3.0；远程会话 §4.2、§4.3；远程插件 §4.4） |
 | [`config-schema/`](config-schema/README.md) | 不是模型：配置 Schema 的共用用例表，各语言的实现逐字比较（配置 Schema 设计 §8），由各实现的测试跑 |
 
 ---
@@ -30,4 +31,5 @@ One model per directory, each with the `.tla` model, `.cfg` configurations (one 
 | --- | --- |
 | [`cross-runtime-sync/`](cross-runtime-sync/README.en.md) | Cross-runtime synchronous calls and the deadlock policy (multi-language design §5, §9) |
 | [`remote-lease/`](remote-lease/README.en.md) | Remote lease takeover, link reconnection and registration revocation, the access point included (remote plugins §3.2, §4.4; dial-out §5, §6) |
+| [`row-lifecycle/`](row-lifecycle/README.en.md) | Rows of a runtime session: load, unload, `rows.ended`/`rows.failed`, a break and a reconnect with the same id, the new hello answered after the old session's rows are cleaned (session trace contract §3.0; remote sessions §4.2, §4.3; remote plugins §4.4) |
 | [`config-schema/`](config-schema/README.en.md) | Not a model: the shared case list for config schemas, compared word for word by every implementation (config schema design §8), run by their own tests |

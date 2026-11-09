@@ -85,7 +85,7 @@ Concepts added: none.
 - **Model:** `shuttle_lineage_marker_precedes_closing` passes; moving `publish_subtree_closing` before `mark_subtree_lineage` makes the model report "this node is closing while its lineage marker is clear".
 - **Model:** all seven `specs/event-close/run.sh` configurations end as `expected.txt` says: `close-healthy` 2,263,040 distinct states in 21 s, `close-tree` 688,580 in 12 s, `close-drain` 31,488 in 1 s; the four mutations violate `ClosingImpliesMarked`, `CommittedStaysOut` (twice) and `CleanupOnce`.
 - **Benchmark (local release, Linux x86-64):** 100 instances: create 150.60 ms, close 119.06 ms; 1000 instances: create 16.94 s, close 11.33 s. `CREATE_RATIO`, `CLOSE_RATIO` and `IDLE_SHARE` all pass; the issue's ≤30s creation target is met on this machine. The CI `stress.yml` `cpu` job still needs to record the same numbers.
-- **Still missing:** focused Loading-owner, `once`, remote-entry and repeated-shutdown cases; the CI stress job; release notes. Rules stay proposed until those land.
+- **Still missing:** focused Loading-owner, `once` and remote-entry cases; the CI stress job; release notes. Rules stay proposed until those land.
 
 ## 7. Design-philosophy check
 
