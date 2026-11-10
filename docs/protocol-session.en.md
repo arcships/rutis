@@ -269,7 +269,7 @@ Receivers are not equally strict: Node, Bun, Go, Swift and Kotlin require `^[1-9
 
 Implementation: `parse_frame` / `reject_unknown_fields` in `crates/rutis-bridge/src/session/rpc.rs`; tests `unknown_frame_fields_fail_only_their_call` and `an_unknown_field_in_hello_fails_the_handshake`.
 
-`SESS-67` **Current (Node, Bun, Python, Go).** These four runtimes implement the call-level refusal of `SESS-66`; Swift and Kotlin still ignore unknown fields and continue, the cross-implementation gap in #635. The rule itself is `SESS-66`; each implementation's applicability is recorded in the tracker.
+`SESS-67` **Current (all seven).** Rust, Node, Bun, Python, Go, Swift and Kotlin all implement the call-level refusal of `SESS-66`; the verification column of `bridge/unknown-fields` lists each implementation's cases.
 
 `SESS-68` **Superseded.** Two old behaviors: Rust treated an unknown field as a malformed whole frame and ended the session; the other six ignored it uniformly. Both are replaced by `SESS-66`.
 

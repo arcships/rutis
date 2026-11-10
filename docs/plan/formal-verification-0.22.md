@@ -45,7 +45,7 @@ Status：执行中。日期：2026-11-09。
 | 编号 | 缺口/阻碍 | 影响 | 处理 |
 | --- | --- | --- | --- |
 | G1 | 未知字段的旧行为：Rust 整会话结束，其他六种忽略 | 错误范围过大或跨实现不一致 | 已定 B：拒绝，但只失败该调用；Rust 已实现（`bad-frame`，`hello` 失败握手，`release`/`cancel` 忽略）；其他六种仍忽略，见 G11 |
-| G11 | Swift、Kotlin 仍静默忽略未知字段，没有 `bad-frame` 调用级拒绝 | 同一份带新字段的帧在 Rust/Node/Bun/Python/Go 与 Swift/Kotlin 上结果不同 | Node、Bun、Python、Go 已完成；Swift/Kotlin 需要工具链和各自的解码器改动，完成前追踪表只写已实现的五种 |
+| G11 | Swift、Kotlin 仍静默忽略未知字段，没有 `bad-frame` 调用级拒绝 | 同一份带新字段的帧在不同实现上结果不同 | 已解决：Swift/Kotlin 已实现并进 CI；七种运行时一致 |
 | G2 | #634 的 1368 条规则清单只在 issue 评论里，仓库没有可抽取来源 | 追踪表无法声称完整 | WS3 先建 schema 和 `guarantees.md` 全量映射；规则清单抽取做成脚本或独立数据文件；完成前状态只能是“部分” |
 | G3 | `release_transient` 在 `Shared.admission` 外摘除 child | marker 集合可能漏成员 | WS1 把摘除移进 admission；若保留无锁摘除，必须补“alive=false 后不可接纳”的证明和并发用例 |
 | G4 | 事件关闭接纳目前没有 shuttle 模型；新 marker 若用 std 原子，shuttle 没有切换点 | 无法穷举 marker 发布与 `Entry::live` 的竞态 | WS1 的 marker 使用 `crate::sync::AtomicBool`，或在读取点加 `switch_point()`；模型必须能在顺序错误时失败 |

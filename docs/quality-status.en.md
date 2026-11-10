@@ -703,7 +703,7 @@ The old “waiting for design” list is no longer the current schedule. The cur
 
 | Layer/work | Issue | Status and next step |
 | --- | --- | --- |
-| Protocol baseline and rule tracker | #635, #634 | In progress: first session protocol specification (`docs/protocol-session.md`) written; first tracker version has 265 rows (not the full 1368). Unknown fields are decided: reject but fail only that call (`bad-frame`); Rust/Node/Bun/Python/Go implement it, Swift/Kotlin still ignore them (cross-implementation gap) |
+| Protocol baseline and rule tracker | #635, #634 | In progress: first session protocol specification (`docs/protocol-session.md`) written; first tracker version has 265 rows (not the full 1368). Unknown fields are decided: reject but fail only that call (`bad-frame`); all seven runtimes implement it and run in CI |
 | Event, call and lifecycle models | #613 | All nine models have a runnable version: event-close, the four events modules, cross-runtime-sync, remote-lease, row-lifecycle, call-lifecycle and peer-rows; the bail blind spot, local abandonment and link race found by the models still need implementation fixes and tests |
 | Rust implementation interleavings | #622 | Core done, verifying: #1025 marker publication, `Entry::live`, seven deterministic race cases and nine shuttle models pass (new: effect registration/dispose, in-flight unload, concurrent subtree shutdown, root dispose/restart, dependency withdrawal); Loading-owner, `once`, remote-entry, root dispose/restart, dependency eviction and the emit chain remain |
 | Non-Rust runtime scheduling | #630 | First slice done: four Node frame-pump cases; Bun/Python/Go are inventory-only; Swift/Kotlin lack toolchains here and are recorded as environment gaps |

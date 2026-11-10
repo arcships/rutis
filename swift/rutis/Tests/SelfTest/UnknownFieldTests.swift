@@ -1,3 +1,4 @@
+// guarantee: bridge/unknown-fields
 import Foundation
 @testable import Rutis
 
