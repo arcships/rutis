@@ -40,11 +40,15 @@ struct UnknownFieldTests {
         decodeError(frame["error"] ?? .null, decodeData: { $0 })
     }
 
-    /// The `data` of an error as JSON data.
+    /// The `data` of an error as JSON data. An error that crossed the wire
+    /// carries a `Value`; one made on this side carries the plain
+    /// `[String: Any]` its constructor was given.
     private func data(_ error: RutisError) -> JSON? {
         guard let carried = error.data else { return nil }
-        guard let value = carried as? Value else { return nil }
-        return value.plainJSON
+        if let value = carried as? Value { return value.plainJSON }
+        guard let object = carried as? [String: Any] else { return nil }
+        let fields = (object["fields"] as? [String] ?? []).map(JSON.string)
+        return .object([("fields", .array(fields)), ("op", .string(object["op"] as? String ?? ""))])
     }
 
     /// `{"op": op, "fields": fields}`, as the data of a `bad-frame` error.
