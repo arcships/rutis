@@ -214,7 +214,7 @@ Receivers are not equally strict: Node, Bun, Go, Swift and Kotlin require `^[1-9
 
 `SESS-60` **Current.** Cancellation itself does not close the session; other calls go on. `crates/rutis-bridge/src/session/rpc.rs:2639-2653`; `go/rutis/internal/peer/peer_test.go:135-170`; `go/rutis/internal/peer/objects_test.go:66-103`
 
-`SESS-61` **Not guaranteed.** Whether a callee replies after a cancellation is not yet one rule across implementations: Rust does not reply to queued calls and awaits, and replies as usual to a synchronous call already running; the other languages leave it to the method and the signal. The rule is written back here once the #626 model decides it. `bridge/cancel-reaches-callee` in `docs/guarantees.en.md` only promises that cancellation arrives, not a reply; #626
+`SESS-61` **Not guaranteed.** Whether a callee replies after a cancellation is not yet one rule across implementations: Rust does not reply to queued calls and awaits, and replies as usual to a synchronous call already running; the other languages leave it to the method and the signal. The rule is written back here once the #626 model decides it. `bridge/cancel-reaches-callee` in `docs/guarantees.en.md` only promises that cancellation arrives, not a reply; #626; the cancel-table cleanup and cancel-ack rule is #1099.
 
 `SESS-62` **Superseded.** "Cancellation is closing the transport" and "a cancelled session is unusable". Cancellation affects only one call.
 

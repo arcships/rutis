@@ -214,7 +214,7 @@
 
 `SESS-60` **当前。** 取消本身不关闭会话；取消后其他调用照常进行。`crates/rutis-bridge/src/session/rpc.rs:2639-2653`；`go/rutis/internal/peer/peer_test.go:135-170`；`go/rutis/internal/peer/objects_test.go:66-103`
 
-`SESS-61` **明确不保证。** 取消之后被调方要不要回复，各实现尚未统一成一条规则：Rust 对排队中的调用和 `await` 不回复，已在运行的同步调用照常回复；其他语言由方法和信号决定。这条规则由 #626 的模型定下后写回本文。`docs/guarantees.md` 的 `bridge/cancel-reaches-callee` 只承诺取消到达，不承诺回复；#626
+`SESS-61` **明确不保证。** 取消之后被调方要不要回复，各实现尚未统一成一条规则：Rust 对排队中的调用和 `await` 不回复，已在运行的同步调用照常回复；其他语言由方法和信号决定。这条规则由 #626 的模型定下后写回本文。`docs/guarantees.md` 的 `bridge/cancel-reaches-callee` 只承诺取消到达，不承诺回复；#626；取消表清理与取消确认规则见 #1099。
 
 `SESS-62` **已取代。** “取消等于关闭承载”；“取消后会话进入不可用状态”。取消只作用于一次调用。
 
