@@ -1108,9 +1108,14 @@ class Peer(private val channel: Channel, private val opts: Options) {
 
     private fun receive(frame: JsonObject) {
         val op = (frame["op"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: throw ProtocolException("invalid frame")
+        // A field this side does not know fails by the frame's scope, never the
+        // session (#635, protocol §9): the handshake for `hello`, the call for a
+        // call or reply frame, nothing for `release`/`cancel`.
+        val unknown = unknownFields(frame)
         synchronized(lock) {
             if (closeError != null) return
             if (op == "hello") {
+                if (unknown.isNotEmpty()) throw IncompatibleException("incompatible session: unknown field ${quotedFields(unknown)} in hello")
                 if (handshake) throw ProtocolException("duplicate protocol handshake")
                 greet(frame)
                 handshake = true
@@ -1126,20 +1131,25 @@ class Peer(private val channel: Channel, private val opts: Options) {
                 val waiter: CompletableFuture<Outcome>?
                 val outcome: Outcome
                 synchronized(lock) {
-                    outcome = if (op == "return") {
-                        val d = Decoding(null)
-                        val value = decode(frame["value"], d)
-                        val refused = d.refused
-                        if (refused != null) {
-                            // A value this side cannot take fails the call
-                            // waiting for it; the references it carried go back.
-                            fresh = d.fresh
-                            Outcome(null, refused)
-                        } else {
-                            Outcome(value, null)
+                    outcome = when {
+                        // A reply carrying a field this side does not know fails
+                        // only the call waiting for it (#635); its value is not
+                        // read, as the value of a reply that cannot be taken is.
+                        unknown.isNotEmpty() -> Outcome(null, badFrame(op, unknown))
+                        op == "return" -> {
+                            val d = Decoding(null)
+                            val value = decode(frame["value"], d)
+                            val refused = d.refused
+                            if (refused != null) {
+                                // A value this side cannot take fails the call
+                                // waiting for it; the references it carried go back.
+                                fresh = d.fresh
+                                Outcome(null, refused)
+                            } else {
+                                Outcome(value, null)
+                            }
                         }
-                    } else {
-                        Outcome(null, decodeError(frame["error"]))
+                        else -> Outcome(null, decodeError(frame["error"]))
                     }
                     waiter = pending.remove(id)
                 }
@@ -1170,7 +1180,7 @@ class Peer(private val channel: Channel, private val opts: Options) {
                 entry.grants -= count
                 if (entry.grants == 0L) forget(reference)
             }
-            else -> invocation(op, frame)
+            else -> invocation(op, frame, unknown)
         }
     }
 
@@ -1227,7 +1237,7 @@ class Peer(private val channel: Channel, private val opts: Options) {
     }
 
     /** Validates an incoming call and starts it on a thread of its own. */
-    private fun invocation(op: String, frame: JsonObject) {
+    private fun invocation(op: String, frame: JsonObject, unknown: List<String>) {
         val invalid = { ProtocolException("invalid invocation") }
         if (op != "invoke" && op != "call" && op != "get" && op != "await") throw invalid()
         val id = (frame["id"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: throw invalid()
@@ -1253,7 +1263,37 @@ class Peer(private val channel: Channel, private val opts: Options) {
                 method = (methodElement as? JsonPrimitive)?.takeIf { it.isString }?.content ?: throw ProtocolException("invalid method")
             }
             if (op == "get") property = string(frame, "property", "invalid property")
-            if (op == "invoke" || op == "call") {
+            // The kind of reference `call`/`get`/`await` names, looked up below
+            // the unknown fields: a frame with an unknown field fails its call
+            // before the reference is looked at.
+            val kind = if (op == "invoke") {
+                val targetElement = frame["target"] ?: throw invalid()
+                target = (targetElement as? JsonPrimitive)?.takeIf { it.isString }?.content ?: throw invalid()
+                if (method == null) throw invalid()
+                null
+            } else when {
+                op == "await" -> "future"
+                op == "get" || method != null -> "object"
+                else -> "function"
+            }
+            // A call frame carrying a field this side does not know fails only
+            // this call (#635): it is answered by a throw, and neither the
+            // reference it names nor its arguments are read. Its id was taken
+            // above, as a completed call's is, so a repeat does not run it.
+            if (unknown.isNotEmpty()) refused = badFrame(op, unknown)
+            business = when {
+                op == "invoke" -> target != ""
+                refused == null -> true
+                else -> false
+            }
+            if (kind != null && refused == null) {
+                val reference = (frame["reference"] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toLongOrNull()
+                    ?: throw ProtocolException("unknown, released or mismatched reference")
+                val found = exports[reference]
+                if (found == null || found.kind != kind) throw ProtocolException("unknown, released or mismatched reference")
+                entry = found
+            }
+            if ((op == "invoke" || op == "call") && refused == null) {
                 val d = Decoding(id)
                 d.arguments = true
                 args = arguments(decode(frame["args"], d))
@@ -1261,24 +1301,6 @@ class Peer(private val channel: Channel, private val opts: Options) {
                 // answered by a throw, and the references they carried go back.
                 refused = d.refused
                 fresh = d.fresh
-            }
-            if (op == "invoke") {
-                val targetElement = frame["target"] ?: throw invalid()
-                target = (targetElement as? JsonPrimitive)?.takeIf { it.isString }?.content ?: throw invalid()
-                if (method == null) throw invalid()
-                business = target != ""
-            } else {
-                val kind = when {
-                    op == "await" -> "future"
-                    op == "get" || method != null -> "object"
-                    else -> "function"
-                }
-                val reference = (frame["reference"] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toLongOrNull()
-                    ?: throw ProtocolException("unknown, released or mismatched reference")
-                val found = exports[reference]
-                if (found == null || found.kind != kind) throw ProtocolException("unknown, released or mismatched reference")
-                entry = found
-                business = true
             }
             if (business) active++
             call = Running(id, Job())
