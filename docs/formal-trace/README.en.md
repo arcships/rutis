@@ -36,7 +36,7 @@ In the table:
   | [protocol-remote.md](rules/protocol-remote.md) | `remote` | 231 | 17 | 248 |
   | Total | — | 1368 | 184 | 1552 |
 
-- **Status of the 1368 after the 0.22 re-check** ([re-check page](recheck-0.22.md), Chinese): 111 `已验证`, 374 `部分验证`, 538 `未验证`, 42 `明确不保证`, 200 `不单独计数`, and 103 rows withdrawn because 0.19 or 0.22 removed the mechanism they describe. The issue snapshot's 184 `已取代` rows were not re-checked. 1368 = 111 + 374 + 538 + 42 + 200 + 103.
+- **Status of the 1368 after the 0.22 re-check** ([re-check page](recheck-0.22.md), Chinese): 111 `已验证`, 376 `部分验证`, 540 `未验证`, 42 `明确不保证`, 201 `不单独计数`, and 98 rows withdrawn because 0.19 or 0.22 removed the mechanism they describe. The issue snapshot's 184 `已取代` rows were not re-checked. 1368 = 111 + 376 + 540 + 42 + 201 + 98.
 
 **Re-check method.** Four checks per rule: the source still exists (and 0.19 / 0.22 did not remove what it describes), a current anchor (a `SESS-*` id from `docs/protocol-session.md`; 161 rows have one), the named evidence resolves, and a status that only moves down. 261 rows have no current source — the multi-language runtimes design of 0.9, the remote-plugins design, register rows the register dropped — and are listed by reason in the re-check page §5. The specification's `当前` is not this table's `已验证`. Register rows the register withdrew follow the register. Row text was not rewritten: semantic re-extraction is still a gap.
 
@@ -47,7 +47,7 @@ In the table:
 - **80 protocol ids also exist in the guarantee register** (for example `core/D1`, `bridge/value-roundtrip`); the protocol list is finer-grained in places (`core/D2a`/`D2b`). Both rows are kept. **1817 is a row count, not a count of distinct rules**; do not add the register and protocol subtotals.
 - Behaviour in design and user documents that is in neither the register nor the #634 list (other than Q3.3 implementation details) has not been extracted.
 
-So the release gate (design §5, quality standard Q13.1) **cannot** be judged from this table: 261 protocol rules have no current source, 200 rows are not counted, and 10 bare file names in the evidence column do not resolve (7 rows, §5).
+So the release gate (design §5, quality standard Q13.1) **cannot** be judged from this table: 261 protocol rules have no current source, 201 rows are not counted, and 10 bare file names in the evidence column do not resolve (7 rows, §5).
 
 ## 2. Numbering
 
