@@ -689,3 +689,254 @@ func TestACallFailsSayingTheHostDisconnected(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// ── Unknown fields (docs/protocol-session.md §9) ─────────────────
+
+// thrown is the error of a throw frame, decoded as the far end decodes it.
+func thrown(t *testing.T, f map[string]any) *RemoteError {
+	t.Helper()
+	if f["op"] != "throw" {
+		t.Fatalf("a throw expected, got %v", f)
+	}
+	raw, err := json.Marshal(f["error"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var remote *RemoteError
+	if !errors.As(decodeError(raw), &remote) {
+		t.Fatalf("not a remote error: %s", raw)
+	}
+	return remote
+}
+
+// wantBadFrame checks a throw: BindingError, code `bad-frame`, `text` and
+// data `{op, fields}`.
+func wantBadFrame(t *testing.T, f map[string]any, op, fields, text string) {
+	t.Helper()
+	remote := thrown(t, f)
+	data, err := json.Marshal(remote.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.Name != "BindingError" || remote.Code != "bad-frame" || remote.Message != text ||
+		string(data) != `{"fields":`+fields+`,"op":"`+op+`"}` {
+		t.Fatalf("name %q code %q message %q data %s", remote.Name, remote.Code, remote.Message, data)
+	}
+}
+
+// guarantee: bridge/unknown-fields
+// A call with a field this side does not know fails only that call: it is
+// answered by a `bad-frame` throw and the session goes on. It fails before
+// the reference it names is looked up, as rutis-bridge fails it.
+func TestAnUnknownFieldInACallFailsOnlyThatCall(t *testing.T) {
+	frames := map[string]string{
+		"invoke": `{"op":"invoke","id":"main:1","path":[],"target":"x","method":"m","args":{"type":"list","value":[]},"trace":"x"}`,
+		"call":   `{"op":"call","id":"main:1","path":[],"reference":99,"method":"m","args":{"type":"list","value":[]},"trace":"x"}`,
+		"get":    `{"op":"get","id":"main:1","path":[],"reference":99,"property":"p","trace":"x"}`,
+		"await":  `{"op":"await","id":"main:1","path":[],"reference":99,"trace":"x"}`,
+	}
+	for _, op := range []string{"invoke", "call", "get", "await"} {
+		t.Run(op, func(t *testing.T) {
+			runtime, far, next := objectHost(t, func(ctx context.Context, target, method string, args []any) (any, error) {
+				return "pong", nil
+			})
+			_ = far.Send([]byte(frames[op]))
+			refused := next()
+			if refused["id"] != "main:1" {
+				t.Fatalf("%v", refused)
+			}
+			wantBadFrame(t, refused, op, `["trace"]`, `unknown field "trace" in `+op)
+
+			// The refused id is taken as a completed call's, so a later call
+			// runs; the session goes on.
+			_ = far.Send([]byte(`{"op":"invoke","id":"main:2","path":[],"target":"x","method":"m","args":{"type":"list","value":[]}}`))
+			if reply := next(); reply["op"] != "return" || reply["id"] != "main:2" {
+				t.Fatalf("%v", reply)
+			}
+			open(t, runtime)
+		})
+	}
+}
+
+// guarantee: bridge/unknown-fields
+// An unknown field inside an argument is named by its path: a record's entry
+// `x` gives `args.value.x.extra`. Top-level fields come first, sorted.
+func TestAnUnknownFieldInAnArgumentNamesItsPath(t *testing.T) {
+	runtime, far, next := objectHost(t, func(ctx context.Context, target, method string, args []any) (any, error) {
+		return "pong", nil
+	})
+	_ = far.Send([]byte(`{"op":"invoke","id":"main:1","path":[],"target":"x","method":"m","args":{"type":"record","value":{"x":{"type":"undefined","extra":1}}},"zz":true}`))
+	refused := next()
+	if refused["id"] != "main:1" {
+		t.Fatalf("%v", refused)
+	}
+	wantBadFrame(t, refused, "invoke", `["zz","args.value.x.extra"]`, `unknown field "zz", "args.value.x.extra" in invoke`)
+	_ = far.Send([]byte(`{"op":"invoke","id":"main:2","path":[],"target":"x","method":"m","args":{"type":"list","value":[]}}`))
+	if reply := next(); reply["op"] != "return" || reply["id"] != "main:2" {
+		t.Fatalf("%v", reply)
+	}
+	open(t, runtime)
+}
+
+// guarantee: bridge/unknown-fields
+// A return or throw with a field this side does not know fails only the call
+// waiting for it; the session goes on.
+func TestAnUnknownFieldInAReplyFailsOnlyTheWaitingCall(t *testing.T) {
+	replies := map[string]string{
+		"return": `{"op":"return","id":"%s","value":{"type":"data","value":"x"},"extra":1}`,
+		"throw":  `{"op":"throw","id":"%s","error":{"name":"E","message":"m"},"extra":1}`,
+	}
+	for _, op := range []string{"return", "throw"} {
+		t.Run(op, func(t *testing.T) {
+			runtime, far, next := objectHost(t, func(ctx context.Context, target, method string, args []any) (any, error) {
+				return "pong", nil
+			})
+			failed := make(chan error, 1)
+			go func() {
+				_, err := runtime.Call(context.Background(), "main:svc", "m", nil, true)
+				failed <- err
+			}()
+			call := next()
+			id, _ := call["id"].(string)
+			_ = far.Send([]byte(fmt.Sprintf(replies[op], id)))
+			err := testwait.Within(t, "the reply", failed)
+			// The rejection is this side's own: the waiting call fails with
+			// the coded error itself, not with one decoded from the wire.
+			var coded *Coded
+			if !errors.As(err, &coded) {
+				t.Fatalf("%T %v", err, err)
+			}
+			data, _ := json.Marshal(coded.Data())
+			if coded.Name() != "BindingError" || coded.Code() != "bad-frame" ||
+				coded.Error() != `unknown field "extra" in `+op ||
+				string(data) != `{"fields":["extra"],"op":"`+op+`"}` {
+				t.Fatalf("name %q code %q message %q data %s", coded.Name(), coded.Code(), coded.Error(), data)
+			}
+			// The session goes on.
+			_ = far.Send([]byte(`{"op":"invoke","id":"main:2","path":[],"target":"x","method":"ping","args":{"type":"list","value":[]}}`))
+			if reply := next(); reply["op"] != "return" || reply["id"] != "main:2" {
+				t.Fatalf("%v", reply)
+			}
+			open(t, runtime)
+		})
+	}
+}
+
+// guarantee: bridge/unknown-fields
+// release and cancel have no call to fail: their extra fields are ignored
+// and the frame is taken by its known fields.
+func TestExtraFieldsInReleaseAndCancelAreIgnored(t *testing.T) {
+	cancelled := make(chan struct{})
+	runtime, far, next := objectHost(t, func(ctx context.Context, target, method string, args []any) (any, error) {
+		switch method {
+		case "hold":
+			return Func(func(context.Context, []any) (any, error) { return "held", nil }), nil
+		case "wait":
+			<-ctx.Done()
+			close(cancelled)
+			return nil, ctx.Err()
+		}
+		return "pong", nil
+	})
+	_ = far.Send([]byte(`{"op":"invoke","id":"main:1","path":[],"target":"x","method":"hold","args":{"type":"list","value":[]}}`))
+	granted := next()["value"].(map[string]any)
+	reference := int64(granted["value"].(map[string]any)["id"].(float64))
+	_ = far.Send([]byte(fmt.Sprintf(`{"op":"release","reference":%d,"count":1,"note":1}`, reference)))
+	// Frames are taken in order: the reply to the call after it proves the
+	// release was taken by its known fields, and the session is open.
+	_ = far.Send([]byte(`{"op":"invoke","id":"main:2","path":[],"target":"x","method":"ping","args":{"type":"list","value":[]}}`))
+	if reply := next(); reply["op"] != "return" || reply["id"] != "main:2" {
+		t.Fatalf("%v", reply)
+	}
+	runtime.mu.Lock()
+	exports := len(runtime.exports)
+	runtime.mu.Unlock()
+	if exports != 0 {
+		t.Fatalf("the released export is still here: %d", exports)
+	}
+
+	// A cancel with an extra field still reaches the call it names.
+	_ = far.Send([]byte(`{"op":"invoke","id":"main:3","path":[],"target":"x","method":"wait","args":{"type":"list","value":[]}}`))
+	_ = far.Send([]byte(`{"op":"cancel","id":"main:3","reason":"done"}`))
+	testwait.Within(t, "the method to see the cancel", cancelled)
+	if reply := next(); reply["id"] != "main:3" {
+		t.Fatalf("%v", reply)
+	}
+	open(t, runtime)
+}
+
+// guarantee: bridge/unknown-fields
+// A greeting with a field this side does not know fails the handshake: the
+// session ends, and says which field.
+func TestAnUnknownFieldInHelloFailsTheHandshake(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	runtime, err := New(NewLines(a), Options{Endpoint: &Endpoint{Local: "go"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		far := NewLines(b)
+		_, _ = far.Recv() // its hello
+		_ = far.Send([]byte(`{"op":"hello","version":4,"endpoint":"main","extra":1}`))
+	}()
+	_ = runtime.Start()
+	testwait.Within(t, "the session to end", runtime.Closed())
+	want := `incompatible session: unknown field "extra" in hello`
+	if err := runtime.Err(); err == nil || err.Error() != want || !errors.Is(err, ErrIncompatible) {
+		t.Fatalf("%v", err)
+	}
+}
+
+// endedBy is a session whose far end greets and then sends `frame`: the
+// error the session ended with.
+func endedBy(t *testing.T, frame string) error {
+	t.Helper()
+	a, b := net.Pipe()
+	t.Cleanup(func() {
+		a.Close()
+		b.Close()
+	})
+	runtime, err := New(NewLines(a), Options{Endpoint: &Endpoint{Local: "go"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		far := NewLines(b)
+		if _, err := far.Recv(); err != nil { // its hello
+			return
+		}
+		if far.Send([]byte(`{"op":"hello","version":4,"endpoint":"main"}`)) != nil {
+			return
+		}
+		_ = far.Send([]byte(frame))
+	}()
+	_ = runtime.Start()
+	testwait.Within(t, "the session to end", runtime.Closed())
+	<-sent
+	return runtime.Err()
+}
+
+// guarantee: bridge/unknown-fields
+// Unknown fields are not a licence to accept a frame that cannot name its
+// call: malformed JSON, an unknown op, a call with no id and a reply to a
+// call this side did not make still end the session.
+func TestFramesThatCannotNameTheirCallStillEndTheSession(t *testing.T) {
+	for _, c := range []struct{ name, frame string }{
+		{"malformed JSON", `{"op":"invoke",`},
+		{"unknown op", `{"op":"nonsense","id":"main:1"}`},
+		{"no id, unknown field", `{"op":"invoke","path":[],"target":"x","method":"m","args":{"type":"list","value":[]},"extra":1}`},
+		{"no method, unknown field", `{"op":"invoke","id":"main:1","path":[],"target":"x","args":{"type":"list","value":[]},"extra":1}`},
+		{"method of the wrong type, unknown field", `{"op":"invoke","id":"main:1","path":[],"target":"x","method":7,"args":{"type":"list","value":[]},"extra":1}`},
+		{"dangling reply, unknown field", `{"op":"return","id":"main:9","value":{"type":"undefined"},"extra":1}`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if err := endedBy(t, c.frame); err == nil {
+				t.Fatal("the session did not end")
+			}
+		})
+	}
+}

@@ -75,24 +75,7 @@ rutis 内核和 Cordis 都没有为兼容做任何修改。
 
 ## 3. 线协议
 
-一个双向 Unix socket，逐行 JSON，协议版本 1。
-
-| 帧 | 含义 |
-| --- | --- |
-| `hello { version }` | 握手；完成前不接受其他帧 |
-| `invoke { id, path, target, method, args }` | 调用服务方法（`target` 为句柄）或控制操作（`target` 为空） |
-| `call { id, path, reference, method?, args }` | 调用对端传来的函数引用；带 `method` 时调用对象引用的方法 |
-| `get { id, path, reference, property }` | 读取对象引用的属性（实时读取） |
-| `await { id, path, reference }` | 等待对端传来的异步结果 |
-| `return { id, value }` / `throw { id, error }` | 返回值 / 错误 |
-| `release { reference, count }` | 归还引用的授予次数 |
-| `cancel { id }` | 调用方放弃调用 `id`：中止被调方收到的 `AbortSignal`，或停止等待异步结果；迟到的应答被丢弃并计数 |
-
-- **值**：`undefined`、JSON 数据、列表、记录（字段里含引用的普通对象）、引用（函数、异步结果、对象）。函数、Promise / Future 和活对象（带方法的对象或类实例）以引用传递，保留身份，不序列化成快照；同一个对象无论出现几次都是同一个引用。目前只有 Node 侧导出对象引用，Rust 侧不导出对象。
-- **Rust 侧解码**：生成的类型用 serde。解码结果时，其中的对象引用先替换为标记，再由 `ObjectRef` 反序列化取回；编码参数时反过来处理。
-- **引用计数**：发送方每授予一次加一；接收方收到时先登记持有再排队执行，本地代理全部释放后按收到的次数 `release`。旧的 release 与新的授予交叉时不会误删。会话关闭时整表清空，不等待 GC。
-- **错误**：以对象图传输，保留 `name`、`message`、`cause`、AggregateError 的 `errors` 及其顺序、共享和循环引用。
-- **调用链**：调用号为 `rust:n` / `node:n`，`path` 记录嵌套调用链，用于把反向调用交给正在同步等待的那一方执行。
+帧、值、引用计数、错误、调用链、取消、畸形帧和消息上限以[会话协议规格](protocol-session.md)为准：协议版本 4，承载是 `rutis-bridge` 的 `Channel`，调用号是 `<endpoint>:<n>`。本节不再重复帧表；下面只保留挂载设计自己的同步 / 异步约定。早期版本的“双向 Unix socket、逐行 JSON、协议版本 1”和 `rust:n` / `node:n` 调用号已被取代。
 
 ### 3.1 同步与异步
 
@@ -216,7 +199,7 @@ Node 侧为每个导出的服务槽位维护一串**对象句柄**：
 ## 9. 工程防护
 
 - **已完成**：取消传播和超时（§3.1）、迟到应答丢弃并计数、帧走独立 socket（插件向 stdout 打印不会破坏帧流）、断连时所有在途调用明确失败。
-- **协议版本**：运行时包声明 `rutisProtocol`，构建时与 crate 的 `PROTOCOL` 比对，运行时握手再核对。目前只有一个协议版本，不做多版本协商。
+- **协议版本**：运行时包声明 `rutisProtocol`，构建时与 crate 的 `PROTOCOL` 比对，运行时握手再核对；协议版本、帧和握手规则见[会话协议规格](protocol-session.md)。只有一个协议版本（4），不做多版本协商。
 - **推迟**：断连时逐个记录在途调用的方法名，等需要排障时再做。
 
 ## 10. 做不到或不支持的部分

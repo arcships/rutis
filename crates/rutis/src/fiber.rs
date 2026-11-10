@@ -356,6 +356,12 @@ pub(crate) struct FiberInner {
     pub parent_fiber: Option<Weak<FiberInner>>,
     pub children: Mutex<Vec<Weak<FiberInner>>>,
     pub closing: Arc<AtomicBool>,
+    /// Permanently closed lineage marker (#1025): true once this fiber or an
+    /// ancestor's subtree shutdown has committed its close marker. It is set
+    /// for every member before any `closing` flag is published, and is never
+    /// cleared by a generation reload. `Entry::live` reads it instead of
+    /// walking the context parent chain.
+    pub lineage_closed: crate::sync::AtomicBool,
     pub event_flights: Mutex<usize>,
     pub event_flights_tx: watch::Sender<usize>,
     _event_flights_rx: watch::Receiver<usize>,
@@ -554,29 +560,6 @@ impl FiberInner {
             tr.pre_cancelled = true;
         }
         self.cancel_current();
-    }
-
-    /// Cancel the current token of every live descendant, so callbacks that
-    /// cooperate with their owner's cancellation can end before the drain.
-    pub(crate) fn cancel_descendants(&self) {
-        let mut pending: Vec<_> = self
-            .children
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(Weak::upgrade)
-            .collect();
-        while let Some(fiber) = pending.pop() {
-            fiber.pre_cancel();
-            pending.extend(
-                fiber
-                    .children
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter_map(Weak::upgrade),
-            );
-        }
     }
 
     pub(crate) fn begin_event(&self) {
@@ -1505,6 +1488,12 @@ async fn release_transient(this: &Arc<FiberInner>) {
         }
     }
     if let Some(parent) = this.parent_fiber.as_ref().and_then(Weak::upgrade) {
+        // Detach under the admission lock (#1025): subtree shutdown collects
+        // and marks its fixed set under the same lock, so a fiber cannot slip
+        // out between collection and the marker pass. The fiber is already in
+        // a terminal state here (`alive` is false before this call), so the
+        // lock is about set fixation, not about admitting work.
+        let _admission = shared.admission.lock().unwrap();
         let self_weak = Arc::downgrade(this);
         let mut children = parent.children.lock().unwrap();
         children.retain(|child| !Weak::ptr_eq(child, &self_weak) && child.strong_count() > 0);
@@ -1647,6 +1636,7 @@ fn spawn_fiber_inner(
             parent_fiber,
             children: Mutex::new(Vec::new()),
             closing,
+            lineage_closed: crate::sync::AtomicBool::new(closed),
             event_flights: Mutex::new(0),
             event_flights_tx,
             _event_flights_rx: event_flights_rx,
@@ -1763,19 +1753,14 @@ impl FiberView {
         let shared = self.inner.ctx.shared().clone();
         let task = {
             let _admission = shared.admission.lock().unwrap();
-            let mut pending = vec![self.inner.clone()];
-            while let Some(fiber) = pending.pop() {
-                fiber.closing.store(true, Ordering::SeqCst);
-                fiber.pre_cancel();
-                pending.extend(
-                    fiber
-                        .children
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .filter_map(Weak::upgrade),
-                );
-            }
+            // Two-phase publication (#1025): every member gets the permanent
+            // lineage marker before any `closing` flag becomes visible. An
+            // `Entry::live` that sees no marker may admit a call; one that
+            // sees the marker must not. Doing all marker stores first keeps a
+            // descendant from looking live after its ancestor's close is
+            // already public.
+            let subtree = mark_subtree_lineage(&self.inner);
+            publish_subtree_closing(&subtree);
             begin_subtree_shutdown_locked(&self.inner)
         };
         Box::pin(async move { join_task(&task).await })
@@ -2176,6 +2161,66 @@ impl FiberView {
         }
         *this.config.lock().unwrap() = Some(boxed);
         Ok(())
+    }
+}
+
+/// The close-publication protocol shared by the kernel and its shuttle model
+/// (#1025). A closed subtree is collected once, every member's permanent
+/// lineage marker is stored, and only then is any `closing` flag published.
+/// The model in `fiber/shuttle_tests.rs` implements this trait, so the tested
+/// order is the one the kernel runs.
+pub(crate) trait CloseTree: Sized {
+    fn close_children(&self) -> Vec<Arc<Self>>;
+    fn mark_lineage(&self);
+    fn publish_closing(&self);
+}
+
+impl CloseTree for FiberInner {
+    fn close_children(&self) -> Vec<Arc<Self>> {
+        self.children
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect()
+    }
+
+    fn mark_lineage(&self) {
+        self.lineage_closed.store(true, Ordering::SeqCst);
+    }
+
+    fn publish_closing(&self) {
+        self.closing.store(true, Ordering::SeqCst);
+        self.pre_cancel();
+    }
+}
+
+fn collect_postorder<N: CloseTree>(fiber: &Arc<N>, out: &mut Vec<Arc<N>>) {
+    for child in fiber.close_children() {
+        collect_postorder(&child, out);
+    }
+    out.push(fiber.clone());
+}
+
+/// Collect `root` and every attached descendant, then commit every lineage
+/// marker. Call with `Shared.admission` held: spawn and `release_transient`
+/// touch a child list under the same lock, so the set is fixed.
+pub(crate) fn mark_subtree_lineage<N: CloseTree>(root: &Arc<N>) -> Vec<Arc<N>> {
+    let mut subtree = Vec::new();
+    collect_postorder(root, &mut subtree);
+    for fiber in &subtree {
+        fiber.mark_lineage();
+    }
+    subtree
+}
+
+/// Publish the existing `closing` flags after the marker pass. Callers may
+/// publish `Shared.closing` between the two calls; no `closing` flag may be
+/// visible before every marker is. The root goes first, matching the previous
+/// shutdown order, while the marker pass stays postorder.
+pub(crate) fn publish_subtree_closing<N: CloseTree>(subtree: &[Arc<N>]) {
+    for fiber in subtree.iter().rev() {
+        fiber.publish_closing();
     }
 }
 

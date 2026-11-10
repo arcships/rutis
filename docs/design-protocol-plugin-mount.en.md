@@ -75,24 +75,7 @@ Service properties also generate getters and are read live through the control o
 
 ## 3. Wire protocol
 
-One bidirectional Unix socket, newline-delimited JSON, protocol version 1.
-
-| Frame | Meaning |
-| --- | --- |
-| `hello { version }` | Handshake; no other frames accepted before completion |
-| `invoke { id, path, target, method, args }` | Call a service method (`target` is a handle) or a control operation (`target` is empty) |
-| `call { id, path, reference, method?, args }` | Call a function reference received from the peer; when `method` is present, call a method on an object reference |
-| `get { id, path, reference, property }` | Read a live property from an object reference |
-| `await { id, path, reference }` | Await an async result received from the peer |
-| `return { id, value }` / `throw { id, error }` | Return value / error |
-| `release { reference, count }` | Return a number of reference grants |
-| `cancel { id }` | Caller abandons invocation `id`: abort callee's `AbortSignal` or stop waiting for async result; discard and count late responses |
-
-- **Values:** `undefined`, JSON data, lists, records (ordinary objects whose fields may contain references), and references (functions, async results, objects). Functions, Promise/Future values, and live objects (objects with methods or class instances) pass by reference, retaining identity instead of becoming snapshots. The same object is the same reference wherever it appears. Currently only Node exports object references; Rust does not export objects.
-- **Rust decoding:** generated types use serde. On decode, object references are first replaced by markers and then recovered by `ObjectRef` deserialization; encoding arguments does the reverse.
-- **Reference counting:** sender increments once per grant. Receiver registers ownership on arrival before scheduling execution, and sends `release` for the received grant count after all local proxies are dropped. An old release racing with a new grant cannot delete the new one. Clear all tables on session close; do not wait for GC.
-- **Errors:** transmit as object graphs, preserving `name`, `message`, `cause`, and `AggregateError.errors` order, sharing, and cycles.
-- **Call chains:** IDs are `rust:n` / `node:n`; `path` records nested calls so reverse calls can run on the side currently waiting synchronously.
+Frames, values, reference counting, errors, call chains, cancellation, malformed frames and message limits are specified in the [session protocol specification](protocol-session.en.md): protocol version 4, on `rutis-bridge`'s `Channel`, with call ids `<endpoint>:<n>`. This section no longer repeats the frame table; only the mount design's own synchronous/asynchronous conventions follow. The earlier "one bidirectional Unix socket, newline-delimited JSON, protocol version 1" and `rust:n` / `node:n` call ids are superseded.
 
 ### 3.1 Synchronous and asynchronous calls
 
@@ -216,7 +199,7 @@ The old bridge where dsh hosted Rust (`rutis-cordis` + `host/`) has been removed
 ## 9. Engineering safeguards
 
 - **Complete:** cancellation propagation and timeouts (§3.1), discard/count late responses, frames use a dedicated socket (plugin stdout cannot corrupt them), and all in-flight calls fail clearly on disconnect.
-- **Protocol version:** runtime package declares `rutisProtocol`; build compares it with crate `PROTOCOL`, and runtime handshake checks again. There is only one protocol version; no multi-version negotiation.
+- **Protocol version:** runtime package declares `rutisProtocol`; build compares it with crate `PROTOCOL`, and runtime handshake checks again; the version, frames and handshake rules are in the [session protocol specification](protocol-session.en.md). There is only one protocol version (4); no multi-version negotiation.
 - **Deferred:** log method names for each in-flight call on disconnect; add when needed for debugging.
 
 ## 10. Unsupported or impossible capabilities

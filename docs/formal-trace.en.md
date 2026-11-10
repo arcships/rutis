@@ -11,7 +11,7 @@ A trace is an ordered sequence of protocol frames plus channel-end observations.
 
 The session is a reliable, ordered, duplex stream of opaque messages (`crates/rutis-bridge/src/channel/mod.rs:4-9`). A `Channel` preserves message boundaries; the session protocol gives each message one JSON `op` and uses endpoint-prefixed call ids. Protocol version 4 is `ENDPOINT_PROTOCOL` (`crates/rutis-bridge/src/session/mod.rs:9-14`), and the same value is used by the WebSocket subprotocol (`rutis.4`).
 
-The protocol frame vocabulary is the Rust `Frame` enum (`crates/rutis-bridge/src/session/protocol.rs:154-222`): `hello`, `invoke`, `call`, `get`, `await`, `return`, `throw`, `release`, and `cancel`. Wire values are tagged (`undefined`, `data`, `list`, `record`, `signal`, `reference`, and negotiated value tags) and unknown fields are rejected by serde (`crates/rutis-bridge/src/session/protocol.rs:26-32`, `87-94`, `154-156`).
+The protocol frame vocabulary is the Rust `Frame` enum (`crates/rutis-bridge/src/session/protocol.rs:154-222`): `hello`, `invoke`, `call`, `get`, `await`, `return`, `throw`, `release`, and `cancel`. Wire values are tagged (`undefined`, `data`, `list`, `record`, `signal`, `reference`, and negotiated value tags); an unknown field is handled at its frame's scope (§3.7).
 
 A trace case below has four parts:
 
@@ -32,7 +32,7 @@ The status vocabulary is deliberately strict. **Current** means that the rule is
 | Cancellation | `cancel` is hop-by-hop; late replies are discarded | Treating cancellation as a transport close | A deadline for calls (none is promised here) |
 | Errors | `Failure` graphs and coded call/session scopes | Matching retry or behaviour by error text | A stable platform-specific transport reason for malformed input |
 | Limits | Per-call value/message refusal and explicit outbound backlog limit | Sending an oversized frame and then continuing the call | An unbounded backlog when `outbound_limit` is `None` |
-| Malformed input | Fail closed for malformed/dangling frames, except a racing unknown `cancel` | Silently ignoring unknown fields or operations | Forward compatibility for arbitrary new fields |
+| Malformed input | Fail closed for malformed/dangling frames; unknown fields fail at their frame scope (`hello` fails the handshake, `release`/`cancel` ignore them), and a racing unknown `cancel` is tolerated | Silently ignoring unknown fields or operations | Forward compatibility for arbitrary new fields |
 | Network/reconnect | Type-based classification, backoff and replacement ordering | Retrying incompatible protocol/identity failures as ordinary transient failures | Exact wall-clock reconnect timing when jitter is enabled |
 
 Trace evidence is not a replacement for model or implementation evidence. It answers whether a real execution belongs to the current allowed trace language. A passing trace does not prove untested paths, an unbounded state space, or arbitrary plugin code.
@@ -138,7 +138,7 @@ Accepted trace:
 
 **Failure — fail closed on malformed or dangling frames.** The Rust table covers malformed JSON, empty bytes, a leading BOM, invalid UTF-8, a non-object, unknown `op`, wrong field type, missing field, unknown wire value, call/await/release of unknown references, and reply to an unknown call (`crates/rutis-bridge/src/session/rpc/tests.rs:268-326`). Every case waits for `peer.closed()`, requires `Error::Transport(_)`, and verifies a later invocation is rejected. This prevents an attacker or buggy peer from turning an invalid message into an ambiguous partial state.
 
-**Boundary — unknown fields are not an extension mechanism.** `Frame`, `WireValue`, `Failure`, and `Implementation` use `deny_unknown_fields` (`crates/rutis-bridge/src/session/protocol.rs:8-12,26-32,87-94,154-156`). A new field therefore requires a protocol specification/version or an explicitly compatible decoder; silently ignoring it is not part of the current trace language.
+**Boundary — unknown fields are not an extension mechanism, but no longer end the session.** They are handled at the frame's scope: `hello` fails the handshake; `invoke`/`call`/`get`/`await` fail only that call (`bad-frame`); `return`/`throw` fail only the call waiting for it; `release`/`cancel` ignore them. Implementation: `parse_frame` / `reject_unknown_fields` in `crates/rutis-bridge/src/session/rpc.rs`; tests `unknown_frame_fields_fail_only_their_call` and `an_unknown_field_in_hello_fails_the_handshake`. A new field still requires a protocol specification/version or an explicitly compatible decoder; silently ignoring it is not part of the current trace language.
 
 ### 3.8 Network and reconnect
 
@@ -161,7 +161,7 @@ A validator must assert these invariants across all categories:
 - **Secret safety:** channel trace output contains sizes and reasons, never message payloads (`crates/rutis-bridge/src/channel/trace.rs:104-133`).
 - **Replacement isolation:** old-session close completes before the new hello is accepted for the same id (`crates/rutis-host/src/connect/listen.rs:4-10`).
 
-Deliberate mutations must be caught: accept an unknown `op`, remove `deny_unknown_fields`, treat an unknown `cancel` as fatal, send an over-limit frame instead of failing its call, or install the replacement before unloading the old session. The malformed-frame matrix, over-limit test and replacement implementation are the regression evidence for those mutations.
+Deliberate mutations must be caught: accept an unknown `op`, make an unknown call field end the session instead of failing its call, treat an unknown `cancel` as fatal, send an over-limit frame instead of failing its call, or install the replacement before unloading the old session. The malformed-frame matrix, unknown-field tests, over-limit test and replacement implementation are the regression evidence for those mutations.
 
 ## 5. What developers see
 
@@ -177,6 +177,8 @@ The protocol contract adds no plugin API, host command or configuration field. I
 - A peer that never greets: `the far end did not greet in time`.
 - A missing host identity: `the host provides no id for its sessions`.
 - A value over the limit: `svc.take: argument 2 cannot be sent: the message would be over the limit of 16777216 bytes (16 MiB)`; code `bad-value`; data `{"argument":2,"limit":16777216,"part":"argument"}`.
+- A call frame carrying an unknown field: `unknown field "x" in invoke`; code `bad-frame`; data `{"op":"invoke","fields":["x"]}`; only that call fails. A field inside a value is written as a path such as `args.value.x`.
+- A greeting carrying an unknown field: `incompatible session: unknown field "x" in hello`; the handshake fails and the session ends.
 - A closed channel during a call: the existing transport error, whose code is `peer-gone`; no new protocol text is invented here.
 
 Each call-level failure is fixed in the call or value. A handshake/transport failure is fixed by matching protocol/capabilities, restoring the peer, or correcting deployment; malformed input is a peer implementation defect.
@@ -214,7 +216,7 @@ memory peer mac: closed: done
 
 Protocol version 4, frame names, capabilities, reference representation, error graphs, cancellation and close semantics are current. This document does not bump the wire version or add a field. Existing peers that speak another version fail the handshake with the exact mismatch output above; they do not exchange calls.
 
-Implementers adding a frame or field must update `Frame`/`WireValue`, this document, the malformed-input matrix, and every applicable conformance implementation together. Unknown fields are currently rejected; a compatibility change must be deliberate and versioned, not silently accepted. Implementers adding reconnect logic must preserve type-based classification, backoff reset, and replacement ordering.
+Implementers adding a frame or field must update `Frame`/`WireValue`, this document, the malformed-input matrix, and every applicable conformance implementation together. An unknown field fails at its frame's scope (§3.7); a compatibility change must be deliberate and versioned, not silently accepted. Implementers adding reconnect logic must preserve type-based classification, backoff reset, and replacement ordering.
 
 Completion for #635 is evidence-backed when every nine-category case above has a validator or conformance test in each applicable implementation, every unsupported capability/platform is marked explicitly, and deliberate mutations fail. Current anchors include Rust lifecycle/session tests (`crates/rutis-bridge/tests/session_plugin.rs:169-270,750-772`), Rust session tests (`crates/rutis-bridge/src/session/rpc/tests.rs:268-359`), Rust handshake tests (`crates/rutis-bridge/tests/session_plugin.rs:101-167`), the Go reference/cancellation/limits tests (`go/rutis/internal/peer/crossing_test.go:29-64`, `go/rutis/internal/peer/objects_test.go:66-147`), and retry tests (`go/rutis/internal/runtime/dial_test.go:25-101`).
 

@@ -1068,6 +1068,9 @@ package final class Peer: @unchecked Sendable {
 
     private func receive(_ frame: JSON) throws {
         guard case .object = frame, let op = frame["op"]?.stringValue else { throw Malformed("invalid frame") }
+        // The fields this side does not know, by path: a greeting's fails the
+        // handshake, a call frame's fails only its call (§9).
+        let ignored = unknownFields(frame)
         lock.lock()
         if closeError != nil {
             lock.unlock()
@@ -1075,6 +1078,9 @@ package final class Peer: @unchecked Sendable {
         }
         if op == "hello" {
             defer { lock.unlock() }
+            if !ignored.isEmpty {
+                throw SessionEnded(.incompatible, "unknown field \(quotedFields(ignored)) in hello")
+            }
             if handshake { throw Malformed("duplicate protocol handshake") }
             try greet(frame)
             handshake = true
@@ -1085,11 +1091,45 @@ package final class Peer: @unchecked Sendable {
             lock.unlock()
             throw Malformed("request before protocol handshake")
         }
+        if !ignored.isEmpty, op == "invoke" || op == "call" || op == "get" || op == "await" {
+            // A field this side does not know is not a session error: this
+            // call alone fails, with a throw saying which fields (§9).
+            guard let id = frame["id"]?.stringValue else {
+                lock.unlock()
+                throw Malformed("invalid invocation")
+            }
+            guard id.hasPrefix(remote), !remote.isEmpty, let seq = sequenceNumber(id.dropFirst(remote.count)) else {
+                lock.unlock()
+                throw Malformed("invalid invocation")
+            }
+            guard seq > received, seq <= UInt64(maxSafe) else {
+                lock.unlock()
+                throw Malformed("invalid or repeated invocation identity")
+            }
+            // The id is taken as a completed call's is, so that sending it
+            // again does not run it.
+            received = seq
+            lock.unlock()
+            respond(id, .failure(badFrame(op, ignored)), [], nil)
+            return
+        }
         switch op {
         case "return", "throw":
             guard let id = frame["id"]?.stringValue else {
                 lock.unlock()
                 throw Malformed("invalid response")
+            }
+            if !ignored.isEmpty {
+                // Only the call waiting for this reply fails; the session
+                // goes on (§9).
+                let waiter = pending.removeValue(forKey: id)
+                lock.unlock()
+                if let waiter {
+                    waiter.resolve(.failure(badFrame(op, ignored)))
+                } else if !issued(id) {
+                    throw Malformed("response for unknown call")
+                }
+                return
             }
             var outcome: Result<Value, Error>
             var fresh: [Imported] = []
@@ -1447,6 +1487,102 @@ extension Value {
         if case .undefined = self { return true }
         return false
     }
+}
+
+// ── Unknown frame fields ─────────────────────────────────────────────
+
+/// The fields each frame op defines (session protocol §9). A field outside
+/// them is not a session error: a call frame fails only its call, a greeting
+/// fails the handshake, and `release`/`cancel` ignore the extras.
+private let frameFields: [String: [String]] = [
+    "hello": ["op", "version", "endpoint", "implementation", "capabilities"],
+    "invoke": ["op", "id", "path", "target", "method", "args", "sync"],
+    "call": ["op", "id", "path", "reference", "method", "args", "sync"],
+    "get": ["op", "id", "path", "reference", "property", "sync"],
+    "await": ["op", "id", "path", "reference", "sync"],
+    "return": ["op", "id", "value"],
+    "throw": ["op", "id", "error"],
+    "release": ["op", "reference", "count"],
+    "cancel": ["op", "id"],
+]
+
+/// The field paths `frame` carries beyond the ones its `op` defines (§9).
+/// `data` values and error graphs are arbitrary JSON and are not inspected.
+private func unknownFields(_ frame: JSON) -> [String] {
+    guard let op = frame["op"]?.stringValue, let allowed = frameFields[op] else { return [] }
+    var out: [String] = []
+    for key in fieldNames(frame) where !allowed.contains(key) {
+        out.append(key)
+    }
+    switch op {
+    case "hello":
+        unknownObjectFields(frame["implementation"], ["name", "version"], "implementation", &out)
+    case "invoke", "call", "get", "await":
+        unknownValueFields(frame["args"], "args", &out)
+    case "return":
+        unknownValueFields(frame["value"], "value", &out)
+    case "throw":
+        unknownObjectFields(frame["error"], ["name", "message", "graph"], "error", &out)
+    default:
+        break
+    }
+    return out
+}
+
+/// The fields of the object `value` beyond `allowed`, as `path.name`.
+private func unknownObjectFields(_ value: JSON?, _ allowed: [String], _ path: String, _ out: inout [String]) {
+    for key in fieldNames(value) where !allowed.contains(key) {
+        out.append("\(path).\(key)")
+    }
+}
+
+/// A wire value's fields beyond `type` and `value`; inside a reference, the
+/// fields beyond the ones it defines. A value's content nests by list, map
+/// and record, so a path names the field inside it.
+private func unknownValueFields(_ value: JSON?, _ path: String, _ out: inout [String]) {
+    guard let value, case .object = value else { return }
+    for key in fieldNames(value) where key != "type" && key != "value" {
+        out.append("\(path).\(key)")
+    }
+    guard let kind = value["type"]?.stringValue, let content = value["value"] else { return }
+    switch kind {
+    case "list", "set":
+        for (index, item) in (content.arrayValue ?? []).enumerated() {
+            unknownValueFields(item, "\(path).value[\(index)]", &out)
+        }
+    case "map":
+        for (index, pair) in (content.arrayValue ?? []).enumerated() {
+            for (part, item) in (pair.arrayValue ?? []).enumerated() {
+                unknownValueFields(item, "\(path).value[\(index)][\(part)]", &out)
+            }
+        }
+    case "record":
+        for name in fieldNames(content) {
+            unknownValueFields(content[name], "\(path).value.\(name)", &out)
+        }
+    case "reference":
+        unknownObjectFields(content, ["id", "home", "kind", "origin"], "\(path).value", &out)
+    default:
+        break
+    }
+}
+
+/// The error a call gets when its frame carried a field this side does not
+/// know (#635): code `bad-frame`, data `{op, fields}`.
+private func badFrame(_ op: String, _ fields: [String]) -> RutisError {
+    let data: [String: Any] = ["op": op, "fields": fields]
+    return RutisError(name: RutisError.Name.bindingError,
+                      message: "unknown field \(quotedFields(fields)) in \(op)",
+                      code: "bad-frame", data: data)
+}
+
+private func quotedFields(_ fields: [String]) -> String {
+    fields.map { "\"\($0)\"" }.joined(separator: ", ")
+}
+
+/// The field names of the object `value`, each once, in a fixed order.
+private func fieldNames(_ value: JSON?) -> [String] {
+    Set((value?.objectValue ?? []).map(\.0)).sorted()
 }
 
 /// Whether data holds an integer beyond ±(2^53−1).

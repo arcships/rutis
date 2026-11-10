@@ -1,6 +1,6 @@
 # 协议插件设计：基于 rutis / Cordis 的跨语言对象与插件体系
 
-> 历史方案参考，不作为本分支的需求或实施依据。当前定义见[协议插件需求](requirements-protocol-plugins.md)，新设计见[跨进程挂载设计](design-protocol-plugin-mount.md)。下文的具体机制、路线与验收门槛不沿用。
+> 历史方案参考，不作为本分支的需求或实施依据。当前定义见[协议插件需求](requirements-protocol-plugins.md)，新设计见[跨进程挂载设计](design-protocol-plugin-mount.md)。下文的具体机制、路线与验收门槛不沿用。现行会话协议（帧、握手、调用、引用、取消、畸形帧、未知字段、消息大小上限）见[会话协议规格](protocol-session.md)；§6.1 的带标记值格式仍是现行规范。
 
 > 2026-09-27 重设计；替代本文件此前以 schema 方法调用为中心的方案。
 > 状态：设计提案，尚未实现。API、消息名与描述符均为草图，冻结门槛见 §16。

@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 # Run TLC on the configurations of this directory and compare each outcome
 # with expected.txt. `lease-*.cfg` check RemoteLease.tla, `access-*.cfg`
-# AccessPoint.tla.
+# AccessPoint.tla. Liveness configurations (`lease-healthy`,
+# `lease-faults-live`, `lease-app-restart`, `access-healthy-*`,
+# `access-faults-live`, `access-static-revoke`) need weak fairness; the
+# others check safety only. The #615 configurations: `lease-takeover`
+# (authentication before the close), `lease-cleanup-deadline` (a cleanup
+# deadline), `lease-app-restart` / `lease-app-restart-3` (stop then start,
+# once and three times), `lease-stop-during-takeover`, `lease-faults-live`
+# (liveness after transient faults), `access-app-restart`,
+# `access-faults-live`, and `access-static-revoke` (a revoked static listen
+# link, a revocation during the handshake included).
 #   TLA2TOOLS=/path/to/tla2tools.jar ./run.sh [name ...]
 # Needs Java 11+ on PATH (for example `mise exec java@temurin-21 -- ./run.sh`).
 # tla2tools.jar: https://github.com/tlaplus/tlaplus/releases/tag/v1.7.4

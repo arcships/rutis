@@ -1,6 +1,6 @@
 # Protocol Plugin Design: Cross-Language Objects and Plugin Systems for rutis / Cordis
 
-> Historical proposal; not a requirement or implementation basis for this branch. Current definition: [protocol plugin requirements](requirements-protocol-plugins.en.md); new design: [cross-process mount design](design-protocol-plugin-mount.en.md). The mechanisms, roadmap, and acceptance gates below are not carried forward.
+> Historical proposal; not a requirement or implementation basis for this branch. Current definition: [protocol plugin requirements](requirements-protocol-plugins.en.md); new design: [cross-process mount design](design-protocol-plugin-mount.en.md). The mechanisms, roadmap, and acceptance gates below are not carried forward. The current session protocol (frames, handshake, calls, references, cancellation, malformed frames, unknown fields, message size limits) is in the [session protocol specification](protocol-session.en.md); §6.1's tagged-value formats are still current.
 >
 > Redesigned 2026-09-27, replacing the previous schema-method-call proposal. Status: design proposal, not implemented. APIs, message names, and descriptors are sketches; see §16 for freeze gates. Source baseline: rutis main `446e58d`; requirements [#46](https://github.com/arcships/rutis/issues/46), [#47](https://github.com/arcships/rutis/issues/47), [#48](https://github.com/arcships/rutis/issues/48). [#41](https://github.com/arcships/rutis/issues/41) is closed and baseline includes generation-bound Ctx; integration still needs regression coverage.
 >

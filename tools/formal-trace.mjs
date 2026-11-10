@@ -1,0 +1,750 @@
+#!/usr/bin/env node
+// Rule trace table: docs/formal-trace/ (§5 of
+// docs/design-formal-verification-2026-11-08.md, issue #634).
+//
+//   node tools/formal-trace.mjs            counts, then checks; exit 1 on a problem
+//   node tools/formal-trace.mjs --write    regenerate the guarantee rows first
+//   node tools/formal-trace.mjs --check    checks only (no counts)
+//
+// The guarantee rows (rules/guarantees-*.md) are the register's rows
+// (docs/guarantees.md, §6–§15), one row per register row, extracted from the
+// Markdown tables and never written by hand: `--write` rewrites the automatic
+// columns (id, source, plain-language promise, level, evidence, status), keeps
+// the manual ones (scope, mutation or counterexample, gap) by id, and refreshes
+// the index in README.md between <!-- index:begin --> and <!-- index:end -->.
+// `--check` reports a row that drifted from the register, a row the register
+// has and the table does not (and the reverse), a status or level outside the
+// vocabulary, a duplicate id, and an evidence path, test name or line range
+// that does not resolve. The trace rows (rules/trace-contract.md,
+// rules/event-close-admission.md) are written by hand and checked the same way.
+//
+// The protocol rows (rules/protocol-*.md) are the exported tables of issue
+// #634's section comments, one row per rule, kept verbatim in the issue's ten
+// columns and never rewritten by this script. Their status is the issue's
+// vocabulary (已覆盖, 部分, …); the script maps it to the table's status at
+// read time (§3 of the README maps only downwards), checks the id form, the
+// per-section totals of #634's summary table, and the evidence the 现有形式化
+// column names. Replaced rows are kept and not counted.
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { posix } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const root = fileURLToPath(new URL('../', import.meta.url))
+const read = file => readFileSync(`${root}${file}`, 'utf8')
+const exists = file => existsSync(`${root}${file}`)
+const lineCount = file => read(file).split('\n').length
+
+const REGISTER = 'docs/guarantees.md'
+const RULES = 'docs/formal-trace/rules'
+const INDEX = 'docs/formal-trace/README.md'
+const INDEX_BEGIN = '<!-- index:begin -->'
+const INDEX_END = '<!-- index:end -->'
+
+// The columns of a row, in the order §5 lists the fields.
+const COLUMNS = ['编号', '现行来源', '人话承诺', '级别', '适用范围', '证据', '变异或反例', '状态', '缺口']
+
+// One file per guarantee family: [file, title, families, register sections].
+const FILES = [
+  ['guarantees-core.md', '`core/*`', ['core'], '§6、§7'],
+  ['guarantees-events.md', '`events/*`', ['events'], '§7、§8a'],
+  ['guarantees-boundary.md', '`boundary/*`', ['boundary'], '§8'],
+  ['guarantees-instance.md', '`instance/*`', ['instance'], '§9'],
+  ['guarantees-bridge.md', '`bridge/*`', ['bridge'], '§10'],
+  ['guarantees-host.md', '`host/*`、`dsh/*`', ['host', 'dsh'], '§11、§13、§15'],
+  ['guarantees-sdk.md', '`sdk/*`', ['sdk'], '§12'],
+  ['guarantees-loader.md', '`loader/*`、`swift/*`', ['loader', 'swift'], '§14'],
+]
+const HANDWRITTEN = ['trace-contract.md', 'event-close-admission.md']
+
+// The exported #634 section comments: one file per section (the session
+// section is one file with two tables), with the current and replaced counts
+// of #634's summary table. `id` says which numbering the section uses.
+const PROTOCOL = [
+  { file: 'protocol-registry-1.md', partition: 'registry-1', label: '#634 · registry-1', comment: 6384932214, current: 156, replaced: 9, id: 'registry' },
+  { file: 'protocol-registry-2.md', partition: 'registry-2', label: '#634 · registry-2', comment: 6384932508, current: 218, replaced: 0, id: 'registry' },
+  { file: 'protocol-events.md', partition: 'events', label: '#634 · events', comment: 6384932886, current: 253, replaced: 9, id: 'protocol' },
+  { file: 'protocol-session.md', partition: 'session', label: '#634 · session 上/下', comment: 6384933233, current: 246, replaced: 104, id: 'protocol' },
+  { file: 'protocol-runtime.md', partition: 'runtime', label: '#634 · runtime', comment: 6384933883, current: 264, replaced: 45, id: 'protocol' },
+  { file: 'protocol-remote.md', partition: 'remote', label: '#634 · remote', comment: 6384934401, current: 231, replaced: 17, id: 'protocol' },
+]
+const PROTOCOL_COLUMNS = ['编号', '来源', '规则', '参与方', '手段', '对应', '现有形式化', '状态', '归属 issue', '备注']
+const ISSUE_STATUSES = ['已覆盖', '部分', '未覆盖', '不适用', '明确不保证', '未登记', '已取代']
+const REGISTRY_FAMILIES = ['core', 'events', 'boundary', 'instance', 'bridge', 'host', 'dsh', 'sdk', 'loader', 'swift']
+const PROTOCOL_PREFIXES = ['EVP', 'EVD', 'SES', 'VAL', 'TAG', 'M1', 'CHN', 'SYN', 'M2', 'MNT', 'REQ', 'RTP', 'INS', 'MSV', 'REM', 'DIA', 'APP', 'NOD']
+const EVIDENCE_EXTENSIONS = /\.(?:rs|mjs|ts|js|py|go|swift|kt|yml|json|toml|md)$/
+
+const LEVELS = ['核心承诺', '契约行为', '明确不保证', '—']
+const STATUSES = ['已验证', '部分验证', '未验证', '明确不保证', '已撤回', '不单独计数']
+
+// Cells of a Markdown table row; `\|` stays escaped, as the register writes it.
+const cellsOf = line => line.slice(1, -1).split(/(?<!\\)\|/).map(cell => cell.trim())
+
+// A cell as it is written: one line, `|` escaped.
+const cell = text => String(text ?? '').replace(/\r?\n/g, ' ').replace(/(?<!\\)\|/g, '\\|').trim()
+
+// The rows of a table whose first column is an id in code spans.
+function table(text) {
+  const rows = []
+  let header = null
+  for (const [index, line] of text.split('\n').entries()) {
+    if (!line.startsWith('|')) {
+      if (line.trim()) header = null
+      continue
+    }
+    const found = cellsOf(line)
+    if (['编号', 'ID', 'Id'].includes(found[0])) { header = found; continue }
+    if (!header || /^-+$/.test(found[0])) continue
+    const id = /^`([^`]+)`$/.exec(found[0])?.[1]
+    if (!id) continue
+    const row = { id, line: index + 1 }
+    for (const [column, name] of header.entries()) row[name] = found[column] ?? ''
+    rows.push(row)
+  }
+  return rows
+}
+
+// The register rows, in file order, with the section they sit under.
+function register() {
+  const rows = []
+  let section = null
+  let header = null
+  for (const [index, line] of read(REGISTER).split('\n').entries()) {
+    const heading = /^## (.+)$/.exec(line)
+    if (heading) {
+      section = heading[1]
+      header = null
+      continue
+    }
+    if (!line.startsWith('|')) {
+      if (line.trim()) header = null
+      continue
+    }
+    const found = cellsOf(line)
+    if (['编号', 'ID', 'Id'].includes(found[0])) { header = found; continue }
+    if (!header || /^-+$/.test(found[0])) continue
+    const id = /^`([^`]+)`$/.exec(found[0])?.[1]
+    if (!id) continue
+    const at = name => {
+      const column = header.indexOf(name)
+      return column < 0 ? '' : found[column] ?? ''
+    }
+    const number = /^(\d+[a-z]?)\./.exec(section ?? '')?.[1] ?? ''
+    rows.push({
+      id,
+      line: index + 1,
+      section: number,
+      origin: at('出处'),
+      content: at('内容'),
+      level: at('级别'),
+      status: at('状态'),
+      evidence: at('验证'),
+      note: at('说明') || at('备注'),
+    })
+  }
+  return rows
+}
+
+// A link of the register, made to work from rules/: the register's links are
+// written in docs/, and rules/ is two levels down (`../specs/…` included).
+const relink = text => text.replace(/\]\(([^)\s]+)\)/g, (whole, target) =>
+  /^(?:[a-z][a-z0-9+.-]*:|\/|#|\.\.\/\.\.\/)/i.test(target) ? whole : `](../../${target})`)
+
+// The register's status, in the table's vocabulary.
+function status(row) {
+  if (/^已撤回/.test(row.status)) return '已撤回'
+  if (row.status === '—' || !row.status) return '不单独计数'
+  return row.status
+}
+
+// The automatic columns of one register row.
+function automatic(row) {
+  return {
+    编号: `\`${row.id}\``,
+    现行来源: `[guarantees.md](../../guarantees.md) §${row.section}${row.origin ? ` · ${relink(row.origin)}` : ''}`,
+    人话承诺: relink(row.content),
+    级别: row.level,
+    证据: row.evidence || '—',
+    状态: status(row),
+  }
+}
+
+// The manual columns a new row starts with: the register's own note is the gap
+// it already names; a verified row without one has none.
+function defaults(row) {
+  const note = row.note?.trim()
+  let gap = '未登记'
+  if (/^已撤回/.test(row.status)) gap = note ? `${row.status}；${note}` : row.status
+  else if (note) gap = note
+  else if (status(row) === '已验证') gap = '—'
+  return { 适用范围: '未登记', 变异或反例: '未登记', 缺口: gap }
+}
+
+// The manual columns already in a rules file, by id.
+function manual(file) {
+  const kept = new Map()
+  if (!exists(file)) return kept
+  for (const row of table(read(file))) {
+    if (!exists(file)) continue
+    kept.set(row.id, {
+      适用范围: row.适用范围 ?? '未登记',
+      变异或反例: row.变异或反例 ?? '未登记',
+      缺口: row.缺口 ?? '未登记',
+    })
+  }
+  return kept
+}
+
+const header = (title, sections) => `# 规则：${title}（保证登记表 ${sections}）
+
+[中文索引](../README.md) · [English](../README.en.md) · 数据来源：[保证登记表](../../guarantees.md)
+
+由 \`node tools/formal-trace.mjs --write\` 从登记表生成：自动列（编号、现行来源、人话承诺、级别、证据、状态）不要手改，手改会被 \`--check\` 报出；人工列（适用范围、变异或反例、缺口）按编号保留。缺口的初始值取登记表的「说明」列。
+
+编号沿用登记表，一经登记不复用；撤销的行保留。
+
+| ${COLUMNS.join(' | ')} |
+| ${COLUMNS.map(() => '---').join(' | ')} |`
+
+// The register's links are written in docs/; a link that does not resolve
+// from rules/ but does from docs/ gets the `../../` it needs. Idempotent, so
+// it also repairs the links copied from the register's notes column.
+function repair(body) {
+  return body.replace(/\]\(([^)\s]+)\)/g, (whole, target) => {
+    if (/^(?:[a-z][a-z0-9+.-]*:|\/|#)/i.test(target)) return whole
+    const bare = target.replace(/[#?].*$/, '')
+    if (!bare || exists(posix.normalize(posix.join(RULES, bare)))) return whole
+    return exists(posix.normalize(posix.join('docs', bare))) ? `](../../${target})` : whole
+  })
+}
+
+function write() {
+  const registerRows = register()
+  const changed = []
+  mkdirSync(`${root}${RULES}`, { recursive: true })
+  for (const [file, title, families, sections] of FILES) {
+    const kept = manual(`${RULES}/${file}`)
+    const body = registerRows
+      .filter(row => families.includes(row.id.split('/')[0]))
+      .map(row => {
+        const fields = { ...defaults(row), ...automatic(row), ...(kept.get(row.id) ?? {}) }
+        return `| ${COLUMNS.map(column => cell(fields[column] ?? '')).join(' | ')} |`
+      })
+    const content = repair(`${header(title, sections)}\n${body.join('\n')}\n`)
+    if (!exists(`${RULES}/${file}`) || read(`${RULES}/${file}`) !== content) {
+      writeFileSync(`${root}${RULES}/${file}`, content)
+      changed.push(file)
+    }
+  }
+  console.log(changed.length ? `wrote ${changed.join(', ')}` : 'rules files are current')
+}
+
+const rowsOf = file => table(read(file)).map(row => ({ ...row, file }))
+
+// Every row of the table: the generated files and the hand-written ones.
+function rules() {
+  const found = FILES.flatMap(([file]) => (exists(`${RULES}/${file}`) ? rowsOf(`${RULES}/${file}`) : []))
+  for (const file of HANDWRITTEN) if (exists(`${RULES}/${file}`)) found.push(...rowsOf(`${RULES}/${file}`))
+  return found
+}
+
+// The protocol tables keep the issue's columns and its plain ids; `table()`
+// above only accepts ids in code spans, so they get their own reader.
+function protocolTable(text) {
+  const rows = []
+  let header = null
+  for (const [index, line] of text.split('\n').entries()) {
+    if (!line.startsWith('|')) {
+      if (line.trim()) header = null
+      continue
+    }
+    const found = cellsOf(line)
+    if (found[0] === '编号') { header = found; continue }
+    if (!header || /^-+$/.test(found[0])) continue
+    const id = found[0].replace(/^`|`$/g, '').trim()
+    if (!id) continue
+    const row = { id, line: index + 1, cells: found.length, width: header.length }
+    for (const [column, name] of header.entries()) row[name] = found[column] ?? ''
+    rows.push(row)
+  }
+  return rows
+}
+
+// Files named by an evidence cell, resolved against the tree: an exact path,
+// a unique path suffix (`tests/foo.rs` for `crates/x/tests/foo.rs`), or a
+// unique basename for the issue's shorthand (`rpc.rs`). A qualified path with
+// no match is a missing path; a bare name with no match is unresolved
+// shorthand, reported but not failed (the issue uses both).
+const SKIP_DIRECTORIES = new Set(['node_modules', 'target', '.git', 'dist', 'build', '__pycache__', '.venv', 'venv', 'vendor'])
+let protocolIndex = null
+function protocolPaths() {
+  if (protocolIndex) return protocolIndex
+  const all = []
+  const walk = relative => {
+    for (const entry of readdirSync(`${root}${relative}`, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRECTORIES.has(entry.name)) walk(`${relative}${entry.name}/`)
+      } else all.push(`${relative}${entry.name}`)
+    }
+  }
+  for (const prefix of ROOTS) if (exists(prefix)) walk(prefix)
+  const byBase = new Map()
+  for (const path of all) {
+    const base = path.split('/').at(-1)
+    if (!byBase.has(base)) byBase.set(base, [])
+    byBase.get(base).push(path)
+  }
+  protocolIndex = { all, byBase }
+  return protocolIndex
+}
+
+function resolveProtocolPath(path) {
+  if (exists(path)) return { kind: 'exact', file: path }
+  const { all, byBase } = protocolPaths()
+  if (path.includes('/')) {
+    const matches = all.filter(candidate => candidate.endsWith(`/${path}`))
+    if (matches.length === 1) return { kind: 'suffix', file: matches[0] }
+    if (matches.length > 1) return { kind: 'ambiguous', files: matches }
+    return { kind: 'missing', qualified: true }
+  }
+  const matches = byBase.get(path) ?? []
+  if (matches.length === 1) return { kind: 'base', file: matches[0] }
+  if (matches.length > 1) return { kind: 'ambiguous', files: matches }
+  return { kind: 'missing', qualified: false }
+}
+
+// The backticked file references of a protocol evidence cell, with the
+// `::name` test and the `:from-to` lines when the issue writes them.
+function protocolEvidenceOf(text) {
+  const found = []
+  for (const match of String(text ?? '').matchAll(/`([^`]+)`/g)) {
+    const token = match[1].trim()
+    const [pathPart, ...rest] = token.split('::')
+    const name = rest.length ? rest.join('::') : null
+    const range = /^(.+?):(\d+)(?:-(\d+))?$/.exec(pathPart)
+    const path = range ? range[1] : pathPart
+    if (!EVIDENCE_EXTENSIONS.test(path) || !/^[\w./\-]+$/.test(path)) continue
+    found.push({
+      token,
+      path,
+      name,
+      from: range ? Number(range[2]) : null,
+      to: range ? Number(range[3] ?? range[2]) : null,
+      ...resolveProtocolPath(path),
+    })
+  }
+  return found
+}
+
+// The issue's status, in the table's vocabulary. It only moves down: `已覆盖`
+// is `已验证` only when the row names an implementation check and every file
+// it names still resolves; a TLA-only row, a row without a name, or a row
+// whose evidence is gone is `部分验证`.
+const implementationMeans = means => String(means ?? '').split('+').map(part => part.trim())
+  .some(part => /^(?:K(?:-|$)|PT$|FZ$|TV$|SH$|KANI$|测试$)/.test(part))
+const namedEvidence = text => /`[^`]+`/.test(String(text ?? ''))
+// An evidence cell that starts with a model and names no implementation check
+// is model coverage only, even when the issue's `手段` column also lists K/PT
+// (the means is the plan, the evidence is what exists).
+const implementationEvidence = text => {
+  const source = String(text ?? '')
+  return /(?:^|[；;、,，\s])(?:K(?=[\s`：\-+（(]|$)|PT(?=[\s`：+（(]|$)|FZ(?=[\s`：+（(]|$)|TV(?=[\s`：+（(]|$)|SH(?=[\s`：+（(]|$)|KANI(?=[\s`：+（(]|$)|测试(?=[\s`：+（(]|$))/.test(source)
+    || /\b(?:session|channel)::testing\b/.test(source)
+    || /\b[\w.-]+\.(?:rs|mjs|ts|js|py|go|swift|kt)::/.test(source)
+    || /\b[\w.-]+\.(?:expected\.json|test\.mjs|test\.ts|test\.js)\b/.test(source)
+    || /\b[\w.-]+_test\.go\b/.test(source)
+    || /\btests?\//.test(source)
+}
+const modelEvidence = text => {
+  const source = String(text ?? '').trim()
+  if (!/^(?:TLA\b|`(?:CrossRuntimeSync|RemoteLease|AccessPoint|remote-lease|cross-runtime-sync)`|(?:CrossRuntimeSync|RemoteLease|AccessPoint|RL|AP)\b)/.test(source)) return false
+  return !implementationEvidence(source)
+}
+// The rule itself says it is a non-guarantee; for the issue's `不适用` rows
+// the note is where that is written. A note that says one *should* be
+// registered is not a non-guarantee yet.
+const explicitNonGuarantee = row => /明确不保证/.test(row.规则 ?? '')
+  || (row.状态 === '不适用' && /明确不保证/.test(row.备注 ?? ''))
+
+function protocolStatus(row) {
+  const issue = row.状态
+  if (issue === '已取代') return '已撤回'
+  if (issue === '明确不保证' || explicitNonGuarantee(row)) return '明确不保证'
+  if (issue === '不适用') return '不单独计数'
+  if (issue === '未登记' || issue === '未覆盖') return '未验证'
+  if (issue === '部分') return '部分验证'
+  if (issue !== '已覆盖') return '未验证'
+  if (!implementationMeans(row.手段)) return '部分验证'
+  if (modelEvidence(row.现有形式化)) return '部分验证'
+  if (!namedEvidence(row.现有形式化)) return '部分验证'
+  if (protocolEvidenceOf(row.现有形式化).some(item => item.kind === 'missing')) return '部分验证'
+  return '已验证'
+}
+
+// Why a `已覆盖` row did not become `已验证`; the gap column carries it.
+function protocolDowngrade(row) {
+  if (row.状态 !== '已覆盖') return null
+  if (!implementationMeans(row.手段)) return '现有形式化只有 TLA，不是实现证据'
+  if (modelEvidence(row.现有形式化)) return '现有形式化只有 TLA/模型，没有实现检查的证据'
+  if (!namedEvidence(row.现有形式化)) return '没有具名证据'
+  if (protocolEvidenceOf(row.现有形式化).some(item => item.kind === 'missing')) return '具名证据在当前树找不到'
+  return null
+}
+
+function protocolLevel(row) {
+  return row.状态 === '明确不保证' || explicitNonGuarantee(row) ? '明确不保证' : '契约行为'
+}
+
+function protocolGap(row, status) {
+  const parts = []
+  if (row.状态 === '已取代') parts.push('已取代')
+  else if (row.状态 === '未登记') parts.push('未登记（测试里用了、登记表没有）')
+  else if (row.状态 === '不适用') parts.push(status === '明确不保证' ? '明确不保证（issue 状态：不适用）' : '不适用（只靠测试，不单独计数）')
+  else if (row.状态 === '已覆盖' && status === '部分验证') {
+    const reason = protocolDowngrade(row)
+    if (reason) parts.push(`已覆盖降为部分验证：${reason}`)
+  }
+  const owner = row['归属 issue'] ?? ''
+  if (owner && owner !== '—') parts.push(owner)
+  if (row.备注) parts.push(row.备注)
+  return parts.length ? parts.join('；') : '—'
+}
+
+// The protocol rows, with the mapped status and the nine-column fields the
+// index and the counts use.
+function protocolRows() {
+  const found = []
+  for (const meta of PROTOCOL) {
+    const file = `${RULES}/${meta.file}`
+    if (!exists(file)) continue
+    for (const row of protocolTable(read(file))) {
+      const status = protocolStatus(row)
+      found.push({
+        ...row,
+        file,
+        meta,
+        issueStatus: row.状态,
+        适用范围: row.参与方 || '未登记',
+        证据: row.现有形式化 || '—',
+        级别: protocolLevel(row),
+        状态: status,
+        缺口: protocolGap(row, status),
+      })
+    }
+  }
+  return found
+}
+
+// Where a path in an evidence cell is: the register writes paths relative to
+// crates/, the trace rows from the root. (`rutis-e2e/` is tests/e2e.)
+const ROOTS = ['crates/', 'node/', 'bun/', 'python/', 'go/', 'swift/', 'kotlin/', 'tests/', 'tools/', 'specs/', 'docs/', 'examples/', 'fuzz/', '.github/']
+function locate(path) {
+  if (path.startsWith('rutis-e2e/')) return `tests/e2e/${path.slice('rutis-e2e/'.length)}`
+  return ROOTS.some(prefix => path.startsWith(prefix)) ? path : `crates/${path}`
+}
+
+// Whether `file` defines `name` (a test, a function, a class).
+function defines(file, name) {
+  const text = read(file)
+  const last = name.split('::').at(-1)
+  const plain = last.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const escaped = last.replaceAll("'", "\\'")
+  return new RegExp(`\\b(?:fn|def|func|fun|class|mod|struct|test|it|describe|async fn|async def)\\s+${plain}\\b`).test(text)
+    || text.includes(`'${escaped}'`) || text.includes(`"${escaped}"`) || text.includes(`\`${escaped}\``)
+}
+
+// The `path::test` and `path:line-line` references of one evidence cell; a bare
+// `::name` is the test last file named in the same cell. A span inside
+// parentheses is a JavaScript test title only when the last file was one, and
+// never a path of its own — the register writes fixtures that way.
+function evidenceOf(text) {
+  const found = []
+  let last = null
+  let depth = 0
+  const source = String(text ?? '')
+  for (let at = 0; at < source.length; at++) {
+    const char = source[at]
+    if (char === '（' || char === '(') { depth++; continue }
+    if (char === '）' || char === ')') { depth = Math.max(0, depth - 1); continue }
+    if (char !== '`') continue
+    const end = source.indexOf('`', at + 1)
+    if (end < 0) break
+    const token = source.slice(at + 1, end).trim()
+    at = end
+    if (depth > 0) {
+      if (last && /\.(mjs|ts|js)$/.test(last) && token && !token.includes('`')) found.push({ token, file: last, name: token, from: null, to: null })
+      continue
+    }
+    const bare = /^::((?:[A-Za-z0-9_]+::)*[A-Za-z0-9_]+)$/.exec(token)
+    if (bare && last) { found.push({ token, file: last, name: bare[1], from: null, to: null }); continue }
+    const parsed = /^([^:]+?\.(?:rs|mjs|ts|js|py|go|swift|kt|yml))(?:(?:::)((?:[A-Za-z0-9_]+::)*[A-Za-z0-9_]+)|:(\d+)(?:-(\d+))?)?$/.exec(token)
+    if (!parsed) continue
+    last = locate(parsed[1])
+    found.push({
+      token,
+      file: last,
+      name: parsed[2],
+      from: parsed[3] ? Number(parsed[3]) : null,
+      to: parsed[4] ? Number(parsed[4]) : parsed[3] ? Number(parsed[3]) : null,
+    })
+  }
+  return found
+}
+
+const problems = []
+const say = line => problems.push(line)
+
+// The evidence of one row: the file, the test name and the lines.
+function evidence(row, counts) {
+  for (const item of evidenceOf(row.证据)) {
+    counts.references++
+    if (!exists(item.file)) {
+      say(`${row.file}:${row.line}: ${row.id}: ${item.token}: ${item.file} does not exist`)
+      counts.missing++
+      continue
+    }
+    if (item.name) {
+      counts.names++
+      if (!defines(item.file, item.name)) {
+        say(`${file}:${row.line}: ${row.id}: ${item.token}: ${item.file} has no ${item.name}`)
+        counts.namesMissing++
+      }
+    }
+    if (item.to !== null) {
+      counts.ranges++
+      const total = lineCount(item.file)
+      if (item.to > total) {
+        say(`${file}:${row.line}: ${row.id}: ${item.token}: ${item.file} has ${total} lines, not ${item.to}`)
+        counts.rangesMissing++
+      }
+    }
+  }
+}
+
+// The evidence a protocol row names. A qualified path that does not resolve
+// is a problem; a bare name the issue uses as shorthand is counted, not
+// failed. A `::name` is checked when it is a plain test name (the issue also
+// writes brace and wildcard sets).
+function protocolEvidence(row, counts, file = row.file) {
+  for (const item of protocolEvidenceOf(row.现有形式化)) {
+    counts.references++
+    if (item.kind === 'missing') {
+      if (item.qualified) {
+        say(`${file}:${row.line}: ${row.id}: ${item.token}: ${item.path} does not exist`)
+        counts.missing++
+      } else counts.unresolved++
+      continue
+    }
+    if (item.kind === 'ambiguous') { counts.ambiguous++; continue }
+    counts.found++
+    if (item.name && !/[*{},]/.test(item.name)) {
+      counts.names++
+      if (!defines(item.file, item.name)) {
+        say(`${file}:${row.line}: ${row.id}: ${item.token}: ${item.file} has no ${item.name}`)
+        counts.namesMissing++
+      }
+    }
+    if (item.to !== null) {
+      counts.ranges++
+      const total = lineCount(item.file)
+      if (item.to > total) {
+        say(`${file}:${row.line}: ${row.id}: ${item.token}: ${item.file} has ${total} lines, not ${item.to}`)
+        counts.rangesMissing++
+      }
+    }
+  }
+}
+
+// Every relative link of a Markdown file of this directory that does not
+// resolve, as "file:line: target".
+function links(file) {
+  const broken = []
+  let fence = null
+  for (const [index, line] of read(file).split('\n').entries()) {
+    const marker = /^\s*(`{3,}|~{3,})/.exec(line)
+    if (marker) {
+      if (!fence) fence = marker[1]
+      else if (marker[1][0] === fence[0] && marker[1].length >= fence.length) fence = null
+      continue
+    }
+    if (fence) continue
+    for (const match of line.replace(/`[^`]*`/g, '').matchAll(/!?\[(?:[^\]\\]|\\.)*\]\(\s*(<[^>]*>|[^\s)]+)/g)) {
+      const target = match[1].replace(/^<|>$/g, '')
+      if (/^(?:[a-z][a-z0-9+.-]*:|#|\/)/i.test(target)) continue
+      const path = target.replace(/[#?].*$/, '')
+      if (!path) continue
+      const resolved = posix.normalize(posix.join(posix.dirname(file), path)).replace(/\/$/, '')
+      if (!exists(resolved)) broken.push(`${file}:${index + 1}: ${target}`)
+    }
+  }
+  return broken
+}
+
+// The index table: rows per file, by status.
+function index(rows) {
+  const lines = [
+    '| 文件 | 覆盖 | 条数 | 已验证 | 部分验证 | 未验证 | 明确不保证 | 已撤回 | 不单独计数 |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+  ]
+  const counted = (file, title) => {
+    const list = rows.filter(row => row.file === `${RULES}/${file}`)
+    const of = status => list.filter(row => row.状态 === status).length
+    lines.push(`| [${file}](rules/${file}) | ${title} | ${list.length} | ${of('已验证')} | ${of('部分验证')} | ${of('未验证')} | ${of('明确不保证')} | ${of('已撤回')} | ${of('不单独计数')} |`)
+  }
+  for (const [file, title] of FILES) counted(file, title)
+  for (const file of HANDWRITTEN) counted(file, '手写')
+  for (const meta of PROTOCOL) counted(meta.file, meta.label)
+  const whole = status => rows.filter(row => row.状态 === status).length
+  lines.push(`| 合计 | — | ${rows.length} | ${whole('已验证')} | ${whole('部分验证')} | ${whole('未验证')} | ${whole('明确不保证')} | ${whole('已撤回')} | ${whole('不单独计数')} |`)
+  return lines.join('\n')
+}
+
+// The index block of README.md, between the markers.
+function indexBlock(text) {
+  const begin = text.indexOf(INDEX_BEGIN)
+  const end = text.indexOf(INDEX_END)
+  if (begin < 0 || end < begin) return null
+  return text.slice(begin + INDEX_BEGIN.length, end).replace(/^\n+|\n+$/g, '')
+}
+
+function refreshIndex(rows) {
+  if (!exists(INDEX)) return
+  const text = read(INDEX)
+  const block = indexBlock(text)
+  if (block === null) return
+  const begin = text.indexOf(INDEX_BEGIN) + INDEX_BEGIN.length
+  const end = text.indexOf(INDEX_END)
+  const wanted = `${text.slice(0, begin)}\n${index(rows)}\n${text.slice(end)}`
+  if (wanted !== text) writeFileSync(`${root}${INDEX}`, wanted)
+}
+
+const counts = { references: 0, missing: 0, names: 0, namesMissing: 0, ranges: 0, rangesMissing: 0 }
+const protocolCounts = { references: 0, found: 0, unresolved: 0, ambiguous: 0, missing: 0, names: 0, namesMissing: 0, ranges: 0, rangesMissing: 0 }
+
+if (process.argv.includes('--write')) write()
+
+const rows = rules()
+const registerRows = register()
+const protocol = protocolRows()
+const allRows = [...rows, ...protocol]
+const byId = new Map(rows.map(row => [row.id, row]))
+
+// 1. Every register row is in the table once, with the register's columns.
+for (const registerRow of registerRows) {
+  const row = byId.get(registerRow.id)
+  if (!row) { say(`${REGISTER}:${registerRow.line}: ${registerRow.id}: no row in ${RULES}/`); continue }
+  for (const [column, text] of Object.entries(automatic(registerRow))) {
+    if (row[column] !== cell(text)) say(`${row.file}:${row.line}: ${registerRow.id}: ${column} differs from the register (${REGISTER}:${registerRow.line})`)
+  }
+}
+
+// 2. Every row is a register row or a trace row, ids are unique, the words are
+//    in the vocabulary.
+const registerIds = new Set(registerRows.map(row => row.id))
+const seen = new Set()
+for (const row of rows) {
+  if (seen.has(row.id)) say(`${row.file}:${row.line}: ${row.id}: a second row with this id`)
+  seen.add(row.id)
+  if (!registerIds.has(row.id) && !/^[A-Z]{2,6}(?:-[A-Z]{2,12})*-\d+$/.test(row.id)) {
+    say(`${row.file}:${row.line}: ${row.id}: not a register row and not an id of the form TRC-…-1 or ECA-1`)
+  }
+  if (!STATUSES.includes(row.状态)) say(`${row.file}:${row.line}: ${row.id}: status ${row.状态 || '(empty)'} is not one of ${STATUSES.join(', ')}`)
+  if (!LEVELS.includes(row.级别)) say(`${row.file}:${row.line}: ${row.id}: level ${row.级别 || '(empty)'} is not one of ${LEVELS.join(', ')}`)
+}
+
+// 3. The evidence resolves, every relative link of this directory resolves,
+//    and the index is current.
+for (const row of rows) evidence(row, counts)
+const protocolFiles = PROTOCOL.map(meta => `${RULES}/${meta.file}`)
+for (const file of [INDEX, 'docs/formal-trace/README.en.md', ...FILES.map(([name]) => `${RULES}/${name}`), ...HANDWRITTEN.map(name => `${RULES}/${name}`), ...protocolFiles]) {
+  if (exists(file)) for (const broken of links(file)) say(`broken link ${broken}`)
+}
+
+// 4. The protocol rows: the exported columns and ids, the issue's status
+//    words, #634's per-section totals, and the evidence they name.
+const protocolSeen = new Map()
+for (const meta of PROTOCOL) {
+  const file = `${RULES}/${meta.file}`
+  if (!exists(file)) { say(`${file}: missing protocol file`); continue }
+  const text = read(file)
+  const headerLine = text.split('\n').find(line => line.startsWith('| 编号 |'))
+  if (!headerLine) { say(`${file}: no table with a 编号 column`); continue }
+  const header = cellsOf(headerLine)
+  if (header.length !== PROTOCOL_COLUMNS.length || header.some((name, at) => name !== PROTOCOL_COLUMNS[at])) {
+    say(`${file}: the columns are ${header.join(' | ')}, not ${PROTOCOL_COLUMNS.join(' | ')}`)
+  }
+  const list = protocolTable(text)
+  const idPattern = meta.id === 'registry'
+    ? new RegExp(`^(?:${REGISTRY_FAMILIES.join('|')})/[A-Za-z0-9_.-]+(?: [a-z])?$`)
+    : new RegExp(`^(?:${PROTOCOL_PREFIXES.join('|')})-\\d+(?:\\.\\d+)*-(?:[A-Z]?\\d+[a-z]?)$`)
+  for (const row of list) {
+    if (row.cells !== row.width) say(`${file}:${row.line}: ${row.id}: ${row.cells} cells, not ${row.width}`)
+    for (const column of PROTOCOL_COLUMNS) if (!(column in row)) say(`${file}:${row.line}: ${row.id}: column ${column} missing`)
+    if (protocolSeen.has(row.id)) say(`${file}:${row.line}: ${row.id}: a second protocol row with this id (first at ${protocolSeen.get(row.id)})`)
+    protocolSeen.set(row.id, `${file}:${row.line}`)
+    if (!idPattern.test(row.id)) say(`${file}:${row.line}: ${row.id}: not an id of the form ${meta.id === 'registry' ? '<family>/<name>' : '<PREFIX>-<section>-<number>'}`)
+    if (!ISSUE_STATUSES.includes(row.状态)) say(`${file}:${row.line}: ${row.id}: issue status ${row.状态 || '(empty)'} is not one of ${ISSUE_STATUSES.join(', ')}`)
+    const mapped = protocolStatus(row)
+    if (!STATUSES.includes(mapped)) say(`${file}:${row.line}: ${row.id}: mapped status ${mapped} is not one of ${STATUSES.join(', ')}`)
+    protocolEvidence(row, protocolCounts, file)
+  }
+  const current = list.filter(row => row.状态 !== '已取代').length
+  const replaced = list.filter(row => row.状态 === '已取代').length
+  if (current !== meta.current || replaced !== meta.replaced) {
+    say(`${file}: ${current} current and ${replaced} replaced rows; #634's summary table says ${meta.current} and ${meta.replaced}`)
+  }
+}
+const protocolReplaced = protocol.filter(row => row.状态 === '已撤回').length
+const protocolCurrent = protocol.length - protocolReplaced
+if (protocolCurrent !== 1368 || protocolReplaced !== 184) {
+  say(`${RULES}: ${protocolCurrent} current and ${protocolReplaced} replaced protocol rows; #634 says 1368 and 184`)
+}
+
+if (process.argv.includes('--write')) refreshIndex(allRows)
+else if (exists(INDEX)) {
+  const block = indexBlock(read(INDEX))
+  if (block !== null && block !== index(allRows)) say(`${INDEX}: the index between the markers is stale; run node tools/formal-trace.mjs --write`)
+}
+
+if (!process.argv.includes('--check')) {
+  const tally = list => {
+    const counted = new Map()
+    for (const row of list) counted.set(row.状态, (counted.get(row.状态) ?? 0) + 1)
+    return STATUSES.filter(status => counted.has(status)).map(status => `${status} ${counted.get(status)}`).join(' · ')
+  }
+  const issueTally = list => {
+    const counted = new Map()
+    for (const row of list) counted.set(row.issueStatus, (counted.get(row.issueStatus) ?? 0) + 1)
+    return ISSUE_STATUSES.filter(status => counted.has(status)).map(status => `${status} ${counted.get(status)}`).join(' · ')
+  }
+  const protocolIds = new Set(protocol.map(row => row.id))
+  const registerOverlap = [...protocolIds].filter(id => registerIds.has(id)).length
+  console.log(`\nrows: ${allRows.length} (register ${registerRows.length}, hand-written ${rows.length - registerRows.length}, protocol ${protocol.length})\n`)
+  console.log('by file:')
+  for (const file of [...FILES.map(([name]) => name), ...HANDWRITTEN, ...PROTOCOL.map(meta => meta.file)]) {
+    const list = allRows.filter(row => row.file === `${RULES}/${file}`)
+    if (list.length) console.log(`  ${file}: ${list.length} — ${tally(list)}`)
+  }
+  console.log(`\nby status: ${tally(allRows)}`)
+  console.log('\nby level:')
+  for (const level of LEVELS) {
+    const list = allRows.filter(row => row.级别 === level)
+    console.log(`  ${level} ${list.length}（${tally(list) || '—'}）`)
+  }
+  const unverified = allRows.filter(row => row.级别 === '核心承诺' && row.状态 === '未验证').length
+  const unverifiedRegister = registerRows.filter(row => row.level === '核心承诺' && status(row) === '未验证').length
+  console.log(`\nunverified core commitments: ${unverified} (register rows: ${unverifiedRegister})`)
+  const scoped = allRows.filter(row => row.适用范围 !== '未登记').length
+  console.log(`scope filled: ${scoped} / ${allRows.length} (未登记 ${allRows.length - scoped})`)
+  console.log(`evidence (register/trace): ${counts.references} references (names ${counts.names}, line ranges ${counts.ranges}); missing files ${counts.missing}, missing names ${counts.namesMissing}, lines beyond the file ${counts.rangesMissing}`)
+  console.log(`evidence (protocol): ${protocolCounts.references} references (resolved ${protocolCounts.found}, unresolved shorthand ${protocolCounts.unresolved}, ambiguous ${protocolCounts.ambiguous}); missing explicit paths ${protocolCounts.missing}, missing names ${protocolCounts.namesMissing}, lines beyond the file ${protocolCounts.rangesMissing}`)
+  console.log(`protocol issue status: ${issueTally(protocol)}`)
+  console.log(`protocol ids also in the register: ${registerOverlap} (kept as separate rows; the totals are rows, not distinct rules)\n`)
+}
+
+if (process.argv.includes('--check') && (protocolCounts.unresolved || protocolCounts.ambiguous)) {
+  console.log(`protocol evidence: ${protocolCounts.unresolved} unresolved shorthand, ${protocolCounts.ambiguous} ambiguous (reported, not problems)`)
+}
+const unique = [...new Set(problems)]
+for (const line of unique) console.log(line)
+console.log(`${unique.length} problem(s)`)
+process.exitCode = unique.length ? 1 : 0

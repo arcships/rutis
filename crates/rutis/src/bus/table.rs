@@ -75,6 +75,11 @@ impl Entry {
     }
 
     /// Not withdrawn, and its owner's generation is loading or active.
+    ///
+    /// The ancestor walk is gone (#1025): a subtree shutdown marks every
+    /// member's `lineage_closed` before it publishes any `closing` flag, so
+    /// reading the owner's own markers is equivalent and does not touch the
+    /// parent chain on every call.
     pub fn live(&self) -> bool {
         if self.withdrawn.load(Ordering::SeqCst) {
             return false;
@@ -82,7 +87,7 @@ impl Entry {
         self.owner.upgrade().is_some_and(|owner| {
             if !owner.alive.load(Ordering::SeqCst)
                 || owner.closing.load(Ordering::SeqCst)
-                || owner.ctx.registration_open().is_err()
+                || owner.lineage_closed.load(Ordering::SeqCst)
             {
                 return false;
             }

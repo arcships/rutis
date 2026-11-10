@@ -67,12 +67,14 @@ pub fn session_frame(data: &[u8]) {
         // The reader fails the frame's call without parsing the frame.
         return;
     }
-    let Ok(frame) = parse_frame(data) else {
+    let Ok(parsed) = parse_frame(data) else {
         return;
     };
+    let frame = parsed.frame;
     let written = serde_json::to_vec(&frame).expect("a frame read writes");
     let again = parse_frame(&written)
-        .unwrap_or_else(|error| panic!("a frame written does not read back: {error}"));
+        .unwrap_or_else(|error| panic!("a frame written does not read back: {error}"))
+        .frame;
     let rewritten = serde_json::to_vec(&again).expect("a frame read writes");
     assert_eq!(
         String::from_utf8_lossy(&written),

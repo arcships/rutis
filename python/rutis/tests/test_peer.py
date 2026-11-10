@@ -13,7 +13,7 @@ import background
 from support import HANG_GUARD, LOCAL, hello, within
 
 from rutis.channel import SocketChannel
-from rutis.peer import ENDPOINT_PROTOCOL, AggregateError, Peer, RemoteError, decode_error, encode_error
+from rutis.peer import ENDPOINT_PROTOCOL, AggregateError, BindingError, Peer, RemoteError, decode_error, encode_error
 
 
 class PeerTests(background.IsolatedAsyncioTestCase):
@@ -393,6 +393,134 @@ class MalformedFrameTests(unittest.IsolatedAsyncioTestCase):
         reply = await asyncio.to_thread(lines.readline)
         self.assertEqual(json.loads(reply)["value"], {"type": "data", "value": "served"})
         self.assertIsNone(peer.closed_error)
+
+
+class UnknownFieldTests(background.IsolatedAsyncioTestCase):
+    """Session protocol §9 (#635): an unknown field never ends the session,
+    but fails by the frame's scope — its call, the call waiting for its
+    reply, or the handshake. The words and data are rutis-bridge's."""
+
+    def session(self, dispatch=None):
+        ours, theirs = socket.socketpair()
+        theirs.settimeout(HANG_GUARD)
+        self.addCleanup(ours.close)
+        self.addCleanup(theirs.close)
+        peer = Peer(ours, dispatch or (lambda target, method, args: "served"), endpoint=LOCAL)
+        self.addCleanup(peer._channel.close)
+        self.addCleanup(peer.close)
+        lines = theirs.makefile("rb")
+        self.addCleanup(lines.close)
+
+        async def read():
+            return json.loads(await asyncio.to_thread(lines.readline))
+
+        return peer, read
+
+    async def test_an_unknown_field_fails_only_the_call_that_carried_it(self):
+        # guarantee: bridge/unknown-fields
+        peer, read = self.session()
+        peer._receive(hello())
+        peer.receive({
+            "op": "invoke", "id": "main:1", "path": [], "target": "t", "method": "m",
+            "args": {"type": "data", "value": []}, "trace": "x",
+        })
+        reply = await read()
+        self.assertEqual((reply["op"], reply["id"]), ("throw", "main:1"))
+        self.assertEqual(reply["error"]["name"], "BindingError")
+        self.assertEqual(reply["error"]["message"], 'unknown field "trace" in invoke')
+        error = decode_error(reply["error"])
+        self.assertIsInstance(error, BindingError)
+        self.assertEqual((error.code, error.data), ("bad-frame", {"op": "invoke", "fields": ["trace"]}))
+        # The rejected id was taken: the session goes on with the next call.
+        peer.receive({"op": "invoke", "id": "main:2", "path": [], "target": "t", "method": "m", "args": {"type": "data", "value": []}})
+        reply = await read()
+        self.assertEqual(reply["value"], {"type": "data", "value": "served"})
+        self.assertIsNone(peer.closed_error)
+
+    async def test_a_field_nested_in_a_value_is_named_by_its_path(self):
+        peer, read = self.session()
+        peer._receive(hello())
+        peer.receive({
+            "op": "invoke", "id": "main:1", "path": [], "target": "t", "method": "m",
+            "args": {"type": "record", "value": {"x": {"type": "undefined", "extra": 1}}},
+        })
+        reply = await read()
+        self.assertEqual(reply["error"]["message"], 'unknown field "args.value.x.extra" in invoke')
+        self.assertEqual(decode_error(reply["error"]).data, {"op": "invoke", "fields": ["args.value.x.extra"]})
+        self.assertIsNone(peer.closed_error)
+
+    async def test_call_get_and_await_fail_alone_too(self):
+        peer, read = self.session()
+        peer._receive(hello())
+        # Reference 99 is unknown: the extra field must be rejected before
+        # the reference is looked up, or the session would end.
+        frames = (
+            {"op": "call", "id": "main:1", "path": [], "reference": 99, "method": "m", "args": {"type": "undefined"}, "extra": 1},
+            {"op": "get", "id": "main:2", "path": [], "reference": 99, "property": "p", "extra": 1},
+            {"op": "await", "id": "main:3", "path": [], "reference": 99, "extra": 1},
+        )
+        for op, frame in zip(("call", "get", "await"), frames):
+            with self.subTest(op):
+                peer.receive(frame)
+                reply = await read()
+                self.assertEqual((reply["op"], reply["id"]), ("throw", frame["id"]))
+                self.assertEqual(reply["error"]["message"], f'unknown field "extra" in {op}')
+                self.assertEqual(decode_error(reply["error"]).data, {"op": op, "fields": ["extra"]})
+        self.assertIsNone(peer.closed_error)
+
+    async def test_an_unknown_field_in_a_reply_fails_the_waiting_call_only(self):
+        peer, read = self.session()
+        peer._receive(hello())
+        future = peer.request("t", "m", [])
+        sent = await read()
+        peer.receive({"op": "return", "id": sent["id"], "value": {"type": "data", "value": 1}, "extra": 1})
+        with self.assertRaises(RemoteError) as failed:
+            await future
+        self.assertEqual((failed.exception.name, failed.exception.code), ("BindingError", "bad-frame"))
+        self.assertEqual(failed.exception.data, {"op": "return", "fields": ["extra"]})
+        # A throw's extras fail the call it would have settled, the same way.
+        future = peer.request("t", "m", [])
+        sent = await read()
+        peer.receive({"op": "throw", "id": sent["id"], "error": {"name": "E", "message": "m"}, "extra": 1})
+        with self.assertRaises(RemoteError) as failed:
+            await future
+        self.assertEqual((failed.exception.name, failed.exception.code), ("BindingError", "bad-frame"))
+        self.assertEqual(failed.exception.data, {"op": "throw", "fields": ["extra"]})
+        # The session continues, and a clean reply still settles its call.
+        future = peer.request("t", "m", [])
+        sent = await read()
+        peer.receive({"op": "return", "id": sent["id"], "value": {"type": "data", "value": 2}})
+        self.assertEqual(await future, 2)
+        self.assertIsNone(peer.closed_error)
+
+    async def test_release_and_cancel_ignore_an_extra_field(self):
+        peer, read = self.session()
+        peer._receive(hello())
+        reference = peer._encode(lambda: 1, [], False)["value"]["id"]
+        peer.receive({"op": "release", "reference": reference, "count": 1, "extra": 1})
+        self.assertEqual(peer._exports, {}, "the release still lands")
+        # An unknown call's cancel stays ignored, extra field and all.
+        peer.receive({"op": "cancel", "id": "py:77", "extra": 1})
+        peer.receive({"op": "invoke", "id": "main:1", "path": [], "target": "t", "method": "m", "args": {"type": "data", "value": []}})
+        reply = await read()
+        self.assertEqual(reply["value"], {"type": "data", "value": "served"})
+        self.assertIsNone(peer.closed_error)
+
+    async def test_an_unknown_field_in_hello_fails_the_handshake(self):
+        peer, _read = self.session()
+        peer.receive({"op": "hello", "version": ENDPOINT_PROTOCOL, "endpoint": "main", "extra": 1})
+        self.assertIsInstance(peer.closed_error, ValueError)
+        self.assertEqual(str(peer.closed_error), 'incompatible session: unknown field "extra" in hello')
+        self.assertTrue(peer.closed.done())
+
+    async def test_a_frame_whose_call_cannot_be_located_still_ends_the_session(self):
+        # §9: an unknown field cannot downgrade a frame that does not name its
+        # call; missing fields keep ending the session (§8).
+        peer, _read = self.session()
+        peer._receive(hello())
+        peer.receive({"op": "invoke", "path": [], "target": "t", "method": "m", "args": {"type": "data", "value": []}, "extra": 1})
+        self.assertIsNotNone(peer.closed_error)
+        self.assertTrue(peer.closed.done())
 
 
 class Weather:

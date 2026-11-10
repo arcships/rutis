@@ -11,7 +11,7 @@
 
 会话是承载不透明消息的可靠、有序、双工流（`crates/rutis-bridge/src/channel/mod.rs:4-9`）。`Channel` 保留消息边界；会话协议为每条消息使用一个 JSON `op`，调用号带端点前缀。协议版本 4 是 `ENDPOINT_PROTOCOL`（`crates/rutis-bridge/src/session/mod.rs:9-14`），WebSocket 子协议也使用同一个值（`rutis.4`）。
 
-协议帧词汇是 Rust 的 `Frame` 枚举（`crates/rutis-bridge/src/session/protocol.rs:154-222`）：`hello`、`invoke`、`call`、`get`、`await`、`return`、`throw`、`release` 和 `cancel`。线上值带标签（`undefined`、`data`、`list`、`record`、`signal`、`reference` 以及协商出的值标签），未知字段由 serde 拒绝（`crates/rutis-bridge/src/session/protocol.rs:26-32`、`87-94`、`154-156`）。
+协议帧词汇是 Rust 的 `Frame` 枚举（`crates/rutis-bridge/src/session/protocol.rs:154-222`）：`hello`、`invoke`、`call`、`get`、`await`、`return`、`throw`、`release` 和 `cancel`。线上值带标签（`undefined`、`data`、`list`、`record`、`signal`、`reference` 以及协商出的值标签）；未知字段按帧的作用范围处理（§3.7）。
 
 下面每个追踪用例包含四部分：
 
@@ -32,7 +32,7 @@
 | 取消 | `cancel` 逐跳传播；迟到回复被丢弃 | 把取消当作关闭承载 | 调用截止时间（本文不作保证） |
 | 错误 | `Failure` 图及调用/会话范围的编码 | 按错误文字匹配重试或行为 | 畸形输入的稳定、平台特定承载原因 |
 | 限制 | 每次调用的值/消息拒绝和明确的出站积压上限 | 发送超大帧后继续调用 | `outbound_limit` 为 `None` 时积压无界 |
-| 畸形输入 | 对畸形/悬空帧故障闭合，但竞态中的未知 `cancel` 除外 | 静默忽略未知字段或操作 | 任意新字段的向前兼容 |
+| 畸形输入 | 对畸形/悬空帧故障闭合；未知字段按调用范围失败（`hello` 失败握手，`release`/`cancel` 忽略），竞态中的未知 `cancel` 也除外 | 静默忽略未知字段或操作 | 任意新字段的向前兼容 |
 | 网络/重连 | 按类型分类、退避和替换顺序 | 把不兼容/身份失败当普通暂时失败重试 | 启用抖动时精确的墙上时钟重连时间 |
 
 追踪证据不能替代模型或实现证据。它回答的是一次真实执行是否属于当前允许的追踪语言。追踪通过不能证明未测试路径、无界状态空间或任意插件代码。
@@ -138,7 +138,7 @@ memory peer mac: closed: done
 
 **失败 — 畸形或悬空帧故障闭合。** Rust 表覆盖畸形 JSON、空字节、开头 BOM、无效 UTF-8、非对象、未知 `op`、错误字段类型、缺少字段、未知线上值、对未知引用的 call/await/release，以及对未知调用的回复（`crates/rutis-bridge/src/session/rpc/tests.rs:268-326`）。每个用例都等待 `peer.closed()`，要求 `Error::Transport(_)`，并验证后续调用被拒绝。这阻止攻击者或有缺陷的对端把无效消息变成含义不明的部分状态。
 
-**边界 — 未知字段不是扩展机制。** `Frame`、`WireValue`、`Failure` 和 `Implementation` 使用 `deny_unknown_fields`（`crates/rutis-bridge/src/session/protocol.rs:8-12,26-32,87-94,154-156`）。因此，新字段需要协议规范/版本，或明确兼容的解码器；静默忽略它不属于当前追踪语言。
+**边界 — 未知字段不是扩展机制，但不再结束整个会话。** 未知字段按帧的作用范围处理：`hello` 失败握手；`invoke`/`call`/`get`/`await` 只失败该调用（`bad-frame`）；`return`/`throw` 只失败等待它的调用；`release`/`cancel` 忽略。实现见 `crates/rutis-bridge/src/session/rpc.rs` 的 `parse_frame` / `reject_unknown_fields`，测试 `unknown_frame_fields_fail_only_their_call`、`an_unknown_field_in_hello_fails_the_handshake`。新字段仍需协议规范/版本或明确兼容的解码器；静默忽略它不属于当前追踪语言。
 
 ### 3.8 网络与重连
 
@@ -161,7 +161,7 @@ memory peer mac: closed: done
 - **秘密安全：** 通道追踪输出只含大小和原因，从不含消息负载（`crates/rutis-bridge/src/channel/trace.rs:104-133`）。
 - **替换隔离：** 同一 id 接受新 hello 前，旧会话关闭已经完成（`crates/rutis-host/src/connect/listen.rs:4-10`）。
 
-必须捕获有意的变异：接受未知 `op`、移除 `deny_unknown_fields`、把未知 `cancel` 视为致命错误、发送超限帧而不是让调用失败，或在卸载旧会话前安装替换会话。畸形帧矩阵、超限测试和替换实现就是这些变异的回归证据。
+必须捕获有意的变异：接受未知 `op`、让未知调用字段结束整个会话而不是失败该调用、把未知 `cancel` 视为致命错误、发送超限帧而不是让调用失败，或在卸载旧会话前安装替换会话。畸形帧矩阵、未知字段测试、超限测试和替换实现就是这些变异的回归证据。
 
 ## 5. 开发者看到的内容
 
@@ -177,6 +177,8 @@ memory peer mac: closed: done
 - 从未问候的对端：`the far end did not greet in time`。
 - 宿主缺少身份：`the host provides no id for its sessions`。
 - 值超过上限：`svc.take: argument 2 cannot be sent: the message would be over the limit of 16777216 bytes (16 MiB)`；代码 `bad-value`；数据 `{"argument":2,"limit":16777216,"part":"argument"}`。
+- 调用帧带未知字段：`unknown field "x" in invoke`；代码 `bad-frame`；数据 `{"op":"invoke","fields":["x"]}`；只失败这次调用。嵌套值里的字段写作 `args.value.x` 这样的路径。
+- 握手帧带未知字段：`incompatible session: unknown field "x" in hello`；握手失败，会话结束。
 - 调用期间通道关闭：现有承载错误，代码为 `peer-gone`；本文不发明新的协议文字。
 
 每次调用级失败都在调用或值这一层结束。握手/承载失败通过匹配协议/能力、恢复对端或修正部署解决；畸形输入是对端实现缺陷。
@@ -214,7 +216,7 @@ memory peer mac: closed: done
 
 协议版本 4、帧名、能力、引用表示、错误图、取消和关闭语义是当前规则。本文不提升线上版本，也不增加字段。说其他版本的现有对端会以此前的精确不匹配输出失败握手；双方不会交换调用。
 
-添加帧或字段的实现者必须同时更新 `Frame`/`WireValue`、本文、畸形输入矩阵和所有适用的一致性实现。未知字段当前会被拒绝；兼容性变更必须有意且有版本，不能静默接受。添加重连逻辑的实现者必须保持按类型分类、退避重置和替换顺序。
+添加帧或字段的实现者必须同时更新 `Frame`/`WireValue`、本文、畸形输入矩阵和所有适用的一致性实现。未知字段按帧的作用范围失败（§3.7）；兼容性变更必须有意且有版本，不能静默接受。添加重连逻辑的实现者必须保持按类型分类、退避重置和替换顺序。
 
 当上面九类的每个用例在所有适用实现中都有追踪验证器或一致性测试、每个不支持的能力/平台都明确标注，并且有意变异都会失败时，#635 才算有证据地完成。当前锚点包括 Rust 生命周期/会话测试（`crates/rutis-bridge/tests/session_plugin.rs:169-270,750-772`）、Rust 会话测试（`crates/rutis-bridge/src/session/rpc/tests.rs:268-359`）、Rust 握手测试（`crates/rutis-bridge/tests/session_plugin.rs:101-167`）、Go 引用/取消/限制测试（`go/rutis/internal/peer/crossing_test.go:29-64`、`go/rutis/internal/peer/objects_test.go:66-147`）和重试测试（`go/rutis/internal/runtime/dial_test.go:25-101`）。
 

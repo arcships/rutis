@@ -373,6 +373,11 @@ jobs:
       - name: guarantee register
         if: success() || failure()
         run: node tools/check-guarantees.mjs
+      # The rule tracker (docs/formal-trace/): evidence paths exist, the rows
+      # match the register, and the generated index is current.
+      - name: rule tracker
+        if: success() || failure()
+        run: node tools/formal-trace.mjs --check
       - name: self-hosted runner, end
         if: always() && runner.environment == 'self-hosted'
         env:
@@ -2056,7 +2061,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        spec: [cross-runtime-sync, remote-lease]
+        spec: [cross-runtime-sync, remote-lease, event-close, events, row-lifecycle, call-lifecycle, peer-rows]
     runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '"ubuntu-24.04"') }}
     timeout-minutes: 30
     steps:

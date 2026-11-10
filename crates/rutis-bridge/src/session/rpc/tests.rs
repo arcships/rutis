@@ -1832,7 +1832,7 @@ fn a_frame_from_within_the_limit_is_within_the_frame_depth() {
     for frame in [lists, maps] {
         assert!(frame_depth(&frame) <= MAX_FRAME_DEPTH);
         assert!(matches!(
-            parse_frame(frame.as_bytes()),
+            parse_frame(frame.as_bytes()).map(|parsed| parsed.frame),
             Ok(Frame::Invoke { .. })
         ));
     }
@@ -1953,7 +1953,7 @@ async fn a_value_deeper_than_the_limit_fails_its_call_before_it_is_sent() {
             .recv()
             .unwrap()
             .unwrap();
-        let frame = parse_frame(&message).unwrap();
+        let frame = parse_frame(&message).unwrap().frame;
         let Frame::Invoke { id, args, .. } = frame else {
             panic!("invoke expected")
         };
@@ -2062,6 +2062,167 @@ async fn a_frame_too_deep_fails_its_call_and_the_session_goes_on() {
         .expect("the session stayed open");
     match peer.close_reason() {
         Some(Error::Transport(message)) => assert!(message.contains("64 levels"), "{message}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+// ── Unknown frame fields (#635) ─────────────────────────────────────
+
+/// `release` and `cancel` have no call to fail: their extra fields are
+/// ignored and the frame is processed as usual.
+/// guarantee: bridge/unknown-fields
+#[tokio::test(flavor = "current_thread")]
+async fn release_and_cancel_ignore_unknown_fields() {
+    let (peer, _far) = pair();
+    let ignored = vec!["extra".to_string()];
+    assert!(!peer
+        .reject_unknown_fields(
+            &Frame::Release {
+                reference: 0,
+                count: 0
+            },
+            &ignored
+        )
+        .unwrap());
+    assert!(!peer
+        .reject_unknown_fields(
+            &Frame::Cancel {
+                id: "node:1".into()
+            },
+            &ignored
+        )
+        .unwrap());
+}
+
+/// A field the receiver does not know is not a session error: a call to
+/// this side fails with a `bad-frame` throw, a reply fails the call waiting
+/// for it, and the session goes on. `cancel` with an extra field is
+/// ignored. A greeting with one fails the handshake.
+/// guarantee: bridge/unknown-fields
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_frame_fields_fail_only_their_call() {
+    let (peer, remote) = connected(Arc::new(EchoArgs));
+    let (answered, calls) = tokio::sync::oneshot::channel();
+    let remote = tokio::task::spawn_blocking(move || {
+        let mut remote = Remote::start(remote);
+        // A call from the far end with an unknown top-level field.
+        let invoke = br#"{"op":"invoke","id":"node:1","path":[],"target":"t","method":"m","args":{"type":"data","value":[]},"trace":"x"}"#;
+        remote.writer.sender.lock().unwrap().send(invoke).unwrap();
+        let Frame::Throw { id, error } = remote.read() else {
+            panic!("throw of node:1 expected")
+        };
+        assert_eq!(id, "node:1");
+        let error: Error = error.into();
+        assert_eq!(error.code(), Some("bad-frame"));
+        assert_eq!(
+            error.data(),
+            Some(json!({"op": "invoke", "fields": ["trace"]}))
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field \"trace\" in invoke"),
+            "{error}"
+        );
+
+        // The same for a field nested in a value.
+        let invoke = br#"{"op":"invoke","id":"node:2","path":[],"target":"t","method":"m","args":{"type":"record","value":{"x":{"type":"undefined","extra":1}}}}"#;
+        remote.writer.sender.lock().unwrap().send(invoke).unwrap();
+        let Frame::Throw { id, error } = remote.read() else {
+            panic!("throw of node:2 expected")
+        };
+        assert_eq!(id, "node:2");
+        let error: Error = error.into();
+        assert_eq!(error.code(), Some("bad-frame"));
+        assert!(error.to_string().contains("extra"), "{error}");
+
+        // A valid call still works after both.
+        let echoed = remote.call(
+            3,
+            Frame::Invoke {
+                id: "node:3".into(),
+                path: vec![],
+                target: "t".into(),
+                method: "m".into(),
+                args: data(json!(["after"])),
+                sync: false,
+            },
+        );
+        assert_eq!(echoed, json!(["after"]));
+
+        // `cancel` has no call to fail; its extra field is ignored.
+        remote
+            .writer
+            .sender
+            .lock()
+            .unwrap()
+            .send(br#"{"op":"cancel","id":"node:99","extra":1}"#)
+            .unwrap();
+        answered.send(()).unwrap();
+
+        // This side calls: the reply carries an unknown field, which fails
+        // only that call.
+        let Frame::Invoke { id, .. } = remote.read() else {
+            panic!("invoke expected")
+        };
+        let reply = format!(
+            r#"{{"op":"return","id":"{id}","value":{{"type":"data","value":[]}},"extra":1}}"#
+        );
+        remote
+            .writer
+            .sender
+            .lock()
+            .unwrap()
+            .send(reply.as_bytes())
+            .unwrap();
+
+        // The next call gets a normal reply.
+        let Frame::Invoke { id, args, .. } = remote.read() else {
+            panic!("invoke expected")
+        };
+        remote.ret(id, args);
+        remote
+    });
+
+    peer.ready().await.unwrap();
+    calls.await.unwrap();
+    let error = peer
+        .invoke_async("t", "m", Value::Data(json!([])))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Some("bad-frame"));
+    assert_eq!(
+        error.data(),
+        Some(json!({"op": "return", "fields": ["extra"]}))
+    );
+    let back = peer
+        .invoke_async("t", "m", Value::Data(json!(["after"])))
+        .await
+        .unwrap();
+    assert_eq!(back.json().unwrap(), json!(["after"]));
+    let remote = remote.await.unwrap();
+    assert!(peer.close_reason().is_none());
+    drop(remote);
+}
+
+/// guarantee: bridge/unknown-fields
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_field_in_hello_fails_the_handshake() {
+    let (local, far) = far_pair();
+    let peer = Connection::open(local, Arc::new(NoExports), rust()).unwrap();
+    far.sender
+        .lock()
+        .unwrap()
+        .send(br#"{"op":"hello","version":4,"endpoint":"node","extra":1}"#)
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), peer.closed())
+        .await
+        .expect("the session closed");
+    match peer.close_reason() {
+        Some(Error::Handshake(Handshake::Incompatible(message))) => assert!(
+            message.contains("unknown field \"extra\" in hello"),
+            "{message}"
+        ),
         other => panic!("{other:?}"),
     }
 }

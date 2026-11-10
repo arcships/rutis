@@ -1,0 +1,140 @@
+# Rule trace table
+
+[中文](README.md) · [Session trace contract](../formal-trace.en.md) · [Guarantee register](../guarantees.en.md) · [Quality standard](../quality-standard.md)
+
+Status: first version, partial coverage. Date: 2026-11-09. Baseline: `main` `2452baee`.
+Issue: [#634](https://github.com/arcships/rutis/issues/634) (the 0.21 trace table, [#776](https://github.com/arcships/rutis/issues/776)); plan: [0.22 plan](../plan/formal-verification-0.22.md) WS3; fields and status rules: §5 of the [formal verification design](../design-formal-verification-2026-11-08.md).
+
+Updated the same day: WS1 landed the core of #1025 (marker publication, `Entry::live`, deterministic race tests, a shuttle model), which lifts blockers G3 and G4 of plan §3; the `ECA-*` rows with implementation or tests became seven `部分验证` rows, the rest stay `未验证`.
+
+Each row is one rule rutis promises, with its current source, the plain-language promise, the level, the implementations it applies to, the evidence (a path, a test name or a line range), a mutation or counterexample, the status and the gap. Status follows §3 of the [guarantee register](../guarantees.en.md). Numbers and evidence checks come from the script:
+
+```sh
+node tools/formal-trace.mjs            # status counts, then the checks
+node tools/formal-trace.mjs --write    # regenerate the guarantee rows, refresh the index
+node tools/formal-trace.mjs --check    # the checks only
+```
+
+## 1. What this version covers, and what it does not
+
+In the table:
+
+- **All 211 rows of the guarantee register**: 200 current, 8 withdrawn, 3 duplicate numbers that are not counted on their own (`core/D20`, `core/D26`, `core/D27`). The script extracts them from the register's Markdown tables; id, level, status and evidence are copied, never remembered. The script counts the table's rows; §16 of the register still disagrees (see §5).
+- **The nine categories of the [session trace contract](../formal-trace.en.md)** (success, failure and boundary of each), its 8 trace invariants and its 9 explicit non-guarantees: 44 rows, ids `TRC-*`.
+- **The 10 proposed rules in §3 of the [event-close admission design](../design-event-close-admission-2026-11-08.en.md)**: ids `ECA-*`; seven have implementation, deterministic tests or a shuttle model and are `部分验证`, three stay `未验证`.
+- **The 1368 rules of #634**: six files, 1552 rows (1368 current + 184 replaced), in `rules/protocol-*.md`. Each file is one section comment's Markdown table exported verbatim (the two session comments make one file); the columns are still the issue's ten. The script maps the issue's status at read time (§3). Rows per section:
+
+  | File | Section | Current | Replaced | Rows |
+  | --- | --- | --- | --- | --- |
+  | [protocol-registry-1.md](rules/protocol-registry-1.md) | `registry-1` | 156 | 9 | 165 |
+  | [protocol-registry-2.md](rules/protocol-registry-2.md) | `registry-2` | 218 | 0 | 218 |
+  | [protocol-events.md](rules/protocol-events.md) | `events` | 253 | 9 | 262 |
+  | [protocol-session.md](rules/protocol-session.md) | `session` parts 1–2 | 246 | 104 | 350 |
+  | [protocol-runtime.md](rules/protocol-runtime.md) | `runtime` | 264 | 45 | 309 |
+  | [protocol-remote.md](rules/protocol-remote.md) | `remote` | 231 | 17 | 248 |
+  | Total | — | 1368 | 184 | 1552 |
+
+- **Status of the 1368 (mapped from the #634 snapshot, not a re-check)**:
+
+  | Issue status | Rows | Table status |
+  | --- | --- | --- |
+  | 已覆盖 | 137 | 116 `已验证`, 21 `部分验证` |
+  | 部分 | 387 | 387 `部分验证` |
+  | 未覆盖 | 555 | 549 `未验证`, 6 `明确不保证` |
+  | 未登记 | 35 | 35 `未验证` |
+  | 不适用 | 249 | 35 `明确不保证`, 214 `不单独计数` |
+  | 明确不保证 | 5 | 5 `明确不保证` |
+  | 已取代 | 184 | 184 `已撤回` (not counted) |
+
+  Totals: 116 `已验证`, 408 `部分验证`, 584 `未验证`, 46 `明确不保证`, 214 `不单独计数`, 184 `已撤回`.
+
+**All 1368 rows are in the table, but none has been checked against the current specifications.**
+
+- All 1368 come from the 2026-10 snapshot (`main` `3496669b`); none was re-extracted from the 0.22 specifications. #634 itself says the 11 design documents of 0.17–0.19 and the new #635 specification must be re-extracted (plan §3 G2). WS2's `docs/protocol-session.md` (82 `SESS-*` numbers) has landed, but the table has not been re-extracted from it; the specification's `当前` is not this table's `已验证`.
+- The protocol status is a mapping of the issue snapshot, not a rerun. Of the 137 `已覆盖` rows only 116 are `已验证`: 4 are TLA-only, 6 are model-only, 10 have no named evidence, and 1 (`events/one-bus b`) names files that no longer exist; all 21 are `部分验证`. The 977 `部分`/`未覆盖`/`未登记` rows stay at `部分验证`/`未验证`.
+- 6 of the 555 `未覆盖` rows are explicit non-guarantees in their rule text (`SYN-9-3`, `SYN-9-26`, `SYN-9-32`, `MNT-2-12`, `MNT-4.2-3`, `MNT-10-4`) and become `明确不保证`; the other 549 are `未验证`.
+- Of the 249 `不适用` rows, 35 say "明确不保证" in their note and become `明确不保证`; 214 are `不单独计数` (tests only, formalization cannot reach them) and are not counted as unverified.
+- **80 protocol ids also exist in the guarantee register** (for example `core/D1`, `bridge/value-roundtrip`); the protocol list is finer-grained in places (`core/D2a`/`D2b`). Both rows are kept. **1817 is a row count, not a count of distinct rules**; do not add the register and protocol subtotals.
+- Behaviour in design and user documents that is in neither the register nor the #634 list (other than Q3.3 implementation details) has not been extracted.
+
+So the release gate (design §5, quality standard Q13.1) **cannot** be judged from this table: the protocol rows are not checked against the current specifications, 214 rows are not counted, and 10 bare file names in the evidence column do not resolve (7 rows, §5).
+
+## 2. Numbering
+
+| Form | Source | Example | Rule |
+| --- | --- | --- | --- |
+| `<family>/<name>` | guarantee register | `core/D6`, `bridge/in-flight-call-fails-once` | kept as the register writes it; never rewritten or reused; withdrawn rows stay |
+| `<family>/<name>`, suffix `a`–`g` | #634 `registry-1`/`registry-2` | `core/D2a`, `bridge/value-tags e` | kept as the issue writes it; the suffix splits one guarantee into separately verifiable requirements, it is not a new number |
+| `<prefix>-<section>-<number>` | #634 `events`, `session`, `runtime`, `remote` | `EVP-2.1-1`, `SES-6.1-12`, `VAL-1-V10`, `TAG-3-R1` | prefixes `EVP`, `EVD`, `SES`, `VAL`, `TAG`, `M1`, `CHN`, `SYN`, `M2`, `MNT`, `REQ`, `RTP`, `INS`, `MSV`, `REM`, `DIA`, `APP`, `NOD`; sections may carry dots (`6.1`), numbers may carry letters (`9a`, `V10`, `R1`) |
+| `TRC-<category>-<n>` | session trace contract §3 | `TRC-GREET-2` | categories `LIFE`, `FRAME`, `GREET`, `REF`, `CANCEL`, `ERR`, `LIMIT`, `MALFORMED`, `NET`; `1` success, `2` failure, `3` boundary |
+| `TRC-INV-<n>` | session trace contract §4 | `TRC-INV-2` | the eight trace invariants |
+| `TRC-NG-<n>` | session trace contract §1, "not guaranteed" | `TRC-NG-4` | explicit non-guarantees |
+| `ECA-<n>` | event-close admission design §3 | `ECA-4` | the design's own rule numbers |
+
+Numbers are only added, never changed: moving a row to another section, renaming it or moving it to another file keeps its number; a deleted row stays with a status and a reason.
+
+## 3. Fields and status
+
+| Field | Meaning | Written by |
+| --- | --- | --- |
+| id | see §2 | script (register rows), hand (trace rows), issue (protocol rows) |
+| current source | the specification, design or user document and section in force; register rows name `guarantees.md §<section>` plus the register's own source column | script |
+| plain-language promise | what a user observes: success, failure, scope and recovery; register rows use the register's content column verbatim | script / hand |
+| level | core commitment, contractual behaviour, explicit non-guarantee (quality standard §3) | script / hand |
+| scope | the implementations (Rust, Node, Bun, Python, Go, Swift, Kotlin), transport and platform | **to fill**: the register does not record it, so all 211 register rows say `未登记`; trace rows say what the document says; protocol rows carry the issue's **participants** (`跨进程`, `进程内并发`, `纯逻辑`, `外部`), not an implementation matrix |
+| evidence | model, test, trace, property/fuzz, black-box or timing evidence, as a path, test name or line range | script (register's verification column verbatim) / hand; protocol rows use the issue's `现有形式化` column |
+| mutation or counterexample | a bug the verification caught, or an injected error | **to fill**: register rows say `未登记`; protocol rows say `未登记` (the issue has no such column); the mutations §4 of the trace contract describes are on their rows |
+| status | `已验证`, `部分验证`, `未验证`, `明确不保证`; `已撤回` and `不单独计数` are not counted | script / hand |
+| gap | the next issue; an uncovered rule is never written as passing | register rows start from the register's notes column; protocol rows combine the issue, the note and the reason a `已覆盖` row was downgraded |
+
+Explicit non-guarantees follow the register's convention (as `core/D15` does): level and status are both `明确不保证`, and they are not counted as unverified. A model passing marks only the model; a rule is `已验证` only with implementation evidence. A trace row is `部分验证` only when a named test asserts a point of it; source code or comments alone leave it `未验证`.
+
+**Protocol rows (`rules/protocol-*.md`).** The files keep the issue's ten columns and status words; the script maps them to the nine columns at read time, downwards only:
+
+| Issue status | Table status | Rule |
+| --- | --- | --- |
+| 已覆盖 | 已验证 / 部分验证 | `已验证` only when `手段` names an implementation check (`K`, `PT`, `FZ`, `TV`, `SH`, `KANI`, `测试`), `现有形式化` names something, and every file it names resolves in the current tree. TLA/model-only, no named evidence, or a missing file is `部分验证` |
+| 部分 | 部分验证 | never raised because the issue says "partial" |
+| 未覆盖 | 未验证 / 明确不保证 | the 6 rules whose text itself says "明确不保证" become `明确不保证`; the rest are `未验证` |
+| 不适用 | 明确不保证 / 不单独计数 | the 35 whose note says "明确不保证" become `明确不保证`; the other 214 are tests only, formalization cannot reach them, and become `不单独计数` with the reason in the gap |
+| 明确不保证 | 明确不保证 | level and status agree |
+| 未登记 | 未验证 | the gap says "未登记（测试里用了、登记表没有）" |
+| 已取代 | 已撤回 | the row is kept, not counted |
+
+Nine-column alignment: id=`编号`; current source=`来源`; promise=`规则`; level=`明确不保证` or `契约行为` (the issue has no level column, so nothing is claimed as a core commitment); scope=`参与方`; evidence=`现有形式化`; mutation=`未登记`; status=the mapping above; gap=`归属 issue` + `备注` + the downgrade reason. The `对应` column stays in the protocol file as the cross-reference to a guarantee-register id and is not one of the nine. A protocol row is not checked against the current specification; `已验证` means the issue snapshot named implementation evidence, not that it was rerun here.
+
+**Language.** The register-driven rows are generated from the Chinese register; the hand-written columns and the trace rows are Chinese only. The English register (`docs/guarantees.en.md`) carries the same ids, so the rows line up, but the English trace rows are a gap (#634). Counts are printed by the script and kept in [the Chinese README](README.md) §4: 1817 rows, 211 register, 54 hand-written, 1552 protocol. The "264 rows" in plan §1/§5 is the count before the protocol list went in; the script output is authoritative.
+
+## 4. Maintenance
+
+- **After changing the register or adding a test**: `node tools/formal-trace.mjs --write`, then `--check`. `--write` rewrites the automatic columns, keeps the manual ones by id, and refreshes the index; it does not touch `rules/protocol-*.md`.
+- **Changing the protocol list**: export the table from the matching #634 comment again, keeping the ten columns, ids and notes; do not hand-edit the status in the export. `--check` verifies the ten columns, the id form, the per-section totals (156/9, 218/0, 253/9, 246/104, 264/45, 231/17; 1368/184 in total), the issue status vocabulary, duplicate ids and evidence paths.
+- **Adding a `TRC`/`ECA` row**: write it in `rules/` with the same columns; `--check` verifies the id form, the status vocabulary and the evidence paths.
+- **Moving a row**: keep the id; change the source and the index.
+- **CI**: not wired yet (WS8). Until then the two commands are run by hand.
+- **English rows**: a gap (#634), see above.
+
+## 5. Gaps found by this version
+
+1. **The 1368 protocol rules are not checked against the current specifications.** All come from the `3496669b` snapshot. WS2's `docs/protocol-session.md` has 82 `SESS-*` numbers, but its `当前`/`明确不保证`/`已取代` says whether a rule is in force, not whether it is verified; every row needs its own status, and `当前` must not be copied as `已验证`. The 11 design documents of 0.17–0.19 must be re-extracted too. #634's eighth comment (`6415164837`) says the remote runtime gained consistency in 0.19 (#695) without changing the link, access-point or remote-lease rules; `protocol-remote.md` does not reflect that change row by row.
+2. **10 bare file names do not resolve in the current tree** (7 names, 7 rows, all in the protocol `现有形式化` column): `events-conformance.test.mjs`, `test_events_conformance.py`, `events-conformance.test.ts`, `node_conformance.rs`, `websocket_conformance.rs`, `leases.rs` (3 rows), `memory_mux.rs` (2 rows). Those rows are only `部分验证`; they can move up after a current path or test is supplied. The note column also has paths that no longer exist (spot-checked: `crates/rutis-bridge/src/cordis/server.rs`, `go/rutis/dial.go`, `runtime/plugin.rs`); `--check` only scans the `现有形式化` column, so the re-extraction has to clean those too.
+3. **A real hole in the register's evidence**: `loader/remote-runtime-lease` (the only `未验证` core commitment) lists `rutis-loader/tests/leases.rs`, deleted with the connection plugin (`ec47944c`); §16 of the register already says the test is to be added. The checker skips paths inside parentheses, as `tools/check-guarantees.mjs` does (there the parenthesis says there is no evidence), so the hole sits in the known blind spot of both checks.
+4. **The register's §16 totals do not match its rows**: §16 says 194 current rows, the tables have 200; by section, §10 has 1 more, §12 2 more and §14 2 more. The table counts the rows; §16 needs a maintainer's check.
+5. **`TRC-GREET-3` (refusing a missing required capability) has no test**: the code is at `crates/rutis-bridge/src/session/plugin/greet.rs:33-70`; searching `Incompatible` finds only version and transport cases.
+6. **`TRC-INV-2` (the handshake gate) has no Rust assertion**: the text `protocol handshake incomplete` is implemented and untested; Go's `TestACallBeforeTheHandshakeEndsTheSession` asserts its own words.
+7. **Scope and mutation are mostly empty**: they come from the support matrix (quality standard §10) and the mutation results of #624, #630 and #631. Protocol rows carry participants in the scope column and `未登记` in the mutation column.
+
+## 6. Next steps
+
+1. **Re-extract from the current specifications**: first map the 82 `SESS-*` rules of `docs/protocol-session.md` to `protocol-session.md`, then re-extract the other sections from #635 and the 11 design documents of 0.17–0.19. Give every rule its own status: `当前` starts as `未验证` and becomes `部分验证` only when a named test asserts a point (a code line is a location, not an assertion); `明确不保证` becomes `明确不保证` in both level and status; `已取代` becomes `已撤回`, with the replacing rule named in the gap.
+2. **Fill the evidence, drop the names that no longer resolve**: find current tests or models for the 7 rows of §5 item 2; if there is none, keep `部分验证`/`未验证` and do not treat the old issue name as evidence. Update the old paths in the note column during the re-extraction.
+3. **Attach models and conformance cases**: once WS4 (`#613`), WS5 (`#624`) and WS7 (`#631`) produce TLA+ properties, the trace validator and conformance test names, they go into the evidence column, and only then can a status move up.
+4. **Wire CI**: `--check` on pull requests. The "trace table references" check of #776 is this script; the "model drift" check belongs to WS4/WS8.
+5. **English**: the protocol list and the `TRC`/`ECA` rows are Chinese only; the English trace table is a gap.
+
+## Related files
+
+- [Session trace contract](../formal-trace.en.md) · [Event-close admission design](../design-event-close-admission-2026-11-08.en.md)
+- [Guarantee register](../guarantees.en.md) · [Quality standard](../quality-standard.md) · [Quality status](../quality-status.en.md)
+- [Formal verification design](../design-formal-verification-2026-11-08.en.md) · [0.22 plan](../plan/formal-verification-0.22.en.md)
+- Scripts: `tools/formal-trace.mjs`; register check: `tools/check-guarantees.mjs`

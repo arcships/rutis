@@ -4,7 +4,7 @@ import { rootCertificates } from 'node:tls'
 import * as websocket from './channel/websocket.mjs'
 import { frame } from './channel/unix.mjs'
 import { keepDialing } from './dialing.mjs'
-import { spawnSession } from './serve.mjs'
+import { spawnSession, ended } from './serve.mjs'
 import { ENDPOINT_PROTOCOL, greetingOf } from './session.mjs'
 
 // A runtime that dials a rutis access point and stays connected (`dialing`
@@ -119,10 +119,10 @@ export async function dialOut({ spec, id, peer, anchor }) {
       close: reason => ws.close(reason),
       // The connection ended: so does the child's session, and its rows go.
       async end() {
-        const ended = await link.closed
+        const closed = await link.closed
         await ready
         await exited
-        return ended
+        return closed
       },
       // Stopped: the child unloads its rows and ends its session (it heard
       // the signal too, from a terminal), then the connection closes.
@@ -132,9 +132,7 @@ export async function dialOut({ spec, id, peer, anchor }) {
         if (child && child.exitCode === null && child.signalCode === null) {
           // Windows has no SIGTERM to send: Ctrl-C reached the child already.
           if (process.platform !== 'win32') child.kill('SIGTERM')
-          const killed = setTimeout(() => child.kill('SIGKILL'), shutdownDeadline() + 5000)
-          await exited
-          clearTimeout(killed)
+          await ended(child)
         }
         ws.close('the runtime stopped')
         await Promise.race([link.closed, new Promise(resolve => setTimeout(resolve, 2000).unref())])
@@ -143,11 +141,4 @@ export async function dialOut({ spec, id, peer, anchor }) {
   }
 
   return keepDialing({ address: `${spec} as ${id}`, dial, start, stopped })
-}
-
-// How long the child's cleanups may take: RUTIS_SHUTDOWN_TIMEOUT seconds,
-// 10 by default; in ms.
-function shutdownDeadline() {
-  const seconds = Number(process.env.RUTIS_SHUTDOWN_TIMEOUT)
-  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 10_000
 }

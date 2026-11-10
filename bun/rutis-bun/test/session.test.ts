@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import { CAPABILITIES } from '../src/session.ts'
 import { encode, decode } from '../src/codec.ts'
+import { decodeError } from '../src/errors.ts'
 
 test('the runtime declares that it is re-entrant', () => {
   expect(CAPABILITIES).toContain('reentrant-sync')
@@ -187,4 +188,107 @@ test('invokeAnswered tells the reply as its frame is read, before the next frame
   peer.receive({ op: 'throw', id: sent.at(-1).id, error: { name: 'BindingError', message: 'refused' } })
   expect(seen.at(-1)).toEqual(['failed', false, 'BindingError'])
   peer.close()
+})
+
+// Protocol §9 (#635): an unknown field in a call frame fails only that call.
+test('a call frame with an unknown field fails only that call', async () => {
+  const { Session, ENDPOINT_PROTOCOL } = require('../src/session.ts')
+  const sent: any[] = [], seen: string[] = []
+  let fault: Error | undefined
+  const peer = new Session({
+    dispatch: (_: string, method: string) => { seen.push(method); return 42 },
+    send: (line: string) => sent.push(JSON.parse(line)),
+    abort: (error: Error) => { fault = error }, pump: () => {}, endpoint: { local: 'bun' },
+  })
+  peer.receive({ op: 'hello', version: ENDPOINT_PROTOCOL, endpoint: 'main', capabilities: [] })
+  peer.receive({ op: 'invoke', id: 'main:1', path: [], target: 'test', method: 'first', args: { type: 'data', value: [] }, trace: 'x' })
+  const refused = decodeError(sent.at(-1).error)
+  expect(sent.at(-1).op).toBe('throw')
+  expect(sent.at(-1).id).toBe('main:1')
+  expect(refused.name).toBe('BindingError')
+  expect(refused.code).toBe('bad-frame')
+  expect(refused.message).toBe('unknown field "trace" in invoke')
+  expect(refused.data).toEqual({ op: 'invoke', fields: ['trace'] })
+  // A field nested in a value is named by its path.
+  peer.receive({ op: 'invoke', id: 'main:2', path: [], target: 'test', method: 'second', args: { type: 'record', value: { x: { type: 'undefined', extra: 1 } } } })
+  const nested = decodeError(sent.at(-1).error)
+  expect(nested.message).toBe('unknown field "args.value.x.extra" in invoke')
+  expect(nested.data).toEqual({ op: 'invoke', fields: ['args.value.x.extra'] })
+  // The session goes on: a valid call runs.
+  peer.receive({ op: 'invoke', id: 'main:3', path: [], target: 'test', method: 'third', args: { type: 'data', value: [] } })
+  await Promise.resolve()
+  expect(seen).toEqual(['third'])
+  expect(sent.at(-1)).toMatchObject({ op: 'return', id: 'main:3', value: { type: 'data', value: 42 } })
+  expect(fault).toBeUndefined()
+  peer.close()
+})
+
+// Protocol §9 (#635): a reply carrying an unknown field fails only the call
+// waiting for it; the session goes on.
+test('a return or throw with an unknown field fails only the call waiting for it', async () => {
+  const { Session, ENDPOINT_PROTOCOL } = require('../src/session.ts')
+  const sent: any[] = []
+  let fault: Error | undefined
+  const peer = new Session({
+    dispatch: () => 42, send: (line: string) => sent.push(JSON.parse(line)),
+    abort: (error: Error) => { fault = error }, pump: () => {}, endpoint: { local: 'bun' },
+  })
+  peer.receive({ op: 'hello', version: ENDPOINT_PROTOCOL, endpoint: 'main', capabilities: [] })
+  const waiting = peer.invokeAsync('test', 'm', [])
+  peer.receive({ op: 'return', id: sent.at(-1).id, value: { type: 'data', value: 1 }, extra: true })
+  const error = await waiting.then(() => undefined, (error: any) => error)
+  expect(error.name).toBe('BindingError')
+  expect(error.code).toBe('bad-frame')
+  expect(error.message).toBe('unknown field "extra" in return')
+  expect(error.data).toEqual({ op: 'return', fields: ['extra'] })
+  const thrown = peer.invokeAsync('test', 'm', [])
+  peer.receive({ op: 'throw', id: sent.at(-1).id, error: { name: 'TypeError', message: 'no' }, extra: 1 })
+  const failure = await thrown.then(() => undefined, (error: any) => error)
+  expect(failure.code).toBe('bad-frame')
+  expect(failure.message).toBe('unknown field "extra" in throw')
+  const next = peer.invokeAsync('test', 'm', [])
+  peer.receive({ op: 'return', id: sent.at(-1).id, value: { type: 'data', value: 2 } })
+  expect(await next).toBe(2)
+  expect(fault).toBeUndefined()
+  peer.close()
+})
+
+// Protocol §9 (#635): `cancel` and `release` have no call to fail; their
+// extra fields are ignored and the frame is handled as usual.
+test('cancel and release ignore unknown fields', async () => {
+  const { Session, ENDPOINT_PROTOCOL } = require('../src/session.ts')
+  const sent: any[] = []
+  let fault: Error | undefined
+  const peer = new Session({
+    dispatch: () => () => 1, send: (line: string) => sent.push(JSON.parse(line)),
+    abort: (error: Error) => { fault = error }, pump: () => {}, endpoint: { local: 'bun' },
+  })
+  peer.receive({ op: 'hello', version: ENDPOINT_PROTOCOL, endpoint: 'main', capabilities: [] })
+  peer.receive({ op: 'invoke', id: 'main:1', path: [], target: 'test', method: 'get', args: { type: 'data', value: [] } })
+  await Promise.resolve()
+  const reference = sent.at(-1).value.value.id
+  peer.receive({ op: 'cancel', id: 'main:99', extra: 1 })
+  peer.receive({ op: 'release', reference, count: 1, extra: 1 })
+  peer.receive({ op: 'invoke', id: 'main:2', path: [], target: 'test', method: 'get', args: { type: 'data', value: [] } })
+  await Promise.resolve()
+  expect(sent.at(-1).op).toBe('return')
+  expect(fault).toBeUndefined()
+  peer.close()
+})
+
+// Protocol §9 (#635): an unknown field in `hello` fails the handshake and
+// ends the session, saying which field.
+test('an unknown field in hello fails the handshake', async () => {
+  const { Session, ENDPOINT_PROTOCOL } = require('../src/session.ts')
+  let fault: any
+  const peer = new Session({
+    dispatch: () => {}, send: () => {}, abort: (error: any) => { fault = error },
+    pump: () => {}, endpoint: { local: 'bun' },
+  })
+  peer.receive({ op: 'hello', version: ENDPOINT_PROTOCOL, endpoint: 'main', capabilities: [], extra: 1 })
+  const error = await peer.ready.then(() => undefined, (error: any) => error)
+  const message = 'incompatible session: unknown field "extra" in hello'
+  expect(error?.category).toBe('incompatible')
+  expect(error?.message).toBe(message)
+  expect(fault?.message).toBe(message)
 })

@@ -91,19 +91,26 @@ function framed(socket: Socket, handlers: Parameters<typeof frame>[1]): Channel 
 
 const running = (child?: ChildProcess) => !!child && child.exitCode === null && child.signalCode === null
 
-async function ended(child: ChildProcess, killAfter: number) {
-  if (!running(child)) return
-  const exited = new Promise(resolve => child.once('exit', resolve))
-  const killed = setTimeout(() => child.kill('SIGKILL'), killAfter)
-  await exited
-  clearTimeout(killed)
-}
-
-// How long a child's cleanups may take: RUTIS_SHUTDOWN_TIMEOUT seconds, 10
-// by default; in ms.
-function shutdownDeadline(): number {
+// How long a child's cleanups may take once its session ended:
+// RUTIS_SHUTDOWN_TIMEOUT seconds, 10 by default; in ms.
+export function shutdownDeadline(): number {
   const seconds = Number(process.env.RUTIS_SHUTDOWN_TIMEOUT)
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 10_000
+}
+
+// What a child still running past its deadline gets: rutis-host gives a
+// runtime 2 s past the deadline at a restart, and this is the same
+// handover, so a child that uses all of it is not cut off as it finishes.
+const KILL_MARGIN = 2000
+
+// Wait for `child` to exit, killing it once its cleanups had their
+// deadline and that margin.
+export async function ended(child: ChildProcess): Promise<void> {
+  if (!running(child)) return
+  const exited = new Promise(resolve => child.once('exit', resolve))
+  const killed = setTimeout(() => child.kill('SIGKILL'), shutdownDeadline() + KILL_MARGIN)
+  await exited
+  clearTimeout(killed)
 }
 
 // Messages from the far end that wait for the session's child.
@@ -176,7 +183,7 @@ export async function serve(spec: string, remote: Remote): Promise<never> {
           current = undefined
           old.ws.replaced()
           old.childChannel?.close('replaced by a new connection')
-          if (old.child) await ended(old.child, 5000)
+          if (old.child) await ended(old.child)
         }
         if (link.closed) return
         current = await start(ws, link)
@@ -279,7 +286,7 @@ export async function dialOut(spec: string, remote: Remote): Promise<number> {
         await ready
         if (running(child)) {
           child!.kill('SIGTERM')
-          await ended(child!, shutdownDeadline() + 5000)
+          await ended(child!)
         }
         ws.close('the runtime stopped')
         await Promise.race([link.ended, new Promise(resolve => setTimeout(resolve, 2000))])

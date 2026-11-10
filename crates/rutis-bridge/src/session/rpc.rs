@@ -1567,7 +1567,11 @@ impl Connection {
                         peer.too_deep(&message)?;
                         continue;
                     }
-                    peer.receive(parse_frame(&message)?)?;
+                    let parsed = parse_frame(&message)?;
+                    if peer.reject_unknown_fields(&parsed.frame, &parsed.ignored)? {
+                        continue;
+                    }
+                    peer.receive(parsed.frame)?;
                 })();
                 if let (Err(error), Some(peer)) = (result, weak.upgrade()) {
                     Self(peer).close(error);
@@ -2595,6 +2599,56 @@ impl Connection {
             Err(error) => Err(error),
         }
     }
+    /// Unknown fields are not a session error (#635): a call frame fails only
+    /// its own call, a greeting fails the handshake, and `release`/`cancel`
+    /// ignore the extras. Returns whether the frame was handled here.
+    fn reject_unknown_fields(&self, frame: &Frame, ignored: &[String]) -> Result<bool, Error> {
+        if ignored.is_empty() {
+            return Ok(false);
+        }
+        let op = frame_op(frame);
+        match frame {
+            Frame::Hello { .. } => Err(Error::Handshake(Handshake::Incompatible(format!(
+                "unknown field {} in hello",
+                quoted_fields(ignored)
+            )))),
+            Frame::Release { .. } | Frame::Cancel { .. } => Ok(false),
+            Frame::Invoke { id, .. }
+            | Frame::Call { id, .. }
+            | Frame::Get { id, .. }
+            | Frame::Await { id, .. } => {
+                if !matches!(*self.0.ready.borrow(), Some(Ok(()))) {
+                    return Err(transport("request before protocol handshake"));
+                }
+                if !id.starts_with(self.remote_prefix()) {
+                    return Err(transport("invalid invocation identity/path"));
+                }
+                // The id is taken as a completed call's is, so a repeat does
+                // not run it later.
+                {
+                    let mut calls = self.0.calls.lock().unwrap();
+                    if let Some(error) = &calls.closed {
+                        return Err(error.clone());
+                    }
+                    calls.admit(id.strip_prefix(self.remote_prefix()))?;
+                }
+                let _ = self.write(Frame::Throw {
+                    id: id.clone(),
+                    error: bad_frame(op, ignored).into(),
+                });
+                Ok(true)
+            }
+            Frame::Return { id, .. } | Frame::Throw { id, .. } => {
+                if !matches!(*self.0.ready.borrow(), Some(Ok(()))) {
+                    return Err(transport("request before protocol handshake"));
+                }
+                if let Some(waiting) = self.reply_target(id)? {
+                    finish(waiting, Err(bad_frame(op, ignored)));
+                }
+                Ok(true)
+            }
+        }
+    }
     fn receive(&self, frame: Frame) -> Result<(), Error> {
         if let Some(error) = &self.0.calls.lock().unwrap().closed {
             return Err(error.clone());
@@ -3204,15 +3258,198 @@ pub(crate) fn deeper_than(text: &[u8], limit: usize) -> bool {
     false
 }
 
+/// The wire name of a frame, for an error that names what the far end sent.
+fn frame_op(frame: &Frame) -> &'static str {
+    match frame {
+        Frame::Hello { .. } => "hello",
+        Frame::Invoke { .. } => "invoke",
+        Frame::Call { .. } => "call",
+        Frame::Get { .. } => "get",
+        Frame::Await { .. } => "await",
+        Frame::Return { .. } => "return",
+        Frame::Throw { .. } => "throw",
+        Frame::Release { .. } => "release",
+        Frame::Cancel { .. } => "cancel",
+    }
+}
+
+fn quoted_fields(fields: &[String]) -> String {
+    fields
+        .iter()
+        .map(|field| format!("\"{field}\""))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The error a call gets when its frame carried a field this side does not
+/// know (#635): code `bad-frame`, data `{op, fields}`.
+fn bad_frame(op: &str, fields: &[String]) -> Error {
+    crate::exports::failure(
+        "BindingError",
+        "bad-frame",
+        format!("unknown field {} in {op}", quoted_fields(fields)),
+        Some(serde_json::json!({ "op": op, "fields": fields })),
+    )
+}
+
+/// A decoded frame and the field paths it did not know (#635). The caller
+/// decides the scope: a call frame fails only its call, a greeting fails the
+/// handshake, `release`/`cancel` ignore the extras.
+pub(crate) struct ParsedFrame {
+    pub frame: Frame,
+    pub ignored: Vec<String>,
+}
+
 /// Parse a frame, nested at most [`MAX_FRAME_DEPTH`] deep (checked before),
-/// past serde_json's own limit of 128.
-pub(crate) fn parse_frame(text: &[u8]) -> Result<Frame, Error> {
+/// past serde_json's own limit of 128. The JSON is read once into a value so
+/// unknown fields can be found without denying the whole frame (#635); the
+/// frame is then decoded from that value.
+pub(crate) fn parse_frame(text: &[u8]) -> Result<ParsedFrame, Error> {
     use serde::Deserialize;
+    let value: Json = {
+        let mut deserializer = serde_json::Deserializer::from_slice(text);
+        deserializer.disable_recursion_limit();
+        let value = Json::deserialize(&mut deserializer).map_err(transport)?;
+        deserializer.end().map_err(transport)?;
+        value
+    };
+    let ignored = unknown_fields(&value);
     let mut deserializer = serde_json::Deserializer::from_slice(text);
     deserializer.disable_recursion_limit();
     let frame = Frame::deserialize(&mut deserializer).map_err(transport)?;
     deserializer.end().map_err(transport)?;
-    Ok(frame)
+    Ok(ParsedFrame { frame, ignored })
+}
+
+/// The field paths a frame carries beyond the ones its `op` defines. `data`
+/// values and error graphs are arbitrary JSON and are not inspected.
+fn unknown_fields(value: &Json) -> Vec<String> {
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    let op = object.get("op").and_then(Json::as_str).unwrap_or("");
+    let allowed: &[&str] = match op {
+        "hello" => &[
+            "op",
+            "version",
+            "endpoint",
+            "implementation",
+            "capabilities",
+        ],
+        "invoke" => &["op", "id", "path", "target", "method", "args", "sync"],
+        "call" => &["op", "id", "path", "reference", "method", "args", "sync"],
+        "get" => &["op", "id", "path", "reference", "property", "sync"],
+        "await" => &["op", "id", "path", "reference", "sync"],
+        "return" => &["op", "id", "value"],
+        "throw" => &["op", "id", "error"],
+        "release" => &["op", "reference", "count"],
+        "cancel" => &["op", "id"],
+        _ => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for key in object.keys() {
+        if !allowed.contains(&key.as_str()) {
+            out.push(key.clone());
+        }
+    }
+    match op {
+        "hello" => {
+            if let Some(implementation) = object.get("implementation") {
+                unknown_object_fields(
+                    implementation,
+                    &["name", "version"],
+                    "implementation",
+                    &mut out,
+                );
+            }
+        }
+        "invoke" | "call" | "get" | "await" => {
+            if let Some(args) = object.get("args") {
+                unknown_value_fields(args, "args", &mut out);
+            }
+        }
+        "return" => {
+            if let Some(value) = object.get("value") {
+                unknown_value_fields(value, "value", &mut out);
+            }
+        }
+        "throw" => {
+            if let Some(error) = object.get("error") {
+                unknown_object_fields(error, &["name", "message", "graph"], "error", &mut out);
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+fn unknown_object_fields(value: &Json, allowed: &[&str], path: &str, out: &mut Vec<String>) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    for key in object.keys() {
+        if !allowed.contains(&key.as_str()) {
+            out.push(format!("{path}.{key}"));
+        }
+    }
+}
+
+/// A `WireValue`: `{type, value}`, with further fields only in a reference.
+fn unknown_value_fields(value: &Json, path: &str, out: &mut Vec<String>) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    for key in object.keys() {
+        if key != "type" && key != "value" {
+            out.push(format!("{path}.{key}"));
+        }
+    }
+    let Some(kind) = object.get("type").and_then(Json::as_str) else {
+        return;
+    };
+    let Some(content) = object.get("value") else {
+        return;
+    };
+    match kind {
+        "list" | "set" => {
+            if let Some(items) = content.as_array() {
+                for (index, item) in items.iter().enumerate() {
+                    unknown_value_fields(item, &format!("{path}.value[{index}]"), out);
+                }
+            }
+        }
+        "map" => {
+            if let Some(pairs) = content.as_array() {
+                for (index, pair) in pairs.iter().enumerate() {
+                    if let Some(pair) = pair.as_array() {
+                        for (part, item) in pair.iter().enumerate() {
+                            unknown_value_fields(
+                                item,
+                                &format!("{path}.value[{index}][{part}]"),
+                                out,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        "record" => {
+            if let Some(entries) = content.as_object() {
+                for (name, item) in entries {
+                    unknown_value_fields(item, &format!("{path}.value.{name}"), out);
+                }
+            }
+        }
+        "reference" => {
+            unknown_object_fields(
+                content,
+                &["id", "home", "kind", "origin"],
+                &format!("{path}.value"),
+                out,
+            );
+        }
+        _ => {}
+    }
 }
 
 fn transport(error: impl std::fmt::Display) -> Error {
