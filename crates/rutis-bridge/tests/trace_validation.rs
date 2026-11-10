@@ -2,7 +2,7 @@
 //! §2, §3.1–§3.8, §4): an execution is a trace, and a trace is allowed only
 //! if every event in it is one the previous events allow.
 //!
-//! Two sequences are checked here.
+//! Three sequences are checked here.
 //!
 //! - The channel trace `channel::trace` writes: direction, length and how a
 //!   channel ended, never its bytes. A close ends both directions of this
@@ -16,6 +16,11 @@
 //!   reply only for a call the same session's far end opened, at most once;
 //!   a cancel for a call this side does not have is the one dangling name
 //!   allowed (it may cross the reply it cancels).
+//! - A lease's steps beside the channels, recorded by the fixture: the
+//!   newer handshake, the old session's unload, the newer session's install
+//!   and a stale command's refusal; the old channel closes as replaced
+//!   before its far plugins are unloaded, and they are unloaded before the
+//!   newer session mounts.
 //!
 //! What frames grant and carry is checked with them:
 //!
@@ -39,31 +44,57 @@
 //!   calls numbered from 1 again; a reply on it for an id the session it
 //!   replaced opened is not a reply in it. What ends a session is
 //!   classified by the error's kind, never by its text
-//!   (`crates/rutis-host/src/connect/session.rs:56-61`). The host's own
-//!   order — a newer connection is installed only after the older session
-//!   unloaded (`crates/rutis-host/src/connect/listen.rs:4-10`, tested
-//!   there) — is not visible in a channel trace beyond the old channel's
-//!   close.
+//!   (`crates/rutis-host/src/connect/session.rs:56-61`).
+//! - §3.8, leases (`specs/remote-lease/RemoteLease.tla`: `OneLease`,
+//!   `OldCommandsStayOld`, `CleanBeforeHello`): a newer connection's
+//!   handshake completes while the old lease still serves; the old session
+//!   then unloads, its far plugins with it, its channel closes as
+//!   `replaced`, and only then does the newer session mount. A command of
+//!   the old lease after that is refused before it crosses. The host's
+//!   listener that makes this order (`crates/rutis-host/src/connect/
+//!   listen.rs:4-10`) is in another crate; the fixture mounts the sessions
+//!   in that order and the lease events it records are checked.
+//! - §3.8, a host gone: the channel ends normally, the call in flight
+//!   fails with a transport error (code `peer-gone`), the session ends with
+//!   `peer disconnected`, and no frame follows the far end's end.
+//! - §3.4, synchronous waits: a forward into a one-stack, non-reentrant
+//!   runtime with a call out, not on the forward's chain, would wait on
+//!   itself; the session does not send it and its caller gets
+//!   `SyncWaitCycle`. The chain and stack-order edges need the runtime's
+//!   stack, which a channel trace does not carry, so only this edge is
+//!   checked.
+//! - §3.8, an access point: a greeting names the end it is on — a
+//!   connection greeting as another endpoint is not an admitted session; a
+//!   revoked identity is closed with `rejected` (4003) after its hello and
+//!   ends as an identity refusal, nothing crossing after it. The old
+//!   `AccessEvent` log was removed with #695 and today's listener is in
+//!   `rutis-host`, so these are the endings this crate sees of an
+//!   admission, not the point's own log.
 //!
 //! Every allowed trace here was produced by a real channel or session, or
 //! is the literal sequence of a replacement, whose two channels are
 //! checked apart, as are the repeated close and the repeated end no run
-//! here makes. Every forbidden one is that same trace with one event
-//! changed, or a literal sequence. The product trace stays size-only: the
-//! fixture decodes frames, the trace does not, because messages carry
-//! configuration. Each forbidden case is one this validator's rule for it
-//! rejects: delete the rule and the case is accepted, failing the test.
+//! here makes. A lease's trace is the channels' lines plus the fixture's
+//! steps beside them (a handshake, an unload, an install), which is how the
+//! host's order becomes visible without a channel event for it. Every
+//! forbidden one is that same trace with one event changed, or a literal
+//! sequence. The product trace stays size-only: the fixture decodes frames,
+//! the trace does not, because messages carry configuration. Each forbidden
+//! case is one this file's rule for it rejects — the channel's own where a
+//! line is the fault — and where a case names a rule, deleting that rule
+//! accepts it.
 //!
-//! Not checked here, and gaps of #624: path forwarding, the wait graph, the
-//! outbound backlog limit (`SessionOptions::outbound_limit`: only a host
-//! makes a session with it, `Connection::open_with` is not public), which
-//! reference kinds a frame may name (a `get` of a function is the far end's
-//! own refusal), the access point's own log
-//! (`specs/remote-lease/AccessPoint.tla`), and the host's install order,
-//! which no channel event carries. 4002 and 4003 are checked through a
-//! memory channel, whose `Close` maps them; the WebSocket close codes
-//! themselves are `crates/rutis-bridge/tests/websocket.rs` (feature
-//! `websocket`, not built here). The retry classes are the ones
+//! Not checked here, and gaps of #624: path forwarding, the outbound
+//! backlog limit (`SessionOptions::outbound_limit`: only a host makes a
+//! session with it, `Connection::open_with` is not public), which reference
+//! kinds a frame may name (a `get` of a function is the far end's own
+//! refusal), the access point's own log
+//! (`specs/remote-lease/AccessPoint.tla`; removed with #695), the chain and
+//! stack-order edges of the wait graph, and the host's real listener (its
+//! order is the fixture's). 4002 and 4003 are checked through a memory
+//! channel, whose `Close` maps them; the WebSocket close codes themselves
+//! are `crates/rutis-bridge/tests/websocket.rs` (feature `websocket`, not
+//! built here). The retry classes are the ones
 //! `crates/rutis-host/src/connect/session.rs:56-61` and the Go dialer
 //! (`go/rutis/internal/runtime/dial.go`, `sessionFailure`) decide by; this
 //! file checks the endings those classes are made from.
@@ -73,15 +104,16 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rutis::host::CtxHost;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect};
 use rutis::Ctx;
 use rutis_bridge::channel::trace::{trace, Sink};
 use rutis_bridge::channel::{Channel, ChannelError, Close, Closer, PeerId, Receiver, Sender};
 use rutis_bridge::session::{
-    Connection, Dispatch, Endpoint, Error, Handshake, Reply, Value, ENDPOINT_PROTOCOL,
+    call_service, host_key, Connection, Dispatch, Endpoint, Error, Handshake, HostDispatch, Reply,
+    Value, ENDPOINT_PROTOCOL,
 };
 use rutis_bridge::{LocalId, Session};
-use rutis_test_support::{until, within};
+use rutis_test_support::{eventually, until, within};
 use serde_json::{json, Value as Json};
 
 fn id(name: &str) -> PeerId {
@@ -332,6 +364,14 @@ struct Frame {
     id: Option<String>,
     version: Option<u64>,
     endpoint: Option<String>,
+    /// The capabilities a greeting declares (`sync-stack`, `reentrant-sync`,
+    /// §3.2): what its waits do in the wait graph, and what it takes.
+    capabilities: Vec<String>,
+    /// The invocation chain a call is made under (`path`, §3.4): the calls
+    /// its answer waits for, the forwarded ones tagged with their session.
+    path: Vec<String>,
+    /// The caller waits for this call synchronously (`sync`).
+    sync: bool,
     bytes: usize,
     /// The `reference` a `call`, `get`, `await` or `release` names.
     reference: Option<u64>,
@@ -446,6 +486,28 @@ fn decode(from: &str, message: &[u8]) -> Frame {
             .get("endpoint")
             .and_then(Json::as_str)
             .map(str::to_owned),
+        capabilities: json
+            .get("capabilities")
+            .and_then(Json::as_array)
+            .map(|capabilities| {
+                capabilities
+                    .iter()
+                    .filter_map(Json::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        path: json
+            .get("path")
+            .and_then(Json::as_array)
+            .map(|path| {
+                path.iter()
+                    .filter_map(Json::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        sync: json.get("sync").and_then(Json::as_bool).unwrap_or(false),
         bytes: message.len(),
         reference: json.get("reference").and_then(Json::as_u64),
         count: json.get("count").and_then(Json::as_u64),
@@ -940,6 +1002,175 @@ fn rejected_frames(frames: &[Frame], sessions: &[Ends<'_>], limit: Option<usize>
         Ok(_) => panic!("a forbidden frame sequence was accepted: {frames:?}"),
         Err(violation) => violation,
     }
+}
+
+/// §3.8: an admitted session's greeting names the end it is on. `sessions`
+/// labels the ends by the endpoint ids they greet with; a greeting that
+/// names another end is a connection the access point did not admit under
+/// that id (#624, `specs/remote-lease/AccessPoint.tla`). Labels that are
+/// not endpoint ids (a replacement's `main-1`, `node-1`) are not checked.
+fn check_admission(frames: &[Frame], sessions: &[Ends<'_>]) -> Result<(), Violation> {
+    let is_end = |label: &str| {
+        sessions
+            .iter()
+            .any(|(host, far)| *host == label || *far == label)
+    };
+    for (at, frame) in frames.iter().enumerate() {
+        if frame.op != "hello" || !is_end(&frame.from) {
+            continue;
+        }
+        if frame.endpoint.as_deref() != Some(frame.from.as_str()) {
+            return Err(Violation {
+                at,
+                text: format!("{} sent `hello`", frame.from),
+                why: format!(
+                    "the greeting of {} names the endpoint {:?}: an admitted session's greeting \
+                     names the end it is on",
+                    frame.from, frame.endpoint
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// How a far end runs calls while it waits (§3.2 `sync-stack`,
+/// `reentrant-sync`), as its greeting says.
+#[derive(Clone, Copy, Debug, Default)]
+struct Profile {
+    /// One thread, one stack: a call that is not started waits for the
+    /// calls the runtime has out.
+    stacked: bool,
+    /// Runs incoming calls while it waits.
+    reentrant: bool,
+}
+
+/// The synchronous forwards in a frame trace that would wait on themselves
+/// (#228, `specs/cross-runtime-sync` policy B). A call is forwarded into a
+/// far end with one stack that has a call out, not on the call's chain: the
+/// runtime runs no other call while it waits, so the forward waits for that
+/// one. When the forward's chain names a marked call — its caller waits for
+/// it — the forward closes a cycle and the session does not send it.
+///
+/// The chain is the call's `path` (§3.4), the profile the far end's
+/// greeting (§3.2), and a marked call one the far end sent with `sync` and
+/// has not answered: a loaded runtime's call out is a forwarded call whose
+/// chain names its own marked call. Only this edge is checked; the chain
+/// and stack-order edges need the runtime's stack, which a channel trace
+/// does not carry (`specs/cross-runtime-sync`, "未建").
+fn refused_waits(frames: &[Frame], sessions: &[Ends<'_>]) -> Option<Violation> {
+    /// The call id a chain entry names: `s1/node:3` is session `s1`'s call
+    /// `node:3`; an untagged entry is the destination session's own id.
+    fn entry_id(entry: &str) -> &str {
+        entry.rsplit_once('/').map_or(entry, |(_, id)| id)
+    }
+    let host_of = |label: &str| -> Option<(&str, &str)> {
+        sessions.iter().find(|(host, _)| *host == label).copied()
+    };
+    let profile = |end: &str| -> Profile {
+        frames
+            .iter()
+            .find(|frame| frame.from == end && frame.op == "hello")
+            .map(|hello| Profile {
+                stacked: hello.capabilities.iter().any(|name| name == "sync-stack"),
+                reentrant: hello
+                    .capabilities
+                    .iter()
+                    .any(|name| name == "reentrant-sync"),
+            })
+            .unwrap_or_default()
+    };
+    // Calls this trace settles: the end that issued the call and its id.
+    let mut settled: BTreeSet<(String, String)> = BTreeSet::new();
+    // Calls a far end sent with `sync`, unanswered: the session's, and the
+    // id its far end gave it.
+    let mut marked: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut host_calls: Vec<(usize, &str)> = Vec::new();
+    for (at, frame) in frames.iter().enumerate() {
+        let Some(id) = frame.id.as_deref() else {
+            continue;
+        };
+        if REPLY_OPS.contains(&frame.op.as_str()) {
+            settled.insert((frame.from.clone(), id.to_owned()));
+            // A reply settles the call of the session whose far end it
+            // went to, whichever side issued it.
+            if let Some((host, _)) = host_of(&frame.from) {
+                marked.remove(&(host.to_owned(), id.to_owned()));
+            }
+            if let Some((host, _)) = sessions.iter().find(|(_, far)| *far == frame.from).copied() {
+                marked.remove(&(host.to_owned(), id.to_owned()));
+            }
+            continue;
+        }
+        if !CALL_OPS.contains(&frame.op.as_str()) {
+            continue;
+        }
+        let Some((host, far)) = host_of(&frame.from) else {
+            // A call from a far end into its session: marked when its
+            // caller waits synchronously.
+            if let Some((host, _)) = sessions.iter().find(|(_, far)| *far == frame.from).copied() {
+                if frame.sync {
+                    marked.insert((host.to_owned(), id.to_owned()));
+                }
+            }
+            continue;
+        };
+        host_calls.push((at, id));
+        if !frame.sync {
+            continue;
+        }
+        let profile = profile(far);
+        if !profile.stacked || profile.reentrant {
+            continue;
+        }
+        let marked_ids: BTreeSet<&str> = marked.iter().map(|(_, id)| id.as_str()).collect();
+        // The forward must be on a chain that names a marked call: its
+        // caller waits for it.
+        if !frame
+            .path
+            .iter()
+            .any(|entry| marked_ids.contains(entry_id(entry)))
+        {
+            continue;
+        }
+        // The calls the far end has out: a forwarded call whose chain names
+        // a marked call of this session.
+        let outs: Vec<(usize, &str)> = host_calls
+            .iter()
+            .filter(|(index, out)| {
+                *index != at
+                    && *index < at
+                    && !settled.contains(&(frames[*index].from.clone(), (*out).to_owned()))
+                    && !frames[*index].path.is_empty()
+                    && frames[*index].path.iter().any(|entry| {
+                        marked.contains(&(host.to_owned(), entry_id(entry).to_owned()))
+                    })
+            })
+            .copied()
+            .collect();
+        if outs.is_empty() {
+            continue;
+        }
+        let related = outs
+            .iter()
+            .any(|(_, out)| frame.path.iter().any(|entry| entry_id(entry) == *out));
+        if related {
+            continue;
+        }
+        return Some(Violation {
+            at,
+            text: format!("{} sent `{}`", frame.from, frame.op),
+            why: format!(
+                "the call {id} would wait on itself: it is forwarded into {far}, one stack, \
+                 which has {} out, not on the call's chain (synchronous calls)",
+                outs.iter()
+                    .map(|(_, out)| out.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
+    None
 }
 
 fn ops(frames: &[Frame]) -> Vec<(&str, Option<&str>)> {
@@ -2677,4 +2908,1033 @@ async fn a_far_end_that_never_greets_times_out_as_retryable() {
         "the trace records the greeting's size"
     );
     checked_frames(&frames.all(), &[("main", "node")], None);
+}
+
+// --------------------------------------------- §3.4, synchronous waits
+
+/// A far end's greeting on `channel`: it reads this side's greeting, then
+/// answers as `endpoint`, declaring `capabilities` (§3.2). A runtime with
+/// one thread and one stack declares `sync-stack` and not `reentrant-sync`.
+fn greet_as(channel: &mut Channel, endpoint: &str, capabilities: &[&str]) {
+    let hello = read_frame(channel);
+    assert_eq!(hello["op"], "hello", "{hello}");
+    write_frame(
+        channel,
+        json!({
+            "op": "hello",
+            "version": ENDPOINT_PROTOCOL,
+            "endpoint": endpoint,
+            "capabilities": capabilities,
+        }),
+    );
+}
+
+/// A call frame from a scripted far end (`sync` and a chain when given).
+fn scripted_call(endpoint: &str, n: u64, method: &str, sync: bool, path: Vec<String>) -> Json {
+    json!({
+        "op": "invoke",
+        "id": format!("{endpoint}:{n}"),
+        "path": path,
+        "target": "t",
+        "method": method,
+        "args": { "type": "undefined" },
+        "sync": sync,
+    })
+}
+
+/// Run a far end's script on a thread of its own and wait for it, so a
+/// script that never gets its frame fails the test after `guard` instead of
+/// holding the test process open (Q7.1). A test starts it with
+/// `tokio::spawn`, before it waits for what the script does.
+async fn far_end<T: Send + 'static>(
+    what: &'static str,
+    guard: Duration,
+    script: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    tokio::task::spawn_blocking(move || {
+        let (done, finished) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let value = script();
+            let _ = done.send(());
+            value
+        });
+        match finished.recv_timeout(guard) {
+            Ok(()) => thread.join().unwrap(),
+            Err(error) => panic!("{what}: the far end did not finish: {error}"),
+        }
+    })
+    .await
+    .unwrap()
+}
+
+/// One session's host side in the cycle case: `start` waits for the test,
+/// then forwards into the other session; the forward that would close the
+/// cycle must not be sent (#228, `specs/cross-runtime-sync`, policy B).
+struct Start {
+    other: std::sync::OnceLock<Connection>,
+    events: Mutex<std::sync::mpsc::Sender<&'static str>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl Dispatch for Start {
+    fn invoke(&self, peer: &Connection, _: &str, method: &str, args: Value) -> Reply {
+        if method != "start" {
+            return Ok(args);
+        }
+        self.events.lock().unwrap().send("start").unwrap();
+        self.release.lock().unwrap().recv().unwrap();
+        let other = self.other.get().expect("the other session");
+        other.forward(peer, || other.invoke("t", "work", Value::List(Vec::new())))
+    }
+}
+
+/// The other session's host side: `kick` forwards into `Start`'s session
+/// and waits there; the far end is one stack, so it answers no other call
+/// while it waits.
+struct Kick {
+    other: std::sync::OnceLock<Connection>,
+    events: Mutex<std::sync::mpsc::Sender<&'static str>>,
+}
+
+impl Dispatch for Kick {
+    fn invoke(&self, peer: &Connection, _: &str, method: &str, args: Value) -> Reply {
+        if method != "kick" {
+            return Ok(args);
+        }
+        self.events.lock().unwrap().send("kick").unwrap();
+        let other = self.other.get().expect("the other session");
+        other.forward(peer, || other.invoke("t", "hold", Value::List(Vec::new())))
+    }
+}
+
+/// guarantee: bridge/sync-wait-cycle-refused; REM-6.2-10, REM-6.2-11,
+/// REM-6.2-15, M1-7.2-5.
+///
+/// §3.4: a synchronous call forwarded across two one-stack runtimes that
+/// would wait on itself is not sent. The cycle here: A's far end calls
+/// `start`; A forwards to B (which waits); B's far end calls `kick`, which
+/// B forwards to A (A's far end is waiting on `start`, so it holds it);
+/// A's `start` then forwards to B, which has that held call out — the
+/// forward would wait on itself. A's caller gets `SyncWaitCycle`; no frame
+/// names the refused call; everything else completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sync_forward_that_would_close_a_cycle_is_not_sent() {
+    let log = Log::default();
+    let frames = Decoded::default();
+    let (ours_a, theirs_a) = rutis_bridge::memory::pair();
+    let (ours_b, theirs_b) = rutis_bridge::memory::pair();
+    let ours_a = instrumented(ours_a, "main-a", "node-a", &log, &frames);
+    let theirs_a = instrumented(theirs_a, "node-a", "main-a", &log, &frames);
+    let ours_b = instrumented(ours_b, "main-b", "node-b", &log, &frames);
+    let theirs_b = instrumented(theirs_b, "node-b", "main-b", &log, &frames);
+
+    let (events, arrived) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let start = Arc::new(Start {
+        other: std::sync::OnceLock::new(),
+        events: Mutex::new(events.clone()),
+        release: Mutex::new(released),
+    });
+    let kick = Arc::new(Kick {
+        other: std::sync::OnceLock::new(),
+        events: Mutex::new(events),
+    });
+    let a = Connection::open(
+        ours_a,
+        start.clone(),
+        Endpoint::rust(id("main-a")).expect(id("node-a")),
+    )
+    .unwrap();
+    let b = Connection::open(
+        ours_b,
+        kick.clone(),
+        Endpoint::rust(id("main-b")).expect(id("node-b")),
+    )
+    .unwrap();
+    assert!(start.other.set(b.clone()).is_ok());
+    assert!(kick.other.set(a.clone()).is_ok());
+    let (a_tag, b_tag) = (a.tag().to_owned(), b.tag().to_owned());
+
+    let (go, begin) = std::sync::mpsc::channel();
+    let step = Duration::from_secs(20);
+    let far = tokio::spawn(far_end("the cycle", step, move || {
+        let (mut far_a, mut far_b) = (theirs_a, theirs_b);
+        greet_as(&mut far_a, "node-a", &["sync-stack"]);
+        greet_as(&mut far_b, "node-b", &["sync-stack"]);
+        begin.recv().unwrap();
+        // A's far end asks for `start` and then holds its stack, waiting.
+        write_frame(
+            &mut far_a,
+            scripted_call("node-a", 1, "start", true, vec![]),
+        );
+        assert_eq!(arrived.recv_timeout(step).unwrap(), "start");
+        // B's far end asks for `kick`; B forwards it to A and waits for it.
+        write_frame(&mut far_b, scripted_call("node-b", 1, "kick", true, vec![]));
+        assert_eq!(arrived.recv_timeout(step).unwrap(), "kick");
+        // The first hop: B's `kick` forwarded into A, on B's marked chain.
+        let first = read_frame(&mut far_a);
+        assert_eq!(
+            (
+                first["op"].as_str(),
+                first["id"].as_str(),
+                first["sync"].as_bool()
+            ),
+            (Some("invoke"), Some("main-a:1"), Some(true)),
+            "{first}"
+        );
+        assert_eq!(
+            first["path"],
+            json!([format!("{b_tag}/node-b:1")]),
+            "the chain names B's waiting call: {first}"
+        );
+        release.send(()).unwrap();
+        // The forward that would close the cycle was refused: A's caller
+        // gets the failure, and no frame of the refused call crossed.
+        let refused = read_frame(&mut far_a);
+        assert_eq!(
+            (refused["op"].as_str(), refused["id"].as_str()),
+            (Some("throw"), Some("node-a:1")),
+            "{refused}"
+        );
+        assert_eq!(refused["error"]["name"], "SyncWaitCycle", "{refused}");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap()
+                .ends_with(" would wait on itself (synchronous calls)"),
+            "{refused}"
+        );
+        // A's far end now answers the held call, which B's `kick` waits for.
+        write_frame(
+            &mut far_a,
+            json!({
+                "op": "return",
+                "id": "main-a:1",
+                "value": { "type": "data", "value": "held" },
+            }),
+        );
+        let kicked = read_frame(&mut far_b);
+        assert_eq!(
+            (kicked["op"].as_str(), kicked["id"].as_str()),
+            (Some("return"), Some("node-b:1")),
+            "{kicked}"
+        );
+    }));
+    within("both greetings", async {
+        a.ready().await.unwrap();
+        b.ready().await.unwrap();
+    })
+    .await;
+    go.send(()).unwrap();
+    within("the far ends", far).await.unwrap();
+
+    a.close(Error::Transport("done".into()));
+    b.close(Error::Transport("done".into()));
+    within("the first session ending", a.closed()).await;
+    within("the second session ending", b.closed()).await;
+
+    let sessions = [("main-a", "node-a"), ("main-b", "node-b")];
+    let all = frames.all();
+    let checked = checked_frames(&all, &sessions, None);
+    assert_eq!(checked.unanswered(), 0, "{all:?}");
+    // The refused forward's id is not on the wire: the session numbers the
+    // call it refused, and nothing of it crossed.
+    assert!(
+        !all.iter()
+            .any(|frame| frame.id.as_deref() == Some("main-b:1")),
+        "the refused forward left no frame: {all:?}"
+    );
+    let lines = log.lines();
+    accepted(&lines);
+
+    // The trace rule: a synchronous forward into a one-stack runtime that
+    // has a call out, not on the forward's chain, would wait on itself.
+    let violation = refused_waits(&all, &sessions);
+    assert!(
+        violation.is_none(),
+        "the real trace is allowed: {violation:?}"
+    );
+
+    // The same trace with the refused frame put back is not: the cycle
+    // check is what keeps it out of the trace.
+    let at = all
+        .iter()
+        .position(|frame| frame.op == "throw" && frame.id.as_deref() == Some("node-a:1"))
+        .expect("the throw");
+    let mut with_refused = all.clone();
+    with_refused.insert(
+        at,
+        decode(
+            "main-b",
+            serde_json::to_string(&scripted_call(
+                "main-b",
+                1,
+                "work",
+                true,
+                vec![format!("{a_tag}/node-a:1")],
+            ))
+            .unwrap()
+            .as_bytes(),
+        ),
+    );
+    checked_frames(&with_refused, &sessions, None);
+    let violation = refused_waits(&with_refused, &sessions).expect("the cycle is caught");
+    assert_eq!(violation.at, at, "{violation}");
+    assert!(
+        violation.why.contains("would wait on itself"),
+        "{violation}"
+    );
+}
+
+// --------------------------------------------------- §3.8, the host gone
+
+/// guarantee: bridge/in-flight-call-fails-once, bridge/no-call-on-a-dead-session;
+/// CHN-2-9, CHN-5-5, MNT-6-6.
+///
+/// §3.8: the host of a runtime goes away — its channel ends normally, as a
+/// killed process's does. The call in flight fails with a transport error
+/// (code `peer-gone`, `session/mod.rs` `Error::code`), the session ends
+/// with `peer disconnected`, and nothing follows the far end's end: a frame
+/// the gone host would have sent is not in an allowed trace, and a call
+/// made after the end is refused here without a frame.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gone_host_fails_the_call_with_peer_gone() {
+    let log = Log::default();
+    let frames = Decoded::default();
+    let (ours, theirs) = rutis_bridge::memory::pair();
+    let ours = instrumented(ours, "main", "node", &log, &frames);
+    let theirs = instrumented(theirs, "node", "main", &log, &frames);
+    let caller = Connection::open(
+        ours,
+        Arc::new(Echo),
+        Endpoint::rust(id("main")).expect(id("node")),
+    )
+    .unwrap();
+    let host = tokio::spawn(far_end("the host", Duration::from_secs(20), move || {
+        let mut theirs = theirs;
+        greet_as(&mut theirs, "node", &[]);
+        // The runtime's call, then the host is gone: its channel ends the
+        // way a killed process's does, with no code of its own.
+        let call = read_frame(&mut theirs);
+        assert_eq!(
+            (call["op"].as_str(), call["id"].as_str()),
+            (Some("invoke"), Some("main:1")),
+            "{call}"
+        );
+        theirs.closer.close(Close::Done);
+    }));
+    within("the greeting", caller.ready()).await.unwrap();
+    let call = caller
+        .invoke_started("svc", "echo", Value::Data(json!("in flight")))
+        .unwrap();
+    within("the host going away", host).await.unwrap();
+
+    let error = within("the call", call).await.unwrap_err();
+    assert!(matches!(error, Error::Transport(_)), "{error:?}");
+    assert_eq!(
+        error.code(),
+        Some("peer-gone"),
+        "a gone peer is the transport code, not a call's"
+    );
+    assert_eq!(error.to_string(), "peer disconnected");
+    within("the caller ending", caller.closed()).await;
+    assert!(
+        caller.close_reason().is_some(),
+        "the caller's session ended"
+    );
+
+    let lines = log.lines();
+    let checked = accepted(&lines);
+    assert_eq!(checked.last["main"], State::Closed);
+    assert_eq!(checked.last["node"], State::Closed);
+    assert_eq!(
+        checked.events("main").last(),
+        Some(&Event::ClosedDone),
+        "{lines:?}"
+    );
+    assert_eq!(
+        checked.events("node").last(),
+        Some(&Event::ClosedDone),
+        "{lines:?}"
+    );
+    let main = checked.events("main");
+    let ended = main
+        .iter()
+        .position(|event| *event == Event::Ended)
+        .expect("the far end's end");
+    // The host's end is the last message event: nothing is received after.
+    assert!(
+        main[ended + 1..]
+            .iter()
+            .all(|event| matches!(event, Event::SendFailed(_) | Event::ClosedDone)),
+        "{lines:?}"
+    );
+    let all = frames.all();
+    let checked = checked_frames(&all, &[("main", "node")], None);
+    assert_eq!(checked.unanswered(), 1, "the call in flight never answered");
+    assert_eq!(
+        ops(&frames.from("main")),
+        [("hello", None), ("invoke", Some("main:1"))]
+    );
+
+    // A call after the session ended is refused here, with no frame written.
+    let after = caller
+        .invoke_async("svc", "echo", Value::Data(json!("after")))
+        .await
+        .unwrap_err();
+    assert_eq!(after.code(), Some("peer-gone"), "{after:?}");
+    assert_eq!(
+        ops(&frames.from("main")),
+        [("hello", None), ("invoke", Some("main:1"))],
+        "the refused call left no frame"
+    );
+
+    // The trace rule: a frame after the far end's end is not one the
+    // channel allows, whatever it carries.
+    let ended = lines
+        .iter()
+        .position(|line| line == "main: ended")
+        .expect("the far end's end in the log");
+    let mut late = lines.clone();
+    late.insert(ended + 1, "main: received 40 bytes".into());
+    let violation = rejected(&late);
+    assert_eq!(violation.at, ended + 1, "{violation}");
+    // And a close ends both directions: a stale command after it is not a
+    // sent frame either.
+    let mut stale = lines.clone();
+    stale.push("main: sent 40 bytes".into());
+    let violation = rejected(&stale);
+    assert_eq!(violation.at, lines.len(), "{violation}");
+}
+
+// ---------------------------------------------- §3.8, leases and takeover
+
+/// A kernel greeting as `name` (`LocalId`, `session_plugin.rs`).
+fn kernel(name: &str) -> Ctx {
+    let root = Ctx::root().unwrap();
+    root.provide(LocalId(id(name))).unwrap();
+    root
+}
+
+/// A far end's service: `get` answers `answer` (`session_plugin.rs`).
+struct Answer(&'static str);
+
+impl HostDispatch for Answer {
+    fn invoke(&self, method: &str, args: Value) -> Reply {
+        match method {
+            "get" => Ok(Value::Data(json!(self.0))),
+            _ => Ok(args),
+        }
+    }
+
+    fn methods(&self) -> Option<Json> {
+        Some(json!({ "get": "async" }))
+    }
+}
+
+/// The plugin `name` providing `service`, whose `get` answers `answer`: what
+/// a lease serves while it is mounted.
+struct Provides {
+    name: &'static str,
+    service: &'static str,
+    answer: &'static str,
+}
+
+impl DynPlugin for Provides {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, rutis::Error>> {
+        Box::pin(async move {
+            ctx.provide_at(host_key(self.service), Arc::new(Answer(self.answer)))?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// One event of a lease's life, in the order it happened: a channel's trace
+/// line, and what the fixture saw of the takeover.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LeaseEvent {
+    /// A line of `channel::trace`, as §2 writes it.
+    Channel(String),
+    /// The newer connection's handshake completed (`Session::handshake`).
+    Greeted,
+    /// The old session's fiber ended: its far plugins are unloaded.
+    Unloaded,
+    /// The newer session mounted: the new lease serves.
+    Installed,
+    /// A frame sent on the old lease's channel after the takeover: refused
+    /// before it crossed.
+    RefusedStale,
+}
+
+/// The lease's events as they happened, shared by the channel sinks and the
+/// test.
+#[derive(Clone, Default)]
+struct Lease(Arc<Mutex<Vec<LeaseEvent>>>);
+
+impl Lease {
+    fn sink(&self) -> Sink {
+        let lease = self.clone();
+        Arc::new(move |line: &str| {
+            lease
+                .0
+                .lock()
+                .unwrap()
+                .push(LeaseEvent::Channel(line.to_owned()))
+        })
+    }
+
+    fn mark(&self, event: LeaseEvent) {
+        self.0.lock().unwrap().push(event);
+    }
+
+    fn events(&self) -> Vec<LeaseEvent> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// A sender this test keeps after the session took the channel: what a
+/// session of a replaced lease would try to send with.
+struct Held(Arc<Mutex<Box<dyn Sender>>>);
+
+impl Sender for Held {
+    fn send(&mut self, message: &[u8]) -> Result<(), ChannelError> {
+        self.0.lock().unwrap().send(message)
+    }
+
+    fn max_message(&self) -> Option<usize> {
+        self.0.lock().unwrap().max_message()
+    }
+}
+
+/// What a lease trace allows (#624, `specs/remote-lease/RemoteLease.tla`:
+/// `OneLease`, `OldCommandsStayOld`, `CleanBeforeHello`; the host's
+/// install order, `crates/rutis-host/src/connect/listen.rs:4-10`): the
+/// channels' lines are §2 traces; the newer connection greets before the
+/// old lease is unloaded; the old lease's channel closes as replaced before
+/// its fiber ends; its far plugins are unloaded before the newer session
+/// mounts; and a command of the old lease after that is refused, never
+/// sent.
+fn check_lease(events: &[LeaseEvent]) -> Result<(), Violation> {
+    // The channels' lines first, as §2 allows them.
+    let lines: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            LeaseEvent::Channel(line) => Some(line.as_str()),
+            _ => None,
+        })
+        .collect();
+    if let Err(violation) = check_trace(&lines) {
+        let at = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| matches!(event, LeaseEvent::Channel(_)))
+            .nth(violation.at)
+            .map(|(at, _)| at)
+            .unwrap_or(violation.at);
+        return Err(Violation { at, ..violation });
+    }
+    let at = |what: fn(&LeaseEvent) -> bool| -> Result<usize, Violation> {
+        events.iter().position(what).ok_or_else(|| Violation {
+            at: events.len(),
+            text: "the lease trace".into(),
+            why: "the lease's life is missing a step".into(),
+        })
+    };
+    let greeted = at(|event| *event == LeaseEvent::Greeted)?;
+    let unloaded = at(|event| *event == LeaseEvent::Unloaded)?;
+    let installed = at(|event| *event == LeaseEvent::Installed)?;
+    if !(greeted < unloaded && unloaded < installed) {
+        let (at, why) = if installed < unloaded {
+            (
+                installed,
+                "the newer session mounts before the old lease is cleaned: one lease at a time",
+            )
+        } else if unloaded < greeted {
+            (
+                unloaded,
+                "the old lease is cleaned before the newer connection greeted: nothing asked for \
+                 the takeover",
+            )
+        } else {
+            (installed, "the newer session mounts before its handshake")
+        };
+        let text = format!("{:?}", events[at]);
+        return Err(Violation {
+            at,
+            text,
+            why: why.into(),
+        });
+    }
+    // The old lease's channel closes as replaced before its fiber ends.
+    let replaced = events.iter().position(
+        |event| matches!(event, LeaseEvent::Channel(line) if line == "lease-1: closed: replaced"),
+    );
+    match replaced {
+        Some(at) if at < unloaded => {}
+        _ => {
+            return Err(Violation {
+                at: unloaded,
+                text: format!("{:?}", events[unloaded]),
+                why: "the old lease's far plugins are cleaned before its channel closed as \
+                      replaced: the far end reads the end before it is replaced"
+                    .into(),
+            })
+        }
+    }
+    // A command of the old lease after the takeover is refused, and no
+    // frame of it is sent.
+    if let Some(refused) = events
+        .iter()
+        .position(|event| *event == LeaseEvent::RefusedStale)
+    {
+        if refused < installed {
+            return Err(Violation {
+                at: refused,
+                text: format!("{:?}", events[refused]),
+                why: "a stale command is refused before the new lease is installed: the old \
+                      lease still serves"
+                    .into(),
+            });
+        }
+        if events[refused..]
+            .iter()
+            .any(|event| matches!(event, LeaseEvent::Channel(line) if line.starts_with("lease-1: sent ")))
+        {
+            let at = events[refused..]
+                .iter()
+                .position(|event| {
+                    matches!(event, LeaseEvent::Channel(line) if line.starts_with("lease-1: sent "))
+                })
+                .unwrap()
+                + refused;
+            return Err(Violation {
+                at,
+                text: format!("{:?}", events[at]),
+                why: "a stale command of the old lease crossed after the takeover: it must be \
+                      refused"
+                    .into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// guarantee: loader/remote-runtime-lease; REM-4.4-4, REM-4.4-5, REM-4.4-7,
+/// REM-4.4-9; `specs/remote-lease/RemoteLease.tla` `OneLease`,
+/// `OldCommandsStayOld`, `CleanBeforeHello`.
+///
+/// §3.8 and `specs/remote-lease`: a newer connection of the same id takes
+/// the lease over. Its handshake completes while the old lease still
+/// serves; the old session then unloads (its far plugins too), its channel
+/// closes as replaced, and only then does the newer session mount. A
+/// command of the old lease afterwards is refused, and no frame of it
+/// reaches the far end.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_takeover_cleans_the_old_lease_before_it_installs_the_new() {
+    let lease = Lease::default();
+    let (main, node) = (kernel("main"), kernel("node"));
+    let newer = kernel("node");
+    (&node.plugin(Provides {
+        name: "clock",
+        service: "clock",
+        answer: "noon",
+    }))
+        .await
+        .unwrap();
+    (&newer.plugin(Provides {
+        name: "clock",
+        service: "clock",
+        answer: "later",
+    }))
+        .await
+        .unwrap();
+
+    // The first lease: both ends of one channel.
+    let (ours, theirs) = rutis_bridge::memory::pair();
+    let held = Arc::new(Mutex::new(ours.sender));
+    let ours = Channel {
+        sender: Box::new(Held(held.clone())),
+        receiver: ours.receiver,
+        closer: ours.closer,
+    };
+    let ours = trace(ours, "lease-1", lease.sink());
+    // The host's `Replaceable` closes the old connection as replaced
+    // (`crates/rutis-host/src/connect/listen.rs:204-220`).
+    let ours = one_reason(ours, Close::Replaced);
+    let theirs = trace(theirs, "lease-1-far", lease.sink());
+    let old = main.plugin(Session::new(ours));
+    let old_far = node.plugin(Session::new(theirs));
+    within("the first lease", async {
+        (&old).await.unwrap();
+        (&old_far).await.unwrap();
+    })
+    .await;
+    eventually(
+        || main.get_at(&host_key("clock")).map(|_| ()),
+        "the old lease's service at the host",
+    )
+    .await;
+    let answer: String = within(
+        "the old lease's service",
+        call_service(&main, "clock", "get", ()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(answer, "noon");
+
+    // A newer connection of the same id: its handshake completes, nothing
+    // is mounted yet and the old lease still serves.
+    let (ours, theirs) = rutis_bridge::memory::pair();
+    let ours = trace(ours, "lease-2", lease.sink());
+    let theirs = trace(theirs, "lease-2-far", lease.sink());
+    let next = newer.plugin(Session::new(theirs));
+    let greeted = within("the new handshake", Session::handshake(&main, ours))
+        .await
+        .unwrap();
+    within("the new far end", async { (&next).await.unwrap() }).await;
+    lease.mark(LeaseEvent::Greeted);
+    let answer: String = within(
+        "the old lease still serving",
+        call_service(&main, "clock", "get", ()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(answer, "noon", "the old lease serves until it is cleaned");
+
+    // The old lease is cleaned: its far plugins are unloaded before the
+    // newer session may mount.
+    within("the old lease unloading", old.dispose())
+        .await
+        .unwrap();
+    lease.mark(LeaseEvent::Unloaded);
+    eventually(
+        || main.get_at(&host_key("clock")).is_none().then_some(()),
+        "the old lease's far plugins unloaded",
+    )
+    .await;
+
+    let installed = main.plugin(greeted);
+    within("the new lease", async { (&installed).await.unwrap() }).await;
+    lease.mark(LeaseEvent::Installed);
+    eventually(
+        || main.get_at(&host_key("clock")).map(|_| ()),
+        "the new lease's service at the host",
+    )
+    .await;
+    let answer: String = within(
+        "the new lease's service",
+        call_service(&main, "clock", "get", ()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(answer, "later", "the new lease serves");
+
+    // A command of the old lease after the takeover is refused here: the
+    // channel was closed as replaced, and the far end is gone.
+    held.lock()
+        .unwrap()
+        .send(br#"{"op":"invoke","id":"main:1","path":[],"target":"t","method":"m","args":{"type":"undefined"}}"#)
+        .unwrap_err();
+    lease.mark(LeaseEvent::RefusedStale);
+    let answer: String = within(
+        "the new lease after the stale command",
+        call_service(&main, "clock", "get", ()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        answer, "later",
+        "a command of the old lease does not act on the new one"
+    );
+
+    let events = lease.events();
+    check_lease(&events)
+        .unwrap_or_else(|violation| panic!("the lease trace was rejected: {violation}"));
+
+    // Counterexamples: the same life with one step moved.
+    let mut moved = events.clone();
+    let installed_at = moved
+        .iter()
+        .position(|event| *event == LeaseEvent::Installed)
+        .unwrap();
+    let unloaded_at = moved
+        .iter()
+        .position(|event| *event == LeaseEvent::Unloaded)
+        .unwrap();
+    moved.swap(unloaded_at, installed_at);
+    let violation = match check_lease(&moved) {
+        Ok(()) => panic!("an install before the cleanup was accepted"),
+        Err(violation) => violation,
+    };
+    assert!(
+        violation.why.contains("one lease at a time"),
+        "the newer session mounted before the old lease was cleaned: {violation}"
+    );
+
+    // A stale command that crossed after the takeover is not a lease trace.
+    let mut stale = events.clone();
+    stale.insert(
+        events.len(),
+        LeaseEvent::Channel("lease-1: sent 80 bytes".into()),
+    );
+    let violation = match check_lease(&stale) {
+        Ok(()) => panic!("a stale command crossing after the takeover was accepted"),
+        Err(violation) => violation,
+    };
+    assert!(
+        violation.why.contains("nothing crosses it after the close"),
+        "{violation}"
+    );
+
+    // Nor is a command of the old lease refused while it still serves: the
+    // takeover is what makes it stale.
+    let mut early_refusal = events.clone();
+    let greeted_at = early_refusal
+        .iter()
+        .position(|event| *event == LeaseEvent::Greeted)
+        .unwrap();
+    let refused_at = early_refusal
+        .iter()
+        .position(|event| *event == LeaseEvent::RefusedStale)
+        .unwrap();
+    let refused = early_refusal.remove(refused_at);
+    early_refusal.insert(greeted_at + 1, refused);
+    let violation = match check_lease(&early_refusal) {
+        Ok(()) => panic!("a refusal before the install was accepted"),
+        Err(violation) => violation,
+    };
+    assert!(
+        violation.why.contains("before the new lease is installed"),
+        "{violation}"
+    );
+
+    // The cleanup comes after the old channel's close as replaced; a trace
+    // that unloads the session before closing its channel is not one.
+    let mut early = events.clone();
+    let replaced = early
+        .iter()
+        .position(|event| {
+            matches!(event, LeaseEvent::Channel(line) if line == "lease-1: closed: replaced")
+        })
+        .unwrap();
+    let unloaded_at = early
+        .iter()
+        .position(|event| *event == LeaseEvent::Unloaded)
+        .unwrap();
+    early.swap(replaced, unloaded_at);
+    let violation = match check_lease(&early) {
+        Ok(()) => panic!("a cleanup before the replaced close was accepted"),
+        Err(violation) => violation,
+    };
+    assert!(violation.why.contains("closed as replaced"), "{violation}");
+}
+
+// ------------------------------------------- §3.8, an access point's ends
+
+/// guarantee: bridge/revocation-refuses-reconnects; DIA-5-7, DIA-5-11,
+/// CHN-5-8.
+///
+/// §3.8 and `specs/remote-lease/AccessPoint.tla`: an identity the access
+/// point admitted is revoked — the listen side closes its connection with
+/// `Close::Rejected` (4003, "the listen side"). The call in flight and the
+/// session end as an identity refusal (an authentication failure, never a
+/// retryable one, by the error's kind), nothing crosses the channel after
+/// the rejection, and a call made after it is refused here.
+///
+/// The `AccessEvent` log of the old access point was removed with #695; the
+/// listener that admits today (`crates/rutis-host/src/connect/listen.rs`)
+/// is in another crate. What this crate sees of an admission is its
+/// session's ending: admitted (a greeting and calls), refused after the
+/// hello (4003, above), or refused before it (403,
+/// `a_rejected_channel_is_an_allowed_trace`).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_admitted_identity_is_revoked_after_its_hello() {
+    let log = Log::default();
+    let frames = Decoded::default();
+    let (ours, theirs) = rutis_bridge::memory::pair();
+    let ours = instrumented(ours, "main", "node", &log, &frames);
+    let theirs = instrumented(theirs, "node", "main", &log, &frames);
+    let closer = theirs.closer.clone();
+    let caller = Connection::open(
+        ours,
+        Arc::new(Echo),
+        Endpoint::rust(id("main")).expect(id("node")),
+    )
+    .unwrap();
+    let callee = Connection::open(
+        theirs,
+        Arc::new(Echo),
+        Endpoint::rust(id("node")).expect(id("main")),
+    )
+    .unwrap();
+    within("both greetings", async {
+        caller.ready().await.unwrap();
+        callee.ready().await.unwrap();
+    })
+    .await;
+    // Admitted: a call crosses.
+    let answer = within(
+        "the admitted call",
+        caller.invoke_async("svc", "echo", Value::Data(json!("admitted"))),
+    )
+    .await
+    .unwrap();
+    assert_eq!(answer.json().unwrap(), json!("admitted"));
+
+    // Revoked: the listen side closes the connection with 4003.
+    closer.close(Close::Rejected("revoked".into()));
+    within("the callee ending", callee.closed()).await;
+    within("the caller ending", caller.closed()).await;
+    let ended = caller.close_reason().expect("the caller's session ended");
+    assert!(
+        matches!(ended, Error::Handshake(Handshake::IdentityMismatch(_))),
+        "{ended:?}"
+    );
+    assert_eq!(retry(&ended), Retry::AuthRejected);
+    assert!(ended.to_string().contains("rejected: revoked"), "{ended}");
+
+    // A call after the revocation is refused here, with no frame.
+    let after = caller
+        .invoke_async("svc", "echo", Value::Data(json!("after")))
+        .await;
+    assert!(after.is_err(), "the session is gone");
+    let all = frames.all();
+    let sent = frames.from("main");
+    assert_eq!(
+        ops(&sent),
+        [("hello", None), ("invoke", Some("main:1"))],
+        "the refused call left no frame: {all:?}"
+    );
+    let checked = checked_frames(&all, &[("main", "node")], None);
+    assert_eq!(checked.unanswered(), 0);
+    // Its greetings name the ends they are on: an admitted session.
+    check_admission(&all, &[("main", "node")])
+        .unwrap_or_else(|violation| panic!("an admitted trace was rejected: {violation}"));
+    let lines = log.lines();
+    let checked = accepted(&lines);
+    assert_eq!(checked.last["main"], State::Closed);
+    assert_eq!(checked.last["node"], State::Closed);
+    assert!(
+        checked.events("main").iter().any(
+            |event| matches!(event, Event::ReceiveFailed(reason) if reason == "rejected: revoked")
+        ),
+        "{lines:?}"
+    );
+    // A frame after the rejection is not in the channel's trace.
+    let at = lines
+        .iter()
+        .position(|line| line == "main: receive failed: rejected: revoked")
+        .expect("the rejection");
+    let mut late = lines.clone();
+    late.insert(at + 1, "main: received 40 bytes".into());
+    assert_eq!(rejected(&late).at, at + 1);
+}
+
+/// guarantee: bridge/revocation-refuses-reconnects; REM-3.1-2, CHN-8-5.
+///
+/// §3.8 and §3.2: a connection whose greeting names another endpoint is
+/// not an admitted session, whatever it asks for afterwards: the session
+/// fails as an endpoint mismatch and the frame trace rejects the greeting.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_greeting_that_names_another_endpoint_is_not_admitted() {
+    let log = Log::default();
+    let frames = Decoded::default();
+    let (ours, theirs) = rutis_bridge::memory::pair();
+    let ours = instrumented(ours, "main", "node", &log, &frames);
+    let theirs = instrumented(theirs, "node", "main", &log, &frames);
+    let caller = Connection::open(
+        ours,
+        Arc::new(Echo),
+        Endpoint::rust(id("main")).expect(id("node")),
+    )
+    .unwrap();
+    let far = tokio::spawn(far_end("the far end", Duration::from_secs(20), move || {
+        let mut theirs = theirs;
+        let hello = read_frame(&mut theirs);
+        assert_eq!(hello["op"], "hello", "{hello}");
+        write_frame(
+            &mut theirs,
+            json!({
+                "op": "hello",
+                "version": ENDPOINT_PROTOCOL,
+                "endpoint": "impostor",
+            }),
+        );
+        // What it reads next, and how its channel ends.
+        theirs.receiver.recv().map(|message| message.is_none())
+    }));
+    let error = within("the greeting", caller.ready()).await.unwrap_err();
+    assert!(
+        matches!(error, Error::Handshake(Handshake::IdentityMismatch(_))),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "endpoint mismatch: the far end greeted as impostor, but node is the expected endpoint"
+    );
+    within("the caller ending", caller.closed()).await;
+    let ended = within("the far end's channel", far).await.unwrap();
+    assert_eq!(ended, Ok(true), "the channel closed with Done");
+
+    let lines = log.lines();
+    accepted(&lines);
+    let all = frames.all();
+    let violation = match check_admission(&all, &[("main", "node")]) {
+        Ok(()) => panic!("a greeting naming another endpoint was admitted: {all:?}"),
+        Err(violation) => violation,
+    };
+    assert_eq!(violation.at, 1, "{violation}");
+    assert!(violation.why.contains("names the endpoint"), "{violation}");
+}
+
+/// guarantee: bridge/revocation-refuses-reconnects; DIA-5-11.
+///
+/// §3.8 and `specs/remote-lease/AccessPoint.tla`: a credential the access
+/// point does not accept is refused before any greeting (403, not 4003):
+/// no session is made, this end's greeting is the only frame, and the
+/// channel's trace ends with the refusal. The difference from a revoked
+/// identity is where it refuses — before the hello for a credential, after
+/// it for an id (4003, above).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_credential_never_greets() {
+    let root = kernel("main");
+    let log = Log::default();
+    let frames = Decoded::default();
+    let (ours, theirs) = rutis_bridge::memory::pair();
+    let ours = instrumented(ours, "main", "node", &log, &frames);
+    let theirs = instrumented(theirs, "node", "main", &log, &frames);
+    let closer = theirs.closer.clone();
+    let far = tokio::spawn(far_end("the far end", Duration::from_secs(20), move || {
+        let mut theirs = theirs;
+        let hello = read_frame(&mut theirs);
+        assert_eq!(hello["op"], "hello", "{hello}");
+        // Nothing is admitted: the refusal comes before a greeting.
+        closer.close(Close::Rejected("no token".into()));
+    }));
+    let error = match within("the handshake", Session::handshake(&root, ours)).await {
+        Err(error) => error,
+        Ok(_) => panic!("a refused credential is not a session"),
+    };
+    assert!(
+        matches!(error, Error::Handshake(Handshake::IdentityMismatch(_))),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("no token"), "{error}");
+    within("the far end", far).await.unwrap();
+
+    let lines = log.lines();
+    accepted(&lines);
+    let all = frames.all();
+    assert_eq!(ops(&all), [("hello", None)], "no far end greeted: {all:?}");
+    checked_frames(&all, &[("main", "node")], None);
+    assert!(
+        log.lines()
+            .iter()
+            .any(|line| line == "main: receive failed: rejected: no token"),
+        "{lines:?}"
+    );
 }
