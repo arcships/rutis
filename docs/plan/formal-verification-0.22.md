@@ -44,7 +44,7 @@ Status：执行中。日期：2026-11-09。
 
 | 编号 | 缺口/阻碍 | 影响 | 处理 |
 | --- | --- | --- | --- |
-| G1 | 未知字段的旧行为：Rust 整会话结束，其他六种忽略 | 错误范围过大或跨实现不一致 | 已定 B：拒绝，但只失败该调用；Rust 已实现（`bad-frame`，`hello` 失败握手，`release`/`cancel` 忽略）；其他六种仍忽略，见 G11 |
+| G1 | 未知字段的旧行为：Rust 整会话结束，其他六种忽略 | 错误范围过大或跨实现不一致 | 已定 B：拒绝，但只失败该调用；七种运行时都已实现（`bad-frame`，`hello` 失败握手，`release`/`cancel` 忽略） |
 | G11 | Swift、Kotlin 仍静默忽略未知字段，没有 `bad-frame` 调用级拒绝 | 同一份带新字段的帧在不同实现上结果不同 | 已解决：Swift/Kotlin 已实现并进 CI；七种运行时一致 |
 | G2 | #634 的 1368 条规则清单只在 issue 评论里，仓库没有可抽取来源 | 追踪表无法声称完整 | WS3 先建 schema 和 `guarantees.md` 全量映射；规则清单抽取做成脚本或独立数据文件；完成前状态只能是“部分” |
 | G3 | `release_transient` 在 `Shared.admission` 外摘除 child | marker 集合可能漏成员 | WS1 把摘除移进 admission；若保留无锁摘除，必须补“alive=false 后不可接纳”的证明和并发用例 |
@@ -55,6 +55,9 @@ Status：执行中。日期：2026-11-09。
 | G8 | 0.22 发布范围从 #1025 扩到完整四层，发布日期不再由单一性能改动决定 | 发布门时间不可预估 | 路线图改为分阶段 gate；WS8 只按追踪表判断，不按“测试跑过”判断 |
 | G9 | Node/Bun 会话关闭时若有已接纳、未执行的业务帧，`drain()` 可能永不结算 | 运行时留下悬挂 promise，与 Python 行为不一致 | WS6 已复现；按 `close()` 对每个被丢弃任务 `#finish()` 或结算 `#draining` 另开修复项，并补回归测试 |
 | G10 | `formal-trace.md` §1/§3.0 仍把 `objects` 能力写成对象传递的不保证；新会话规格认定协议 4 没有 `objects` 能力、六种实现都收对象 | 两份现行文档对同一行为给出不同规则，追踪表无法判定状态 | WS2 先按代码复核；确认后改 `formal-trace.md`、`guarantees.md` 和追踪表，不能同时保留两种说法 |
+| G12 | 异步调用没有“之后是否 await 结果”的协议信号，854bef5d 只能保守记边，误拒不会死但会失败；去掉会漏真实等待边 | 已标记链上的异步调用可能被误判成环，或相反地漏掉真实环 | 已开 issue #1098；在协议定信号前保留保守行为，模型 `async-policy-b` 记为已知误报 |
+| G13 | 排队中被取消的调用被调方不回复，`Calls.cancelled` 项只由迟到回复清理，留到会话结束 | 长会话里反复取消排队调用会无界涨内存；直接清表项会把合法迟到回复当悬空而断会话 | 已开 issue #1099；等取消确认帧/迟到回复规则定下再改代码 |
+| G14 | 模型按 `ctx.instance()` 建 peer row，代码更像 `plugin#n` 每次新键 | 同一实例跨重启/两会话时模型与实现不是同一身份，覆盖不能直接算数 | 已开 issue #1100；先定 #625/#640 的行身份语义，再对齐代码和模型 |
 
 ## 4. 文件所有权（并行时避免冲突）
 
@@ -72,7 +75,7 @@ Status：执行中。日期：2026-11-09。
 
 ## 5. 执行记录
 
-- 2026-11-09：`events::link::accept` 旧提供回插已修（`gone` 边界 + 插入同锁重检，2 个确定性回归测试）；`cross-runtime-sync` 的“已标记链异步调用”疑点发现帧上无法区分“发起即不管”和“之后 await”，先回退代码改动，待协议加信号后再改。
+- 2026-11-10：三个设计缺口开 issue：#1098（异步调用“是否等待结果”信号）、#1099（取消表清理与取消后回复）、#1100（peer row 键身份）；当前 PR 只做不改变这些语义的实现 bug 修复。- 2026-11-09：`events::link::accept` 旧提供回插已修（`gone` 边界 + 插入同锁重检，2 个确定性回归测试）；`cross-runtime-sync` 的“已标记链异步调用”疑点发现帧上无法区分“发起即不管”和“之后 await”，先回退代码改动，待协议加信号后再改。
 - 2026-11-09：TLA+ 九块全部落地：`specs/events/` 四模块 21 配置、`specs/peer-rows/` 7 配置、`row-lifecycle` 22 配置、`call-lifecycle` 16 配置、`remote-lease` 21 配置、`cross-runtime-sync` 新配置；模型发现 bail 分发盲区、本地放弃不发 cancel、已标记链异步调用误判、link accept 旧代次回插等疑点。
 - 2026-11-09：第三批：shuttle 增至 9 个模型（新增 root dispose/shutdown、依赖驱逐）；`specs/call-lifecycle` 7 个配置按预期结束；trace 验证器 23 个用例；cargo-fuzz 实际跑 session_frame/websocket_upgrade/error_graph/local_lines 共 4 个目标、无 crash。
 - 2026-11-09：第二批代码落地：shuttle 增至 7 个模型（新增 effect 登记/dispose、在途卸载、并发子树关闭）；`specs/row-lifecycle` 9 个配置按预期结束；trace 验证器 16 个用例；值/帧/坏帧属性 5 个；Node/Bun/Python/Go 实现未知字段调用级 `bad-frame`；#634 协议规则 1368 条导入追踪表（1817 行），rule tracker 检查进 CI。

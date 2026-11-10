@@ -14,6 +14,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonPrimitive
 import java.util.Collections
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
 import kotlin.test.Test
@@ -302,5 +303,94 @@ class AppTest {
         val refused = "rutis: cannot announce health: Error: pad-2:health: health is provided here by row pad-1:health: not registered from pad-2"
         until("the refusal: $reported") { refused in reported }
         assertEquals("pad-1:health", provided["health"])
+    }
+
+    /**
+     * start, stop, start, stop, start: each thread serves the run it was
+     * started for. The first run's thread is held in its "listening on"
+     * line, so the two later starts wait for it (the first one still runs);
+     * once it goes, they see that neither of them is the one to listen: the
+     * listener is the first's only, nothing is bound after the last stop.
+     *
+     * Listening (not dialing) on purpose: binding and its line are the run
+     * thread's own, before anything can stop it, so a start that should not
+     * listen shows itself here every time; a dial that a stop tears down
+     * again may not reach the access point at all.
+     */
+    @Test
+    fun aStartThatWaitedForTheOneBeforeItListensForItselfOnly() {
+        val lines = Collections.synchronizedList(ArrayList<String>())
+        val entered = CountDownLatch(1)
+        val held = CountDownLatch(1)
+        val app = RutisApp(
+            plugins = listOf(Rutis.define<Rutis.NoConfig>(name = "nothing") { _, _ -> }),
+            listen = "ws://127.0.0.1:0/rutis",
+            id = "queue-1", token = "secret", peer = "test",
+            log = { line ->
+                lines.add(line)
+                if (line.startsWith("listening on")) {
+                    entered.countDown()
+                    held.await()
+                }
+            },
+        )
+        closing.add(AutoCloseable { held.countDown() })
+        closing.add(AutoCloseable { app.stop() })
+
+        app.start()
+        assertTrue(entered.await(10, TimeUnit.SECONDS), "the first run listens")
+        // The first stops while its thread is in that line, and is still there.
+        app.stop()
+        // Two starts more while it is still stopping: each waits for the one before it.
+        app.start()
+        app.stop()
+        app.start()
+        held.countDown()
+
+        // The last start listens now that the ones before it are done; one of them must not have listened for it.
+        fun listeners() = lines.count { it.startsWith("listening on") }
+        until("the last run listens: ${lines.toList()}") { listeners() == 2 }
+        // The last stop: it ends the last run's listener, and binds no more.
+        app.stop()
+        until("the runs end: ${app.state.value}") { app.state.value is RutisState.Stopped }
+        assertEquals(2, listeners(), "the first and the last run's listeners only: ${lines.toList()}")
+    }
+
+    /**
+     * A start whose thread still waited for the one before it when its own
+     * stop came binds nothing either: a stop is not followed by a listener.
+     */
+    @Test
+    fun aStartStoppedWhileItWaitedBindsNothing() {
+        val lines = Collections.synchronizedList(ArrayList<String>())
+        val entered = CountDownLatch(1)
+        val held = CountDownLatch(1)
+        val app = RutisApp(
+            plugins = listOf(Rutis.define<Rutis.NoConfig>(name = "nothing") { _, _ -> }),
+            listen = "ws://127.0.0.1:0/rutis",
+            id = "queue-2", token = "secret", peer = "test",
+            log = { line ->
+                lines.add(line)
+                if (line.startsWith("listening on")) {
+                    entered.countDown()
+                    held.await()
+                }
+            },
+        )
+        closing.add(AutoCloseable { held.countDown() })
+        closing.add(AutoCloseable { app.stop() })
+
+        app.start()
+        assertTrue(entered.await(10, TimeUnit.SECONDS), "the first run listens")
+        // Stopped while its thread is still in that line: it is still running.
+        app.stop()
+        // Started and stopped while the first run's thread is still there: this start waits, and is stopped while it waits.
+        app.start()
+        app.stop()
+        held.countDown()
+
+        // It ends as stopped without binding: the first run's listener is the only one.
+        until("the stopped start ends: ${app.state.value}") { app.state.value is RutisState.Stopped }
+        assertEquals(1, lines.count { it.startsWith("listening on") }, "the first run's listener only: ${lines.toList()}")
     }
 }

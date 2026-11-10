@@ -19,6 +19,28 @@ import { ENDPOINT_PROTOCOL } from './session.mjs'
 const LOOPBACK = process.platform === 'win32' || process.env.RUTIS_LOCAL_HANDOVER === 'loopback'
 const TOKEN = 'RUTIS_CHANNEL_TOKEN'
 
+// How long a child's cleanups may take once its session ended:
+// RUTIS_SHUTDOWN_TIMEOUT seconds, 10 by default; in ms.
+export function shutdownDeadline() {
+  const seconds = Number(process.env.RUTIS_SHUTDOWN_TIMEOUT)
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 10_000
+}
+
+// What a child still running past its deadline gets: rutis-host gives a
+// runtime 2 s past the deadline at a restart, and this is the same
+// handover, so a child that uses all of it is not cut off as it finishes.
+const KILL_MARGIN = 2000
+
+// Wait for `child` to exit, killing it once its cleanups had their
+// deadline and that margin.
+export async function ended(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  const exited = new Promise(resolve => child.once('exit', resolve))
+  const killed = setTimeout(() => child.kill('SIGKILL'), shutdownDeadline() + KILL_MARGIN)
+  await exited
+  clearTimeout(killed)
+}
+
 // A loopback listener for one child: its `tcp:` address, and the socket of
 // the first connection that presents `token`.
 export async function loopback(token) {
@@ -81,29 +103,24 @@ export async function serve({ spec, id, peer, anchor }) {
   // Messages that arrive before the session's child is up wait for it.
   function relay() {
     const pending = []
-    let target, ended = false
+    let target, closed = false
     return {
       handlers: {
         message: text => target ? target.send(text) : pending.push(text),
-        closed: () => { ended = true; target?.end() },
+        closed: () => { closed = true; target?.end() },
       },
       attach(channel) {
         target = channel
         for (const text of pending.splice(0)) channel.send(text)
-        if (ended) channel.end()
+        if (closed) channel.end()
       },
-      get ended() { return ended },
+      get ended() { return closed },
     }
   }
 
   async function stop(session) {
     session.childChannel?.close('replaced by a new connection')
-    if (session.child.exitCode === null && session.child.signalCode === null) {
-      const exited = new Promise(resolve => session.child.once('exit', resolve))
-      const killed = setTimeout(() => session.child.kill('SIGKILL'), 5000)
-      await exited
-      clearTimeout(killed)
-    }
+    await ended(session.child)
   }
 
   async function start(ws, link) {

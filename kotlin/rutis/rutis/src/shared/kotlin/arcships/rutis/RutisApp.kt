@@ -100,9 +100,17 @@ class RutisApp(
 
     private val lock = Object()
 
-    /** The running connection: its thread, and how to stop it. */
-    private class Run(val thread: Thread, @Volatile var stop: (() -> Unit)?) {
-        @Volatile
+    /**
+     * One start: its thread, the one it waits for, and how to stop what it
+     * connects. A thread serves only the run it was started for.
+     */
+    private class Run(val previous: Run?) {
+        lateinit var thread: Thread
+
+        /** How to stop what this run connected, once it has; read and set under [lock]. */
+        var stop: (() -> Unit)? = null
+
+        /** Whether [stop] was asked: this run must not connect, and stops what it connected; read and set under [lock]. */
         var stopping = false
     }
 
@@ -146,9 +154,10 @@ class RutisApp(
             val previous = current
             if (previous != null && !previous.stopping && previous.thread.isAlive) return
             states.value = RutisState.Connecting()
-            val run = Run(Thread({ run(previous) }, "rutis-app-$id").apply { isDaemon = true }, null)
-            current = run
-            run.thread.start()
+            val started = Run(previous)
+            started.thread = Thread({ run(started) }, "rutis-app-$id").apply { isDaemon = true }
+            current = started
+            started.thread.start()
         }
     }
 
@@ -158,16 +167,27 @@ class RutisApp(
      * once the plugins are unloaded and the connection is closed.
      */
     fun stop() {
-        val run = synchronized(lock) { current } ?: return
-        run.stopping = true
-        run.stop?.invoke()
+        val stop = synchronized(lock) {
+            val run = current ?: return
+            run.stopping = true
+            run.stop
+        }
+        stop?.invoke()
     }
 
-    private fun run(previous: Run?) {
-        previous?.thread?.join()
-        val run = synchronized(lock) { current } ?: return
+    private fun run(started: Run) {
+        started.previous?.thread?.join()
+        synchronized(lock) {
+            // A later start took over: it has its own state, and its own connection.
+            if (current !== started) return
+            // Stopped while it waited for the one before it: it must not dial or bind.
+            if (started.stopping) {
+                states.value = RutisState.Stopped()
+                return
+            }
+        }
         val ended = try {
-            if (connect != null) dial(run, connect) else listen(run, listen!!)
+            if (connect != null) dial(started, connect) else listen(started, listen!!)
         } catch (e: Exception) {
             Ended.Refused(e.message ?: e.toString())
         }
@@ -177,15 +197,21 @@ class RutisApp(
         }
         synchronized(lock) {
             // A start after this stop has its own state.
-            if (current === run) states.value = RutisState.Stopped(reason)
+            if (current === started) states.value = RutisState.Stopped(reason)
         }
     }
 
-    /** Sets what stops `run`; when it was asked to stop already, stops at once. */
-    private fun stopping(run: Run, stop: () -> Unit) {
-        run.stop = stop
-        if (run.stopping) stop()
-    }
+    /**
+     * What `run` connects with, made and given its stop hook under [lock]: a
+     * [stop] that came first is seen here (null: it must not connect), and
+     * one that comes after stops it at once, so nothing is dialed or bound
+     * once a stop returned.
+     */
+    private fun <T : Any> connecting(run: Run, make: () -> T, stop: (T) -> Unit): T? =
+        synchronized(lock) {
+            if (current !== run || run.stopping) null
+            else make().also { run.stop = { stop(it) } }
+        }
 
     /**
      * What `run` reports, unless a later start took over or it is stopping:
@@ -208,11 +234,16 @@ class RutisApp(
         val tls = if (address.startsWith("wss:")) Tls.trust(extra) else null
         val dialer = WebSocketDialer(address, PROTOCOL, token, tls, retry, Heartbeat())
         try {
-            val dialing = Dialing(
-                address, endpoint, plugins, retry, dialer::dial,
-                say = log, status = status(run), shutdownMillis = shutdownTimeout.inWholeMilliseconds, own = own,
-            )
-            stopping(run, dialing::stop)
+            val dialing = connecting(
+                run,
+                make = {
+                    Dialing(
+                        address, endpoint, plugins, retry, dialer::dial,
+                        say = log, status = status(run), shutdownMillis = shutdownTimeout.inWholeMilliseconds, own = own,
+                    )
+                },
+                stop = Dialing::stop,
+            ) ?: return Ended.Stopped(true)
             return dialing.run()
         } finally {
             dialer.close()
@@ -222,10 +253,18 @@ class RutisApp(
     private fun listen(run: Run, address: String): Ended {
         val at = ListenAddress.parse(address)
         val tls = if (at.secure) Tls.server(certificate!!, certificate) else null
-        val server = WebSocketServer(at, PROTOCOL, token, tls, Heartbeat())
-        log("listening on ${server.address}")
-        val listening = Listening(server, endpoint, plugins, status = status(run), shutdownMillis = shutdownTimeout.inWholeMilliseconds, own = own)
-        stopping(run, listening::stop)
+        var bound = address
+        val listening = connecting(
+            run,
+            // Bound under the lock: a stop that came first is seen before a listener exists.
+            make = {
+                val server = WebSocketServer(at, PROTOCOL, token, tls, Heartbeat())
+                bound = server.address
+                Listening(server, endpoint, plugins, status = status(run), shutdownMillis = shutdownTimeout.inWholeMilliseconds, own = own)
+            },
+            stop = Listening::stop,
+        ) ?: return Ended.Stopped(true)
+        log("listening on $bound")
         return listening.run()
     }
 

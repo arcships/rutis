@@ -1,13 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import { connect } from 'node:net'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline'
-import { loopback } from '../src/serve.mjs'
+import { ended, loopback, shutdownDeadline } from '../src/serve.mjs'
 import { open } from '../src/channel/websocket.mjs'
 import { ENDPOINT_PROTOCOL } from '../src/session.mjs'
 import { within } from './support.mjs'
@@ -65,14 +66,77 @@ test('a session whose process ends before connecting ends at once', async () => 
       runtime.once('exit', code => reject(new Error(`the runtime exited (${code})`)))
     }))
     let closed
-    const ended = new Promise(resolve => { closed = resolve })
+    const sessionEnded = new Promise(resolve => { closed = resolve })
     await open(url, { message() {}, closed: reason => closed(reason) }, { protocol: `rutis.${ENDPOINT_PROTOCOL}`, token: 'main-token' })
     // Ends at once: within the hang guard, not at the heartbeat timeout (30 s).
-    await within('the session to end', ended)
+    await within('the session to end', sessionEnded)
     // The runtime keeps listening.
     assert.equal(runtime.exitCode, null)
   } finally {
     runtime.kill()
     rmSync(project, { recursive: true, force: true })
   }
+})
+
+// A child process the test drives: when it ends, and how it was killed.
+function fakeChild() {
+  const child = new EventEmitter()
+  child.exitCode = null
+  child.signalCode = null
+  child.signals = []
+  child.kill = signal => {
+    child.signals.push(signal)
+    child.signalCode = signal
+    child.emit('exit', null, signal)
+    return true
+  }
+  return child
+}
+
+// Run `body` with RUTIS_SHUTDOWN_TIMEOUT set to `value`, restored after.
+async function withShutdownTimeout(value, body) {
+  const saved = process.env.RUTIS_SHUTDOWN_TIMEOUT
+  if (value === undefined) delete process.env.RUTIS_SHUTDOWN_TIMEOUT
+  else process.env.RUTIS_SHUTDOWN_TIMEOUT = value
+  try {
+    await body()
+  } finally {
+    if (saved === undefined) delete process.env.RUTIS_SHUTDOWN_TIMEOUT
+    else process.env.RUTIS_SHUTDOWN_TIMEOUT = saved
+  }
+}
+
+test('the shutdown deadline follows RUTIS_SHUTDOWN_TIMEOUT, 10 s otherwise', async () => {
+  await withShutdownTimeout('1', () => assert.equal(shutdownDeadline(), 1_000))
+  await withShutdownTimeout('0.25', () => assert.equal(shutdownDeadline(), 250))
+  // Not a positive number: the default, as before (#615).
+  for (const invalid of ['', 'soon', '0', '-1']) {
+    await withShutdownTimeout(invalid, () => assert.equal(shutdownDeadline(), 10_000, `RUTIS_SHUTDOWN_TIMEOUT=${JSON.stringify(invalid)}`))
+  }
+  await withShutdownTimeout(undefined, () => assert.equal(shutdownDeadline(), 10_000))
+})
+
+test('a child still unloading is killed 2 s past its deadline, not at 5 s (#615)', async () => {
+  await withShutdownTimeout('1', async () => {
+    const child = fakeChild()
+    const started = Date.now()
+    await within('the child to be killed', ended(child))
+    const took = Date.now() - started
+    assert.deepEqual(child.signals, ['SIGKILL'])
+    // Its cleanups have their deadline (1 s), then the margin (2 s).
+    assert.ok(took >= 2_900, `killed after ${took} ms, before the deadline and its margin`)
+    assert.ok(took < 4_500, `killed after ${took} ms: 5 s is the fixed kill time this replaces`)
+  })
+})
+
+test('a child that ends within its deadline is not killed, and not waited for', async () => {
+  await withShutdownTimeout('1', async () => {
+    const child = fakeChild()
+    setTimeout(() => { child.exitCode = 0; child.emit('exit', 0, null) }, 20)
+    const started = Date.now()
+    await within('the child to end', ended(child))
+    const took = Date.now() - started
+    assert.deepEqual(child.signals, [])
+    assert.ok(took < 1_000, `waited ${took} ms for a child that ended at once`)
+  })
 })
