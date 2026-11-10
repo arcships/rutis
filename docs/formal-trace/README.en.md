@@ -2,10 +2,12 @@
 
 [中文](README.md) · [Session trace contract](../formal-trace.en.md) · [Guarantee register](../guarantees.en.md) · [Quality standard](../quality-standard.md)
 
-Status: first version, partial coverage. Date: 2026-11-09. Baseline: `main` `2452baee`.
+Status: first version, partial coverage. Date: 2026-11-11. Baseline: `origin/main` `449ed13a`.
 Issue: [#634](https://github.com/arcships/rutis/issues/634) (the 0.21 trace table, [#776](https://github.com/arcships/rutis/issues/776)); plan: [0.22 plan](../plan/formal-verification-0.22.md) WS3; fields and status rules: §5 of the [formal verification design](../design-formal-verification-2026-11-08.md).
 
-Updated the same day: WS1 landed the core of #1025 (marker publication, `Entry::live`, deterministic race tests, a shuttle model), which lifts blockers G3 and G4 of plan §3; the `ECA-*` rows with implementation or tests became seven `部分验证` rows, the rest stay `未验证`.
+2026-11-11: the 1368 protocol rules were re-checked against the current 0.22 sources; the result is in the [re-check page](recheck-0.22.md) (Chinese). A protocol row's status now comes from that re-check, not from the issue snapshot.
+
+2026-11-09: WS1 landed the core of #1025 (marker publication, `Entry::live`, deterministic race tests, a shuttle model), which lifts blockers G3 and G4 of plan §3; the `ECA-*` rows with implementation or tests became seven `部分验证` rows, the rest stay `未验证`.
 
 Each row is one rule rutis promises, with its current source, the plain-language promise, the level, the implementations it applies to, the evidence (a path, a test name or a line range), a mutation or counterexample, the status and the gap. Status follows §3 of the [guarantee register](../guarantees.en.md). Numbers and evidence checks come from the script:
 
@@ -34,30 +36,18 @@ In the table:
   | [protocol-remote.md](rules/protocol-remote.md) | `remote` | 231 | 17 | 248 |
   | Total | — | 1368 | 184 | 1552 |
 
-- **Status of the 1368 (mapped from the #634 snapshot, not a re-check)**:
+- **Status of the 1368 after the 0.22 re-check** ([re-check page](recheck-0.22.md), Chinese): 111 `已验证`, 374 `部分验证`, 538 `未验证`, 42 `明确不保证`, 200 `不单独计数`, and 103 rows withdrawn because 0.19 or 0.22 removed the mechanism they describe. The issue snapshot's 184 `已取代` rows were not re-checked. 1368 = 111 + 374 + 538 + 42 + 200 + 103.
 
-  | Issue status | Rows | Table status |
-  | --- | --- | --- |
-  | 已覆盖 | 137 | 116 `已验证`, 21 `部分验证` |
-  | 部分 | 387 | 387 `部分验证` |
-  | 未覆盖 | 555 | 549 `未验证`, 6 `明确不保证` |
-  | 未登记 | 35 | 35 `未验证` |
-  | 不适用 | 249 | 35 `明确不保证`, 214 `不单独计数` |
-  | 明确不保证 | 5 | 5 `明确不保证` |
-  | 已取代 | 184 | 184 `已撤回` (not counted) |
+**Re-check method.** Four checks per rule: the source still exists (and 0.19 / 0.22 did not remove what it describes), a current anchor (a `SESS-*` id from `docs/protocol-session.md`; 161 rows have one), the named evidence resolves, and a status that only moves down. 261 rows have no current source — the multi-language runtimes design of 0.9, the remote-plugins design, register rows the register dropped — and are listed by reason in the re-check page §5. The specification's `当前` is not this table's `已验证`. Register rows the register withdrew follow the register. Row text was not rewritten: semantic re-extraction is still a gap.
 
-  Totals: 116 `已验证`, 408 `部分验证`, 584 `未验证`, 46 `明确不保证`, 214 `不单独计数`, 184 `已撤回`.
-
-**All 1368 rows are in the table, but none has been checked against the current specifications.**
-
-- All 1368 come from the 2026-10 snapshot (`main` `3496669b`); none was re-extracted from the 0.22 specifications. #634 itself says the 11 design documents of 0.17–0.19 and the new #635 specification must be re-extracted (plan §3 G2). WS2's `docs/protocol-session.md` (82 `SESS-*` numbers) has landed, but the table has not been re-extracted from it; the specification's `当前` is not this table's `已验证`.
-- The protocol status is a mapping of the issue snapshot, not a rerun. Of the 137 `已覆盖` rows only 116 are `已验证`: 4 are TLA-only, 6 are model-only, 10 have no named evidence, and 1 (`events/one-bus b`) names files that no longer exist; all 21 are `部分验证`. The 977 `部分`/`未覆盖`/`未登记` rows stay at `部分验证`/`未验证`.
+- All 1368 come from the 2026-10 snapshot (`main` `3496669b`); the re-check maps their sources and evidence, it does not re-derive the wording from the 0.22 specifications. #634 itself says the 11 design documents of 0.17–0.19 and the new #635 specification must be re-extracted (plan §3 G2). WS2's `docs/protocol-session.md` (82 `SESS-*` numbers) is the only current specification for the session layer; the event protocol is the current source for events but was not updated for 0.19 (its `events-v2` and node export/import rules are withdrawn).
+- The snapshot mapping sets the ceiling. Of the 137 `已覆盖` rows only 116 were `已验证` under it: 4 are TLA-only, 6 are model-only, 10 have no named evidence, and 1 (`events/one-bus b`) names files that no longer exist. The 977 `部分`/`未覆盖`/`未登记` rows stay at `部分验证`/`未验证`.
 - 6 of the 555 `未覆盖` rows are explicit non-guarantees in their rule text (`SYN-9-3`, `SYN-9-26`, `SYN-9-32`, `MNT-2-12`, `MNT-4.2-3`, `MNT-10-4`) and become `明确不保证`; the other 549 are `未验证`.
-- Of the 249 `不适用` rows, 35 say "明确不保证" in their note and become `明确不保证`; 214 are `不单独计数` (tests only, formalization cannot reach them) and are not counted as unverified.
+- Of the 249 `不适用` rows, 35 say "明确不保证" in their note and become `明确不保证`; the others are `不单独计数` (tests only, formalization cannot reach them) and are not counted as unverified.
 - **80 protocol ids also exist in the guarantee register** (for example `core/D1`, `bridge/value-roundtrip`); the protocol list is finer-grained in places (`core/D2a`/`D2b`). Both rows are kept. **1817 is a row count, not a count of distinct rules**; do not add the register and protocol subtotals.
 - Behaviour in design and user documents that is in neither the register nor the #634 list (other than Q3.3 implementation details) has not been extracted.
 
-So the release gate (design §5, quality standard Q13.1) **cannot** be judged from this table: the protocol rows are not checked against the current specifications, 214 rows are not counted, and 10 bare file names in the evidence column do not resolve (7 rows, §5).
+So the release gate (design §5, quality standard Q13.1) **cannot** be judged from this table: 261 protocol rules have no current source, 200 rows are not counted, and 10 bare file names in the evidence column do not resolve (7 rows, §5).
 
 ## 2. Numbering
 
@@ -84,7 +74,7 @@ Numbers are only added, never changed: moving a row to another section, renaming
 | scope | the implementations (Rust, Node, Bun, Python, Go, Swift, Kotlin), transport and platform | **to fill**: the register does not record it, so all 211 register rows say `未登记`; trace rows say what the document says; protocol rows carry the issue's **participants** (`跨进程`, `进程内并发`, `纯逻辑`, `外部`), not an implementation matrix |
 | evidence | model, test, trace, property/fuzz, black-box or timing evidence, as a path, test name or line range | script (register's verification column verbatim) / hand; protocol rows use the issue's `现有形式化` column |
 | mutation or counterexample | a bug the verification caught, or an injected error | **to fill**: register rows say `未登记`; protocol rows say `未登记` (the issue has no such column); the mutations §4 of the trace contract describes are on their rows |
-| status | `已验证`, `部分验证`, `未验证`, `明确不保证`; `已撤回` and `不单独计数` are not counted | script / hand |
+| status | `已验证`, `部分验证`, `未验证`, `明确不保证`; `已撤回` and `不单独计数` are not counted | script (register rows; protocol rows from the [re-check](recheck-0.22.md)) / hand |
 | gap | the next issue; an uncovered rule is never written as passing | register rows start from the register's notes column; protocol rows combine the issue, the note and the reason a `已覆盖` row was downgraded |
 
 Explicit non-guarantees follow the register's convention (as `core/D15` does): level and status are both `明确不保证`, and they are not counted as unverified. A model passing marks only the model; a rule is `已验证` only with implementation evidence. A trace row is `部分验证` only when a named test asserts a point of it; source code or comments alone leave it `未验证`.
@@ -101,14 +91,17 @@ Explicit non-guarantees follow the register's convention (as `core/D15` does): l
 | 未登记 | 未验证 | the gap says "未登记（测试里用了、登记表没有）" |
 | 已取代 | 已撤回 | the row is kept, not counted |
 
-Nine-column alignment: id=`编号`; current source=`来源`; promise=`规则`; level=`明确不保证` or `契约行为` (the issue has no level column, so nothing is claimed as a core commitment); scope=`参与方`; evidence=`现有形式化`; mutation=`未登记`; status=the mapping above; gap=`归属 issue` + `备注` + the downgrade reason. The `对应` column stays in the protocol file as the cross-reference to a guarantee-register id and is not one of the nine. A protocol row is not checked against the current specification; `已验证` means the issue snapshot named implementation evidence, not that it was rerun here.
+Nine-column alignment: id=`编号`; current source=`来源`; promise=`规则`; level=`明确不保证` or `契约行为` (the issue has no level column, so nothing is claimed as a core commitment); scope=`参与方`; evidence=`现有形式化`; mutation=`未登记`; status=the mapping above, then the re-check; gap=`归属 issue` + `备注` + the downgrade reason. The `对应` column stays in the protocol file as the cross-reference to a guarantee-register id and is not one of the nine.
+
+**Re-check layer (2026-11-11).** The issue mapping is the ceiling, not the final status. Every protocol row also passes the four checks of the [re-check page](recheck-0.22.md) §1: the source still exists, a current anchor (a `SESS-*` id) where the session specification covers it, the named evidence resolves, and the register did not withdraw the row. It only moves down: mechanisms 0.19 / 0.22 removed (compat, `events-v2`, `sync-wait`, node `export` / `import`, `Registration`, the access point, `Revocations`, `PeerRows`, `peer:` rows, `runtimes.remote`, `Transport`, `ChannelInfo`) and rows the register withdrew become `已撤回`; a row whose current source is a historical design and has no current anchor is no longer `已验证`. Row text is not rewritten; `rules/protocol-*.md` keeps the issue's ten columns verbatim.
 
 **Language.** The register-driven rows are generated from the Chinese register; the hand-written columns and the trace rows are Chinese only. The English register (`docs/guarantees.en.md`) carries the same ids, so the rows line up, but the English trace rows are a gap (#634). Counts are printed by the script and kept in [the Chinese README](README.md) §4: 1817 rows, 211 register, 54 hand-written, 1552 protocol. The "264 rows" in plan §1/§5 is the count before the protocol list went in; the script output is authoritative.
 
 ## 4. Maintenance
 
-- **After changing the register or adding a test**: `node tools/formal-trace.mjs --write`, then `--check`. `--write` rewrites the automatic columns, keeps the manual ones by id, and refreshes the index; it does not touch `rules/protocol-*.md`.
+- **After changing the register or adding a test**: `node tools/formal-trace.mjs --write`, then `--check`. `--write` rewrites the automatic columns, keeps the manual ones by id, refreshes the index and the re-check page; it does not touch `rules/protocol-*.md`.
 - **Changing the protocol list**: export the table from the matching #634 comment again, keeping the ten columns, ids and notes; do not hand-edit the status in the export. `--check` verifies the ten columns, the id form, the per-section totals (156/9, 218/0, 253/9, 246/104, 264/45, 231/17; 1368/184 in total), the issue status vocabulary, duplicate ids and evidence paths.
+- **Changing a current source or a re-check verdict**: edit `SOURCES`, `ANCHORS`, `SUPERSEDED` or `UNMAPPED` in `tools/formal-trace-recheck.mjs`, then `--write`. `--check` verifies the anchors exist in `docs/protocol-session.md`, the superseded ids are protocol rows, each `by` file exists, and the page matches the generator.
 - **Adding a `TRC`/`ECA` row**: write it in `rules/` with the same columns; `--check` verifies the id form, the status vocabulary and the evidence paths.
 - **Moving a row**: keep the id; change the source and the index.
 - **CI**: not wired yet (WS8). Until then the two commands are run by hand.
@@ -116,25 +109,28 @@ Nine-column alignment: id=`编号`; current source=`来源`; promise=`规则`; l
 
 ## 5. Gaps found by this version
 
-1. **The 1368 protocol rules are not checked against the current specifications.** All come from the `3496669b` snapshot. WS2's `docs/protocol-session.md` has 82 `SESS-*` numbers, but its `当前`/`明确不保证`/`已取代` says whether a rule is in force, not whether it is verified; every row needs its own status, and `当前` must not be copied as `已验证`. The 11 design documents of 0.17–0.19 must be re-extracted too. #634's eighth comment (`6415164837`) says the remote runtime gained consistency in 0.19 (#695) without changing the link, access-point or remote-lease rules; `protocol-remote.md` does not reflect that change row by row.
-2. **10 bare file names do not resolve in the current tree** (7 names, 7 rows, all in the protocol `现有形式化` column): `events-conformance.test.mjs`, `test_events_conformance.py`, `events-conformance.test.ts`, `node_conformance.rs`, `websocket_conformance.rs`, `leases.rs` (3 rows), `memory_mux.rs` (2 rows). Those rows are only `部分验证`; they can move up after a current path or test is supplied. The note column also has paths that no longer exist (spot-checked: `crates/rutis-bridge/src/cordis/server.rs`, `go/rutis/dial.go`, `runtime/plugin.rs`); `--check` only scans the `现有形式化` column, so the re-extraction has to clean those too.
+1. **The 1368 protocol rules have no current specification outside the session layer.** 261 of them have no current source: `docs/protocol-session.md` covers 161 (82 `SESS-*`), the event protocol is the current source for events but was not updated for 0.19 (its `events-v2` and node export/import rules are withdrawn), and the runtime, mount and remote partitions still point at 0.17–0.19 designs or the user guide. The multi-language runtimes design (`SYN`) and the remote-plugins design (`REM`) are historical; the re-check page §5 lists those rules by reason. Writing the specifications is #635's follow-up. The re-check maps sources, anchors, evidence and status; it does not rewrite the rule text.
+2. **10 bare file names do not resolve in the current tree** (7 names, 7 rows, all in the protocol `现有形式化` column): `events-conformance.test.mjs`, `test_events_conformance.py`, `events-conformance.test.ts`, `node_conformance.rs`, `websocket_conformance.rs`, `leases.rs` (3 rows), `memory_mux.rs` (2 rows). Those rows are only `部分验证` or `未验证`; they can move up after a current path or test is supplied. The note column also has paths that no longer exist (spot-checked: `crates/rutis-bridge/src/cordis/server.rs`, `go/rutis/dial.go`, `runtime/plugin.rs`); `--check` only scans the `现有形式化` column, so the re-extraction has to clean those too.
 3. **A real hole in the register's evidence**: `loader/remote-runtime-lease` (the only `未验证` core commitment) lists `rutis-loader/tests/leases.rs`, deleted with the connection plugin (`ec47944c`); §16 of the register already says the test is to be added. The checker skips paths inside parentheses, as `tools/check-guarantees.mjs` does (there the parenthesis says there is no evidence), so the hole sits in the known blind spot of both checks.
 4. **The register's §16 totals do not match its rows**: §16 says 194 current rows, the tables have 200; by section, §10 has 1 more, §12 2 more and §14 2 more. The table counts the rows; §16 needs a maintainer's check.
 5. **`TRC-GREET-3` (refusing a missing required capability) has no test**: the code is at `crates/rutis-bridge/src/session/plugin/greet.rs:33-70`; searching `Incompatible` finds only version and transport cases.
 6. **`TRC-INV-2` (the handshake gate) has no Rust assertion**: the text `protocol handshake incomplete` is implemented and untested; Go's `TestACallBeforeTheHandshakeEndsTheSession` asserts its own words.
 7. **Scope and mutation are mostly empty**: they come from the support matrix (quality standard §10) and the mutation results of #624, #630 and #631. Protocol rows carry participants in the scope column and `未登记` in the mutation column.
+8. **The re-check did not rewrite rule text**: it verified sources, anchors, evidence paths and status. Semantic re-extraction — rewriting an old design sentence as a current rule, splitting or merging ids — is still ahead; the re-check page §4 says for every row which `SESS-*` or current document it falls under, and §5 lists the rows with none.
 
 ## 6. Next steps
 
-1. **Re-extract from the current specifications**: first map the 82 `SESS-*` rules of `docs/protocol-session.md` to `protocol-session.md`, then re-extract the other sections from #635 and the 11 design documents of 0.17–0.19. Give every rule its own status: `当前` starts as `未验证` and becomes `部分验证` only when a named test asserts a point (a code line is a location, not an assertion); `明确不保证` becomes `明确不保证` in both level and status; `已取代` becomes `已撤回`, with the replacing rule named in the gap.
-2. **Fill the evidence, drop the names that no longer resolve**: find current tests or models for the 7 rows of §5 item 2; if there is none, keep `部分验证`/`未验证` and do not treat the old issue name as evidence. Update the old paths in the note column during the re-extraction.
-3. **Attach models and conformance cases**: once WS4 (`#613`), WS5 (`#624`) and WS7 (`#631`) produce TLA+ properties, the trace validator and conformance test names, they go into the evidence column, and only then can a status move up.
-4. **Wire CI**: `--check` on pull requests. The "trace table references" check of #776 is this script; the "model drift" check belongs to WS4/WS8.
-5. **English**: the protocol list and the `TRC`/`ECA` rows are Chinese only; the English trace table is a gap.
+1. **Write the missing current specifications**: the 261 rules with no current source (`SYN`, the 0.9 multi-language runtimes design; `REM`, the remote-plugins design) need a 0.22 specification or an explicit non-guarantee before they can be re-extracted; the session layer's remaining differences are in `protocol-session.md` §14 G1–G6.
+2. **Re-extract the session partition semantically**: map the 82 `SESS-*` rules to the SES, VAL, TAG, M1 and CHN rows one by one, splitting or merging ids; `ANCHORS` now gives ranges by old section and should become per rule.
+3. **Fill the evidence, drop the names that no longer resolve**: find current tests or models for the 7 rows of §5 item 2; if there is none, keep `部分验证`/`未验证` and do not treat the old issue name as evidence. Update the old paths in the note column during the re-extraction.
+4. **Attach models and conformance cases**: once WS4 (`#613`), WS5 (`#624`) and WS7 (`#631`) produce TLA+ properties, the trace validator and conformance test names, they go into the evidence column, and only then can a status move up.
+5. **Wire CI**: `--check` on pull requests. The "trace table references" check of #776 is this script; the "model drift" check belongs to WS4/WS8.
+6. **English**: the protocol list and the `TRC`/`ECA` rows are Chinese only; the English trace table is a gap.
 
 ## Related files
 
+- [Re-check page](recheck-0.22.md)
 - [Session trace contract](../formal-trace.en.md) · [Event-close admission design](../design-event-close-admission-2026-11-08.en.md)
 - [Guarantee register](../guarantees.en.md) · [Quality standard](../quality-standard.md) · [Quality status](../quality-status.en.md)
 - [Formal verification design](../design-formal-verification-2026-11-08.en.md) · [0.22 plan](../plan/formal-verification-0.22.en.md)
-- Scripts: `tools/formal-trace.mjs`; register check: `tools/check-guarantees.mjs`
+- Scripts: `tools/formal-trace.mjs`, `tools/formal-trace-recheck.mjs`; register check: `tools/check-guarantees.mjs`
