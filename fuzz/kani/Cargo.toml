@@ -1,0 +1,18 @@
+# The Kani harness (#631): bounded proofs of the session protocol's pure
+# date and time-of-day logic (`crates/rutis-bridge/src/session/values.rs`).
+# Its own workspace, like `fuzz/`: plain `cargo test` never builds it.
+[package]
+name = "rutis-kani"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[dependencies]
+rutis-bridge = { path = "../../crates/rutis-bridge", default-features = false }
+
+[workspace]
+members = ["."]
+
+[lints.rust]
+# `#[cfg(kani)]` is set by `cargo kani` only.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
