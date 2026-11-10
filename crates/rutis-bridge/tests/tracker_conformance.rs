@@ -8,18 +8,18 @@
 //! Go, Bun, Swift, Kotlin) stay open: these checks close the Rust column
 //! only.
 //!
-//! guarantee: TRC-FRAME-1
-//! guarantee: TRC-FRAME-2
-//! guarantee: TRC-FRAME-3
-//! guarantee: TRC-MALFORMED-1
-//! guarantee: TRC-MALFORMED-2
-//! guarantee: TRC-MALFORMED-3
-//! guarantee: TRC-CANCEL-1
-//! guarantee: TRC-CANCEL-2
-//! guarantee: TRC-CANCEL-3
-//! guarantee: TRC-LIMIT-2
-//! guarantee: TRC-ERR-1
-//! guarantee: TRC-ERR-2
+//! rule: TRC-FRAME-1
+//! rule: TRC-FRAME-2
+//! rule: TRC-FRAME-3
+//! rule: TRC-MALFORMED-1
+//! rule: TRC-MALFORMED-2
+//! rule: TRC-MALFORMED-3
+//! rule: TRC-CANCEL-1
+//! rule: TRC-CANCEL-2
+//! rule: TRC-CANCEL-3
+//! rule: TRC-LIMIT-2
+//! rule: TRC-ERR-1
+//! rule: TRC-ERR-2
 //! guarantee: bridge/unknown-fields
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -162,7 +162,7 @@ fn limited(dispatch: Arc<dyn Dispatch>) -> (Connection, Channel) {
 /// A call is an `invoke` frame — `id`, `path`, `target`, `method`, `args`
 /// and `sync` — and its answer is a `return` or a `throw` with the same
 /// `id`.
-/// guarantee: TRC-FRAME-1
+/// rule: TRC-FRAME-1
 #[tokio::test(flavor = "multi_thread")]
 async fn a_call_is_an_invoke_and_its_answer_carries_the_same_id() {
     let (peer, far) = session(Arc::new(Nothing));
@@ -238,7 +238,7 @@ async fn a_call_is_an_invoke_and_its_answer_carries_the_same_id() {
 
 /// Frames are read one at a time, but a call's body does not hold the
 /// channel: a second call is answered while the first still runs.
-/// guarantee: TRC-FRAME-1
+/// rule: TRC-FRAME-1
 #[tokio::test(flavor = "multi_thread")]
 async fn a_slow_call_does_not_hold_the_channel() {
     struct Held {
@@ -285,7 +285,7 @@ async fn a_slow_call_does_not_hold_the_channel() {
 
 /// A `return` for a call this side never issued is a framing failure: the
 /// session closes, and a call made after it fails.
-/// guarantee: TRC-FRAME-2
+/// rule: TRC-FRAME-2
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reply_for_a_call_this_side_never_issued_ends_the_session() {
     let (peer, mut far) = session(Arc::new(Nothing));
@@ -310,8 +310,8 @@ async fn a_reply_for_a_call_this_side_never_issued_ends_the_session() {
 
 /// A `cancel` for no call of this side's is ignored (it may have overtaken
 /// its own reply), and the session goes on.
-/// guarantee: TRC-FRAME-3
-/// guarantee: TRC-MALFORMED-1
+/// rule: TRC-FRAME-3
+/// rule: TRC-MALFORMED-1
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cancel_for_an_unknown_call_is_ignored_and_calls_go_on() {
     let (peer, mut far) = session(Arc::new(Nothing));
@@ -338,7 +338,7 @@ async fn a_cancel_for_an_unknown_call_is_ignored_and_calls_go_on() {
 
 /// Malformed or dangling frames close the session, with a transport error;
 /// every case gets a fresh channel, and a call after it fails.
-/// guarantee: TRC-MALFORMED-2
+/// rule: TRC-MALFORMED-2
 #[tokio::test(flavor = "multi_thread")]
 async fn malformed_frames_end_the_session() {
     let cases: &[(&str, &[u8])] = &[
@@ -381,7 +381,7 @@ async fn malformed_frames_end_the_session() {
 /// and `{op, fields}`; in a reply, only the call it answers; `release` and
 /// `cancel` ignore extras; in a greeting, the handshake fails.
 /// guarantee: bridge/unknown-fields
-/// guarantee: TRC-MALFORMED-3
+/// rule: TRC-MALFORMED-3
 #[tokio::test(flavor = "multi_thread")]
 async fn unknown_fields_fail_only_their_call_and_the_session_goes_on() {
     struct Echo;
@@ -499,7 +499,7 @@ async fn unknown_fields_fail_only_their_call_and_the_session_goes_on() {
 
 /// A caller that gives up sends `cancel` for its call, which the callee
 /// reads; the session goes on.
-/// guarantee: TRC-CANCEL-1
+/// rule: TRC-CANCEL-1
 #[tokio::test(flavor = "multi_thread")]
 async fn giving_up_on_a_call_sends_a_cancel_the_callee_reads() {
     let (peer, mut far) = session(Arc::new(Nothing));
@@ -553,7 +553,7 @@ async fn giving_up_on_a_call_sends_a_cancel_the_callee_reads() {
 
 /// The far end cancelling its wait for a result aborts the method behind
 /// it (a cancellable future), and the session goes on.
-/// guarantee: TRC-CANCEL-2
+/// rule: TRC-CANCEL-2
 #[tokio::test(flavor = "multi_thread")]
 async fn the_far_end_cancelling_its_await_drops_the_method() {
     struct Flag(Arc<AtomicBool>);
@@ -647,7 +647,7 @@ async fn the_far_end_cancelling_its_await_drops_the_method() {
 
 /// A `cancel` that arrives after the reply to its call is ignored: the call
 /// keeps its value and the session goes on.
-/// guarantee: TRC-CANCEL-3
+/// rule: TRC-CANCEL-3
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cancel_after_the_reply_is_ignored() {
     let (peer, mut far) = session(Arc::new(Nothing));
@@ -680,8 +680,8 @@ async fn a_cancel_after_the_reply_is_ignored() {
 
 /// An argument that does not fit the channel's limit fails only its call,
 /// saying which argument and the limit; the next call goes through.
-/// guarantee: TRC-LIMIT-2
-/// guarantee: TRC-ERR-2
+/// rule: TRC-LIMIT-2
+/// rule: TRC-ERR-2
 #[tokio::test(flavor = "multi_thread")]
 async fn an_argument_over_the_channel_limit_fails_only_its_call() {
     let (peer, mut far) = limited(Arc::new(Nothing));
@@ -741,7 +741,7 @@ async fn an_argument_over_the_channel_limit_fails_only_its_call() {
 
 /// A result that does not fit the channel's limit is answered with a
 /// `throw` naming the result: that call fails, the session goes on.
-/// guarantee: TRC-ERR-2
+/// rule: TRC-ERR-2
 #[tokio::test(flavor = "multi_thread")]
 async fn a_result_over_the_channel_limit_is_answered_with_a_throw() {
     struct Big;
@@ -778,7 +778,7 @@ async fn a_result_over_the_channel_limit_is_answered_with_a_throw() {
 }
 
 /// `no-method` crosses with its code, its data and the exact message.
-/// guarantee: TRC-ERR-1
+/// rule: TRC-ERR-1
 #[tokio::test(flavor = "multi_thread")]
 async fn a_no_method_error_crosses_with_its_code() {
     struct Weather;
