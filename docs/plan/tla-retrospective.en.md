@@ -1,85 +1,79 @@
-# Landing TLA+ in 0.22: practice, incidents and reflection
+# From the day TLA+ was introduced: a 0.22 landing record
 
-This is not a model guide. It records how TLA+ went from one line in a design document to nine models, about 215 configurations, CI and a rule tracker — mostly the mistakes and the judgements we changed along the way.
+## 1. The day it started
 
-## 1. The starting point is not writing a model; it is deciding what to prove
+On 2026-11-09 the task began with reading remote `main`, the formal-verification design documents and the existing `specs/`. The scope then became 0.22: merge 0.23 into it and land the TLA+ models as one part of the work.
 
-The easiest mistake is to open an editor and write `Init`/`Next`. The order we ended up using was:
+## 2. Why it was introduced
 
-1. Find the promises in the design documents and issue #613: which behaviours cross processes, interleave, retry, disconnect or crash.
-2. Turn each promise into a property: safety and liveness separately; what can be an invariant becomes one, and what cannot is explicitly left out.
-3. Only then choose participants, messages, failure model and bounds.
+Four pieces of background:
 
-After that, every property can point back to a design rule. If it cannot, it is usually an implementation detail and does not belong in TLA.
+- The core 0.22 change, #1025, is event close admission. It involves subtree close, marker publication, listener admission and cleanup, all with concurrent interleavings.
+- Quality standard Q9.1.2 / Q11.2 requires model checking for multi-party concurrent protocols at design time, and model updates when the design changes.
+- The formal-verification design splits the protocol into events, cross-runtime calls, remote leases, row lifecycle, call lifecycle and node-hosted rows.
+- Issue #613 lists the modules, properties and a set of historical bugs. At that point the repository had only two old models, `cross-runtime-sync` and `remote-lease`.
 
-## 2. Three batches; "the first version passes" means little
+Past reviews and intermittent failures had many concurrency problems. Tests only covered constructed schedules and could not exhaust interleavings. The goals were:
 
-The first batch — event close, row lifecycle, call lifecycle — ran and passed, but the coverage was shallow: many configurations only checked the happy path, and the mutations only flipped a boolean.
+- exhaust participant, message, disconnect, retry and crash interleavings at the design level;
+- write design promises as properties and search for counterexamples;
+- turn historical bugs into pre-fix configurations that guard against regression;
+- give implementation and review an executable specification.
 
-The second batch, with shuttle, trace validation and property tests, started exposing implementation problems: the old-generation reinsertion in `events/link.rs`, the Kotlin `RutisApp` start/stop race, and the Node/Bun 5-second kill. These were not model mistakes; the models made real windows in the code visible.
+## 3. The landing process
 
-Only the third batch, expanding six directories to the design scope, hit state explosion, CI timeouts and models that lie.
+Three batches:
 
-## 3. Concrete incidents
+- Batch one: first versions of `event-close`, `row-lifecycle` and `call-lifecycle`, made to run.
+- Batch two: shuttle, trace validation and property tests in parallel; TLA expanded to the four `events` modules and `peer-rows`, with `row` / `call` / `lease` / `sync` filled in.
+- Batch three: six directories expanded to the design scope, about 215 configurations. Every new configuration was run; all seven CI `specs` jobs passed.
 
-### 3.1 Bigger state spaces are not better
+## 4. Incidents
 
-`table-healthy` in `events` once took 10 minutes and 9 GB. `policy-b-posts` in `cross-runtime-sync` had 14 million states and pushed a 4-core CI job past its 30-minute limit.
+**State space.** `table-healthy` once took 10 minutes and 9 GB. `policy-b-posts` had 14 million states and pushed a 4-core CI job past its 30-minute limit. We reduced `MaxDepth` from 3 to 2, added `SYMMETRY`, and used two runtimes by one row; the state count fell to 1.15 million and CI took 7m25s.
 
-The fix was not a bigger machine. It was smaller bounds: two runtimes by one row, `MaxDispatch=1`, `SYMMETRY`; and `MaxDepth` from 3 to 2 for `policy-b-posts`, taking it from 14M to 1.15M states. The properties stayed, the counterexamples stayed, and CI went from timeout to seven minutes.
+**Model mistakes.** In `peer-rows`, `PFailed` wrote one variable both as an assignment and in `UNCHANGED`, so the action was always false. The failure path was never explored while the configuration still passed. A rewrite of `row-lifecycle` also put `cleanCount` into an `UNCHANGED` it did not belong in. We added reachability checks and mutation configurations.
 
-The lesson: **TLC bounds are part of the design, not a knob to tune afterwards.** Every configuration has to answer whether its bounds can still produce the counterexample it is meant to catch. If not, change the configuration; do not keep running.
+**Configurations describing old code.** `bail-policy-b` kept showing a deadlock. Printing the real `forward` input showed the current compliant runtime already puts the dispatch id on the listener's `path`, equivalent to `bail-recorded`. `bail-policy-b` describes the pre-fix behaviour. We almost changed `waits.rs` for it.
 
-### 3.2 Models make quiet mistakes
+**Changing code from a model broke the implementation.** `async-policy-b` says an asynchronous call on a marked chain recorded as a hop causes false refusals. Changing `waits.rs` to count only `sync` made the object-relay test `a_synchronous_cycle_through_objects_is_refused` hang. The frame only has `sync`, and cannot distinguish "fire and forget" from "awaited later". The code change was reverted and #1098 was opened.
 
-In `peer-rows`, `PFailed` wrote one variable both as an assignment and in `UNCHANGED`, so the action was always false. The failure/restart path was never explored, while the configuration still reported success.
+**Real bugs.** The old-generation reinsertion in `events::link::accept`, the Kotlin `RutisApp` start/stop race, and the Node/Bun 5-second kill firing before the cleanup deadline. All three are fixed.
 
-A rewrite of `row-lifecycle` also put `cleanCount` into an `UNCHANGED` it did not belong in. The old state counts looked unchanged, but the coverage had already changed.
+**Suspected bugs.** A peer-row `unload` before `load` may leave an orphan, the Kotlin heartbeat starts at accept, and the host single-worker wait-graph blind spot. Issues #1101–#1103.
 
-TLC does not report these; the model simply "passes" for no reason. We added two habits:
+**Design gaps.** The async "will await" signal, cancel-table cleanup and cancel replies, and the peer-row key identity. Issues #1098–#1100.
 
-- every new action gets a reachability check: can it actually happen?
-- every passing configuration needs at least one mutation that fails the same property.
+## 5. The value of TLA+
 
-### 3.3 A configuration may describe old code
+Results from this work:
 
-`bail-policy-b` in `cross-runtime-sync` kept reporting a deadlock. We almost changed `waits.rs` for it. Printing the real `forward` input showed that the current compliant runtime already puts the dispatch id on the listener's `path`, equivalent to `bail-recorded`; `bail-policy-b` describes the pre-fix behaviour.
+- three real bugs found and fixed;
+- the `bail` implementation confirmed correct, avoiding one wrong change;
+- three design gaps and three suspected implementation problems turned into trackable issues;
+- a reusable asset of nine models, about 215 configurations, `expected.txt` / `run.sh` / READMEs / CI / tracker;
+- design review now has an executable specification, and historical bugs have pre-fix configurations.
 
-The model was not wrong. We were wrong to treat its "current" configuration as current code. Every model README now says which behaviour the base configuration matches and whether a mutation is pre-fix or deliberately wrong.
+TLA+ is a design tool. It shows "no counterexample in this bounded model". Code correctness needs trace validation, shuttle, conformance tests and ordinary tests.
 
-### 3.4 Changing code from a model can break the implementation
+TLA+ fits concurrent, multi-party protocols with interleavings, failures and retries. Deterministic logic, timing, scheduling, memory ordering, encoding and performance do not fit TLA+.
 
-`async-policy-b` says recording an asynchronous call on a marked chain as a hop causes false refusals. Changing `waits.rs` to count only `sync` made the object-relay test `a_synchronous_cycle_through_objects_is_refused` hang. The frame only has `sync`; it cannot distinguish "fire and forget" from "awaited later".
+## 6. Environment and setup cost
 
-We reverted the code, recorded the finding as a known false alarm, and opened #1098. It is not a pretty outcome, but it is better than "the model says so, so break the implementation".
+**Software.** Java 21 and `tla2tools.jar` v1.7.4 with a pinned sha256. No other dependencies.
 
-### 3.5 Separate real bugs, suspected bugs and design gaps
+**Local runs.** `TLA2TOOLS=/tmp/tla2tools.jar specs/<dir>/run.sh`. On 32 cores the full set takes a few minutes.
 
-The real bugs confirmed and fixed were:
+**CI.** A `specs` matrix of seven jobs. Each job installs Java 21, downloads the jar and runs that directory's `run.sh`. Path filtering triggers it only when `specs/**` changes, or on full / nightly runs. Ordinary pull requests do not run it.
 
-- the old-generation reinsertion in `events::link::accept`;
-- the Kotlin `RutisApp` start/stop race;
-- the Node/Bun kill firing before the cleanup deadline.
+**CI time.** `cross-runtime-sync` 7m25s, `remote-lease` 3m7s, `event-close` 1m31s, `events` 1m20s, `row-lifecycle` 1m13s, `call-lifecycle` 1m9s, `peer-rows` 45s. Each job has a 30-minute limit.
 
-Suspected but unconfirmed issues went to #1101/#1102/#1103. Undecided design rules went to #1098/#1099/#1100. We did not write "suspected" as "fixed", and did not force a design gap into an implementation patch.
+**People.** Six agents wrote models in parallel; the main thread reviewed, integrated, ran the full suites and changed CI. The main cost was model writing, state-space debugging and specification review. LLMs speed up the first draft; humans still review the specification and bounds.
 
-## 4. How we decide whether TLA coverage is enough
+**Maintenance.** Models move with design changes. Each directory's README records properties, simplifications, results and uncovered parts. New configurations go into `expected.txt` and `run.sh`.
 
-Not by model count or configuration count, but by four questions:
+## 7. Next
 
-1. Does every promise have a property?
-2. Does every property have a healthy configuration and a counterexample-catching mutation?
-3. Are the results in `expected.txt`, `run.sh` and the tracker?
-4. Are the bounds, simplifications and uncovered parts written down?
-
-All four: covered. Missing one: partially verified. An explicit non-guarantee is acceptable; an unwritten gap is not.
-
-## 5. Reflection
-
-- **TLA is a design tool, not a code proof.** It can show "no counterexample in this bounded model"; it cannot show the Rust/Kotlin/Node code is correct. Code needs trace validation, shuttle, conformance and ordinary tests.
-- **An LLM can write a model, but cannot decide the specification.** Syntax passing and TLC running do not mean the model matches the code; a human has to review the specification and the bounds.
-- **Do not chase 100% of code paths.** State space and review cost explode. Add models only for new promises, historical bugs, implementation ambiguities and undecided decisions.
-- **CI cost has to be designed in.** Large configurations blow through a 30-minute job; path filtering keeps TLA out of ordinary PRs, but a PR that changes `specs/**` has to survive the full run.
-- **Passing is not the deliverable.** The real outputs are fixed bugs, recorded design gaps and confirmed or rejected implementation suspicions. Configuration count is only a process metric.
-
-The biggest gain was not "nine models". It was separating model conclusions from code behaviour: the model may assume boldly; the code change must return to the implementation and its tests. The next step is not more configurations, but settling #1098–#1103 and adding trace validation plus Kani/Miri.
+- Confirm or close #1098–#1103;
+- add trace validation, Kani/Miri and the #639 cases;
+- leave refinement for later.
