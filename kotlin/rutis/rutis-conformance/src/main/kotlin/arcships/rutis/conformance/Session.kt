@@ -8,6 +8,7 @@ package arcships.rutis.conformance
 import arcships.rutis.advanced.RemoteFunction
 import arcships.rutis.RutisException
 import arcships.rutis.internal.peer.Endpoint
+import arcships.rutis.internal.peer.Exported
 import arcships.rutis.internal.peer.ExportedObject
 import arcships.rutis.internal.peer.LocalChannels
 import arcships.rutis.internal.peer.Options
@@ -89,6 +90,8 @@ private class Conformance {
             "wrap" -> listOf(arg(args, 0))
             "applyWrapped" -> session.callFunctionSuspend(function(arg(args, 0), method), listOf(listOf(arg(args, 1))))
             "reenter" -> session.callFunctionSuspend(function(arg(args, 0), method), emptyList())
+            // A new function, for the release-count cases of the malformed matrix.
+            "make" -> Exported("make") { made -> arg(made, 0) }
             // Past the message limit, this side's reply or call fails (#675).
             "big" -> "x".repeat(size(arg(args, 0)))
             "applyBig" -> session.callFunctionSuspend(function(arg(args, 0), method), listOf("x".repeat(size(arg(args, 1)))))

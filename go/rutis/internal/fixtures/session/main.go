@@ -130,6 +130,8 @@ func (c *conformance) dispatch(ctx context.Context, target, method string, args 
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		return c.aborted, nil
+	case "make":
+		return peer.Func(func(ctx context.Context, args []any) (any, error) { return arg(args, 0), nil }), nil
 	// The value one level deeper, returned or passed to a callback: past the
 	// depth limit, this side's call or reply fails (#279).
 	case "wrap":

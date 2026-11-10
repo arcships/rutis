@@ -20,6 +20,8 @@ const conformance: Record<string, (...args: any[]) => unknown> = {
   started: () => started,
   aborted: () => aborted,
   reenter: fn => fn(),
+  // A new function, for the release-count cases of the malformed matrix.
+  make: () => (value: unknown) => value,
   // The value one level deeper, returned or passed to a callback: past the
   // depth limit, this side's call or reply fails (#279).
   wrap: value => [value],
