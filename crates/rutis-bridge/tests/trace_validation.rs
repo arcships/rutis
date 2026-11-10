@@ -3735,8 +3735,7 @@ async fn a_takeover_cleans_the_old_lease_before_it_installs_the_new() {
 
 // ------------------------------------------- §3.8, an access point's ends
 
-/// guarantee: bridge/revocation-refuses-reconnects; DIA-5-7, DIA-5-11,
-/// CHN-5-8.
+/// rule: DIA-5-7, DIA-5-11, CHN-5-8.
 ///
 /// §3.8 and `specs/remote-lease/AccessPoint.tla`: an identity the access
 /// point admitted is revoked — the listen side closes its connection with
@@ -3834,7 +3833,7 @@ async fn an_admitted_identity_is_revoked_after_its_hello() {
     assert_eq!(rejected(&late).at, at + 1);
 }
 
-/// guarantee: bridge/revocation-refuses-reconnects; REM-3.1-2, CHN-8-5.
+/// rule: DIA-5-7, DIA-5-11, CHN-5-8.
 ///
 /// §3.8 and §3.2: a connection whose greeting names another endpoint is
 /// not an admitted session, whatever it asks for afterwards: the session
@@ -3891,7 +3890,7 @@ async fn a_greeting_that_names_another_endpoint_is_not_admitted() {
     assert!(violation.why.contains("names the endpoint"), "{violation}");
 }
 
-/// guarantee: bridge/revocation-refuses-reconnects; DIA-5-11.
+/// rule: DIA-5-7, DIA-5-11, CHN-5-8.
 ///
 /// §3.8 and `specs/remote-lease/AccessPoint.tla`: a credential the access
 /// point does not accept is refused before any greeting (403, not 4003):
