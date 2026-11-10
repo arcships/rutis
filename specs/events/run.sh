@@ -3,6 +3,9 @@
 # with expected.txt. `host-defs` checks EventsHostCheck.tla (the definitions
 # of EventsHost.tla); `table-*`, `emit-*` and `link-*` check their modules.
 #   TLA2TOOLS=/path/to/tla2tools.jar ./run.sh [name ...]
+# Configurations whose .cfg says CHECK_DEADLOCK TRUE rely on the Done action:
+# it stutters only when the protocol has no work left, so a stuck state with
+# work remaining is still reported as a deadlock.
 # Needs Java 11+ on PATH (for example `mise exec java@temurin-21 -- ./run.sh`).
 # tla2tools.jar: https://github.com/tlaplus/tlaplus/releases/tag/v1.7.4
 # (do not commit it).

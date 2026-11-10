@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Run TLC on the configurations of this directory and compare each outcome
-# with expected.txt. Every `call-*.cfg` checks CallLifecycle.tla. An outcome
-# is `ok`, `deadlock` (TLC's deadlock check), or `violated:<name>` for an
-# invariant or the liveness property.
+# with expected.txt. Every `call-*.cfg` checks CallLifecycle.tla and every
+# `relay-*.cfg` CallRelay.tla. An outcome is `ok`, `deadlock` (TLC's deadlock
+# check), or `violated:<name>` for an invariant or the liveness property
+# (a temporal property is reported as `violated:liveness`).
 #   TLA2TOOLS=/path/to/tla2tools.jar ./run.sh [name ...]
 # Needs Java 11+ on PATH (for example `mise exec java@temurin-21 -- ./run.sh`).
 # tla2tools.jar: https://github.com/tlaplus/tlaplus/releases/tag/v1.7.4
@@ -21,6 +22,7 @@ status=0
 for name in "${names[@]}"; do
   case "$name" in
     call-*) module=CallLifecycle.tla ;;
+    relay-*) module=CallRelay.tla ;;
     *) echo "$name: no module for this name" >&2; status=1; continue ;;
   esac
   log="$out/$name.log"

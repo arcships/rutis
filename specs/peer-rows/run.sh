@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Run TLC on the configurations of this directory and compare each outcome
-# with expected.txt. Every `peer-*.cfg` checks PeerRows.tla.
+# with expected.txt. `peer-*` checks PeerRows.tla (sessions, per-session
+# tables, generations), `offers-*` PeerOffers.tla (link.offers, the gate,
+# the two pre-fix cases), `hosted-*` PeerHosted.tla (the host's load, update
+# and unload, cancel in flight), `pair-*` PeerPair.tla (two nodes hosting
+# each other), `svc-*` PeerServices.tla (versions and withdrawal).
 #   TLA2TOOLS=/path/to/tla2tools.jar ./run.sh [name ...]
 # Needs Java 11+ on PATH (for example `mise exec java@temurin-21 -- ./run.sh`).
 # tla2tools.jar: https://github.com/tlaplus/tlaplus/releases/tag/v1.7.4
@@ -19,6 +23,10 @@ status=0
 for name in "${names[@]}"; do
   case "$name" in
     peer-*) module=PeerRows.tla ;;
+    offers-*) module=PeerOffers.tla ;;
+    hosted-*) module=PeerHosted.tla ;;
+    pair-*) module=PeerPair.tla ;;
+    svc-*) module=PeerServices.tla ;;
     *) echo "$name: no module for this name" >&2; status=1; continue ;;
   esac
   log="$out/$name.log"

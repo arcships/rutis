@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Run TLC on the configurations of this directory and compare each outcome
 # with expected.txt. Every `row-*.cfg` checks RowLifecycle.tla; the
-# two-stage, service, lease, crash and two-runtime configurations turn on
-# optional parts of the model through constants (README.md, "The model").
+# two-stage, service (with and without versions), lease, crash, two-runtime,
+# refresh, update and load-step configurations turn on optional parts of the
+# model through constants (README.md, "The model").
 #   TLA2TOOLS=/path/to/tla2tools.jar ./run.sh [name ...]
 # Needs Java 11+ on PATH (for example `mise exec java@temurin-21 -- ./run.sh`).
 # tla2tools.jar: https://github.com/tlaplus/tlaplus/releases/tag/v1.7.4

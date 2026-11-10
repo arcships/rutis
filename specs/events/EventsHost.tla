@@ -205,7 +205,28 @@ EmittableByPlugin(name) == ~IsReserved(name)
 (* 0 means "says no epoch", so its entries are replaced by id only.           *)
 AnnouncedEpoch(id) == id[1]
 
+AnnouncedNumber(id) == id[2]
+
 HasEpoch(id) == id[1] > 0
 
 SameId(a, b) == a = b
+
+AnnouncedId(epoch, n) == <<epoch, n>>
+
+BareId(n) == <<0, n>>
+
+(* §9: an announcement of a newer offer may replace older entries; one from an *)
+(* older offer is ignored. A bare id says nothing about its offer, so it is    *)
+(* always taken (by id only).                                                  *)
+AnnouncementCurrent(seen, id) == ~HasEpoch(id) \/ AnnouncedEpoch(id) >= seen
+
+AnnouncementStale(seen, id) == HasEpoch(id) /\ AnnouncedEpoch(id) < seen
+
+(* §9: a newer offer withdraws the entries announced under older offers; a     *)
+(* bare id stays, because the host has nothing to compare.                     *)
+KeptAfterEpoch(ids, epoch) ==
+    { id \in ids : ~HasEpoch(id) \/ AnnouncedEpoch(id) >= epoch }
+
+KeptAfterOffer(ids, lastOffer) ==
+    { id \in ids : ~HasEpoch(id) \/ AnnouncedEpoch(id) > lastOffer }
 ======================================================================================

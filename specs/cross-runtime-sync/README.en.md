@@ -6,6 +6,8 @@ TLC explores every interleaving of language runtimes calling each other synchron
 
 **Reconciliation (2026-11-09, #614).** The wait graph is now the one `crates/rutis-bridge/src/session/rpc/waits.rs` has: #561's slow path keeps its chain, #597's host-originated synchronous call is a hop, and 854bef5d's asynchronous call on a marked chain is a hop too. The model adds Go / Swift / Kotlin's `Profile` (`stacked = false`, the constant `Threaded`), `bail` / `waterfall-sync` synchronous dispatch, a caller that gives up a synchronous call locally (no `cancel`), Python's synchronous call from another thread (an edge the host cannot see), session end, and SYN-9-3's explicit non-guarantee. What changed since #535 is in "Results" and "Counterexamples".
 
+**Addendum (2026-11-10, #614 continued).** The host is a participant now: the number of threads running Rust code is bounded (`Workers`); a synchronous Rust service call, the host's own synchronous call and a `bail` / `waterfall-sync` dispatch each hold one, and wait in a queue when none is free (`policy-b-workers1`). An asynchronous `serial` / `parallel` / `waterfall` dispatch waits inside a host execution for its listener calls; its first poll may suspend (the filter), and a chain lost across that suspension is `before-lost-chain`. `cancel` follows #561: the caller stops waiting, the callee keeps its mark until it really ends, and a late `ret` is dropped (`before-cancel` is the pre-fix behaviour, pinned by `MarkedWhileRunning`). A Cordis node's connectors share one pump (`Linked`): while one connection waits it reads no other, a cross-session wait the host cannot see (`link-policy-b`); a cycle across hosts is built as "one segment of the wait is in another table" (`Remote`, `cross-host`).
+
 ## Design and code it corresponds to
 
 | Part of the model | Design | Implementation |
@@ -16,6 +18,10 @@ TLC explores every interleaving of language runtimes calling each other synchron
 | Runtimes with a thread per call (Go, Swift, Kotlin): `sync-wait`, `reentrant-sync`, and not `sync-stack` | Multi-language design §9 (2026-10-14) | `waits.rs` `Profile.stacked`; `go/rutis/internal/peer/peer.go`, `swift/rutis/Sources/Rutis/Session/Peer.swift`, `kotlin/rutis/rutis/src/shared/kotlin/arcships/rutis/internal/peer/Peer.kt` |
 | A runtime that does not declare `sync-wait` is outside the check | Multi-language design §9, "mixing versions" | `waits.rs` `forward`: a call without `sync` is not recorded; `profile` |
 | Synchronous event dispatch: `bail`, `waterfall-sync` | [Events protocol](../../docs/design-events-protocol-2026-10-18.en.md) §5.4 | `crates/rutis-bridge/src/events/hub.rs` `dispatch` (`Mode::Bail`, `Mode::Waterfall if sync`), `call_sync`, `Waits`/`wait_here` |
+| The host's bounded worker threads (`Workers`): a Rust service call, the host's own synchronous call and a synchronous dispatch each hold one | Multi-language design §9; events protocol §5.4 | `rpc.rs` `receive`; `events/hub.rs` `dispatch`; `waits.rs` (it records edges per session; the host's threads are not in the graph) |
+| Asynchronous dispatch `serial` / `parallel` / asynchronous `waterfall`: the filter may suspend once, listener calls are asynchronous and the execution awaits them | Events protocol §5.4, §5.5; multi-language design §9 (#561) | `events/hub.rs` `dispatch` (`Mode::Serial`, `Mode::Parallel`, `Mode::Waterfall` when not sync), `call_async` |
+| `cancel`, a late `ret`, the callee keeping its mark until it ends | Multi-language design §9 (#561) | `waits.rs` `marked` / `answered` / `returned`; `rpc.rs`; Go's context, Swift's Task, Kotlin's interrupt |
+| A Cordis node's connector pump: while one connection waits, it reads no other | Multi-language design §9 | `crates/rutis-bridge/src/peer.rs` (`link.offers`); one pump per connector on the Cordis side |
 | Node runtime: non-reentrant | Multi-language design §9; [plugin API](../../docs/guide/plugin-api.en.md), "sync calls and reentrancy" | `node/rutis-runtime/src/session.mjs` `#requestSync`, `#run` |
 | Python runtime: reentrant; a synchronous call from another thread | same | `python/rutis/rutis/peer.py` `_call_sync`, `_run`; `run_coroutine_threadsafe` |
 | Giving up a synchronous call locally (no `cancel`) | Multi-language design §9 (after #561) | Go's context, Swift's Task, Kotlin's interrupt |
@@ -26,11 +32,16 @@ TLC explores every interleaving of language runtimes calling each other synchron
 - **Participants**: the Rust host and 3 runtimes. A runtime is either single-threaded with one stack (outside `Threaded`, declares `sync-stack`) or one thread or task per incoming call (`Threaded`: Go / Swift / Kotlin). One session per runtime; each direction is delivered in order.
 - **A stacked runtime**: only the top runs. When the top makes a synchronous call, the thread reads incoming frames while it waits (pumping): a reply marks its call as returned; a call runs at once when idle; while waiting, a reentrant runtime runs it nested and a non-reentrant one puts it aside unless its path names one of its waits; a top that is running reads nothing.
 - **A runtime with a thread per call**: every incoming call starts on its own thread at once; nothing waits for anything, there is no stack order and no call is put aside. Its own synchronous calls still wait.
-- **Rust** reads each session in order, forwards calls, rewrites `path`, and returns results to their callers; its threads are not a bounded resource (see "Simplifications"). It also makes its own synchronous calls (a Rust plugin's) and runs `bail` / `waterfall-sync` dispatches.
+- **Rust** reads each session in order, forwards calls, rewrites `path`, and returns results to their callers. It also makes its own synchronous calls (a Rust plugin's), runs `bail` / `waterfall-sync` synchronous dispatches, and is called synchronously by a runtime (a Rust service or function): all of these run on the host's `Workers` threads, a call that waits holds one, and a call with none free queues (`policy-b-workers1`). Read threads are not counted.
+- **The host as a participant**: a host execution (`kind` = `"service"`, `"root"`; a synchronous dispatch lives in `dispatches`) is a piece of Rust code. A synchronous call it makes is the host's own (`src` empty, #597) and is recorded in the wait graph as usual; the call that brought it in from a runtime is not (`waits.rs` records `forward` per session). An asynchronous dispatch inside it does not hold a thread while it awaits.
 - **How a call is classified** (waits.rs `forward`): the caller waits synchronously and the last call of its chain is marked → a **hop** (`kind` = `"hop"`); it waits synchronously but no marked call is on its chain → a hop with an empty `src` (#597); an asynchronous call whose chain's last call is marked → a hop too (`kind` = `"async"`, though nobody waits for it); otherwise an **entry**. A synchronous call from a runtime that does not declare `sync-wait` (not in `Declared`) is recorded as an entry (`kind` = `"hidden"`): the host does not see that wait.
 - **Emits and posts**: a running activation may emit an event (`MaxPosts` in total), an `events.dispatch` nobody waits for, and it goes on. Rust then posts the listener's call to the listener's runtime (an entry). `EmitChain` says whether that call carries the emitter's chain (#561: it does not).
 - **Synchronous dispatch**: `bail`, and a Cordis plugin's `waterfall`, make the emitter wait for the whole dispatch; the host calls one listener and waits for it. `Dispatch` happens at a top-level activity only (a plugin's `ctx.emit` / `ctx.bail`); `DispatchHop` says whether Rust records the dispatch itself as a hop. A `bail`'s listener call carries no chain, a `waterfall`'s does (calls back into the emitter's process have to land on the chain it waits for).
-- **Session end**: with `Ends`, a session may end while it holds no other session's call: its calls leave the table and calls into it are answered with an error (SYN-9-30).
+- **Asynchronous dispatch**: `serial`, `parallel` and an asynchronous `waterfall` happen inside a host execution (a Rust service handling a runtime's synchronous call). The dispatch suspends once first (the filter, `st = "filter"`), then sends one asynchronous `events.call` to a listener and awaits it. With `KeepChain` the listener call carries the emitter's chain; without it (#561 before) the chain is lost across the suspension and a listener calling the waiting side back is put aside (`before-lost-chain`).
+- **Cancellation**: a runtime in `Cancellers` may cancel a synchronous wait (`cancel`): the caller stops waiting; the forwarded call stays in Rust's table but nobody waits for it (`real = false`) and a late `ret` is dropped; the callee (a runtime or a Rust service) keeps its mark until it really ends (`KeepMark`; `before-cancel` clears it on the cancel). A call cancelled before it starts still runs in the model, and only its reply is dropped ("it may have started").
+- **A shared pump**: `Linked` groups sessions (a Cordis node's connectors). While any session of a group waits, the others read no frames (`Group`); the host sees independent sessions and not this wait (`link-policy-b`).
+- **A session on another host**: a session in `Remote` is on the other host; its synchronous waits are in the other host's table, not this one, and the path this host writes carries none of its call ids, so a callback cannot land on its chain (`cross-host`).
+- **Session end**: with `Ends`, a session may end while it holds no other session and no host execution is live: its calls leave the table and calls into it are answered with an error (SYN-9-30).
 - **Call ids** are numbered per session; the model also keeps every call's true ancestry (`truth`), apart from the wire `path`.
 - **Policies** (`Policy`): `current` detects nothing; `A` refuses synchronous calls between two non-reentrant runtimes; `B` builds a wait graph before each forward and answers `SyncWaitCycle` on a cycle; `Bchain` is B without the stack-order edges.
 
@@ -45,6 +56,13 @@ Nodes are the calls Rust forwarded and has not answered (`hops`), plus posts nob
 | stack order | c and then d entered the same single-stack runtime y and d has started there; c waits for d | yes: frames of a session are ordered |
 | dispatch | the host calls a listener inside a synchronous dispatch, and the dispatch waits for that call; a call back into the emitter lands on the chain it waits for | the dispatch itself is not in the table (`DispatchHop` = FALSE); the listener call is the host's own synchronous call (a hop) |
 | entry | a call nobody waits for synchronously (`emit`'s `events.call`, an asynchronous call on a marked chain, a synchronous call the host cannot see) is a boundary of chains | it is recorded (`entry`), but it does not count as a call out of its runtime |
+| host thread | a queued host execution waits for every host execution or synchronous dispatch holding a worker | no: the host's threads are not in the table (`policy-b-workers1`) |
+| host wait | a host execution waits for the calls it makes; an asynchronous dispatch waits for its listener call | only the forwarded calls are in it (as hops); the service call itself and the dispatch are not |
+| cancel | a cancelled hop stays a node with `real` false: it waits for nothing and nothing waits for it | it stays in the table until the reply, which is then dropped |
+| connector pump | while one session of a group waits, the other sessions' incoming calls do not start (TLC's deadlock check sees it directly) | no: `Linked` sessions are independent in the table (`link-policy-b`) |
+| another host | a wait that comes from another host is only in that table; this one sees it as an entry, and the chain carries none of its call ids | no: `Remote` calls are recorded as entries (`cross-host`) |
+
+`Linked` adds no edge: the model disables `Receive` for a session while another session of its group waits, and TLC's deadlock check sees "frames but nobody can read them". The host has no record of it.
 
 The model has two graphs: `TrueSucc`, from the runtimes' real stacks, queues and each node's `real` (someone really waits for it) — only for judging; and `RustSucc`, from Rust's own state and the `entry` flags it recorded — what policy B can do. A node whose `real` is false (a post, an asynchronous call on a marked chain, a call given up locally) is not on a real cycle, but it may be on one in Rust's graph.
 
@@ -53,10 +71,11 @@ The model has two graphs: `TrueSucc`, from the runtimes' real stacks, queues and
 - A runtime's calls may be synchronous, asynchronous (`Async`) or "it waits but the frame does not say so" (`Hidden`); Rust's posts and synchronous dispatches are built as described.
 - Calls inside one runtime do not cross Rust and are not modelled.
 - Service calls and function (callback) calls are one action; `await`, reference counts and value encoding are not modelled.
-- A synchronous dispatch happens at a top-level activity only; `next` (a waterfall's chain) and the terminal are not built: one dispatch has one listener. A listener in the emitter's own runtime is modelled; `next` would add the listener-to-host edge, which the model does not have.
-- Cancellation is modelled only as "the caller gives up locally, without `cancel`" (`Abandoners`, open to `Threaded` runtimes only: what Go / Swift / Kotlin do): a late reply is dropped. `cancel` itself, a late `ret` blocking the reader, Node's keyed holds and behind tasks are not modelled.
-- A session ends only while it has no call out and takes part in no dispatch (`Ends`); calls into it are answered with an error. A break, a reconnect and `rows.ended` are not modelled.
-- Rust threads are not a bounded resource: each forward runs on the thread already waiting for its chain or on a new one (#614's `Workers` and a bounded executor are not modelled).
+- A synchronous dispatch happens at a top-level activity only; an asynchronous one only inside a Rust service's execution. `next` (a waterfall's chain), several listeners, a filter's veto and its exceptions are not built: one dispatch has one listener, and the filter only chooses "suspend once, then go on". A listener in the emitter's own runtime is modelled; `next` would add the listener-to-host edge, which the model does not have.
+- A host execution has two sources: a runtime's synchronous service call, or the host's own synchronous call (`HostRoot`). The host's `Workers` is bounded and read threads are not counted; an asynchronous dispatch awaiting its listener does not hold a thread. Only a synchronous `call` into the host is modelled (`acall` / `hcall` into the host are not: an asynchronous reply has no node to land in).
+- Cancellation is modelled in two forms: with `cancel` (`Cancellers`) and a local give-up without it (`Abandoners`, open to `Threaded` runtimes only: what Go / Swift / Kotlin do). A `cancel` that reaches a call before it starts lets it run and drops its late reply; a `ret` blocking the reader is not built.
+- A session ends only while it has no call out, takes part in no dispatch and no host execution is live (`Ends`); calls into it are answered with an error. A break, a reconnect and `rows.ended` are not modelled.
+- **Not built**: Node's keyed holds (a later call of the same key waits behind an earlier emit); a behind task is `deferred` (it runs only when the stack is empty and is dropped when the session ends); a Cordis connector's inline handling and holds are only the shared pump; a cycle across hosts is built as one segment (`Remote`), not as two real hosts; the differential test for `cycle_among` and trace validation of the wait graph are under "Open questions".
 - Each activation makes one call by default; `policy-b-2node-seq` allows two in sequence.
 - Scale: 3 runtimes, chains ≤ 3 hops (`async-policy-b` up to 4), ≤ 2 concurrent top-level activities, ≤ 1 post or dispatch.
 
@@ -69,54 +88,68 @@ The model has two graphs: `TrueSucc`, from the runtimes' real stacks, queues and
 | `ChainRecognised` | A non-reentrant runtime never puts aside a call of its own chain: true ancestry, every node of which someone really waits for (posts and the like do not count) |
 | `NoFalseCycle` | Policy B answers `SyncWaitCycle` only if the real wait graph plus this call has a cycle |
 | `NoLegitimateRefused` | Policy A refuses no legitimate call (forwarding it closes no cycle in the real wait graph) |
+| `MarkedWhileRunning` | A synchronous call received and run by Rust code that is cancelled stays marked until it really ends; a call it forwards afterwards is still a hop. `before-cancel` clears the mark on the cancel and violates this |
 | `NeverCycle` | Only to confirm B's check fires (expected to be violated) |
 | `NeverNested` | SYN-9-3 (expected to be violated): a reentrant runtime's service is called in the middle of its own synchronous call. Not a defect: an explicit non-guarantee, pinned by a property |
 
 ## Results
 
-TLC 2.19 (tla2tools v1.7.4), Temurin 21, 16 cores; `MaxRoots = 2`, `MaxDepth = 3`, `MaxCalls = 1` unless noted.
+TLC 2.19 (tla2tools v1.7.4), Temurin 21, 32 cores, `run.sh` with `-workers auto`; `MaxRoots = 2`, `MaxDepth = 3`, `MaxCalls = 1` unless noted. Every configuration was rerun on 2026-11-10 and the counts and times below are from that run; the host-related ones set `Workers` (1 for `policy-b-workers1`, 4 for the asynchronous dispatches, 2 otherwise).
 
 | Configuration | Runtimes (`n` non-reentrant, `p` reentrant, `g` a thread per call) | Result | Distinct states | Time |
 | --- | --- | --- | --- | --- |
-| `current-1node-1python` | n, p | pass | 606 | <1 s |
-| `current-2node` | n1, n2, p | **deadlock** (counterexample 1) | 1,006 | <1 s |
-| `current-1node` | n, p1, p2 | **deadlock** (counterexample 2) | 8,908 | 1 s |
-| `current-reentrant` | p1, p2, p3 | pass | 88,824 | <1 s |
-| `current-norebase` | n1, n2, p, no `path` rewriting | **`RoutingSound` violated** (counterexample 3) | 268 | <1 s |
-| `policy-a-1node` | n, p1, p2 (the combination A intends) | **deadlock** (as counterexample 2) | 9,706 | <1 s |
-| `policy-a-2node` | n1, n2, p | **deadlock** (shape of counterexample 2) | 3,066 | <1 s |
-| `policy-a-refusals` | n1, n2, p | **`NoLegitimateRefused` violated** (counterexample 4) | 93 | <1 s |
-| `policy-bchain-2node` | n1, n2, p | **deadlock** (as counterexample 2) | 5,798 | 1 s |
-| `policy-b-2node` | n1, n2, p | pass | 37,311 | 1 s |
-| `policy-b-1node` | n, p1, p2 | pass | 55,327 | 1 s |
-| `policy-b-nonreentrant` | n1, n2, n3 | pass | 27,000 | 1 s |
-| `policy-b-2node-depth4` | n1, n2, p; chains ≤ 4 | pass | 149,659 | 1 s |
-| `policy-b-2node-3roots` | n1, n2, p; 3 top-level | pass | 1,190,945 | 8 s |
-| `policy-b-1node-3roots` | n, p1, p2; 3 top-level | pass | 2,468,607 | 16 s |
-| `policy-b-2node-seq` | n1, n2, p; 2 calls per activation, chains ≤ 2 | pass | 2,549,258 | 19 s |
-| `policy-b-acts` | n1, n2, p | `NeverCycle` violated (expected: B fires) | 408 | <1 s |
-| `current-posts` | n, p, q (p, q reentrant); 2 top-level calls, 1 emit | **deadlock** (counterexample 5) | 334,773 | 2 s |
-| `policy-b-posts` | as `current-posts`, policy B with entries; CI size with `MaxDepth=2` | pass | 1,152,323 | 16 s on 32 cores; estimated 1–2 min on CI 4 cores |
-| `policy-b-posts-node` | n, p, q (p non-reentrant, `q` reentrant), policy B; CI size with `MaxDepth=2` | pass | 641,339 | 10 s on 32 cores; estimated 1–2 min on CI 4 cores |
-| `threaded-policy-b` | n, g, p (g a thread per call) | pass | 62,128 | <1 s |
-| `unmarked-policy-b` | n, g, p; g does not declare `sync-wait` | **deadlock** (counterexample 9, explicit non-guarantee) | 762 | <1 s |
-| `bail-policy-b` | r, t; a `bail` dispatch Rust does not record (pre-fix behaviour; current code carries the chain) | **deadlock** (counterexample 6) | 449 | <1 s |
+| `current-1node-1python` | n, p | pass | 652 | <1 s |
+| `current-2node` | n1, n2, p | **deadlock** (counterexample 1) | 915 | <1 s |
+| `current-1node` | n, p1, p2 | **deadlock** (counterexample 2) | 12,340 | 1 s |
+| `current-reentrant` | p1, p2, p3 | pass | 113,191 | 1 s |
+| `current-norebase` | n1, n2, p, no `path` rewriting | **`RoutingSound` violated** (counterexample 3) | 389 | <1 s |
+| `policy-a-1node` | n, p1, p2 (the combination A intends) | **deadlock** (as counterexample 2) | 7,058 | <1 s |
+| `policy-a-2node` | n1, n2, p | **deadlock** (shape of counterexample 2) | 2,687 | <1 s |
+| `policy-a-refusals` | n1, n2, p | **`NoLegitimateRefused` violated** (counterexample 4) | 212 | <1 s |
+| `policy-bchain-2node` | n1, n2, p | **deadlock** (as counterexample 2) | 7,730 | <1 s |
+| `policy-b-2node` | n1, n2, p | pass | 41,107 | 1 s |
+| `policy-b-1node` | n, p1, p2 | pass | 65,400 | 1 s |
+| `policy-b-nonreentrant` | n1, n2, n3 | pass | 27,012 | <1 s |
+| `policy-b-2node-depth4` | n1, n2, p; chains ≤ 4 | pass | 163,909 | 3 s |
+| `policy-b-2node-3roots` | n1, n2, p; 3 top-level | pass | 1,398,345 | 21 s |
+| `policy-b-1node-3roots` | n, p1, p2; 3 top-level | pass | 3,584,445 | 45 s |
+| `policy-b-2node-seq` | n1, n2, p; 2 calls per activation, chains ≤ 2 | pass | 3,120,478 | 35 s |
+| `policy-b-acts` | n1, n2, p | `NeverCycle` violated (expected: B fires) | 793 | <1 s |
+| `current-posts` | n, p, q (p, q reentrant); 2 top-level calls, 1 emit | **deadlock** (counterexample 5) | 135,882 | 2 s |
+| `policy-b-posts` | as `current-posts`, policy B with entries; CI size with `MaxDepth=2` | pass | 1,152,323 | 11 s |
+| `policy-b-posts-node` | n, p, q (p non-reentrant, `q` reentrant), policy B; CI size with `MaxDepth=2` | pass | 641,339 | 7 s |
+| `threaded-policy-b` | n, g, p (g a thread per call) | pass | 62,128 | 1 s |
+| `unmarked-policy-b` | n, g, p; g does not declare `sync-wait` | **deadlock** (counterexample 9, explicit non-guarantee) | 760 | <1 s |
+| `bail-policy-b` | r, t; a `bail` dispatch Rust does not record (pre-fix behaviour; current code carries the chain) | **deadlock** (counterexample 6) | 282 | <1 s |
 | `waterfall-policy-b` | r, t; a `waterfall` dispatch | pass | 3,277 | <1 s |
 | `bail-recorded` | r, t; `bail`, Rust records the dispatch as a hop | pass | 3,494 | <1 s |
 | `emit-unchained` | n, p, q; an emit's listener call carries no chain (`EmitChain` FALSE), 1 top-level | pass | 69,591 | 2 s |
-| `host-call` | n1, p; the host's own synchronous call | pass | 5,208 | <1 s |
-| `before-host-call` | as above, before #597 (an entry) | pass | 5,208 | <1 s |
-| `abandon-policy-b` | n, g, p; g gives up a synchronous call locally | **`NoFalseCycle` violated** (counterexample 7) | 71,002 | 1 s |
-| `hidden-policy-b` | n, p, q; p calls synchronously from another thread | **`ChainRecognised` violated** (counterexample 10, explicit non-guarantee) | 772 | <1 s |
-| `async-policy-b` | n, p, q; an asynchronous call on a marked chain (implementation keeps the conservative edge; known false alarm) | **`NoFalseCycle` violated** (counterexample 8) | 29,660 | 1 s |
+| `host-call` | n1, p; the host's own synchronous call (holds one `Workers` thread) | pass | 5,939 | 1 s |
+| `before-host-call` | as above, before #597 (an entry) | pass | 5,939 | 1 s |
+| `abandon-policy-b` | n, g, p; g gives up a synchronous call locally | **`NoFalseCycle` violated** (counterexample 7) | 59,335 | 1 s |
+| `hidden-policy-b` | n, p, q; p calls synchronously from another thread | **`ChainRecognised` violated** (counterexample 10, explicit non-guarantee) | 941 | <1 s |
+| `async-policy-b` | n, p, q; an asynchronous call on a marked chain (implementation keeps the conservative edge; known false alarm) | **`NoFalseCycle` violated** (counterexample 8) | 27,725 | 1 s |
 | `nested-service` | p1, p2 | `NeverNested` violated (expected, SYN-9-3) | 118 | <1 s |
 | `end-session` | n1, n2, p; a session may end | pass | 84,695 | 1 s |
+| `policy-b-workers1` | p, q, r; `Workers = 1`, the host's own call holds the only thread | **deadlock** (counterexample 12, explicit non-guarantee) | 950 | <1 s |
+| `serial-policy-b` | r, t; a `serial` dispatch, chain kept across the suspension | pass | 1,601 | <1 s |
+| `parallel-policy-b` | r, t; a `parallel` dispatch (one listener) | pass | 1,601 | <1 s |
+| `waterfall-async-policy-b` | r, t; an asynchronous `waterfall` (one listener, `next` not built) | pass | 1,601 | <1 s |
+| `before-lost-chain` | as `serial-policy-b`, chain lost across the suspension (before #561) | **deadlock** (counterexample 13) | 599 | <1 s |
+| `cancel-policy-b` | r, t; cancel a running Rust service call (`KeepMark`) | pass | 1,613 | <1 s |
+| `cancel-forward-policy-b` | r, t; cancel a forwarded synchronous call, late reply dropped | pass | 480 | <1 s |
+| `before-cancel` | as `cancel-policy-b`, the mark cleared on the cancel (before #561) | **`MarkedWhileRunning` violated** (counterexample 14) | 426 | <1 s |
+| `link-policy-b` | l1, l2 (one pump), x; l1 waits for x, x calls l2 | **deadlock** (counterexample 15, explicit non-guarantee) | 94 | <1 s |
+| `link-alone` | as `link-policy-b` with `Linked = {}` (a pump per connection) | pass | 468 | <1 s |
+| `cross-host` | a (on the other host), b; a waits for b, b calls a back | **deadlock** (counterexample 16, explicit non-guarantee) | 34 | <1 s |
 
 "Pass" means exhaustive: no deadlock, all listed invariants hold; state counts on these rows are exact. On deadlock and violation rows TLC stops at the first counterexample, so the count depends on the order of the search and varies between runs; treat it as indicative.
 
-The first 20 rows are the #535 results and state counts. Records now carry more fields (`kind`, `entry`, `real`, `mk`), so the same configurations take somewhat more states; these were rerun during the extension and every result matched the table; `policy-b-posts` and `policy-b-posts-node` use `MaxDepth=2` for CI and the table shows the reduced counts. Every new configuration was run to completion within a minute.
+The state counts differ from the first #614 reconciliation (for example `current-1node` 8,908 → 12,340, `policy-b-2node` 37,311 → 41,107): those were the #535 model, and `entry`, `real`, `mk`, `cancelled` and the rest widened the state space. `host-call` and `before-host-call` also carry a worker id now. `policy-b-posts` and `policy-b-posts-node` use `MaxDepth=2` for CI; with chains ≤ 3, `policy-b-2node-seq` passed 44 million states in 10 minutes and was still growing, so it runs with chains ≤ 2. Every configuration finishes within a minute except `policy-b-1node-3roots` (45 s), `policy-b-2node-seq` (35 s) and `policy-b-2node-3roots` (21 s).
 
-`current-1node-1python` backs the statement in §9 of the multi-language design that one Node and one Python runtime do not deadlock. With chains ≤ 3, `policy-b-2node-seq` passed 44 million states in 10 minutes and was still growing, so it runs with chains ≤ 2.
+`current-1node-1python` backs the statement in §9 of the multi-language design that one Node and one Python runtime do not deadlock.
+
+`before-host-call` is expected to pass: with no call marked, the host's own synchronous call is an entry; with a complete chain, the only incoming edge a top-level call can have is stack order, and a mark already exists then, so it is an entry, and entries have that kind of edge, so no cycle is missed. #597's unit test is about the truncated-chain case (`session/rpc/tests.rs`, `rutis-loader/tests/sync_cycles.rs`).
 
 ### Counterexamples
 
@@ -140,6 +173,11 @@ The first 20 rows are the #535 results and state counts. Records now carry more 
 9. **A runtime without `sync-wait`** (`unmarked-policy-b`, SYN-9-26). g's synchronous calls carry no `sync`, the host does not record them, and the whole session is outside the check; the n → g → p → n cycle is not found and deadlocks. This is an **explicit non-guarantee**: an older SDK can still deadlock as before, but nothing is falsely refused.
 10. **A synchronous call from another thread** (`hidden-policy-b`). Python calls synchronously from another thread (`run_coroutine_threadsafe`); the frame carries no `sync`, so the host does not see the wait. The call enters a waiting non-reentrant runtime and is put aside; `ChainRecognised` is violated (the first step of a deadlock). This is an **explicit non-guarantee**.
 11. **A reentrant runtime called mid-call** (`nested-service`, SYN-9-3). p1 synchronously calls a service of p2; inside that call p2 synchronously calls p1; another activity of p1 synchronously calls p2, and p2, reentrant, nests it above the call it is running. `NeverNested` is violated: an **explicit non-guarantee** ("do not hold a lock while calling a rutis service" cannot be enforced), pinned by a property that is expected to be violated.
+12. **The host's worker threads run out** (`policy-b-workers1`, 2026-11-10). With `Workers = 1`, the host's own synchronous call (`HostRoot`) holds the only thread and waits for r; r, inside the wait, calls a Rust service; the service is not on r's chain (`waits.rs` records edges per session) and needs a worker, and the only worker is held. r waits for the service, the service for a worker, the worker for r: deadlock. The state of the host's threads is not in the wait graph, so B does not see it. This is an **explicit non-guarantee**: Rust code waiting synchronously holds a worker; concurrent waits like this can fill the pool, and if one of them also waits for an incoming call that is not on its chain and needs a new thread, the host stalls. The smallest shape the model finds is the host's own call, one runtime's synchronous service call and one service call; the issue's three-runtime example is the same cycle.
+13. **A chain lost after an asynchronous dispatch suspended** (`before-lost-chain`). r (non-reentrant) synchronously calls a Rust service; the service starts a `serial` dispatch; the listener call is made only after the dispatch suspended (the filter). With `KeepChain` FALSE (before #561) the listener call carries no id of r's wait; when the listener is in r (or calls r back), r does not recognise it and puts it aside. r waits for the service, the service for the dispatch, the dispatch for the listener: deadlock. `serial-policy-b` / `parallel-policy-b` / `waterfall-async-policy-b` keep the chain and pass. This configuration checks the deadlock only, not `ChainRecognised`: the lost chain also makes a non-reentrant runtime put a call of its own chain aside. It corresponds to #561's slow-path tests (`session/rpc/tests.rs`, `waits.rs`).
+14. **The mark cleared on a cancel** (`before-cancel`). r synchronously calls a Rust service; after the call has started, r sends `cancel`. Before the fix (`KeepMark` false) the service drops its mark on the cancel; a call it forwards afterwards is no longer a hop under a marked chain, violating `MarkedWhileRunning`. `cancel-policy-b` keeps the mark until the call really ends and passes; `cancel-forward-policy-b` is the same rule on a forwarded call (the late `ret` is dropped). It corresponds to #561's cancel rules (`waits.rs` `marked` / `answered` / `returned`).
+15. **A Cordis node's connections share one pump** (`link-policy-b`). l1 synchronously calls x; inside that call x synchronously calls l2; l1 and l2 are two connectors of one Cordis node, sharing a pump, and while l1 waits it reads no frames of l2. The host takes l1 and l2 for independent sessions: l1 waits for x and x for l2 are in its table, but "l2 cannot read" is not, so it deadlocks. `link-alone` drops `Linked` (a pump per connector) and passes. This is an **explicit non-guarantee**: the host cannot see a cross-session wait inside one node.
+16. **A cycle across hosts** (`cross-host`). a is on the other host: its synchronous wait for b is in the other table, this one records it as an entry, and the path this host writes carries none of a's call ids (`Remote`). a waits for b, and b synchronously calls a back; a does not recognise the callback and puts it aside: deadlock. Each host sees only its own segment, and `SyncWaitCycle` fires on neither side. This is an **explicit non-guarantee**.
 
 ## Recommendation: policy B (with stack order)
 
@@ -154,13 +192,20 @@ What an implementation of B needs (the model's premises):
 3. a check before each forward, answering `SyncWaitCycle` with the calls of the cycle instead of forwarding;
 4. reliable reentrancy and stack information: `reentrant-sync`, `sync-stack` (Node declares no `reentrant-sync`; Go / Swift / Kotlin declare no `sync-stack`);
 5. only **synchronous** waits in the graph (see "Open questions").
+6. the number of threads running Rust code on the host must be bounded (`Workers`); B builds no edges for the host's threads, so blocking on them is outside the check (counterexample 12).
 
 ## Open questions and what is not covered
 
 - **Telling synchronous from asynchronous (settled, modelled)**: the call frame's `sync` field says the caller waits synchronously; only calls with it, and calls whose chain's last call is marked, enter the graph (#228, 854bef5d). The model shows that recording an asynchronous call on a marked chain as a hop raises false alarms (counterexample 8): either fix the implementation or count only `sync` calls.
 - **Synchronous dispatch has to be visible (new, counterexample 6)**: a `bail` dispatch and its listener call must be connected in the graph (recorded as a hop, with the emitter's wait id on the listener's `path`), or a deadlock goes undetected. `waterfall-sync` passes today because calls back into the emitter's process carry its innermost wait chain.
-- **#614 still not modelled**: the host's `Workers` (bounded worker threads, and `policy-b-workers1`), the asynchronous `serial` / `parallel` / `waterfall` dispatch (executions on the host as a participant), `cancel` and late `ret`s, Node's keyed holds and behind tasks, a Cordis node's connection session (while waiting on one session it reads no other), cycles across hosts, bounded thread pools on the runtime side (Kotlin's IO pool, Swift's cooperative pool). Also the `before-lost-chain` and `before-cancel` configurations, the differential property test for `cycle_among`, and trace validation of the wait graph.
-- **Synchronous calls made by Rust itself** are modelled as the host's calls (`host-call`, `before-host-call`), but the host's thread count is not bounded.
+- **Node's keyed holds are not built**: a later call of the same key waits behind an earlier emit; that needs two emits on one key and their order in flight. `deferred` builds a behind task only (it runs when the stack is empty and is dropped when the session ends), not the per-key order. The other Node detail from #614, "a `SyncWaitCycle` when a waiting chain awaits an unresolved promise", is not built either: it is a `waits.rs` decision, not the shape of the wait graph.
+- **A cycle across hosts is built as one segment**: `Remote` records "this session's wait is in another table" as an entry, and the path carries none of its call ids; `cross-host` is the counterexample. The real topology of two hosts, the path rewriting on a node link and the refusal on the other side are not built. §9 of the multi-language design and `bridge/sync-wait-cycle-refused` carry it as an explicit non-guarantee.
+- **The premise of `Workers`**: the model assumes a synchronous wait in Rust code holds a worker thread (a Rust service runs on the calling thread, and the synchronous call blocks it). If in the implementation a Rust service runs on an asynchronous executor and the wait holds no thread, `policy-b-workers1` becomes expected to pass and the worker edge goes away. The asynchronous dispatch holding no thread while it awaits is the other half of the same judgement.
+- **Bounded thread pools on the runtime side are not built**: Kotlin's IO pool (64) and Swift's cooperative pool are not resources the host can see; a `Threaded` runtime is assumed to have a thread or task for every incoming call. A full pool queues inside the runtime, invisible to the host, the same kind of problem as the host's workers in `policy-b-workers1`.
+- **The differential test for `cycle_among` (not done, a Rust test to come)**: build every edge by the model's `RustSucc` (chain, put aside, stack order, entry boundary), then DFS, and compare with `waits.rs`'s `cycle_among` (sorted by (dst, seq), only the nearest chain hop and the next started call) on random graphs: about 20 hops, random `Profile` (`stacked` / `reentrant`), the two must agree on a cycle or its absence. It is a `waits.rs` test; this change touches `specs/` only and does not add it.
+- **Trace validation of the wait graph (not done)**: record the six operations of `waits.rs` (`profile`, `marked`, `answered`, `returned`, `ended`, `forward`) and each decision, and check them against the model on runs of `rutis-loader/tests/sync_cycles.rs` and `rpc_callbacks.rs` (as #616 and #624 do). It needs recording points in the tests; this change does not touch the crates.
+- **Asynchronous dispatch is only built inside a Rust service's execution**: `serial` / `parallel` at a top-level activity (a Cordis plugin's `ctx.parallel`, say) are not built; one dispatch has one listener, and `next`, a filter's veto and its exceptions are not built.
+- **Synchronous calls made by Rust itself** are built as host executions (`host-call`, `before-host-call`) and hold one `Workers` thread; read threads and asynchronous executions hold none.
 - **B's cost**: a reachability check on the global table before every synchronous forward; the table's size is the number of synchronous calls in progress. The model does not measure time.
 - A caller that retries at once after `SyncWaitCycle` may cycle again; whether to back off is the caller's decision, not modelled.
 
@@ -181,8 +226,8 @@ TLA2TOOLS=/tmp/tla2tools.jar mise exec java@temurin-21 -- specs/cross-runtime-sy
 java -cp /tmp/tla2tools.jar tlc2.TLC -workers auto -config bail-policy-b.cfg CrossRuntimeSync.tla
 ```
 
-Each new configuration finishes within a minute; `policy-b-posts` and `policy-b-posts-node` take about ten seconds locally after reducing to `MaxDepth=2` (estimated 1–2 minutes on CI 4 cores); `policy-b-1node-3roots` and `policy-b-2node-seq` take a dozen or so seconds.
+Each new configuration finishes within a minute; `policy-b-posts` and `policy-b-posts-node` take about ten seconds locally after reducing to `MaxDepth=2` (estimated 1–2 minutes on CI 4 cores); `policy-b-1node-3roots`, `policy-b-2node-3roots` and `policy-b-2node-seq` take 20–45 s on 32 cores and longer on CI.
 
 ## Maintenance
 
-When §5 or §9 of the multi-language design or §7 of M1 changes, or when `rpc.rs`, `waits.rs`, `events/hub.rs`, `session.mjs` or `peer.py` change which calls run during a synchronous wait, or which calls enter the wait graph, change this model and `expected.txt` together (standard Q11.2.3).
+When §5 or §9 of the multi-language design or §7 of M1 changes, or when `rpc.rs`, `waits.rs`, `events/hub.rs`, `session.mjs` or `peer.py` change which calls run during a synchronous wait, or which calls enter the wait graph, change this model and `expected.txt` together (standard Q11.2.3). Host executions, `Workers`, asynchronous dispatch and `cancel` follow `rpc.rs` `receive`, `events/hub.rs` `dispatch` and `waits.rs` `marked` / `answered` / `returned`.

@@ -6,10 +6,13 @@
 (* path rewriting) and §九 (deadlock policy);                              *)
 (* docs/design-multilang-m1-2026-10-04.md §七 (relays, `rebase`).           *)
 (* Implementation modelled: crates/rutis-bridge/src/session/rpc.rs,         *)
-(* rpc/waits.rs (its six operations), events/hub.rs (synchronous dispatch),*)
-(* runtime/rows.rs (Rust); node/rutis-runtime/src/session.mjs (Node,        *)
-(* non-reentrant); python/rutis/rutis/peer.py (Python, reentrant); Go,      *)
-(* Swift, Kotlin (a thread or task per call: `Threaded`).                   *)
+(* rpc/waits.rs (its six operations), events/hub.rs (synchronous and       *)
+(* asynchronous dispatch), runtime/rows.rs (Rust); node/rutis-runtime/     *)
+(* src/session.mjs (Node, non-reentrant); python/rutis/rutis/peer.py        *)
+(* (Python, reentrant); Go, Swift, Kotlin (a thread or task per call:       *)
+(* `Threaded`). The host is a participant too: Rust code (a service call,   *)
+(* the host's own call, a synchronous dispatch) runs on `Workers` threads,  *)
+(* and an asynchronous dispatch waits inside such an execution.             *)
 (* README.md next to this file lists the simplifications and results.      *)
 (*                                                                         *)
 (* Every runtime has one session with Rust; each direction of a session is *)
@@ -42,17 +45,33 @@ CONSTANTS
     Abandoners, \* runtimes that give up a synchronous call locally, without `cancel`
     Hidden,     \* runtimes that make synchronous calls from another thread, unmarked
     Ends,       \* TRUE: a session may end during the run
-    Async       \* TRUE: an activation may make an asynchronous call
+    Async,      \* TRUE: an activation may make an asynchronous call
+    Workers,    \* host threads that run Rust plugin code (a bounded pool)
+    Services,   \* TRUE: a runtime may call a Rust service (the host as a participant)
+    Cancellers, \* runtimes that cancel a synchronous call with `cancel`
+    KeepMark,   \* TRUE: a cancelled call stays marked until it ends (#561)
+    KeepChain,  \* TRUE: a call made after an asynchronous suspension keeps its chain
+    Linked,     \* groups of sessions sharing one pump (a Cordis node's connectors)
+    Remote      \* sessions on another host: this host does not record their waits
 
 ASSUME Reentrant \subseteq Runtimes
 ASSUME Threaded \subseteq Reentrant
 ASSUME Declared \subseteq Runtimes
 ASSUME Abandoners \subseteq Runtimes
 ASSUME Hidden \subseteq Runtimes
+ASSUME Cancellers \subseteq Runtimes
+ASSUME Workers \in Nat \ {0}
+ASSUME Services \in BOOLEAN
+ASSUME KeepMark \in BOOLEAN
+ASSUME KeepChain \in BOOLEAN
+ASSUME Linked \in SUBSET SUBSET Runtimes
+ASSUME \A a, b \in Linked : a = b \/ a \cap b = {}
+ASSUME \A a \in Linked : Cardinality(a) >= 2
+ASSUME Remote \subseteq Runtimes
 ASSUME Policy \in {"current", "A", "B", "Bchain"}
 ASSUME Rebase \in BOOLEAN
 ASSUME EmitChain \in BOOLEAN
-ASSUME DispatchMode \in {"none", "bail", "waterfall"}
+ASSUME DispatchMode \in {"none", "bail", "waterfall", "serial", "parallel", "waterfall-async"}
 ASSUME DispatchHop \in BOOLEAN
 ASSUME HostRoot \in BOOLEAN
 ASSUME HostHop \in BOOLEAN
@@ -67,7 +86,9 @@ VARIABLES
     deferred,   \* deferred[r]: calls r read and put aside (not on its chain)
     toRust,     \* toRust[r]: frames r sent on its session, not yet read by Rust
     hops,       \* forwarded calls Rust has not answered yet (Rust's own state)
-    dispatches, \* synchronous event dispatches Rust does not record as calls
+    dispatches, \* event dispatches Rust runs (synchronous or asynchronous)
+    hosts,      \* host executions: Rust services and the host's own calls
+    hostCtr,    \* hostCtr: last host execution id
     nodeCtr,    \* nodeCtr[r]: last `node:n` id runtime r allocated
     rustCtr,    \* rustCtr[r]: last `rust:n` id Rust allocated on r's session
     roots,      \* top-level activations started so far
@@ -78,10 +99,23 @@ VARIABLES
     alive,      \* runtimes whose session has not ended
     ghost       \* observations for the invariants, not part of any process
 
-vars == <<stack, toRt, deferred, toRust, hops, dispatches, nodeCtr, rustCtr,
-          roots, posts, postCtr, dispCtr, alive, ghost>>
+vars == <<stack, toRt, deferred, toRust, hops, dispatches, hosts, hostCtr,
+          nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
 
 NonReentrant == Runtimes \ Reentrant
+
+\* The host as a participant: the destination of a runtime's call into Rust
+\* code (a mock's service, a plugin's function). A string, not a model
+\* value, so it is no session.
+Host == "rust"
+ASSUME Host \notin Runtimes
+
+\* The host executions currently holding a worker (dispatches included).
+WorkerOf(h) == h.worker
+BusyWorkers == {WorkerOf(h) : h \in hosts \cup dispatches} \ {0}
+FreeWorkers == (1..Workers) \ BusyWorkers
+\* The sessions sharing r's pump (a Cordis node's connectors, `Linked`).
+Group(r) == IF \E g \in Linked : r \in g THEN CHOOSE g \in Linked : r \in g ELSE {r}
 
 (***************************************************************************)
 (* Call ids and chains.                                                    *)
@@ -114,10 +148,11 @@ RebasePath(p, from, to) ==
 
 (***************************************************************************)
 (* A node of the wait graph: a forwarded call, a posted call, a call the   *)
-(* host makes in its own right, or a synchronous dispatch.                 *)
+(* host makes in its own right, a host execution, or a dispatch.           *)
 (*   src, sid    the session Rust records as the caller ("" for the host)  *)
 (*               and the id the caller gave the call on that session       *)
-(*   dst, did    the session the call went to, its id there                *)
+(*   dst, did    the session the call went to, its id there (a host        *)
+(*               execution has dst = Host and its own id in `did`)         *)
 (*   chain       the call's chain as Rust reads it (rebased `path`)        *)
 (*   truth       its real ancestry, then its own id (ghost)                *)
 (*   path        the frame sent to `dst`                                   *)
@@ -125,10 +160,13 @@ RebasePath(p, from, to) ==
 (*   real        someone really waits for it (truth)                       *)
 (*   maker       the session that really made it ("" = the host, truth)    *)
 (*   kind        "hop" | "async" | "entry" | "hidden" | "listener" |       *)
-(*               "host" | "dispatch"                                       *)
-(*   under       the dispatch the host makes this call in (or <<>>)        *)
+(*               "host" | "service" | "root" | "dispatch"                  *)
+(*   under       the node the host makes this call in (or <<>>)            *)
+(*   worker      the host worker it holds (0 for none; host nodes and      *)
+(*               dispatches only)                                          *)
 (***************************************************************************)
-Gid(h) == <<h.dst, IF h.kind = "dispatch" THEN "dispatch" ELSE "rust", h.did>>
+Gid(h) == IF h.dst = Host THEN <<Host, "host", h.did>>
+          ELSE <<h.dst, IF h.kind = "dispatch" THEN "dispatch" ELSE "rust", h.did>>
 \* The call is made out of runtime y (Rust's view, and the truth's).
 Out(d, y) == ~d.entry /\ d.src = y
 OutTrue(d, y) == d.real /\ d.maker = y
@@ -180,14 +218,21 @@ InFlight(y, id) == \E i \in 1..Len(toRt[y]) : toRt[y][i].op = "call" /\ toRt[y][
 \*  - a call running at stack index i waits for every call made from an
 \*    activation at index >= i, and for every incoming call running at an
 \*    index > i (LIFO: it resumes only when they return);
-\*  - a dispatch waits for the listener calls the host makes under it.
+\*  - a dispatch waits for the listener calls the host makes under it;
+\*  - a host execution waits for the calls it made (its chain), and a queued
+\*    one waits for whoever holds a worker;
+\*  - a session's frames wait while another session of its pump group waits
+\*    (`Linked`); no edge is built for it, the deadlock check sees it.
 OnStack(y, d) == \E j \in 1..Len(stack[y]) : stack[y][j].from = d.did
 TrueSucc(h, N, new) ==
     LET y == h.dst
-        idx == {i \in 1..Len(stack[y]) : stack[y][i].from = h.did /\ h /= new}
-        waiting == h = new \/ InFlight(y, h.did) \/ \E f \in deferred[y] : f.id = h.did
-        defer == waiting /\ h.real /\ Enters(h) /\ y \in NonReentrant
-                 /\ y \notin Threaded /\ stack[y] /= <<>>
+        idx == IF y \in Runtimes
+               THEN {i \in 1..Len(stack[y]) : stack[y][i].from = h.did /\ h /= new}
+               ELSE {}
+        waiting == h = new \/ (y \in Runtimes /\
+                     (InFlight(y, h.did) \/ \E f \in deferred[y] : f.id = h.did))
+        defer == y \in Runtimes /\ waiting /\ h.real /\ Enters(h)
+                 /\ y \in NonReentrant /\ y \notin Threaded /\ stack[y] /= <<>>
                  /\ ~PathRelated(y, h.path)
     IN {c \in N : c.real /\ ChainFree(Gid(h), c.truth, TrueStop(N))}
        \cup (IF defer THEN {d \in N : OutTrue(d, y) \/ (d.dst = y /\ OnStack(y, d))} ELSE {})
@@ -197,8 +242,11 @@ TrueSucc(h, N, new) ==
                        /\ \E i \in idx : \E j \in (i + 1)..Len(stack[y]) :
                                       stack[y][j].from = d.did}
        \cup {d \in N : d.under = Gid(h)}
+       \* A host execution waiting for a worker waits for whoever holds one.
+       \cup (IF y = Host /\ h.st = "queued" /\ FreeWorkers = {}
+             THEN {d \in hosts \cup dispatches : d.worker /= 0} ELSE {})
 TrueCycle(new) ==
-    LET N == hops \cup posts \cup dispatches \cup {new}
+    LET N == hops \cup posts \cup dispatches \cup hosts \cup {new}
     IN OnCycle({<<a, b>> \in N \X N : b \in TrueSucc(a, N, new)}, new)
 
 \* Policy B: the graph Rust can build from what it sees itself: the hops,
@@ -266,7 +314,19 @@ ReadyAt(r) == CHOOSE i \in 1..Len(stack[r]) :
 Activation(r, f) == [path |-> Append(f.path, <<"rust", f.id>>),
                      truth |-> Append(f.truth, <<r, "rust", f.id>>),
                      depth |-> f.depth, st |-> "fresh", w |-> 0, n |-> 0,
-                     from |-> f.id, mk |-> f.mk]
+                     from |-> f.id, mk |-> f.mk, cancelled |-> FALSE]
+
+\* A call received with `sync` that a `cancel` reached: it keeps its mark
+\* until it ends (`KeepMark`), or loses it at once (#561 before).
+CancelledActivation(a, id) ==
+    IF a.from = id
+    THEN [a EXCEPT !.cancelled = TRUE,
+                   !.mk = IF KeepMark THEN a.mk ELSE FALSE]
+    ELSE a
+CancelledFrame(d, id) ==
+    IF d.id = id
+    THEN [d EXCEPT !.mk = IF KeepMark THEN d.mk ELSE FALSE]
+    ELSE d
 
 \* The frame an activation makes for a call out of its runtime: "call" says
 \* its caller waits synchronously (`sync: true`), "hcall" says it waits but
@@ -290,7 +350,7 @@ Call(r, t) ==
        /\ toRust' = [toRust EXCEPT ![r] = Append(@, CallFrame(a, k, t, "call"))]
        /\ stack' = [stack EXCEPT ![r][i] = [a EXCEPT !.st = "wait", !.w = k, !.n = @ + 1]]
        /\ nodeCtr' = [nodeCtr EXCEPT ![r] = k]
-    /\ UNCHANGED <<toRt, deferred, hops, dispatches, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
+    /\ UNCHANGED <<toRt, deferred, hops, dispatches, hosts, hostCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
 
 \* A synchronous call whose frame carries no `sync` (Python's
 \* `run_coroutine_threadsafe` from another thread): the caller waits, the
@@ -304,7 +364,23 @@ CallHidden(r, t) ==
        /\ toRust' = [toRust EXCEPT ![r] = Append(@, HiddenFrame(a, k, t))]
        /\ stack' = [stack EXCEPT ![r][i] = [a EXCEPT !.st = "wait", !.w = k, !.n = @ + 1]]
        /\ nodeCtr' = [nodeCtr EXCEPT ![r] = k]
-    /\ UNCHANGED <<toRt, deferred, hops, dispatches, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
+    /\ UNCHANGED <<toRt, deferred, hops, dispatches, hosts, hostCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
+
+\* A synchronous call into Rust code (a service or function of the host): the
+\* runtime waits; the host becomes a participant (`Services`).
+CallService(r) ==
+    /\ Services
+    /\ r \in alive
+    /\ Callable(r)
+    /\ LET i == CallAt(r) IN
+       LET a == stack[r][i] k == nodeCtr[r] + 1 IN
+       /\ toRust' = [toRust EXCEPT ![r] = Append(@,
+                        [op |-> "call", id |-> k, path |-> a.path, truth |-> a.truth,
+                         depth |-> a.depth, target |-> Host, from |-> a.from,
+                         mk |-> a.mk])]
+       /\ stack' = [stack EXCEPT ![r][i] = [a EXCEPT !.st = "wait", !.w = k, !.n = @ + 1]]
+       /\ nodeCtr' = [nodeCtr EXCEPT ![r] = k]
+    /\ UNCHANGED <<toRt, deferred, hops, dispatches, hosts, hostCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
 
 \* An asynchronous call: the activation goes on running; if the caller is on
 \* a marked chain, Rust still records it as a hop (854bef5d), though nobody
@@ -318,7 +394,7 @@ CallAsync(r, t) ==
        /\ toRust' = [toRust EXCEPT ![r] = Append(@, CallFrame(a, k, t, "acall"))]
        /\ stack' = [stack EXCEPT ![r][i] = [a EXCEPT !.n = @ + 1]]
        /\ nodeCtr' = [nodeCtr EXCEPT ![r] = k]
-    /\ UNCHANGED <<toRt, deferred, hops, dispatches, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
+    /\ UNCHANGED <<toRt, deferred, hops, dispatches, hosts, hostCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
 
 \* The running activation emits an event whose listener is in t: an
 \* events.dispatch nobody waits for; the activation goes on running. Rust
@@ -337,7 +413,7 @@ Emit(r, t) ==
                          truth |-> a.truth, depth |-> a.depth, target |-> t])]
        /\ nodeCtr' = [nodeCtr EXCEPT ![r] = k]
     /\ postCtr' = postCtr + 1
-    /\ UNCHANGED <<stack, toRt, deferred, hops, dispatches, rustCtr, roots, posts, dispCtr, alive, ghost>>
+    /\ UNCHANGED <<stack, toRt, deferred, hops, dispatches, hosts, hostCtr, rustCtr, roots, posts, dispCtr, alive, ghost>>
 
 \* A synchronous event dispatch (events protocol §5.4: `bail`, and a Cordis
 \* plugin's `waterfall`): the emitter waits for the whole dispatch; the host
@@ -346,10 +422,12 @@ Emit(r, t) ==
 \* the emitter's process carry the innermost wait's chain, a bail's carry
 \* none.
 Dispatch(r, t) ==
-    /\ DispatchMode /= "none"
+    /\ DispatchMode \in {"bail", "waterfall"}
+    /\ FreeWorkers /= {}
     /\ r \in alive /\ t \in alive
     \* A dispatch from a top-level activity: what a Cordis plugin's `ctx.emit`
     \* and `ctx.bail` are in practice. A dispatch nested in a service call is
+    \* the asynchronous one (`HostDispatch`); a synchronous dispatch there is
     \* left out (README, simplifications).
     /\ \E i \in Running(r) : stack[r][i].from = 0
     /\ Callable(r)
@@ -366,10 +444,12 @@ Dispatch(r, t) ==
            carried == IF DispatchHop THEN (IF chained THEN full ELSE << <<"node", k>> >>)
                       ELSE IF chained THEN full ELSE <<>>
            m == rustCtr[t] + 1
+           w == CHOOSE w \in FreeWorkers : TRUE
            d == [src |-> r, sid |-> k, dst |-> t, did |-> dispCtr + 1, seq |-> dispCtr + 1,
                  chain |-> Decode(carried, r), truth |-> Append(a.truth, <<r, "node", k>>),
                  path |-> RebasePath(carried, r, t), entry |-> FALSE, real |-> TRUE,
-                 maker |-> r, kind |-> "dispatch", rec |-> FALSE, under |-> <<>>]
+                 maker |-> r, kind |-> "dispatch", rec |-> FALSE, under |-> <<>>,
+                 st |-> "wait", worker |-> w, parent |-> <<>>, n |-> 1]
            \* The listener call: nobody waits for it; the dispatcher waits.
            listener == [src |-> "", sid |-> 0, dst |-> t, did |-> m, seq |-> m,
                         chain |-> Decode(carried, r),
@@ -399,26 +479,181 @@ Dispatch(r, t) ==
              \* Rust does not record it: the listener call is the host's own.
              ELSE /\ hops' = hops \cup {listener}
                   /\ dispatches' = dispatches \cup {d}
-    /\ UNCHANGED <<deferred, roots, posts, postCtr, alive, ghost>>
+    /\ UNCHANGED <<deferred, roots, posts, postCtr, hosts, hostCtr, alive, ghost>>
+
+\* A host execution: Rust plugin code on a worker thread. `kind` is "root"
+\* (the host's own synchronous call, #597) or "service" (a call from a
+\* runtime into Rust code). A service that cannot get a worker waits in
+\* `st = "queued"`. `cancelled`/`marked` follow a `cancel`: #561 keeps the
+\* mark until the call really ends (`KeepMark`).
+\*   [kind, dst = Host, did, src, sid, path, truth, depth, st, w, worker,
+\*    n, cancelled, marked]
 
 \* The host's own synchronous call into a runtime (a Rust plugin's, a host
-\* service's): it has no chain, and Rust records it as a hop (#597) or, in
-\* older versions, as an entry.
+\* service's): it has no chain and occupies a worker while it waits; Rust
+\* records it as a hop (#597) or, in older versions, as an entry.
 HostCall(t) ==
     /\ HostRoot
     /\ t \in alive
     /\ roots < MaxRoots
-    /\ LET m == rustCtr[t] + 1 IN
-       /\ hops' = hops \cup {[src |-> "", sid |-> 0, dst |-> t, did |-> m, seq |-> m,
-                             chain |-> <<>>, truth |-> <<>>, path |-> <<>>,
-                             entry |-> ~HostHop, real |-> TRUE, maker |-> "",
-                             kind |-> "host", rec |-> FALSE, under |-> <<>>]}
-       /\ toRt' = [toRt EXCEPT ![t] = Append(@,
-                    [op |-> "call", id |-> m, path |-> <<>>, truth |-> <<>>,
-                     depth |-> 0, mk |-> t \in Declared])]
-       /\ rustCtr' = [rustCtr EXCEPT ![t] = m]
-       /\ roots' = roots + 1
+    /\ FreeWorkers /= {}
+    /\ LET m == rustCtr[t] + 1
+           id == hostCtr + 1
+           w == CHOOSE w \in FreeWorkers : TRUE
+           node == [kind |-> "root", dst |-> Host, did |-> id, src |-> "", sid |-> 0,
+                    path |-> <<>>, truth |-> <<>>, depth |-> 0, st |-> "wait", w |-> m,
+                    worker |-> w, n |-> 1, cancelled |-> FALSE, marked |-> TRUE,
+                    entry |-> FALSE, real |-> TRUE, maker |-> "", under |-> <<>>]
+           hop == [src |-> "", sid |-> 0, dst |-> t, did |-> m, seq |-> m,
+                   chain |-> <<>>, truth |-> <<<<Host, "host", id>>>>, path |-> <<>>,
+                   entry |-> ~HostHop, real |-> TRUE, maker |-> "", kind |-> "host",
+                   rec |-> FALSE, under |-> Gid(node)]
+       IN /\ hops' = hops \cup {hop}
+          /\ hosts' = hosts \cup {node}
+          /\ hostCtr' = id
+          /\ toRt' = [toRt EXCEPT ![t] = Append(@,
+                       [op |-> "call", id |-> m, path |-> <<>>,
+                        truth |-> <<<<Host, "host", id>>>>, depth |-> 0,
+                        mk |-> t \in Declared])]
+          /\ rustCtr' = [rustCtr EXCEPT ![t] = m]
+          /\ roots' = roots + 1
     /\ UNCHANGED <<stack, deferred, toRust, dispatches, nodeCtr, posts, postCtr, dispCtr, alive, ghost>>
+
+\* A runtime's synchronous call into Rust code: the host becomes a
+\* participant. The call is not forwarded to another session, so it is not
+\* a hop in waits.rs; it is a host execution, queued until a worker is free.
+RustService(s) ==
+    /\ Services
+    /\ toRust[s] /= <<>>
+    /\ Head(toRust[s]).op = "call"
+    /\ Head(toRust[s]).target = Host
+    /\ LET f == Head(toRust[s])
+           id == hostCtr + 1
+           node == [kind |-> "service", dst |-> Host, did |-> id, src |-> s,
+                    sid |-> f.id, path |-> Append(f.path, <<"node", f.id>>),
+                    truth |-> Append(Append(f.truth, <<s, "node", f.id>>),
+                                     <<Host, "host", id>>),
+                    depth |-> f.depth + 1, st |-> "queued", w |-> 0, worker |-> 0,
+                    n |-> 0, cancelled |-> FALSE, marked |-> TRUE,
+                    entry |-> FALSE, real |-> TRUE, maker |-> "", under |-> <<>>]
+       IN /\ toRust' = [toRust EXCEPT ![s] = Tail(@)]
+          /\ hosts' = hosts \cup {node}
+          /\ hostCtr' = id
+    /\ UNCHANGED <<stack, toRt, deferred, hops, dispatches, nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
+
+\* A queued host execution starts on a free worker.
+StartHost(h) ==
+    /\ h \in hosts
+    /\ h.st = "queued"
+    /\ FreeWorkers /= {}
+    /\ LET w == CHOOSE w \in FreeWorkers : TRUE IN
+       hosts' = (hosts \ {h}) \cup {[h EXCEPT !.st = "run", !.worker = w]}
+    /\ UNCHANGED <<stack, toRt, deferred, toRust, hops, dispatches, hostCtr,
+                     nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
+
+\* Rust code calls a runtime synchronously. The call is the host's own
+\* (`src` empty): a hop in waits.rs, with the host execution's id on its
+\* path. A cancelled call that makes another one while unmarked violates
+\* `MarkedWhileRunning` (`before-cancel`).
+HostNodeCall(h, t) ==
+    /\ h \in hosts
+    /\ h.kind = "service"
+    /\ h.st = "run"
+    /\ h.n < MaxCalls
+    /\ h.depth < MaxDepth
+    /\ t \in alive
+    /\ LET m == rustCtr[t] + 1
+           path == Append(RebasePath(h.path, h.src, t), <<Host, "host", h.did>>)
+           hop == [src |-> "", sid |-> 0, dst |-> t, did |-> m, seq |-> m,
+                   chain |-> Decode(path, t),
+                   truth |-> Append(h.truth, <<Host, "host", h.did>>),
+                   path |-> path, entry |-> FALSE, real |-> TRUE, maker |-> "",
+                   kind |-> "host", rec |-> FALSE, under |-> Gid(h)]
+       IN /\ hops' = hops \cup {hop}
+          /\ hosts' = (hosts \ {h}) \cup {[h EXCEPT !.st = "wait", !.w = m, !.n = @ + 1]}
+          /\ toRt' = [toRt EXCEPT ![t] = Append(@,
+                       [op |-> "call", id |-> m, path |-> path,
+                        truth |-> hop.truth, depth |-> h.depth + 1,
+                        mk |-> t \in Declared])]
+          /\ rustCtr' = [rustCtr EXCEPT ![t] = m]
+          /\ ghost' = IF h.cancelled /\ ~h.marked
+                      THEN [ghost EXCEPT !.unmarked = TRUE] ELSE ghost
+    /\ UNCHANGED <<stack, deferred, toRust, dispatches, hostCtr, nodeCtr, roots,
+                     posts, postCtr, dispCtr, alive>>
+
+\* Rust code finished: its worker is free and its caller is answered (a
+\* late reply, after a cancel, is dropped by the runtime).
+HostNodeReturn(h) ==
+    /\ h \in hosts
+    /\ h.kind = "service"
+    /\ h.st = "run"
+    /\ hosts' = hosts \ {h}
+    /\ toRt' = [toRt EXCEPT ![h.src] = Append(@, [op |-> "ret", id |-> h.sid])]
+    /\ UNCHANGED <<stack, deferred, toRust, hops, dispatches, hostCtr, nodeCtr,
+                     rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
+
+\* An asynchronous dispatch (`serial`, `parallel`, a plugin's asynchronous
+\* `waterfall`) inside a running host execution: the execution awaits the
+\* listener calls, so it does not hold a worker while it waits. The first
+\* poll may suspend (the filter) before the first listener call.
+HostDispatch(h, t) ==
+    /\ DispatchMode \in {"serial", "parallel", "waterfall-async"}
+    /\ h \in hosts
+    /\ h.kind = "service"
+    /\ h.st = "run"
+    /\ t \in alive
+    /\ dispCtr < MaxPosts
+    /\ LET id == dispCtr + 1
+           d == [src |-> h.src, sid |-> h.sid, dst |-> t, did |-> id, seq |-> id,
+                 chain |-> <<>>, truth |-> Append(h.truth, <<Host, "host", h.did>>),
+                 path |-> h.path, entry |-> TRUE, real |-> TRUE, maker |-> "",
+                 kind |-> "async", rec |-> hops /= {}, under |-> <<>>,
+                 st |-> "filter", worker |-> 0, parent |-> Gid(h), n |-> 0,
+                 depth |-> h.depth]
+       IN /\ dispatches' = dispatches \cup {d}
+          /\ hosts' = (hosts \ {h}) \cup {[h EXCEPT !.st = "wait", !.w = 0]}
+          /\ dispCtr' = id
+    /\ UNCHANGED <<stack, toRt, deferred, toRust, hops, hostCtr, nodeCtr, rustCtr,
+                     roots, posts, postCtr, alive, ghost>>
+
+\* The dispatch's first poll resumes: the filter answered "keep going".
+DispatchFilter(d) ==
+    /\ d \in dispatches
+    /\ d.kind = "async"
+    /\ d.st = "filter"
+    /\ dispatches' = (dispatches \ {d}) \cup {[d EXCEPT !.st = "run"]}
+    /\ UNCHANGED <<stack, toRt, deferred, toRust, hops, hosts, hostCtr, nodeCtr,
+                     rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
+
+\* The dispatch calls one listener asynchronously. With `KeepChain` FALSE
+\* the chain is lost across the suspension (#561 before): a call the
+\* listener makes back into the waiting chain is put aside.
+DispatchStart(d) ==
+    /\ d \in dispatches
+    /\ d.kind = "async"
+    /\ d.st = "run"
+    /\ d.dst \in alive
+    /\ LET t == d.dst
+           m == rustCtr[t] + 1
+           path == IF KeepChain
+                   THEN Append(Append(RebasePath(d.path, d.src, t), d.parent),
+                               <<Host, "dispatch", d.did>>)
+                   ELSE <<>>
+           post == [src |-> "", sid |-> 0, dst |-> t, did |-> m, seq |-> m,
+                    chain |-> Decode(path, t),
+                    truth |-> Append(d.truth, <<t, "dispatch", d.did>>),
+                    path |-> path, entry |-> TRUE, real |-> TRUE, maker |-> "",
+                    kind |-> "listener", rec |-> hops /= {}, under |-> Gid(d)]
+           frame == [op |-> "call", id |-> m, path |-> path,
+                     truth |-> post.truth, depth |-> d.depth + 1,
+                     mk |-> t \in Declared]
+       IN /\ posts' = posts \cup {post}
+          /\ dispatches' = (dispatches \ {d}) \cup
+                           {[d EXCEPT !.st = "wait", !.n = 1, !.chain = Decode(path, t)]}
+          /\ toRt' = [toRt EXCEPT ![t] = Append(@, frame)]
+          /\ rustCtr' = [rustCtr EXCEPT ![t] = m]
+    /\ UNCHANGED <<stack, deferred, toRust, hops, hosts, hostCtr, nodeCtr, roots,
+                     postCtr, dispCtr, alive, ghost>>
 
 \* A top-level activation (a timer, an event) starts at an idle runtime.
 StartRoot(r) ==
@@ -427,9 +662,9 @@ StartRoot(r) ==
     /\ stack[r] = <<>>
     /\ stack' = [stack EXCEPT ![r] = <<[path |-> <<>>, truth |-> <<>>, depth |-> 0,
                                     st |-> "fresh", w |-> 0, n |-> 0, from |-> 0,
-                                    mk |-> FALSE]>>]
+                                    mk |-> FALSE, cancelled |-> FALSE]>>]
     /\ roots' = roots + 1
-    /\ UNCHANGED <<toRt, deferred, toRust, hops, dispatches, nodeCtr, rustCtr, posts, postCtr, dispCtr, alive, ghost>>
+    /\ UNCHANGED <<toRt, deferred, toRust, hops, dispatches, hosts, hostCtr, nodeCtr, rustCtr, posts, postCtr, dispCtr, alive, ghost>>
 
 \* The pump loop of the top activation exits; it goes on running.
 Resume(r) ==
@@ -437,7 +672,7 @@ Resume(r) ==
     /\ Readyable(r)
     /\ LET i == ReadyAt(r) IN
        stack' = [stack EXCEPT ![r][i] = [stack[r][i] EXCEPT !.st = "fresh", !.w = 0]]
-    /\ UNCHANGED <<toRt, deferred, toRust, hops, dispatches, nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
+    /\ UNCHANGED <<toRt, deferred, toRust, hops, dispatches, hosts, hostCtr, nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
 
 \* Read the next frame: only when idle or pumping (a running activation does
 \* not read) — and at a runtime with a thread per call, always. session.mjs
@@ -449,6 +684,9 @@ Receive(r) ==
     /\ r \in alive
     /\ toRt[r] /= <<>>
     /\ r \in Threaded \/ stack[r] = <<>> \/ Pumping(r)
+    \* A Cordis node's connectors share one pump: while one session waits,
+    \* the others read nothing (`Linked`).
+    /\ \A s \in Group(r) : s = r \/ ~Pumping(s)
     /\ LET f == Head(toRt[r]) IN
        /\ toRt' = [toRt EXCEPT ![r] = Tail(@)]
        /\ IF f.op = "ret"
@@ -461,6 +699,16 @@ Receive(r) ==
                \* it is dropped.
                ELSE /\ stack' = stack
                     /\ UNCHANGED <<deferred, ghost>>
+          ELSE IF f.op = "cancel"
+          \* The caller cancelled the call `f.id` while it was running: the
+          \* mark stays until it really ends (#561), unless `KeepMark` is
+          \* FALSE (`before-cancel`).
+          THEN /\ stack' = [stack EXCEPT ![r] =
+                    [i \in 1..Len(stack[r]) |->
+                        CancelledActivation(stack[r][i], f.id)]]
+               /\ deferred' = [deferred EXCEPT ![r] =
+                    {CancelledFrame(d, f.id) : d \in deferred[r]}]
+               /\ UNCHANGED ghost
           ELSE IF r \in Threaded \/ stack[r] = <<>> \/ r \in Reentrant \/ PathRelated(r, f.path)
           THEN /\ stack' = [stack EXCEPT ![r] = Append(@, Activation(r, f))]
                /\ deferred' = deferred
@@ -478,7 +726,7 @@ Receive(r) ==
                \* Put aside although it belongs to a waiting chain.
                /\ ghost' = IF TruthWaited(r, f.truth) /\ FrameReal(r, f)
                            THEN [ghost EXCEPT !.missed = TRUE] ELSE ghost
-    /\ UNCHANGED <<toRust, hops, dispatches, nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, alive>>
+    /\ UNCHANGED <<toRust, hops, dispatches, hosts, hostCtr, nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, alive>>
 
 \* Calls put aside run once the stack is empty (a stacked runtime only).
 RunDeferred(r, f) ==
@@ -488,7 +736,7 @@ RunDeferred(r, f) ==
     /\ r \notin Threaded
     /\ deferred' = [deferred EXCEPT ![r] = @ \ {f}]
     /\ stack' = [stack EXCEPT ![r] = <<Activation(r, f)>>]
-    /\ UNCHANGED <<toRt, toRust, hops, dispatches, nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
+    /\ UNCHANGED <<toRt, toRust, hops, dispatches, hosts, hostCtr, nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
 
 \* Only the top of a stacked runtime returns before anything below resumes;
 \* at a runtime with a thread per call, an activation returns on its own.
@@ -501,7 +749,7 @@ Return(r) ==
                                             ELSE SubSeq(seq, 1, Len(seq) - 1)]
        /\ toRust' = IF a.from = 0 THEN toRust
                     ELSE [toRust EXCEPT ![r] = Append(@, [op |-> "ret", id |-> a.from])]
-    /\ UNCHANGED <<toRt, deferred, hops, dispatches, nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
+    /\ UNCHANGED <<toRt, deferred, hops, dispatches, hosts, hostCtr, nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
 
 \* The caller gives up a synchronous call locally (Go's context, Swift's
 \* task, Kotlin's interrupt) and sends no `cancel`: its thread goes on, the
@@ -515,21 +763,64 @@ Abandon(r) ==
        /\ stack' = [stack EXCEPT ![r][i] = [stack[r][i] EXCEPT !.st = "fresh", !.w = 0]]
        /\ hops' = {[h EXCEPT !.real = IF h.src = r /\ h.sid = k THEN FALSE ELSE h.real]
                    : h \in hops}
-    /\ UNCHANGED <<toRt, deferred, toRust, dispatches, nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
+    /\ UNCHANGED <<toRt, deferred, toRust, dispatches, hosts, hostCtr, nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
+
+\* The caller cancels a synchronous call (`cancel`): it stops waiting and
+\* the host drops the wait edge, but the callee may already be running, so
+\* its mark stays until it really ends (#561).
+Cancel(r) ==
+    /\ r \in Cancellers
+    /\ \E i \in 1..Len(stack[r]) : stack[r][i].st = "wait"
+    /\ LET i == CHOOSE i \in 1..Len(stack[r]) : stack[r][i].st = "wait"
+           k == stack[r][i].w IN
+       /\ toRust' = [toRust EXCEPT ![r] = Append(@, [op |-> "cancel", id |-> k])]
+       /\ stack' = [stack EXCEPT ![r][i] = [stack[r][i] EXCEPT !.st = "fresh", !.w = 0]]
+    /\ UNCHANGED <<toRt, deferred, hops, dispatches, hosts, hostCtr, nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
+
+\* A `cancel` frame: a forwarded call stops being waited for but stays in
+\* the table until its reply (which is then dropped); a call into Rust code
+\* marks the host execution cancelled, keeping its mark when `KeepMark`.
+RustCancel(s) ==
+    /\ toRust[s] /= <<>>
+    /\ Head(toRust[s]).op = "cancel"
+    /\ LET k == Head(toRust[s]).id
+           serv == {h \in hosts : h.kind = "service" /\ h.src = s /\ h.sid = k}
+           fwd == {h \in hops : h.src = s /\ h.sid = k}
+       IN /\ toRust' = [toRust EXCEPT ![s] = Tail(@)]
+          /\ IF serv /= {}
+             THEN LET h == CHOOSE h \in serv : TRUE IN
+                  /\ hosts' = (hosts \ {h}) \cup
+                              {[h EXCEPT !.cancelled = TRUE,
+                                        !.marked = IF KeepMark THEN h.marked ELSE FALSE]}
+                  /\ hops' = hops
+                  /\ toRt' = toRt
+             ELSE IF fwd /= {}
+                  THEN LET h == CHOOSE h \in fwd : TRUE IN
+                       /\ hops' = (hops \ {h}) \cup {[h EXCEPT !.real = FALSE]}
+                       /\ toRt' = [toRt EXCEPT ![h.dst] = Append(@,
+                                    [op |-> "cancel", id |-> h.did])]
+                       /\ hosts' = hosts
+                  ELSE /\ hops' = hops /\ hosts' = hosts /\ toRt' = toRt
+    /\ UNCHANGED <<stack, deferred, dispatches, hostCtr, nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
 
 (***************************************************************************)
 (* Rust side (rpc.rs `receive`/`execute`, waits.rs `forward`,               *)
 (* rows.rs `RowService::invoke`, relay.rs `relay`, events/hub.rs). Rust     *)
-(* reads each session in order. It runs a forwarded call on the thread      *)
-(* already pumping the chain, or on a new one; Rust threads are not a       *)
-(* bounded resource here (README).                                          *)
+(* reads each session in order. A forwarded call runs on the worker thread  *)
+(* already pumping the chain, or on a free one (`Workers`); a call into    *)
+(* Rust code takes a worker too (`RustService`).                           *)
 (***************************************************************************)
 RustForward(s) ==
     /\ toRust[s] /= <<>>
     /\ Head(toRust[s]).op \in {"call", "hcall", "acall"}
+    /\ Head(toRust[s]).target /= Host
     /\ LET f == Head(toRust[s])
            t == f.target
-           full == Append(f.path, <<"node", f.id>>)
+           \* A call from another host: its caller's wait is in the other
+           \* host's table, and the path this host writes carries none of the
+           \* caller's ids, so a callback cannot land on the chain here.
+           remote == s \in Remote
+           full == IF remote THEN <<>> ELSE Append(f.path, <<"node", f.id>>)
            truth == Append(f.truth, <<s, "node", f.id>>)
            m == rustCtr[t] + 1
            sync == f.op \in {"call", "hcall"}
@@ -539,7 +830,8 @@ RustForward(s) ==
            \* entries. A runtime that does not declare `sync-wait` marks
            \* nothing, so its calls stay outside the check.
            marked == f.from /= 0 /\ f.mk
-           kind == IF sync /\ (marked \/ (f.op = "call" /\ s \in Declared)) THEN "hop"
+           kind == IF remote THEN (IF sync THEN "hidden" ELSE "entry")
+                   ELSE IF sync /\ (marked \/ (f.op = "call" /\ s \in Declared)) THEN "hop"
                    ELSE IF ~sync /\ marked THEN "async"
                    ELSE IF sync THEN "hidden"
                    ELSE "entry"
@@ -583,7 +875,7 @@ RustForward(s) ==
                               mk |-> t \in Declared])]
                /\ rustCtr' = [rustCtr EXCEPT ![t] = m]
                /\ ghost' = [ghost EXCEPT !.misrouted = @ \/ misrouted]
-    /\ UNCHANGED <<stack, deferred, nodeCtr, dispatches, roots, posts, postCtr, dispCtr, alive>>
+    /\ UNCHANGED <<stack, deferred, nodeCtr, dispatches, hosts, hostCtr, roots, posts, postCtr, dispCtr, alive>>
 
 \* An emit: Rust sends the listener's call (events.call) to its runtime with
 \* the emitter's chain, rebased (or without one: EmitChain FALSE, #561);
@@ -615,40 +907,63 @@ RustPost(s) ==
                               mk |-> t \in Declared])]
                   /\ rustCtr' = [rustCtr EXCEPT ![t] = m]
                   /\ posts' = posts \cup {post}
-    /\ UNCHANGED <<stack, deferred, hops, dispatches, nodeCtr, roots, postCtr, dispCtr, alive, ghost>>
+    /\ UNCHANGED <<stack, deferred, hops, dispatches, hosts, hostCtr, nodeCtr, roots, postCtr, dispCtr, alive, ghost>>
 
-\* The answer to a posted call: nobody waits for it.
+\* The answer to a posted call: nobody waits for it. A listener call of an
+\* asynchronous dispatch ends the dispatch, and the host execution that
+\* awaited it goes on.
 RustAnswered(t) ==
     /\ toRust[t] /= <<>>
     /\ Head(toRust[t]).op = "ret"
     /\ ~\E h \in hops : h.dst = t /\ h.did = Head(toRust[t]).id
-    /\ posts' = {e \in posts : ~(e.dst = t /\ e.did = Head(toRust[t]).id)}
-    /\ toRust' = [toRust EXCEPT ![t] = Tail(@)]
-    /\ UNCHANGED <<stack, deferred, toRt, hops, dispatches, nodeCtr, rustCtr, roots, postCtr, dispCtr, alive, ghost>>
+    /\ \E e \in posts : e.dst = t /\ e.did = Head(toRust[t]).id
+    /\ LET e == CHOOSE e \in posts : e.dst = t /\ e.did = Head(toRust[t]).id
+           d == CHOOSE d \in dispatches : Gid(d) = e.under
+       IN /\ posts' = posts \ {e}
+          /\ toRust' = [toRust EXCEPT ![t] = Tail(@)]
+          /\ IF e.under = <<>> \/ ~\E q \in dispatches : Gid(q) = e.under
+             THEN UNCHANGED <<dispatches, hosts>>
+             ELSE /\ dispatches' = dispatches \ {d}
+                  /\ IF d.kind = "async" /\ \E x \in hosts : Gid(x) = d.parent
+                     THEN LET x == CHOOSE x \in hosts : Gid(x) = d.parent IN
+                          hosts' = (hosts \ {x}) \cup {[x EXCEPT !.st = "run"]}
+                     ELSE hosts' = hosts
+    /\ UNCHANGED <<stack, deferred, toRt, hops, hostCtr, nodeCtr, rustCtr, roots, postCtr, dispCtr, alive, ghost>>
 
 \* A forwarded call answered: the reply goes back to its caller, unless
 \* nobody waits for it any more (an asynchronous call, a caller that gave
-\* up locally). A listener call the host makes under a dispatch ends that
-\* dispatch, and the emitter goes on.
+\* up locally or cancelled). The call it was made under goes on: a
+\* synchronous dispatch's emitter, or the host execution that made it.
 RustReturn(t) ==
     /\ toRust[t] /= <<>>
     /\ Head(toRust[t]).op = "ret"
-    /\ \E h \in hops :
-          /\ h.dst = t /\ h.did = Head(toRust[t]).id
-          /\ hops' = hops \ {h}
+    /\ \E h \in hops : h.dst = t /\ h.did = Head(toRust[t]).id
+    /\ LET h == CHOOSE h \in hops : h.dst = t /\ h.did = Head(toRust[t]).id
+           d == CHOOSE d \in dispatches : Gid(d) = h.under
+           x == CHOOSE x \in hosts : Gid(x) = h.under
+       IN /\ hops' = hops \ {h}
           /\ toRt' = IF h.real /\ h.src /= ""
                      THEN [toRt EXCEPT ![h.src] = Append(@,
                               [op |-> "ret", id |-> h.sid, outcome |-> "ok"])]
                      ELSE toRt
-          /\ IF h.under = <<>> \/ ~\E d \in dispatches : Gid(d) = h.under
-             THEN UNCHANGED <<dispatches, stack>>
-             ELSE LET d == CHOOSE d \in dispatches : Gid(d) = h.under IN
-                  /\ dispatches' = dispatches \ {d}
-                  /\ \E i \in 1..Len(stack[d.src]) :
-                         stack[d.src][i].st = "wait" /\ stack[d.src][i].w = d.sid
-                         /\ stack' = [stack EXCEPT ![d.src][i].st = "ready"]
+          /\ IF h.under = <<>>
+             THEN UNCHANGED <<dispatches, hosts, stack>>
+             ELSE IF \E q \in dispatches : Gid(q) = h.under
+                  THEN /\ dispatches' = dispatches \ {d}
+                       /\ hosts' = hosts
+                       /\ \E i \in 1..Len(stack[d.src]) :
+                              stack[d.src][i].st = "wait" /\ stack[d.src][i].w = d.sid
+                              /\ stack' = [stack EXCEPT ![d.src][i].st = "ready"]
+                  ELSE IF \E z \in hosts : Gid(z) = h.under
+                       THEN /\ dispatches' = dispatches
+                            /\ IF x.kind = "root"
+                               THEN hosts' = hosts \ {x}
+                               ELSE hosts' = (hosts \ {x}) \cup
+                                             {[x EXCEPT !.st = "run", !.w = 0]}
+                            /\ stack' = stack
+                       ELSE UNCHANGED <<dispatches, hosts, stack>>
     /\ toRust' = [toRust EXCEPT ![t] = Tail(@)]
-    /\ UNCHANGED <<deferred, nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
+    /\ UNCHANGED <<deferred, hostCtr, nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, alive, ghost>>
 
 (***************************************************************************)
 (* A session ends: its calls leave the table, and the calls into it fail   *)
@@ -659,6 +974,7 @@ End(r) ==
     /\ Ends
     /\ r \in alive
     /\ toRust[r] = <<>>
+    /\ hosts = {}
     /\ ~\E h \in hops : h.src = r
     /\ ~\E d \in dispatches : d.src = r \/ d.dst = r
     /\ LET gone == {h \in hops : h.dst = r}
@@ -671,12 +987,13 @@ End(r) ==
           /\ toRt' = [toRt EXCEPT ![r] = <<>>]
           /\ deferred' = [deferred EXCEPT ![r] = {}]
           /\ alive' = alive \ {r}
-    /\ UNCHANGED <<toRust, dispatches, nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, ghost>>
+    /\ UNCHANGED <<toRust, dispatches, hosts, hostCtr, nodeCtr, rustCtr, roots, posts, postCtr, dispCtr, ghost>>
 
 (***************************************************************************)
 Quiet == /\ hops = {}
          /\ posts = {}
          /\ dispatches = {}
+         /\ hosts = {}
          /\ \A r \in alive : /\ stack[r] = <<>> /\ deferred[r] = {}
                              /\ toRt[r] = <<>> /\ toRust[r] = <<>>
 
@@ -691,6 +1008,8 @@ Init ==
     /\ toRust = [r \in Runtimes |-> <<>>]
     /\ hops = {}
     /\ dispatches = {}
+    /\ hosts = {}
+    /\ hostCtr = 0
     /\ nodeCtr = [r \in Runtimes |-> 0]
     /\ rustCtr = [r \in Runtimes |-> 0]
     /\ roots = 0
@@ -700,7 +1019,7 @@ Init ==
     /\ alive = Runtimes
     /\ ghost = [misrouted |-> FALSE, missed |-> FALSE, refusedLegit |-> FALSE,
                 falseCycle |-> FALSE, refused |-> FALSE, cycled |-> FALSE,
-                nested |-> FALSE]
+                nested |-> FALSE, unmarked |-> FALSE]
 
 Next ==
     \/ \E r \in Runtimes :
@@ -709,17 +1028,25 @@ Next ==
           \/ Resume(r)
           \/ End(r)
           \/ Abandon(r)
+          \/ Cancel(r)
           \/ \E t \in Runtimes : Call(r, t)
           \/ \E t \in Runtimes : CallHidden(r, t)
           \/ \E t \in Runtimes : CallAsync(r, t)
+          \/ CallService(r)
           \/ \E t \in Runtimes : Emit(r, t)
           \/ \E t \in Runtimes : Dispatch(r, t)
           \/ Receive(r)
           \/ \E f \in deferred[r] : RunDeferred(r, f)
           \/ RustForward(r)
+          \/ RustService(r)
           \/ RustReturn(r)
+          \/ RustCancel(r)
           \/ RustPost(r)
           \/ RustAnswered(r)
+          \/ \E d \in dispatches : DispatchFilter(d) \/ DispatchStart(d)
+          \/ \E h \in hosts : StartHost(h) \/ HostNodeReturn(h)
+          \/ \E h \in hosts : \E t \in Runtimes : HostNodeCall(h, t)
+          \/ \E h \in hosts : \E t \in Runtimes : HostDispatch(h, t)
     \/ \E t \in Runtimes : HostCall(t)
     \/ Done
 
@@ -750,4 +1077,8 @@ NeverCycle == ~ghost.cycled
 \* SYN-9-3, expected to be violated: a reentrant runtime's service is
 \* called in the middle of its own synchronous call.
 NeverNested == ~ghost.nested
+\* #561: a synchronous call received by Rust code stays marked until it
+\* really ends, so a call it forwards after a cancel is still a hop.
+\* `before-cancel` removes the mark at the cancel and violates this.
+MarkedWhileRunning == ~ghost.unmarked
 ==============================================================================

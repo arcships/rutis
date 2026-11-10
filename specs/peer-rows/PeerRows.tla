@@ -34,6 +34,13 @@
 (* arbitrarily long; a session that broke is not read any more, but a      *)
 (* notification already written may still reach the row late (`PLateEnded` *)
 (* and `PLateFailed`).                                                     *)
+(*                                                                         *)
+(* The key: this model uses the row's instance, stable across restarts, as *)
+(* the old `PeerRow` did. A current `run` row uses `plugin#n`, new on every *)
+(* load (`run.rs:168`), so a notice of an old load cannot reach a new one; *)
+(* the model's stable key is what makes the generation in each notice      *)
+(* necessary. That difference is the decision input for #1100: see README, *)
+(* "The key: the model and today's code".                                  *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 

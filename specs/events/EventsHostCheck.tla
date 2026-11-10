@@ -90,8 +90,17 @@ ASSUME ~EmittableByPlugin("rutis/row")
 
 (* §9: ids `<epoch>.<n>` say their offer; a bare id does not.                 *)
 ASSUME AnnouncedEpoch(<<3, 12>>) = 3
+ASSUME AnnouncedNumber(<<3, 12>>) = 12
 ASSUME HasEpoch(<<3, 12>>)
 ASSUME ~HasEpoch(<<0, 12>>)
+ASSUME AnnouncedId(3, 12) = <<3, 12>>
+ASSUME BareId(12) = <<0, 12>>
+ASSUME AnnouncementCurrent(3, <<3, 12>>)
+ASSUME AnnouncementCurrent(4, <<0, 12>>)
+ASSUME AnnouncementStale(4, <<3, 12>>)
+ASSUME ~AnnouncementStale(3, <<3, 12>>)
+ASSUME KeptAfterEpoch({<<2, 1>>, <<3, 1>>, <<0, 9>>}, 3) = {<<3, 1>>, <<0, 9>>}
+ASSUME KeptAfterOffer({<<2, 1>>, <<3, 1>>, <<0, 9>>}, 2) = {<<3, 1>>, <<0, 9>>}
 
 -------------------------------------------------------------------------------
 (* The one state: nothing to explore                                          *)

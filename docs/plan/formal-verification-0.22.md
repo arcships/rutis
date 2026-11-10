@@ -14,7 +14,7 @@ Status：执行中。日期：2026-11-09。
 | WS1 | #1025 事件关闭接纳：marker、发布、Entry::live、竞态测试、benchmark | #1025、#622 | 代码、确定性测试、benchmark 结果 | WS0 | 核心完成，验证中 |
 | WS2 | 现行会话协议规格：帧、握手、调用、引用、取消、畸形帧、上限、未知字段 | #635 | `docs/protocol-session.md` 与 `.en.md`；旧设计改为引用；规格缺口清单 | WS0 | 第一版完成；未知字段已定（调用级失败） |
 | WS3 | 规则清单与追踪表：每条规则的来源、人话承诺、证据、变异、状态、缺口 | #634 | `docs/formal-trace/` 与统计脚本；`guarantees.md` 接上 | WS2 部分输入 | 第一版完成，1817 行（含 1368 条协议规则）；未按现行规格逐条复核 |
-| WS4 | 协议设计的 TLA+ 模型：事件关闭接纳、跨运行时同步、远程租约、行与调用生命周期 | #613 | `specs/` 新模型或对账后的旧模型、`expected.txt`、`run.sh`、README | WS2 | 九个模型均有可跑版本：event-close、events 四模块、cross-runtime-sync、remote-lease、row-lifecycle、call-lifecycle、peer-rows；仍缺实现修复和部分配置 |
+| WS4 | 协议设计的 TLA+ 模型：事件关闭接纳、跨运行时同步、远程租约、行与调用生命周期 | #613 | `specs/` 新模型或对账后的旧模型、`expected.txt`、`run.sh`、README | WS2 | 九个模型全部扩到设计稿范围：event-close、events 四模块、cross-runtime-sync、remote-lease、row-lifecycle、call-lifecycle、peer-rows；约 215 个配置，新增配置都已实跑；剩余是实现修复与模型跟随 |
 | WS5 | 真实执行 trace 与一致性：通道/帧 trace 验证、适用实现列 | #624 | 验证器、正反用例、缺口清单 | WS2、WS4 | 首块完成：16 个用例；上限、leases、host-gone、sync-cycles 待补 |
 | WS6 | 非 Rust 运行时可控调度与静态检查 | #630 | 每个适用语言的证据；不适用写原因 | WS2 | 首块完成 |
 | WS7 | 属性、模糊、Kani、Miri、虚拟时钟 | #631、#639 | 属性测试、模糊目标、计时用例、Kani/Miri 结论 | WS2 | 首块完成：引用回滚 6 + 值/帧/坏帧属性 5；Kani/Miri/fuzz 未跑 |
@@ -75,6 +75,7 @@ Status：执行中。日期：2026-11-09。
 
 ## 5. 执行记录
 
+- 2026-11-10：六个模型目录扩到设计稿范围：events 33 配置、cross-runtime-sync 44、remote-lease 32、row-lifecycle 36、call-lifecycle 35、peer-rows 28；新增配置全部实跑通过，`specs/README` 与计划状态同步；剩余是实现修复与验证收口。
 - 2026-11-10：三个设计缺口开 issue：#1098（异步调用“是否等待结果”信号）、#1099（取消表清理与取消后回复）、#1100（peer row 键身份）；当前 PR 只做不改变这些语义的实现 bug 修复。- 2026-11-09：`events::link::accept` 旧提供回插已修（`gone` 边界 + 插入同锁重检，2 个确定性回归测试）；`cross-runtime-sync` 的“已标记链异步调用”疑点发现帧上无法区分“发起即不管”和“之后 await”，先回退代码改动，待协议加信号后再改。
 - 2026-11-09：TLA+ 九块全部落地：`specs/events/` 四模块 21 配置、`specs/peer-rows/` 7 配置、`row-lifecycle` 22 配置、`call-lifecycle` 16 配置、`remote-lease` 21 配置、`cross-runtime-sync` 新配置；模型发现 bail 分发盲区、本地放弃不发 cancel、已标记链异步调用误判、link accept 旧代次回插等疑点。
 - 2026-11-09：第三批：shuttle 增至 9 个模型（新增 root dispose/shutdown、依赖驱逐）；`specs/call-lifecycle` 7 个配置按预期结束；trace 验证器 23 个用例；cargo-fuzz 实际跑 session_frame/websocket_upgrade/error_graph/local_lines 共 4 个目标、无 crash。

@@ -36,3 +36,18 @@ hidden-policy-b violated:ChainRecognised
 async-policy-b violated:NoFalseCycle
 nested-service violated:NeverNested
 end-session ok
+# #614 continued (2026-11-10): the host as a participant (`Workers`
+# bounded), asynchronous `serial` / `parallel` / `waterfall` dispatch,
+# `cancel` with a late `ret`, the lost chain across a suspension, a Cordis
+# node's shared pump, a cycle across hosts, and `MarkedWhileRunning`.
+policy-b-workers1 deadlock
+serial-policy-b ok
+parallel-policy-b ok
+waterfall-async-policy-b ok
+before-lost-chain deadlock
+cancel-policy-b ok
+cancel-forward-policy-b ok
+before-cancel violated:MarkedWhileRunning
+link-policy-b deadlock
+link-alone ok
+cross-host deadlock
