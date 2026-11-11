@@ -969,11 +969,11 @@ ${sources.join('\n')}
 
 ## 3. Result
 
-| Rows | Verified | Partial | Unverified | Not guaranteed |
-| --- | --- | --- | --- | --- |
-| ${list.length} | ${count('已验证')} | ${count('部分验证')} | ${count('未验证')} | ${count('明确不保证')} |
+| Rows | Verified | Partial | Unverified | Not guaranteed | Withdrawn |
+| --- | --- | --- | --- | --- | --- |
+| ${list.length} | ${count('已验证')} | ${count('部分验证')} | ${count('未验证')} | ${count('明确不保证')} | ${count('已撤回')} |
 
-No status moved in the re-extraction: no test was added, and the two rows that gained evidence citations (\`TRC-LIMIT-2\`, \`TRC-MALFORMED-2\`) already described that evidence in their wording, so each row keeps its status.
+No status moved in the re-extraction: no test was added, and the two rows that gained evidence citations (\`TRC-LIMIT-2\`, \`TRC-MALFORMED-2\`) already described that evidence in their wording, so each row keeps its status. \`TRC-NG-4\` is withdrawn: protocol 4 no longer has the \`objects\` capability it described (#1123).
 
 ## 4. Per-row re-extraction
 
@@ -1046,7 +1046,7 @@ ${PROTOCOL.map(meta => `### ${meta.label}\n\n${recheckTable(rows, meta)}`).join(
 
 ## 5. 语义重抽：${SEMANTIC.label}（${semantic.length} 行，${SEMANTIC.date}）
 
-\`TRC-*\` 的 ${semantic.length} 行已按 0.22 现行来源重写（基准 \`${SEMANTIC.baseline}\`）：每行给出会话规格 §11 的 \`SESS-*\` 锚点（没有锚点的行写明会话规格不覆盖的部分），承诺文字改用现行规格的措辞与数字，来源章节与英文重抽文字在[英文复核页](recheck-0.22.en.md)。锚点、来源章节与英文页由 \`--check\` 核对：每个 \`SESS-*\` 都在会话规格里，并出现在该行「现行来源」。
+\`TRC-*\` 的 ${semantic.length} 行已按 0.22 现行来源重写（基准 \`${SEMANTIC.baseline}\`）：每行给出会话规格 §11 的 \`SESS-*\` 锚点（没有锚点的行写明会话规格不覆盖的部分），承诺文字改用现行规格的措辞与数字，来源章节与英文重抽文字在[英文复核页](recheck-0.22.en.md)。锚点、来源章节与英文页由 \`--check\` 核对：每个 \`SESS-*\` 都在会话规格里，并出现在该行「现行来源」。\`TRC-NG-4\` 已撤回：协议 4 没有它所描述的 \`objects\` 能力（#1123）。
 
 **其余分区没有重抽**：协议清单 ${total} 行仍是 issue 快照的十列原文（状态按本页复核），保证登记表 211 行由登记表生成，\`ECA\` 10 行仍是手写的设计提案。语义重抽的下一批仍是会话分区（SES、VAL、TAG、M1、CHN）。
 

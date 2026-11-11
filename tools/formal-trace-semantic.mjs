@@ -270,8 +270,8 @@ export const SEMANTIC = {
     'TRC-NG-4': {
       source: 'formal-trace.md §1',
       anchors: ['SESS-52', 'SESS-53', 'SESS-79'],
-      en: 'Cross-runtime object capability interop is not guaranteed: protocol 4 has no `objects` capability (`SESS-16`; `SESS-53` replaced the capability and its refusal branch), and every protocol-4 implementation accepts object references (`SESS-52`); the #639 "Rust relay does not check `objects`" has no check point to trigger in protocol 4, and far ends of 0.18 or earlier are refused at the handshake (`SESS-79`).',
-      gapEn: 'Reproduce it as a test first, then decide whether to fix it or write it into the specification (#639, #635); `docs/formal-trace.md` §1 and §3.0 still use the `objects` capability wording and #635 has to fix the source document.',
+      en: 'Withdrawn: "cross-runtime object-capability interop is not guaranteed" was written for the 0.18 `objects` capability. Protocol 4 has no such capability (`SESS-16`; `SESS-53` replaced the capability and its refusal branch), and every protocol-4 implementation accepts object references (`SESS-52`); cross-language object references are covered by `bridge/object-refs`; the #639 "Rust relay does not check `objects`" has no check point to trigger in protocol 4, and far ends of 0.18 or earlier are refused at the handshake (`SESS-79`).',
+      gapEn: 'The 0.18 `objects` capability no longer exists in protocol 4, so this non-guarantee is withdrawn; object references are no longer sent conditionally (#1123).',
     },
     'TRC-NG-5': {
       source: 'formal-trace.md §1',

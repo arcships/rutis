@@ -28,7 +28,7 @@ The status vocabulary is deliberately strict. **Current** means that the rule is
 | --- | --- | --- | --- |
 | Session frames | The protocol-4 `Frame` vocabulary and ordered handling in §3.1 | Pre-protocol-4 frame names or payload-dependent channel logs | A particular scheduler interleaving beyond channel order |
 | Handshake | Mutual `hello`, version 4, endpoint and capability checks | A handshake that registers/mounts plugins before `Greeted` is mounted | Successful calls before `ready` |
-| References | Tagged references, home identity, counted `release` | The old assumption that every reference is copied data | Reference lifetime keeping a runtime process alive; cross-runtime object-capability interop for an undeclared `objects` capability is Not guaranteed |
+| References | Tagged references, home identity, counted `release` | The old assumption that every reference is copied data; choosing the far end by the `objects` capability (0.18) | Reference lifetime keeping a runtime process alive (Not guaranteed) |
 | Cancellation | `cancel` is hop-by-hop; late replies are discarded | Treating cancellation as a transport close | A deadline for calls (none is promised here) |
 | Errors | `Failure` graphs and coded call/session scopes | Matching retry or behaviour by error text | A stable platform-specific transport reason for malformed input |
 | Limits | Per-call value/message refusal and explicit outbound backlog limit | Sending an oversized frame and then continuing the call | An unbounded backlog when `outbound_limit` is `None` |
@@ -75,7 +75,7 @@ Each category includes a success, failure and boundary case. The examples are cu
 
 **Boundary — reconnect is a new session.** The old session and its rows are disposed before a new pair becomes active; a handshake-only session shares no plugins or services, and replacement mounts only after the old session unloads (`crates/rutis-bridge/tests/session_plugin.rs:182-270`). The normal channel result is `Ok(())`/`Ok(None)` for the transport thread, while the local session state is separately `Disposed`; those observations must not be merged into one handshake result.
 
-Lifecycle trace status: the session/row sequencing above is current implementation evidence. It does not assert a single cross-runtime row-failure policy: announcement errors are handled differently by the SDKs, as recorded in the service-announcement design. Object-capability interop remains **Not guaranteed / pending reproduction**: issue #639 reports a suspected Rust relay to a runtime that does not declare `objects`; the cross-runtime failure has not yet been reproduced or fixed, so the issue remains a pending investigation rather than a source-backed guarantee.
+Lifecycle trace status: the session/row sequencing above is current implementation evidence. It does not assert a single cross-runtime row-failure policy: announcement errors are handled differently by the SDKs, as recorded in the service-announcement design. Object references are not negotiated by capability: protocol 4 has no `objects` capability ([session protocol specification](protocol-session.md) `SESS-16`, `SESS-53`), and every protocol-4 implementation accepts object references (`SESS-52`); the #639 finding that a Rust relay does not check `objects` has no reachable check point in protocol 4, and far ends of 0.18 or earlier are already refused at the handshake (`SESS-79`).
 
 ### 3.1 Frames
 

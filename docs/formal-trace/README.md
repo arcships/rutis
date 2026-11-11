@@ -7,6 +7,8 @@
 
 2026-11-11：1368 条协议规则按 0.22 现行来源复核，结果在[复核表](recheck-0.22.md)；本表协议行的状态改由复核结论给出，不再沿用 issue 快照的映射。
 
+2026-11-11（#1123）：协议 4 没有 `objects` 能力（`SESS-16`、`SESS-53`），`TRC-NG-4` 从「明确不保证」改为「已撤回」；[会话追踪契约](../formal-trace.md) §1、§3.0 与英文版同步。
+
 2026-11-11（语义重抽，基准 `4a1ac08b`）：会话追踪契约（`TRC-*`，44 行）按现行来源逐行重写，43 行给出 `SESS-*` 锚点，`TRC-INV-7` 写明会话规格不覆盖追踪输出；中文表在[复核表](recheck-0.22.md) §5，英文逐行文字在[英文复核页](recheck-0.22.en.md)。状态不变（这一轮没有新增实现证据）。其余分区仍未语义重抽。
 
 2026-11-09：WS1 落地 #1025 的核心（marker 发布、`Entry::live`、确定性竞态测试、shuttle 模型），计划 §3 的 G3、G4 两条阻断解除；`ECA-*` 行按实际证据改为 7 条「部分验证」，其余 3 条仍是「未验证」。
@@ -24,7 +26,7 @@ node tools/formal-trace.mjs --check    # 只检查，不打印统计
 已进表：
 
 - **保证登记表的全部 211 行**：200 条现行、8 条已撤回、3 条不单独计数的复述编号（`core/D20`、`core/D26`、`core/D27`）。这些行由脚本从登记表的 Markdown 表格抽取，编号、级别、状态、验证列原样沿用，不凭记忆补写。脚本按表内行计数；登记表 §16 的合计仍与表内不一致，见 §6。
-- **[会话追踪契约](../formal-trace.md) 的九类规则**（每类成功、失败、边界各一行）、§4 的 8 条追踪不变量、§1 的 9 条明确不保证：44 行，编号 `TRC-*`。
+- **[会话追踪契约](../formal-trace.md) 的九类规则**（每类成功、失败、边界各一行）、§4 的 8 条追踪不变量、§1 的 9 条（8 条明确不保证，`TRC-NG-4` 已按协议 4 撤回）：44 行，编号 `TRC-*`。
 - **[事件关闭接纳设计](../design-event-close-admission-2026-11-08.md) §3 的 10 条提案规则**：编号 `ECA-*`；7 条有实现、确定性用例或 shuttle 模型，记「部分验证」，其余 3 条记「未验证」。
 - **#634 的 1368 条规则清单**：6 个文件、1552 行（1368 条现行 + 184 条已取代），在 `rules/protocol-*.md`。每个文件是 issue 的一条分区评论的 Markdown 表格原样导出（会话分区的上下两条评论合成一个文件），列仍是 issue 的十列；脚本读入时按 §3 映射状态。分区行数：
 
@@ -39,7 +41,7 @@ node tools/formal-trace.mjs --check    # 只检查，不打印统计
   | 合计 | — | 1368 | 184 | 1552 |
 
 - **#634 的 1368 条规则按 0.22 现行来源复核**（方法与逐条记录见[复核表](recheck-0.22.md)）：111「已验证」、376「部分验证」、540「未验证」、42「明确不保证」、201「不单独计数」，另有 98 条按 0.19 / 0.22 删除的机制改记「已撤回」；issue 快照里的 184 条「已取代」没有重抽。1368 = 111 + 376 + 540 + 42 + 201 + 98。
-- **TRC 分区（44 行）已语义重抽**（2026-11-11，基准 `4a1ac08b`）：`rules/trace-contract.md` 的九类追踪规则、8 条不变量、9 条明确不保证逐行按 `docs/formal-trace.md`、`docs/protocol-session.md` §11 与 `docs/design-remote-session-2026-10-28.md` 重写。43 行给出 `SESS-*` 锚点；`TRC-INV-7` 没有锚点，写明会话规格不规定追踪输出。来源章节、锚点、状态与英文页由 `--check` 核对。**其余分区没有语义重抽**：协议清单 1552 行仍是 issue 快照原文，保证登记表 211 行由登记表生成，`ECA` 10 行仍是设计提案；重抽数据只有这一分区（`tools/formal-trace-semantic.mjs`）。
+- **TRC 分区（44 行）已语义重抽**（2026-11-11，基准 `4a1ac08b`）：`rules/trace-contract.md` 的九类追踪规则、8 条不变量、9 条不作保证条目（`TRC-NG-4` 后按 #1123 撤回）逐行按 `docs/formal-trace.md`、`docs/protocol-session.md` §11 与 `docs/design-remote-session-2026-10-28.md` 重写。43 行给出 `SESS-*` 锚点；`TRC-INV-7` 没有锚点，写明会话规格不规定追踪输出。来源章节、锚点、状态与英文页由 `--check` 核对。**其余分区没有语义重抽**：协议清单 1552 行仍是 issue 快照原文，保证登记表 211 行由登记表生成，`ECA` 10 行仍是设计提案；重抽数据只有这一分区（`tools/formal-trace-semantic.mjs`）。
 - **状态按复核定，不按 issue 的「已覆盖」定**：口径是来源是否还在、有没有现行锚点、`现有形式化` 列的证据是否解析、状态只降不升（[复核表](recheck-0.22.md) §1）。161 条对到 `docs/protocol-session.md` 的 `SESS-*`；261 条没有现行来源（多语言运行时设计的 0.9 基线、远程插件设计、登记表已删的行等），按原因列在复核表 §5。规格写「当前」只说明规则现行，不等于本表的「已验证」。
 - **80 个协议清单编号与保证登记表的行同号**（例如 `core/D1`、`bridge/value-roundtrip`）；两份清单的粒度不同（协议清单有 `core/D2a`/`D2b` 这种拆行），本表把它们当两行保留。**1817 是行数，不是不同的规则数**，不要把保证登记表和协议清单的合计相加。
 - 设计文档、用户文档里没有进登记表、也没有进 #634 清单的行为（Q3.3 的实现细节除外）没有逐条抽。
@@ -55,7 +57,7 @@ node tools/formal-trace.mjs --check    # 只检查，不打印统计
 | `<前缀>-<章节>-<序号>` | #634 的 `events`、`session`、`runtime`、`remote` 分区 | `EVP-2.1-1`、`SES-6.1-12`、`VAL-1-V10`、`TAG-3-R1` | 前缀：`EVP`、`EVD`、`SES`、`VAL`、`TAG`、`M1`、`CHN`、`SYN`、`M2`、`MNT`、`REQ`、`RTP`、`INS`、`MSV`、`REM`、`DIA`、`APP`、`NOD`；章节可带点（`6.1`），序号可带字母（`9a`、`V10`、`R1`） |
 | `TRC-<类别>-<序号>` | 会话追踪契约 §3 | `TRC-GREET-2` | 类别：`LIFE`（会话与 row 生命周期）、`FRAME`、`GREET`、`REF`、`CANCEL`、`ERR`、`LIMIT`、`MALFORMED`、`NET`；`1` 成功、`2` 失败、`3` 边界 |
 | `TRC-INV-<n>` | 会话追踪契约 §4 | `TRC-INV-2` | 八条追踪不变量 |
-| `TRC-NG-<n>` | 会话追踪契约 §1「不作保证」列 | `TRC-NG-4` | 明确不保证 |
+| `TRC-NG-<n>` | 会话追踪契约 §1「不作保证」列 | `TRC-NG-3` | 不作保证条目；已撤回的保留 |
 | `ECA-<n>` | 事件关闭接纳设计 §3 | `ECA-4` | 设计里的规则号 |
 
 编号只增不改：条目移动章节、改名、换文件时编号不变；删除条目时行保留并写状态与原因。
@@ -74,7 +76,7 @@ node tools/formal-trace.mjs --check    # 只检查，不打印统计
 | 状态 | 已验证、部分验证、未验证、明确不保证；已撤回和不单独计数不计入统计 | 脚本（登记表行；协议行按[复核表](recheck-0.22.md)的结论）/ 手写 |
 | 缺口 | 下一步 issue；不能把「未覆盖」写成「通过」 | 登记表行初始值取「说明」列，之后可手工补充；协议行取「归属 issue」+「备注」+ 降级原因 |
 
-**关于「明确不保证」行**：按登记表的惯例（如 `core/D15`），级别与状态都是「明确不保证」，不计入未验证数。会话追踪契约 §1 的 9 条明确不保证按这条惯例登记。
+**关于「明确不保证」行**：按登记表的惯例（如 `core/D15`），级别与状态都是「明确不保证」，不计入未验证数。会话追踪契约 §1 的 9 条不作保证条目按这条惯例登记；`TRC-NG-4` 已按协议 4 撤回（#1123），不计入。
 
 **状态的边界**：模型通过只把模型列为通过；必须有实现证据才能把规则写「已验证」。本表引用 `TRC`/`ECA` 行时，只有具名测试断言了要点才算「部分验证」，只有源码或注释的记「未验证」。
 
@@ -109,7 +111,7 @@ node tools/formal-trace.mjs --check    # 只检查，不打印统计
 | [guarantees-host.md](rules/guarantees-host.md) | `host/*`、`dsh/*` | 35 | 31 | 4 | 0 | 0 | 0 | 0 |
 | [guarantees-sdk.md](rules/guarantees-sdk.md) | `sdk/*` | 11 | 11 | 0 | 0 | 0 | 0 | 0 |
 | [guarantees-loader.md](rules/guarantees-loader.md) | `loader/*`、`swift/*` | 48 | 42 | 5 | 1 | 0 | 0 | 0 |
-| [trace-contract.md](rules/trace-contract.md) | 手写 | 44 | 0 | 34 | 1 | 9 | 0 | 0 |
+| [trace-contract.md](rules/trace-contract.md) | 手写 | 44 | 0 | 34 | 1 | 8 | 1 | 0 |
 | [event-close-admission.md](rules/event-close-admission.md) | 手写 | 10 | 0 | 7 | 3 | 0 | 0 | 0 |
 | [protocol-registry-1.md](rules/protocol-registry-1.md) | #634 · registry-1 | 165 | 4 | 48 | 62 | 6 | 21 | 24 |
 | [protocol-registry-2.md](rules/protocol-registry-2.md) | #634 · registry-2 | 218 | 8 | 29 | 126 | 5 | 14 | 36 |
@@ -117,7 +119,7 @@ node tools/formal-trace.mjs --check    # 只检查，不打印统计
 | [protocol-session.md](rules/protocol-session.md) | #634 · session 上/下 | 350 | 13 | 99 | 86 | 7 | 118 | 27 |
 | [protocol-runtime.md](rules/protocol-runtime.md) | #634 · runtime | 309 | 8 | 38 | 140 | 10 | 50 | 63 |
 | [protocol-remote.md](rules/protocol-remote.md) | #634 · remote | 248 | 4 | 70 | 73 | 13 | 56 | 32 |
-| 合计 | — | 1817 | 294 | 431 | 545 | 53 | 290 | 204 |
+| 合计 | — | 1817 | 294 | 431 | 545 | 52 | 291 | 204 |
 <!-- index:end -->
 
 脚本还会打印这些数字（只算本表内的行）：
