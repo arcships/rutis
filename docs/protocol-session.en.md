@@ -363,9 +363,9 @@ The table is this file's rule list, for #634's trace table and #613's models. Ev
 | `SESS-62` | Cancellation is closing the transport | Superseded | §7 |
 | `SESS-63` | Malformed input fails closed | Current | `crates/rutis-bridge/src/session/rpc.rs:2514-2561,2598-2618`; `crates/rutis-bridge/src/session/testing.rs:151-392` |
 | `SESS-64` | The shared malformed matrix: 25 cases (13 single-frame + 12 multi-frame/ordered), all seven implementations have an entry point | Current | `crates/rutis-bridge/src/session/testing.rs:154-360`; `crates/rutis-bridge/tests/runtime_conformance.rs:452-633` |
-| `SESS-65` | The old "outside the shared matrix" malformed rules; the 25-case matrix covers that list | Superseded | §8.1; §14 G2 |
+| `SESS-65` | The old "these rules are outside the shared matrix" state; the 25-case matrix covers that list (`SESS-64`) | Superseded | §8.1; §14 G2 |
 | `SESS-66` | Rust: an unknown field fails only that call (`hello` fails the handshake, `release`/`cancel` ignore it) | Current | `parse_frame` / `reject_unknown_fields` in `crates/rutis-bridge/src/session/rpc.rs`; `rpc/tests.rs::unknown_frame_fields_fail_only_their_call`, `::an_unknown_field_in_hello_fails_the_handshake` |
-| `SESS-67` | The six runtimes still ignore unknown fields; no call-level refusal yet | Current (to change) | `node/rutis-runtime/src/session.mjs:702-740`; §9's anchors; §14 G1 |
+| `SESS-67` | All seven runtimes implement the call-level refusal (`bad-frame`); `release`/`cancel` ignore extra fields | Current | `bridge/unknown-fields` in `docs/guarantees.en.md`; §9; §14 G1 |
 | `SESS-68` | Unknown fields end the session / six runtimes ignore them uniformly | Superseded | §9; §14 G1 |
 | `SESS-69` | Unknown fields as an extension mechanism | Not guaranteed | §9 |
 | `SESS-70` | 16 MiB default; the memory channel has no limit | Current | `crates/rutis-bridge/src/pipe/lines.rs:13-28`; `crates/rutis-bridge/src/websocket/config.rs:104-108,132-141` |
@@ -438,8 +438,8 @@ Every call-level failure ends at the call or the value. Handshake and transport 
 ### G1 Unknown fields: decided (2026-11-09)
 
 - Decision: keep rejecting (B), but handle the field at the frame's scope instead of ending the whole session: `hello` fails the handshake; `invoke`/`call`/`get`/`await` fail only that call; `return`/`throw` fail only the call waiting for it; `release`/`cancel` ignore it. Code `bad-frame`, data `{op, fields}`.
-- Current: Rust implements it (`SESS-66`); tests `unknown_frame_fields_fail_only_their_call`, `an_unknown_field_in_hello_fails_the_handshake`, `release_and_cancel_ignore_unknown_fields`.
-- Not done: Node, Bun, Python, Go, Swift and Kotlin still silently ignore unknown fields and have no call-level refusal (`SESS-67`, plan G11). Cross-implementation cases and an unknown-field group in `MALFORMED` follow each implementation.
+- Done (2026-11-10): all seven implementations have the call-level refusal (`SESS-67`); the verification column of `bridge/unknown-fields` lists each implementation's cases, and Rust's tests are `unknown_frame_fields_fail_only_their_call`, `an_unknown_field_in_hello_fails_the_handshake` and `release_and_cancel_ignore_unknown_fields`. Plan G11 is closed.
+- Unknown fields fail one call only, so they are not part of the session-ending `MALFORMED` matrix; each implementation's call-level tests are the evidence.
 - The old A (ignore everything) and C (whitelist) directions are dropped.
 
 ### G2 The shared malformed matrix: filled (2026-11-11)
@@ -459,12 +459,10 @@ Whether a callee replies after cancellation is not one rule (`SESS-61`). The #62
 
 Both need a later documentation revision; this file only marks them superseded and does not edit the old design texts.
 
-### G5 Rules without tests
+### G5 Rules without tests: closed (2026-11-11)
 
-- `SESS-67`'s six runtimes still ignore unknown fields; they have no `bad-frame` call-level refusal test (plan G11).
-- `SESS-22` (a second `hello`), `SESS-21` (a request before the greeting) and `SESS-33`'s repeated call id and `path` self-reference are now in the shared matrix (`SESS-64`); the backwards, non-numeric, above-2^53−1 and wrong-prefix forms of `SESS-33` are still checked by code only.
-
-`SESS-67` is the remaining gap here; the other rules are covered by the shared matrix or other tests.
+- `SESS-67`: all seven implementations have call-level refusal tests (the verification column of `bridge/unknown-fields`); plan G11 is closed.
+- `SESS-22` (a second `hello`), `SESS-21` (a request before the greeting) and `SESS-33`'s repeated call id and `path` self-reference are now in the shared matrix (`SESS-64`); the other call-id forms are listed under G2's "Still outside the matrix".
 
 ### G6 Error text differences
 

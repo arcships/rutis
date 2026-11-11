@@ -363,9 +363,9 @@
 | `SESS-62` | 取消等于关闭承载 | 已取代 | §7 |
 | `SESS-63` | 畸形输入故障闭合 | 当前 | `crates/rutis-bridge/src/session/rpc.rs:2514-2561,2598-2618`；`crates/rutis-bridge/src/session/testing.rs:151-392` |
 | `SESS-64` | 共享畸形帧矩阵 25 个用例（13 单帧 + 12 多帧/顺序），七种实现都有入口 | 当前 | `crates/rutis-bridge/src/session/testing.rs:154-360`；`crates/rutis-bridge/tests/runtime_conformance.rs:452-633` |
-| `SESS-65` | 原“共享矩阵之外”的畸形规则；25 个用例的矩阵已覆盖该清单 | 已取代 | §8.1；§14 G2 |
+| `SESS-65` | 旧状态“这些规则未进共享矩阵”；25 个用例的矩阵已覆盖该清单（`SESS-64`） | 已取代 | §8.1；§14 G2 |
 | `SESS-66` | Rust：未知字段只失败该调用（`hello` 失败握手，`release`/`cancel` 忽略） | 当前 | `crates/rutis-bridge/src/session/rpc.rs` 的 `parse_frame` / `reject_unknown_fields`；`rpc/tests.rs::unknown_frame_fields_fail_only_their_call`、`::an_unknown_field_in_hello_fails_the_handshake` |
-| `SESS-67` | 六种运行时仍忽略未知字段，未做调用级拒绝 | 当前（待改） | `node/rutis-runtime/src/session.mjs:702-740`；§9 的各实现锚点；§14 G1 |
+| `SESS-67` | 七种运行时都实现调用级拒绝（`bad-frame`）；`release`/`cancel` 忽略多余字段 | 当前 | `docs/guarantees.md` 的 `bridge/unknown-fields`；§9；§14 G1 |
 | `SESS-68` | 未知字段结束整个会话 / 六种无差别忽略 | 已取代 | §9；§14 G1 |
 | `SESS-69` | 未知字段可作扩展机制 | 明确不保证 | §9 |
 | `SESS-70` | 16 MiB 默认上限；内存通道无上限 | 当前 | `crates/rutis-bridge/src/pipe/lines.rs:13-28`；`crates/rutis-bridge/src/websocket/config.rs:104-108,132-141` |
@@ -438,8 +438,8 @@
 ### G1 未知字段：已定（2026-11-09）
 
 - 决定：采用 B（拒绝），但按帧的作用范围处理，不结束整个会话：`hello` 失败握手；`invoke`/`call`/`get`/`await` 只失败该调用；`return`/`throw` 只失败等待它的调用；`release`/`cancel` 忽略。错误码 `bad-frame`，data `{op, fields}`。
-- 当前：Rust 已实现（`SESS-66`），测试见 `unknown_frame_fields_fail_only_their_call`、`an_unknown_field_in_hello_fails_the_handshake`、`release_and_cancel_ignore_unknown_fields`。
-- 未完成：Node、Bun、Python、Go、Swift、Kotlin 仍静默忽略未知字段，没有调用级拒绝（`SESS-67`，计划 G11）。跨实现一致性用例和 `MALFORMED` 的未知字段分组要随各自实现补。
+- 已完成（2026-11-10）：七种实现都实现了调用级拒绝（`SESS-67`）；`bridge/unknown-fields` 的验证列列出各实现的用例，Rust 的测试见 `unknown_frame_fields_fail_only_their_call`、`an_unknown_field_in_hello_fails_the_handshake`、`release_and_cancel_ignore_unknown_fields`。计划 G11 关闭。
+- 未知字段只失败一条调用，不属于会话结束的 `MALFORMED` 矩阵；各实现的调用级测试就是证据。
 - 旧 A（全部忽略）和 C（白名单）不再采用。
 
 ### G2 共享畸形矩阵：已补齐（2026-11-11）
@@ -459,12 +459,10 @@
 
 这两处需要后续的文档修订；本文只把它们标为已取代，不改旧设计正文。
 
-### G5 缺少测试的规则
+### G5 缺少测试的规则：已关闭（2026-11-11）
 
-- `SESS-67` 的六种运行时仍忽略未知字段，没有 `bad-frame` 调用级拒绝的用例（计划 G11）。
-- `SESS-22`（重复 `hello`）、`SESS-21`（问候前的请求）和 `SESS-33` 的重复调用号、`path` 自指已进入共享矩阵（`SESS-64`）；`SESS-33` 的倒退、非数字、超过 2^53−1、前缀不符仍只有代码检查。
-
-`SESS-67` 仍是这里的缺口；其余规则已由共享矩阵或其他测试覆盖。
+- `SESS-67`：七种实现都有调用级拒绝的测试（`bridge/unknown-fields` 的验证列）；计划 G11 关闭。
+- `SESS-22`（重复 `hello`）、`SESS-21`（问候前的请求）和 `SESS-33` 的重复调用号、`path` 自指已进入共享矩阵（`SESS-64`）；其余调用号形式见 G2 的“仍不在矩阵内”。
 
 ### G6 错误文字的差异
 
