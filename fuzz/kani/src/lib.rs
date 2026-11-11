@@ -6,13 +6,19 @@
 //!
 //!     cargo kani
 //!
-//! Not run in the change that added this file: `cargo-kani` is not
-//! installed here and the Kani release download stalled (see `README.md`).
+//! Not verified yet: Kani 0.68.0 does not finish these harnesses here
+//! (each was still checking after 90 minutes). `fuzz/KANI-MIRI.md` records
+//! the runs; a harness whose inputs are held to a smaller range says so.
 //!
-//! guarantee: bridge/value-tags
+//! guarantee: bridge/value-tags, bridge/value-roundtrip
 #![cfg(kani)]
 
-use rutis_bridge::session::{Date, TimeOfDay};
+use rutis_bridge::session::{Date, Instant, TimeOfDay};
+
+/// The days `Date::from_days_since_unix_epoch` spans: 0001-01-01 to
+/// 9999-12-31.
+const MIN_DAYS: i64 = -719_162;
+const MAX_DAYS: i64 = 2_932_896;
 
 /// A date the constructor accepts keeps the fields it was given and stays
 /// in the range the `date` tag can carry (years 0001–9999, months 1–12,
@@ -50,7 +56,7 @@ fn date_new_rejects_month_and_day_zero() {
 #[kani::proof]
 fn days_from_epoch_roundtrip() {
     let days: i64 = kani::any();
-    kani::assume((-719_162..=2_932_896).contains(&days));
+    kani::assume((MIN_DAYS..=MAX_DAYS).contains(&days));
     let date =
         Date::from_days_since_unix_epoch(days).expect("a day in 0001–9999 is a date in 0001–9999");
     assert_eq!(date.days_since_unix_epoch(), days);
@@ -75,4 +81,43 @@ fn time_of_day_keeps_valid_fields() {
         assert_eq!(time.second(), second);
         assert_eq!(time.nanosecond(), nanosecond);
     }
+}
+
+/// An instant, split into a UTC date and time of day and built back from
+/// them, is the same instant, with no nanosecond lost and the sign of a
+/// time before 1970 kept.
+#[kani::proof]
+fn instant_reads_back_through_utc() {
+    let seconds: i64 = kani::any();
+    let nanosecond: u32 = kani::any();
+    kani::assume(nanosecond < 1_000_000_000);
+    // A year's worth of seconds around 1970: the property does not depend
+    // on the year, and the full range takes longer than it is worth here.
+    kani::assume((-31_536_000..=31_536_000).contains(&seconds));
+    let instant = Instant::from_unix(seconds, nanosecond)
+        .expect("a second within a year of 1970 is inside 0001–9999");
+    let utc = instant.to_utc();
+    assert_eq!(Instant::from_utc(utc), instant);
+    assert_eq!(
+        utc.date().days_since_unix_epoch() * 86_400
+            + i64::from(utc.time().hour()) * 3_600
+            + i64::from(utc.time().minute()) * 60
+            + i64::from(utc.time().second()),
+        seconds
+    );
+    assert_eq!(utc.time().nanosecond(), nanosecond);
+}
+
+/// Nanoseconds since 1970-01-01 within years 0001–9999, split into whole
+/// seconds (rounded toward negative infinity, so that a time before 1970
+/// keeps its nanosecond) and the nanoseconds past them, read back as the
+/// same number.
+#[kani::proof]
+fn instant_nanoseconds_roundtrip() {
+    let nanos: i128 = kani::any();
+    // One day either side of 1970: the split at 10^9 does not depend on the
+    // magnitude, and symbolic 128-bit division over the full range is slow.
+    kani::assume((-86_400_000_000_000..=86_400_000_000_000 + 999_999_999).contains(&nanos));
+    let instant = Instant::from_unix_nanos(nanos).expect("a day either side of 1970 is in range");
+    assert_eq!(instant.unix_nanos(), nanos);
 }
