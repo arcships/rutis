@@ -4,18 +4,24 @@
 //! (`rutis_bridge::fuzzing::session_frame`). Malformed and too-deep input
 //! must fail alone, and a frame that reads must write back unchanged.
 //!
+//! The same run covers the two other in-memory fuzz targets, on the seeds
+//! in `fuzz/corpus/`: the local channels' line framing as the stream
+//! arrives in pieces (`local_lines`, `Mutex`, `Arc` and atomics), and an
+//! error graph from the far end read, printed and thrown on
+//! (`error_graph`).
+//!
 //! Run, from the repository root:
 //!
 //!     RUSTFLAGS="--cfg fuzzing" \
 //!         cargo +nightly miri run --manifest-path fuzz/miri/Cargo.toml
 //!
-//! `--cfg fuzzing` exposes the fuzz entry point in `rutis-bridge`; nothing
+//! `--cfg fuzzing` exposes the fuzz entry points in `rutis-bridge`; nothing
 //! here reads files, clocks or the network, so Miri's default isolation is
-//! enough (no `MIRIFLAGS` needed). The same entry runs the cargo-fuzz
-//! target `session_frame` on nightly (`fuzz/Cargo.toml`).
+//! enough (no `MIRIFLAGS` needed). The same entry points are the cargo-fuzz
+//! targets in `fuzz/Cargo.toml`, on nightly.
 //!
 //! guarantee: bridge/value-roundtrip, bridge/value-tags,
-//! bridge/large-and-deep-values
+//! bridge/large-and-deep-values, bridge/error-report-bounded
 
 /// A frame the reader must accept; `session_frame` writes each back and
 /// reads it again.
@@ -70,6 +76,63 @@ const FIXTURES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The `local_lines` seeds: a limit, a piece size and the stream. Each is
+/// read back line by line through a memory channel, and what was sent back
+/// must be the stream up to the last complete line.
+const LOCAL_LINES: &[(&str, &[u8])] = &[
+    (
+        "empty-limit",
+        include_bytes!("../../corpus/local_lines/empty-limit"),
+    ),
+    (
+        "no-newline",
+        include_bytes!("../../corpus/local_lines/no-newline"),
+    ),
+    (
+        "over-limit",
+        include_bytes!("../../corpus/local_lines/over-limit"),
+    ),
+    (
+        "truncated",
+        include_bytes!("../../corpus/local_lines/truncated"),
+    ),
+    (
+        "two-lines",
+        include_bytes!("../../corpus/local_lines/two-lines"),
+    ),
+    // A limit of 0 accepts only empty lines, one byte at a time.
+    ("limit 0", &[0, 0, b'\n', b'\n']),
+    // A piece size of 0 reads one byte at a time (`local_lines` makes it
+    // 1); the limit is the full buffer here, so no line is too long.
+    ("one byte a read", &[255, 0, b'a', b'\n', b'b', b'\n']),
+    // Fewer than two bytes: the target reads nothing.
+    ("empty input", &[]),
+    ("limit only", &[8]),
+];
+
+/// The `error_graph` seeds: an error graph from the far end, as JSON text.
+/// Reading it, printing it and throwing it on must not panic, and what is
+/// printed must start with the error's own text.
+const ERROR_GRAPHS: &[(&str, &[u8])] = &[
+    ("cycle", include_bytes!("../../corpus/error_graph/cycle")),
+    (
+        "dangling",
+        include_bytes!("../../corpus/error_graph/dangling"),
+    ),
+    (
+        "method-newline",
+        include_bytes!("../../corpus/error_graph/method-newline"),
+    ),
+    (
+        "plugin-error",
+        include_bytes!("../../corpus/error_graph/plugin-error"),
+    ),
+    // Not JSON, and not UTF-8: the target returns before reading a graph.
+    ("truncated json", b"{\"root\":{"),
+    ("not utf-8", &[0xff, 0xfe, b'{', b'}']),
+    ("empty input", b""),
+];
+
 fn main() {
     for (name, fixture) in FIXTURES {
         println!("miri: {name}");
@@ -84,5 +147,13 @@ fn main() {
     );
     println!("miri: too deep");
     rutis_bridge::fuzzing::session_frame(deep.as_bytes());
+    for (name, fixture) in LOCAL_LINES {
+        println!("miri: lines {name}");
+        rutis_bridge::fuzzing::local_lines(fixture);
+    }
+    for (name, fixture) in ERROR_GRAPHS {
+        println!("miri: error {name}");
+        rutis_bridge::fuzzing::error_graph(fixture);
+    }
     println!("miri: ok");
 }

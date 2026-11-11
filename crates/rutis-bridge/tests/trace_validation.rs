@@ -56,13 +56,17 @@
 //!   in that order and the lease events it records are checked.
 //! - §3.8, a host gone: the channel ends normally, the call in flight
 //!   fails with a transport error (code `peer-gone`), the session ends with
-//!   `peer disconnected`, and no frame follows the far end's end.
-//! - §3.4, synchronous waits: a forward into a one-stack, non-reentrant
-//!   runtime with a call out, not on the forward's chain, would wait on
-//!   itself; the session does not send it and its caller gets
-//!   `SyncWaitCycle`. The chain and stack-order edges need the runtime's
-//!   stack, which a channel trace does not carry, so only this edge is
-//!   checked.
+//!   `peer disconnected`, and no frame follows the far end's end. A far end
+//!   that is a process of the test's own is killed with `SIGKILL` instead:
+//!   the channel's end then says how the process ended (a receive failure,
+//!   not `ended`) and the call fails with that same text, which is the
+//!   difference a normal close and a kill leave.
+//! - §3.4, synchronous waits: a forward into a runtime whose waits would
+//!   close a cycle — chain, put aside or stack order (`crates/rutis-bridge/
+//!   src/session/rpc/waits.rs:1-23`) — is not sent, and its caller gets
+//!   `SyncWaitCycle`. What a channel trace does not carry of the runtime's
+//!   stack, the far end's frames do: its greeting declares `sync-stack` and
+//!   `reentrant-sync`, and each call of its names the call it runs under.
 //! - §3.8, an access point: a greeting names the end it is on — a
 //!   connection greeting as another endpoint is not an admitted session; a
 //!   revoked identity is closed with `rejected` (4003) after its hello and
@@ -84,13 +88,13 @@
 //! line is the fault — and where a case names a rule, deleting that rule
 //! accepts it.
 //!
-//! Not checked here, and gaps of #624: path forwarding, the outbound
-//! backlog limit (`SessionOptions::outbound_limit`: only a host makes a
-//! session with it, `Connection::open_with` is not public), which reference
-//! kinds a frame may name (a `get` of a function is the far end's own
-//! refusal), the access point's own log
-//! (`specs/remote-lease/AccessPoint.tla`; removed with #695), the chain and
-//! stack-order edges of the wait graph, and the host's real listener (its
+//! Not checked here, and gaps of #624: the outbound backlog limit
+//! (`SessionOptions::outbound_limit`: only a host makes a session with it,
+//! `Connection::open_with` is not public), which reference kinds a frame may
+//! name (a `get` of a function is the far end's own refusal), the access
+//! point's own log (`specs/remote-lease/AccessPoint.tla`; removed with
+//! #695), the guard that a call a runtime has started is not put aside (the
+//! graph keeps it, no run here needs it), and the host's real listener (its
 //! order is the fixture's). 4002 and 4003 are checked through a memory
 //! channel, whose `Close` maps them; the WebSocket close codes themselves
 //! are `crates/rutis-bridge/tests/websocket.rs` (feature `websocket`, not
@@ -1045,32 +1049,191 @@ struct Profile {
     reentrant: bool,
 }
 
-/// The synchronous forwards in a frame trace that would wait on themselves
-/// (#228, `specs/cross-runtime-sync` policy B). A call is forwarded into a
-/// far end with one stack that has a call out, not on the call's chain: the
-/// runtime runs no other call while it waits, so the forward waits for that
-/// one. When the forward's chain names a marked call — its caller waits for
-/// it — the forward closes a cycle and the session does not send it.
+/// The session a call id belongs to, by the prefix the issuing side puts on
+/// it: `main-a:3` is session `main-a`'s host's call, `node-a:3` its far
+/// end's (`session/rpc.rs`, `local_prefix` and the far end's).
+fn call_session<'a>(call: &str, sessions: &[Ends<'a>]) -> Option<&'a str> {
+    sessions.iter().find_map(|(host, far)| {
+        let named = |label: &str| {
+            call.strip_prefix(label)
+                .is_some_and(|rest| rest.starts_with(':'))
+        };
+        (named(host) || named(far)).then_some(*host)
+    })
+}
+
+/// A call the wait graph holds (§3.4, `crates/rutis-bridge/src/session/rpc/
+/// waits.rs:1-23`): a forward into a session, or the entry that bounds the
+/// chains made under it.
+struct Hop {
+    /// The id the call was sent with.
+    id: String,
+    /// The session that sent it: the one whose far end runs it.
+    dst: String,
+    /// The session that made it, when one did: the chain's last call.
+    src: Option<String>,
+    /// The call its chain names last: the one it was made under.
+    sid: Option<String>,
+    /// The ids its `path` names, the call itself not.
+    chain: Vec<String>,
+    /// Nobody waits for it: an asynchronous call off a marked chain.
+    entry: bool,
+}
+
+/// The calls of the wait cycle the last of `hops` would close, each by id,
+/// when there is one. The edges are the three the session draws
+/// (`waits.rs`): chain, put aside and stack order; `profile` is a far
+/// end's, by its label.
+fn wait_cycle(
+    hops: &[Hop],
+    sessions: &[Ends<'_>],
+    profile: impl Fn(&str) -> Profile,
+) -> Option<Vec<String>> {
+    let last = hops.len() - 1;
+    let index: BTreeMap<&str, usize> = hops
+        .iter()
+        .enumerate()
+        .map(|(at, hop)| (hop.id.as_str(), at))
+        .collect();
+    let entry_of = |call: &str| index.get(call).is_some_and(|&at| hops[at].entry);
+    // Calls a call out of their session named: that runtime has started
+    // them (a call made under them names them).
+    let mut named: BTreeSet<&str> = BTreeSet::new();
+    for hop in hops.iter().filter(|hop| !hop.entry) {
+        let Some(src) = hop.src.as_deref() else {
+            continue;
+        };
+        for entry in &hop.chain {
+            if call_session(entry, sessions) == Some(src) {
+                named.insert(entry);
+            }
+        }
+    }
+    let started: Vec<bool> = hops
+        .iter()
+        .map(|hop| named.contains(hop.id.as_str()))
+        .collect();
+    let mut successors: Vec<Vec<usize>> = vec![Vec::new(); hops.len()];
+    // Chain: a call waits for the calls made under it, through the nearest
+    // one; an entry bounds them (nobody waits for it).
+    for (at, hop) in hops.iter().enumerate() {
+        if hop.entry {
+            continue;
+        }
+        for entry in hop.chain.iter().rev() {
+            if let Some(&caller) = index.get(entry.as_str()) {
+                successors[caller].push(at);
+            }
+            if entry_of(entry) {
+                break;
+            }
+        }
+    }
+    // By session: the calls into it in order, and the calls out of it.
+    let mut into: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    let mut out: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (at, hop) in hops.iter().enumerate() {
+        into.entry(hop.dst.as_str()).or_default().push(at);
+        if hop.entry {
+            continue;
+        }
+        if let Some(src) = hop.src.as_deref() {
+            out.entry(src).or_default().push(at);
+        }
+    }
+    for (session, calls) in &into {
+        let Some(far) = sessions
+            .iter()
+            .find(|(host, _)| host == session)
+            .map(|(_, far)| *far)
+        else {
+            continue;
+        };
+        let profile = profile(far);
+        if !profile.stacked {
+            continue;
+        }
+        // Put aside: a call not started in a non-reentrant runtime with
+        // calls out, none of them on its chain, waits for all of them.
+        if let Some(outs) = out.get(session).filter(|_| !profile.reentrant) {
+            let sids: BTreeSet<&str> = outs
+                .iter()
+                .filter_map(|&at| hops[at].sid.as_deref())
+                .collect();
+            for &at in calls {
+                let hop = &hops[at];
+                let related = hop.chain.iter().any(|entry| {
+                    call_session(entry, sessions) == Some(*session) && sids.contains(entry.as_str())
+                });
+                if !hop.entry && !related && !started[at] {
+                    successors[at].extend(outs.iter().copied().filter(|&out| out != at));
+                }
+            }
+        }
+        // Stack order: a call waits for every later call into the same
+        // runtime that started there, through the next one that did.
+        let mut next_started = None;
+        for &at in calls.iter().rev() {
+            if let Some(later) = next_started {
+                successors[at].push(later);
+            }
+            if started[at] {
+                next_started = Some(at);
+            }
+        }
+    }
+    // Depth-first from the new call, remembering how each was reached.
+    let mut from: Vec<Option<usize>> = vec![None; hops.len()];
+    let mut stack = vec![last];
+    let mut seen = vec![false; hops.len()];
+    while let Some(at) = stack.pop() {
+        for &next in &successors[at] {
+            if next == last {
+                let mut cycle = vec![hops[last].id.clone()];
+                let mut back = Vec::new();
+                let mut here = at;
+                while here != last {
+                    back.push(hops[here].id.clone());
+                    here = from[here].expect("reached from the new call");
+                }
+                cycle.extend(back.into_iter().rev());
+                return Some(cycle);
+            }
+            if !seen[next] {
+                seen[next] = true;
+                from[next] = Some(at);
+                stack.push(next);
+            }
+        }
+    }
+    None
+}
+
+/// The first synchronous forward in `frames` that would wait on itself
+/// (#228, `specs/cross-runtime-sync` policy B), with the calls recorded
+/// before it as the wait graph. A forward whose chain names a marked call —
+/// its caller waits for it — closes a cycle when the call it becomes waits,
+/// through any of the graph's edges, for a call that waits for it; the
+/// session does not send it.
 ///
 /// The chain is the call's `path` (§3.4), the profile the far end's
-/// greeting (§3.2), and a marked call one the far end sent with `sync` and
-/// has not answered: a loaded runtime's call out is a forwarded call whose
-/// chain names its own marked call. Only this edge is checked; the chain
-/// and stack-order edges need the runtime's stack, which a channel trace
-/// does not carry (`specs/cross-runtime-sync`, "未建").
+/// greeting (§3.2) and a marked call one the far end sent with `sync` and
+/// has not answered. What a session's ends do is all in the frames: there is
+/// no event for a session ending, so a trace here ends its sessions after
+/// its calls settled. The graph also keeps the guard that a call the
+/// runtime has started is not put aside (`waits.rs`, `started`); no trace
+/// here needs it — the runs this file records either leave a runtime's
+/// calls unstarted or do not put them aside.
 fn refused_waits(frames: &[Frame], sessions: &[Ends<'_>]) -> Option<Violation> {
     /// The call id a chain entry names: `s1/node:3` is session `s1`'s call
     /// `node:3`; an untagged entry is the destination session's own id.
     fn entry_id(entry: &str) -> &str {
         entry.rsplit_once('/').map_or(entry, |(_, id)| id)
     }
-    let host_of = |label: &str| -> Option<(&str, &str)> {
-        sessions.iter().find(|(host, _)| *host == label).copied()
-    };
-    let profile = |end: &str| -> Profile {
+    let profile = |far: &str| -> Profile {
         frames
             .iter()
-            .find(|frame| frame.from == end && frame.op == "hello")
+            .find(|frame| frame.from == far && frame.op == "hello")
             .map(|hello| Profile {
                 stacked: hello.capabilities.iter().any(|name| name == "sync-stack"),
                 reentrant: hello
@@ -1080,95 +1243,74 @@ fn refused_waits(frames: &[Frame], sessions: &[Ends<'_>]) -> Option<Violation> {
             })
             .unwrap_or_default()
     };
-    // Calls this trace settles: the end that issued the call and its id.
-    let mut settled: BTreeSet<(String, String)> = BTreeSet::new();
-    // Calls a far end sent with `sync`, unanswered: the session's, and the
-    // id its far end gave it.
-    let mut marked: BTreeSet<(String, String)> = BTreeSet::new();
-    let mut host_calls: Vec<(usize, &str)> = Vec::new();
+    let is_far = |label: &str| sessions.iter().any(|(_, far)| *far == label);
+    let is_host = |label: &str| sessions.iter().any(|(host, _)| *host == label);
+    // Calls a far end sent with `sync` and has not answered: its runtime
+    // waits for them, and so does everything forwarded under them.
+    let mut marked: BTreeSet<String> = BTreeSet::new();
+    let mut hops: Vec<Hop> = Vec::new();
     for (at, frame) in frames.iter().enumerate() {
         let Some(id) = frame.id.as_deref() else {
             continue;
         };
         if REPLY_OPS.contains(&frame.op.as_str()) {
-            settled.insert((frame.from.clone(), id.to_owned()));
-            // A reply settles the call of the session whose far end it
-            // went to, whichever side issued it.
-            if let Some((host, _)) = host_of(&frame.from) {
-                marked.remove(&(host.to_owned(), id.to_owned()));
-            }
-            if let Some((host, _)) = sessions.iter().find(|(_, far)| *far == frame.from).copied() {
-                marked.remove(&(host.to_owned(), id.to_owned()));
-            }
+            marked.remove(id);
+            // The reply to a forward: it waits for nothing any more.
+            hops.retain(|hop| hop.id != id);
             continue;
         }
         if !CALL_OPS.contains(&frame.op.as_str()) {
             continue;
         }
-        let Some((host, far)) = host_of(&frame.from) else {
-            // A call from a far end into its session: marked when its
-            // caller waits synchronously.
-            if let Some((host, _)) = sessions.iter().find(|(_, far)| *far == frame.from).copied() {
-                if frame.sync {
-                    marked.insert((host.to_owned(), id.to_owned()));
-                }
+        // A call a far end sent into its session: its caller waits for it
+        // when it says `sync`.
+        if is_far(&frame.from) {
+            if frame.sync {
+                marked.insert(id.to_owned());
             }
             continue;
-        };
-        host_calls.push((at, id));
-        if !frame.sync {
+        }
+        if !is_host(&frame.from) {
             continue;
         }
-        let profile = profile(far);
-        if !profile.stacked || profile.reentrant {
+        // Nobody waits for a call made while nothing is marked: the
+        // session records no entry for it either.
+        if !frame.sync && marked.is_empty() {
             continue;
         }
-        let marked_ids: BTreeSet<&str> = marked.iter().map(|(_, id)| id.as_str()).collect();
-        // The forward must be on a chain that names a marked call: its
-        // caller waits for it.
-        if !frame
+        // The call it was made under, when that one's caller waits: the
+        // chain's last entry, named on the wire.
+        let caller = frame
             .path
-            .iter()
-            .any(|entry| marked_ids.contains(entry_id(entry)))
-        {
-            continue;
-        }
-        // The calls the far end has out: a forwarded call whose chain names
-        // a marked call of this session.
-        let outs: Vec<(usize, &str)> = host_calls
-            .iter()
-            .filter(|(index, out)| {
-                *index != at
-                    && *index < at
-                    && !settled.contains(&(frames[*index].from.clone(), (*out).to_owned()))
-                    && !frames[*index].path.is_empty()
-                    && frames[*index].path.iter().any(|entry| {
-                        marked.contains(&(host.to_owned(), entry_id(entry).to_owned()))
-                    })
-            })
-            .copied()
-            .collect();
-        if outs.is_empty() {
-            continue;
-        }
-        let related = outs
-            .iter()
-            .any(|(_, out)| frame.path.iter().any(|entry| entry_id(entry) == *out));
-        if related {
-            continue;
-        }
-        return Some(Violation {
-            at,
-            text: format!("{} sent `{}`", frame.from, frame.op),
-            why: format!(
-                "the call {id} would wait on itself: it is forwarded into {far}, one stack, \
-                 which has {} out, not on the call's chain (synchronous calls)",
-                outs.iter()
-                    .map(|(_, out)| out.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            .last()
+            .map(|entry| entry_id(entry))
+            .filter(|call| marked.contains(*call));
+        let entry = caller.is_none() && !frame.sync;
+        hops.push(Hop {
+            id: id.to_owned(),
+            dst: frame.from.clone(),
+            src: caller.and_then(|call| call_session(call, sessions).map(str::to_owned)),
+            sid: caller.map(str::to_owned),
+            chain: frame
+                .path
+                .iter()
+                .map(|entry| entry_id(entry).to_owned())
+                .collect(),
+            entry,
         });
+        if entry {
+            continue;
+        }
+        if let Some(cycle) = wait_cycle(&hops, sessions, profile) {
+            return Some(Violation {
+                at,
+                text: format!("{} sent `{}`", frame.from, frame.op),
+                why: format!(
+                    "the call {id} would wait on itself: {} → {id} (synchronous calls)",
+                    cycle.join(" → ")
+                ),
+            });
+        }
     }
     None
 }
@@ -3186,6 +3328,333 @@ async fn a_sync_forward_that_would_close_a_cycle_is_not_sent() {
     );
 }
 
+/// One session's host side in the stack-order case: for each method it
+/// forwards, the method called and the session it goes to. The forward
+/// keeps the caller's chain (`Connection::forward`), which is what makes
+/// the forwarded call one the caller waits for.
+struct Forwards(Vec<(&'static str, &'static str, std::sync::OnceLock<Connection>)>);
+
+impl Dispatch for Forwards {
+    fn invoke(&self, peer: &Connection, target: &str, method: &str, args: Value) -> Reply {
+        let Some((_, call, other)) = self.0.iter().find(|(name, _, _)| *name == method) else {
+            return Ok(args);
+        };
+        let other = other.get().expect("the session it forwards to");
+        other.forward(peer, || other.invoke(target, call, Value::List(Vec::new())))
+    }
+}
+
+/// A far end's failure for the call `id` here (`throw`, §3.5).
+fn scripted_throw(id: &str, message: &str) -> Json {
+    json!({
+        "op": "throw",
+        "id": id,
+        "error": { "name": "Error", "message": message },
+    })
+}
+
+/// guarantee: bridge/sync-wait-cycle-refused; REM-6.2-10, REM-6.2-11,
+/// REM-6.2-15, M1-7.2-5.
+///
+/// §3.4, the two edges of the wait graph a channel's own trace does not
+/// show, on a real run: a call waits for what was made under it (chain) and
+/// for what later started on a one-stack runtime's stack (stack order).
+///
+/// n's far end calls `go`; n forwards to p2 (p2's call `main-p2:1`). p2's far end is
+/// one stack and reentrant, so it runs a call that arrives while it waits:
+/// it calls `mid`, which p2 forwards to p1 under `main-p2:1`. p1's far end
+/// calls `kick`, whose forward to p2 (`main-p2:2`) starts on top of
+/// `main-p2:1`. p2's far end then calls `deep` — on top of `main-p2:2` —
+/// and p2 forwards to n: n's far end is one stack and waiting, so the call
+/// would be put aside behind `main-p2:1`, which is buried under
+/// `main-p2:2`, which waits for it. p2's forward is refused, and the calls
+/// unwound with it.
+///
+/// The paths are the chain as it crosses sessions (§4, identity): each
+/// forward names the call it was made under, tagged with the session that
+/// made it (`Connection::tag`), and an entry of a third session passes
+/// through as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn a_stack_order_cycle_is_not_sent() {
+    let log = Log::default();
+    let frames = Decoded::default();
+    let (ours_n, theirs_n) = rutis_bridge::memory::pair();
+    let (ours_p1, theirs_p1) = rutis_bridge::memory::pair();
+    let (ours_p2, theirs_p2) = rutis_bridge::memory::pair();
+    let ours_n = instrumented(ours_n, "main-n", "node-n", &log, &frames);
+    let theirs_n = instrumented(theirs_n, "node-n", "main-n", &log, &frames);
+    let ours_p1 = instrumented(ours_p1, "main-p1", "node-p1", &log, &frames);
+    let theirs_p1 = instrumented(theirs_p1, "node-p1", "main-p1", &log, &frames);
+    let ours_p2 = instrumented(ours_p2, "main-p2", "node-p2", &log, &frames);
+    let theirs_p2 = instrumented(theirs_p2, "node-p2", "main-p2", &log, &frames);
+
+    let forwards = |routes: Vec<(&'static str, &'static str)>| {
+        Arc::new(Forwards(
+            routes
+                .into_iter()
+                .map(|(method, call)| (method, call, std::sync::OnceLock::new()))
+                .collect(),
+        ))
+    };
+    let n = forwards(vec![("go", "mid")]);
+    let p1 = forwards(vec![("kick", "hold")]);
+    let p2 = forwards(vec![("mid", "hold"), ("deep", "again")]);
+    let conn_n = Connection::open(
+        ours_n,
+        n.clone(),
+        Endpoint::rust(id("main-n")).expect(id("node-n")),
+    )
+    .unwrap();
+    let conn_p1 = Connection::open(
+        ours_p1,
+        p1.clone(),
+        Endpoint::rust(id("main-p1")).expect(id("node-p1")),
+    )
+    .unwrap();
+    let conn_p2 = Connection::open(
+        ours_p2,
+        p2.clone(),
+        Endpoint::rust(id("main-p2")).expect(id("node-p2")),
+    )
+    .unwrap();
+    // Where each session forwards: n's `go` and p1's `kick` into p2, p2's
+    // `mid` into p1, and p2's `deep` back into n (the forward that would
+    // close the cycle).
+    assert!(n.0[0].2.set(conn_p2.clone()).is_ok());
+    assert!(p1.0[0].2.set(conn_p2.clone()).is_ok());
+    assert!(p2.0[0].2.set(conn_p1.clone()).is_ok());
+    assert!(p2.0[1].2.set(conn_n.clone()).is_ok());
+    let (p1_tag, p2_tag) = (conn_p1.tag().to_owned(), conn_p2.tag().to_owned());
+    let (n_in, p1_in, p2_in) = (conn_n.tag().to_owned(), p1_tag.clone(), p2_tag.clone());
+
+    let (go, begin) = std::sync::mpsc::channel();
+    let step = Duration::from_secs(20);
+    let far = tokio::spawn(far_end("the stack", step, move || {
+        let (mut far_n, mut far_p1, mut far_p2) = (theirs_n, theirs_p1, theirs_p2);
+        greet_as(&mut far_n, "node-n", &["sync-stack"]);
+        greet_as(&mut far_p1, "node-p1", &["sync-stack", "reentrant-sync"]);
+        greet_as(&mut far_p2, "node-p2", &["sync-stack", "reentrant-sync"]);
+        begin.recv().unwrap();
+        // n's far end calls the host: the root of the chain.
+        write_frame(&mut far_n, scripted_call("node-n", 1, "go", true, vec![]));
+        // n forwards to p2; the call is made under n's waiting call.
+        let first = read_frame(&mut far_p2);
+        assert_eq!(
+            (
+                first["op"].as_str(),
+                first["id"].as_str(),
+                first["sync"].as_bool()
+            ),
+            (Some("invoke"), Some("main-p2:1"), Some(true)),
+            "{first}"
+        );
+        assert_eq!(
+            first["path"],
+            json!([format!("{n_in}/node-n:1")]),
+            "n's waiting call, tagged with n's session: {first}"
+        );
+        // p2's far end calls back, naming the call into it, and p2 forwards
+        // to p1 under both calls: p2's own call is tagged, and the entry of
+        // the third session (p1's `hold`) passes through as it was.
+        write_frame(
+            &mut far_p2,
+            scripted_call("node-p2", 1, "mid", true, vec!["main-p2:1".into()]),
+        );
+        let second = read_frame(&mut far_p1);
+        assert_eq!(
+            (
+                second["op"].as_str(),
+                second["id"].as_str(),
+                second["sync"].as_bool()
+            ),
+            (Some("invoke"), Some("main-p1:1"), Some(true)),
+            "{second}"
+        );
+        assert_eq!(
+            second["path"],
+            json!([format!("{p2_in}/main-p2:1"), format!("{p2_in}/node-p2:1"),]),
+            "p2's stack, tagged with p2's session: {second}"
+        );
+        // p1's far end calls its host on its own, and p1 forwards to p2: a
+        // later call into p2, which its one stack runs on top of the one
+        // waiting there.
+        write_frame(
+            &mut far_p1,
+            scripted_call("node-p1", 1, "kick", true, vec![]),
+        );
+        let third = read_frame(&mut far_p2);
+        assert_eq!(
+            (
+                third["op"].as_str(),
+                third["id"].as_str(),
+                third["sync"].as_bool()
+            ),
+            (Some("invoke"), Some("main-p2:2"), Some(true)),
+            "{third}"
+        );
+        assert_eq!(
+            third["path"],
+            json!([format!("{p1_in}/node-p1:1")]),
+            "p1's waiting call, tagged with p1's session: {third}"
+        );
+        // p2's far end calls back on top of `main-p2:2`, which starts it
+        // there; the forward p2 makes to n would wait on its own stack.
+        write_frame(
+            &mut far_p2,
+            scripted_call(
+                "node-p2",
+                2,
+                "deep",
+                true,
+                vec![format!("{p1_in}/node-p1:1"), "main-p2:2".to_owned()],
+            ),
+        );
+        let refused = read_frame(&mut far_p2);
+        assert_eq!(
+            (refused["op"].as_str(), refused["id"].as_str()),
+            (Some("throw"), Some("node-p2:2")),
+            "{refused}"
+        );
+        assert_eq!(refused["error"]["name"], "SyncWaitCycle", "{refused}");
+        assert_eq!(
+            refused["error"]["message"], "t.again would wait on itself (synchronous calls)",
+            "{refused}"
+        );
+        // The far end fails its own call, and the calls unwind one by one:
+        // each session throws its caller what the refused forward was.
+        write_frame(
+            &mut far_p2,
+            scripted_throw("main-p2:2", "the stack order refused the forward"),
+        );
+        let kick = read_frame(&mut far_p1);
+        assert_eq!(
+            (kick["op"].as_str(), kick["id"].as_str()),
+            (Some("throw"), Some("node-p1:1")),
+            "{kick}"
+        );
+        write_frame(
+            &mut far_p1,
+            scripted_throw("main-p1:1", "the forward into p2 failed"),
+        );
+        let mid = read_frame(&mut far_p2);
+        assert_eq!(
+            (mid["op"].as_str(), mid["id"].as_str()),
+            (Some("throw"), Some("node-p2:1")),
+            "{mid}"
+        );
+        write_frame(
+            &mut far_p2,
+            scripted_throw("main-p2:1", "the forward into p1 failed"),
+        );
+        let root = read_frame(&mut far_n);
+        assert_eq!(
+            (root["op"].as_str(), root["id"].as_str()),
+            (Some("throw"), Some("node-n:1")),
+            "{root}"
+        );
+    }));
+    within("the greetings", async {
+        conn_n.ready().await.unwrap();
+        conn_p1.ready().await.unwrap();
+        conn_p2.ready().await.unwrap();
+    })
+    .await;
+    go.send(()).unwrap();
+    within("the far ends", far).await.unwrap();
+
+    conn_n.close(Error::Transport("done".into()));
+    conn_p1.close(Error::Transport("done".into()));
+    conn_p2.close(Error::Transport("done".into()));
+    within("the first session ending", conn_n.closed()).await;
+    within("the second session ending", conn_p1.closed()).await;
+    within("the third session ending", conn_p2.closed()).await;
+
+    let sessions = [
+        ("main-n", "node-n"),
+        ("main-p1", "node-p1"),
+        ("main-p2", "node-p2"),
+    ];
+    let all = frames.all();
+    let checked = checked_frames(&all, &sessions, None);
+    assert_eq!(checked.unanswered(), 0, "{all:?}");
+    accepted(&log.lines());
+    // The refused forward's id is not on the wire: n numbered it and
+    // nothing of it crossed.
+    assert!(
+        !all.iter()
+            .any(|frame| frame.id.as_deref() == Some("main-n:1")),
+        "the refused forward left no frame: {all:?}"
+    );
+    // The real trace is allowed by all three edges.
+    assert_eq!(
+        refused_waits(&all, &sessions).map(|violation| violation.to_string()),
+        None
+    );
+
+    // The same trace with the refused forward put back closes a cycle the
+    // chain and stack-order edges make: the call into n waits for the call
+    // n has out, that one waits for what started on top of it, and that one
+    // was made under the refused call.
+    let after = all
+        .iter()
+        .position(|frame| frame.id.as_deref() == Some("node-p2:2"))
+        .expect("the far end's second call")
+        + 1;
+    let refused = decode(
+        "main-n",
+        serde_json::to_string(&scripted_call(
+            "main-n",
+            1,
+            "again",
+            true,
+            vec![
+                format!("{p1_tag}/node-p1:1"),
+                format!("{p2_tag}/main-p2:2"),
+                format!("{p2_tag}/node-p2:2"),
+            ],
+        ))
+        .unwrap()
+        .as_bytes(),
+    );
+    let mut with_refused = all.clone();
+    with_refused.insert(after, refused);
+    checked_frames(&with_refused, &sessions, None);
+    let violation =
+        refused_waits(&with_refused, &sessions).expect("the stack order closes a cycle");
+    assert_eq!(violation.at, after, "{violation}");
+    assert_eq!(violation.text, "main-n sent `invoke`", "{violation}");
+    assert_eq!(
+        violation.why,
+        "the call main-n:1 would wait on itself: main-n:1 → main-p2:1 → main-p2:2 → main-n:1 \
+         (synchronous calls)",
+        "{violation}"
+    );
+
+    // Without the chain entry that made `main-p2:2` started, the later call
+    // into p2 is one the runtime has not begun, and nothing waits for it:
+    // no stack order, no cycle.
+    let mut without_chain = with_refused.clone();
+    without_chain[after].path = vec![format!("{p1_tag}/node-p1:1")];
+    assert_eq!(
+        refused_waits(&without_chain, &sessions).map(|violation| violation.to_string()),
+        None,
+        "the chain entry is what starts the later call"
+    );
+    // And without the one stack, the two calls into p2 are not ordered at
+    // all: the same trace is allowed.
+    let mut without_stack = with_refused.clone();
+    let hello = without_stack
+        .iter()
+        .position(|frame| frame.from == "node-p2" && frame.op == "hello")
+        .expect("p2's greeting");
+    without_stack[hello].capabilities = vec!["reentrant-sync".into()];
+    assert_eq!(
+        refused_waits(&without_stack, &sessions).map(|violation| violation.to_string()),
+        None,
+        "the stack order edge is what closes the cycle"
+    );
+}
+
 // --------------------------------------------------- §3.8, the host gone
 
 /// guarantee: bridge/in-flight-call-fails-once, bridge/no-call-on-a-dead-session;
@@ -3271,7 +3740,11 @@ async fn a_gone_host_fails_the_call_with_peer_gone() {
     );
     let all = frames.all();
     let checked = checked_frames(&all, &[("main", "node")], None);
-    assert_eq!(checked.unanswered(), 1, "the call in flight never answered");
+    assert_eq!(
+        checked.unanswered(),
+        1,
+        "the call in flight never answered: {all:?}"
+    );
     assert_eq!(
         ops(&frames.from("main")),
         [("hello", None), ("invoke", Some("main:1"))]
@@ -3301,6 +3774,160 @@ async fn a_gone_host_fails_the_call_with_peer_gone() {
     assert_eq!(violation.at, ended + 1, "{violation}");
     // And a close ends both directions: a stale command after it is not a
     // sent frame either.
+    let mut stale = lines.clone();
+    stale.push("main: sent 40 bytes".into());
+    let violation = rejected(&stale);
+    assert_eq!(violation.at, lines.len(), "{violation}");
+}
+
+/// The far end of [`a_killed_far_end_ends_the_session_as_peer_gone`]: a
+/// shell that greets as `node`, reads one call, writes `marker`, then
+/// waits as `sleep` (replacing itself, so the kill reaches the process
+/// that holds the socket). `reader` is its two lines of shell.
+#[cfg(unix)]
+fn killed_far_end(marker: &std::path::Path) -> String {
+    let hello = json!({
+        "op": "hello",
+        "version": ENDPOINT_PROTOCOL,
+        "endpoint": "node",
+        "capabilities": [],
+    });
+    format!(
+        "read hello <&3 || exit 1\n\
+         printf '%s\\n' '{hello}' >&3\n\
+         read call <&3 || exit 1\n\
+         : > '{}'\n\
+         exec sleep 60\n",
+        marker.display()
+    )
+}
+
+/// guarantee: bridge/in-flight-call-fails-once, bridge/no-call-on-a-dead-session;
+/// CHN-2-9, CHN-5-5, MNT-6-6.
+///
+/// §3.8, for real: the far end is a process of this test's own
+/// (`pipe::spawn`), so it is killed with `SIGKILL` instead of closing its
+/// channel. What the trace records is the channel's end with how the
+/// process ended — a receive failure naming the signal, not `ended` — and
+/// the call in flight fails with that same text: the session ends for the
+/// transport's reason, `peer-gone`. A process that closed its channel
+/// would say `peer disconnected` instead
+/// ([`a_gone_host_fails_the_call_with_peer_gone`]).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_killed_far_end_ends_the_session_as_peer_gone() {
+    use rutis_bridge::pipe::{self, Processes, Spawn};
+
+    let log = Log::default();
+    let frames = Decoded::default();
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("call-read");
+    let mut far = Spawn::new("sh");
+    far.args = vec!["-c".into(), killed_far_end(&marker).into()];
+    let processes = Processes::default();
+    let channel = pipe::spawn(&far, &processes).await.unwrap();
+    let channel = instrumented(channel, "main", "node", &log, &frames);
+    let caller = Connection::open(
+        channel,
+        Arc::new(Echo),
+        Endpoint::rust(id("main")).expect(id("node")),
+    )
+    .unwrap();
+    within("the greeting", caller.ready()).await.unwrap();
+
+    let call = caller
+        .invoke_started("svc", "echo", Value::Data(json!("in flight")))
+        .unwrap();
+    // The call is out: the far end read it and the session waits for the
+    // reply that will never come.
+    until(|| marker.exists(), "the far end to read the call").await;
+    let pid = processes.pid().expect("the far end still runs");
+    // SAFETY: SIGKILL to a process this test started and has not waited
+    // for; its id cannot have been reused while it runs.
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    }
+
+    let error = within("the call", call).await.unwrap_err();
+    assert!(matches!(error, Error::Transport(_)), "{error:?}");
+    assert_eq!(
+        error.code(),
+        Some("peer-gone"),
+        "a killed peer is transport"
+    );
+    // The channel's end says how the process ended, and the session ends
+    // with that: not `peer disconnected`, which is a channel that ended of
+    // its own accord.
+    assert_eq!(
+        error.to_string(),
+        "the process exited with signal: 9 (SIGKILL)",
+        "the ending names the kill"
+    );
+    within("the caller ending", caller.closed()).await;
+    let status = eventually(|| processes.status(), "the far end's end").await;
+    assert_eq!(
+        status, "exited with signal: 9 (SIGKILL)",
+        "a killed process, not one that closed its channel"
+    );
+
+    let lines = log.lines();
+    let checked = accepted(&lines);
+    assert_eq!(checked.last["main"], State::Closed, "{lines:?}");
+    let receive_failed = lines
+        .iter()
+        .position(|line| {
+            line == "main: receive failed: the process exited with signal: 9 (SIGKILL)"
+        })
+        .expect("the channel's end in the log");
+    assert_eq!(
+        checked.events("main")[receive_failed + 1],
+        Event::ClosedDone,
+        "the session closes the channel after its end: {lines:?}"
+    );
+    assert_eq!(receive_failed + 2, lines.len(), "{lines:?}");
+
+    let all = frames.all();
+    checked_frames(&all, &[("main", "node")], None);
+    // The far end sent its greeting and nothing else: the call it read was
+    // never answered.
+    assert_eq!(
+        ops(&frames.from("node")),
+        [("hello", None)],
+        "the far end only greets: {all:?}"
+    );
+    // Two frames left this side: the greeting and the call in flight.
+    let sent = |checked: &Checked| {
+        checked
+            .events("main")
+            .iter()
+            .filter(|event| matches!(event, Event::Sent(_)))
+            .count()
+    };
+    assert_eq!(
+        sent(&checked),
+        2,
+        "the greeting and the one call: {lines:?}"
+    );
+
+    // A call after the end is refused here, with no frame written.
+    let after = caller
+        .invoke_async("svc", "echo", Value::Data(json!("after")))
+        .await
+        .unwrap_err();
+    assert_eq!(after.code(), Some("peer-gone"), "{after:?}");
+    assert_eq!(
+        sent(&checked),
+        2,
+        "the refused call left no frame: {lines:?}"
+    );
+
+    // The trace rule: nothing is received after a receive failed, and
+    // nothing is sent after the close.
+    let mut late = lines.clone();
+    late.insert(receive_failed + 1, "main: received 40 bytes".into());
+    let violation = rejected(&late);
+    assert_eq!(violation.at, receive_failed + 1, "{violation}");
+    assert!(violation.why.contains("a receive failed"), "{violation}");
     let mut stale = lines.clone();
     stale.push("main: sent 40 bytes".into());
     let violation = rejected(&stale);
