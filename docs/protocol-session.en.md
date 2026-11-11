@@ -177,7 +177,7 @@ Receivers are not equally strict: Node, Bun, Go, Swift and Kotlin require `^[1-9
 
 `SESS-47` **Current.** The sender adds one grant per send. The receiver holds the number of grants it received; once every local proxy is gone it sends `release {reference, count}` with that number. `count` must be greater than 0 and at most the current grants; otherwise the session ends with `invalid reference release count`. `crates/rutis-bridge/src/session/rpc.rs:992-1010,2655-2676`; `bridge/release-count` and `bridge/reference-release-count` in `docs/guarantees.en.md`
 
-`SESS-48` **Current.** A `release` for a reference this session does not have ends the session with `release of unknown reference`. A `call`, `get` or `await` for a reference it does not have ends it with `unknown or released reference`; a method call or property read on a non-object reference ends it with `method call or property read on a non-object reference`. `crates/rutis-bridge/src/session/rpc.rs:2504-2513,2655-2676,2699-2736`; `crates/rutis-bridge/src/session/testing.rs:173-184`
+`SESS-48` **Current.** A `release` for a reference this session does not have ends the session with `release of unknown reference`. A `call`, `get` or `await` for a reference it does not have ends it with `unknown or released reference`; a method call or property read on a non-object reference ends it with `method call or property read on a non-object reference`. `crates/rutis-bridge/src/session/rpc.rs:2504-2513,2655-2676,2699-2736`; `crates/rutis-bridge/src/session/testing.rs:176-191`
 
 `SESS-49` **Current.** Reference ids run from 1 to 2^53−1; an id out of range, exhausted allocation or an overflowing grant count ends the session (`invalid reference identity`, `reference identifiers exhausted`, `reference grant overflow`). `crates/rutis-bridge/src/session/rpc.rs:2397-2398,3085-3108`
 
@@ -226,7 +226,7 @@ Receivers are not equally strict: Node, Bun, Go, Swift and Kotlin require `^[1-9
 
 | Input | Result | Anchor |
 | --- | --- | --- |
-| Malformed JSON, an empty message, a leading BOM, invalid UTF-8, not an object | Session ends, transport error | `crates/rutis-bridge/src/session/rpc.rs:3207-3216`; `crates/rutis-bridge/src/session/testing.rs:151-189` |
+| Malformed JSON, an empty message, a leading BOM, invalid UTF-8, not an object | Session ends, transport error | `crates/rutis-bridge/src/session/rpc.rs:3207-3216`; `crates/rutis-bridge/src/session/testing.rs:151-192` |
 | Unknown `op`; a field of the wrong type; a missing required field; an unknown wire tag | Session ends, transport error | same; `crates/rutis-bridge/src/session/protocol.rs:154-156` |
 | `throw.error` missing `name`/`message` | Session ends, transport error | `crates/rutis-bridge/src/session/protocol.rs:87-94` |
 | `throw.error` carrying unknown fields | Only the call waiting for that reply fails (`bad-frame`); the session continues | §9; `reject_unknown_fields` in `crates/rutis-bridge/src/session/rpc.rs` |
@@ -253,9 +253,9 @@ Receivers are not equally strict: Node, Bun, Go, Swift and Kotlin require `^[1-9
 | A `cancel` for a call that does not exist | Ignored | `crates/rutis-bridge/src/session/rpc/tests.rs:329-361` |
 | A late reply to a cancelled call | Discarded and counted; the session is not closed | `crates/rutis-bridge/src/session/rpc.rs:2490-2501` |
 
-`SESS-64` **Current.** The shared malformed-frame matrix has 13 cases, covering the first group's syntax, fields, unknown references and unknown replies; Rust, Node, Bun, Python, Go, Swift and Kotlin all run it. `crates/rutis-bridge/src/session/testing.rs:148-243`; `crates/rutis-bridge/tests/runtime_conformance.rs:456-633`; `docs/ci.en.md` "Conformance matrix"
+`SESS-64` **Current.** The shared malformed-frame matrix has 25 cases: 13 single frames in `MALFORMED` (syntax, fields, unknown references, unknown replies) and 12 multi-frame/ordered cases in `MALFORMED_SEQUENCES` (a request before the greeting, a second `hello`, an invocation with no `id`, `get` on an unknown reference, a released reference, a `release` count of 0 or above the grant, wrong field types in `cancel`/`throw`, a `throw` for an unknown call, a `path` containing the frame's own id, a repeated call id). A case requires the session to end with a transport error; apart from the replies owed to the case's valid calls, the far end replies to nothing. All seven implementations have an entry point: Rust uses the memory channel, the others a Unix socket, loopback or WebSocket; Swift's cases compile only on macOS and run in CI's `runtimes-swift` job. `crates/rutis-bridge/src/session/testing.rs:151-392`; `crates/rutis-bridge/tests/runtime_conformance.rs:452-633`; `docs/ci.en.md` "Conformance matrix"
 
-`SESS-65` **Current.** Rules outside the shared matrix (a second `hello`, a request before the greeting, `get` on an unknown reference, a released reference, a `release` count of 0 or above the grants, wrong field types in `cancel`/`throw`, a `throw` for an unknown call, a `path` containing the frame's id, a call id that does not increase) are enforced by code but are not in the shared matrix run by the seven implementations; filling the gap is G2 in §14.
+`SESS-65` **Superseded.** "A second `hello`, a request before the greeting, `get` on an unknown reference, a released reference, a `release` count of 0 or above the grants, wrong field types in `cancel`/`throw`, a `throw` for an unknown call, a `path` containing the frame's id and a call id that does not increase are enforced by code but are not in the shared matrix run by the seven implementations." That is no longer the state: every rule in that list is now in the 25-case matrix (`SESS-64`, §14 G2), with the call-id item covering a repeated id. Still verified by code alone: a method call or property read on a non-object reference; a call id that goes backwards, is not numeric, exceeds 2^53−1 or lacks the far end's prefix; `throw.error` missing `name`/`message` (the matrix has an `error` that is not an object only); a frame deeper than 208 levels; a message over the channel's limit.
 
 ## 9. Unknown fields
 
@@ -361,11 +361,11 @@ The table is this file's rule list, for #634's trace table and #613's models. Ev
 | `SESS-60` | Cancellation does not close the session | Current | `crates/rutis-bridge/src/session/rpc.rs:2639-2653` |
 | `SESS-61` | Whether a callee replies after cancellation | Not guaranteed | #626 |
 | `SESS-62` | Cancellation is closing the transport | Superseded | §7 |
-| `SESS-63` | Malformed input fails closed | Current | `crates/rutis-bridge/src/session/rpc.rs:2514-2561,2598-2618`; `crates/rutis-bridge/src/session/testing.rs:148-243` |
-| `SESS-64` | The shared malformed matrix: 13 cases, seven implementations | Current | `crates/rutis-bridge/tests/runtime_conformance.rs:456-633` |
-| `SESS-65` | Malformed rules outside the shared matrix, enforced by code | Current | `crates/rutis-bridge/src/session/rpc.rs:2602-2618`; §8.1; §14 G2 |
+| `SESS-63` | Malformed input fails closed | Current | `crates/rutis-bridge/src/session/rpc.rs:2514-2561,2598-2618`; `crates/rutis-bridge/src/session/testing.rs:151-392` |
+| `SESS-64` | The shared malformed matrix: 25 cases (13 single-frame + 12 multi-frame/ordered), all seven implementations have an entry point | Current | `crates/rutis-bridge/src/session/testing.rs:154-360`; `crates/rutis-bridge/tests/runtime_conformance.rs:452-633` |
+| `SESS-65` | The old "these rules are outside the shared matrix" state; the 25-case matrix covers that list (`SESS-64`) | Superseded | §8.1; §14 G2 |
 | `SESS-66` | Rust: an unknown field fails only that call (`hello` fails the handshake, `release`/`cancel` ignore it) | Current | `parse_frame` / `reject_unknown_fields` in `crates/rutis-bridge/src/session/rpc.rs`; `rpc/tests.rs::unknown_frame_fields_fail_only_their_call`, `::an_unknown_field_in_hello_fails_the_handshake` |
-| `SESS-67` | The six runtimes still ignore unknown fields; no call-level refusal yet | Current (to change) | `node/rutis-runtime/src/session.mjs:702-740`; §9's anchors; §14 G1 |
+| `SESS-67` | All seven runtimes implement the call-level refusal (`bad-frame`); `release`/`cancel` ignore extra fields | Current | `bridge/unknown-fields` in `docs/guarantees.en.md`; §9; §14 G1 |
 | `SESS-68` | Unknown fields end the session / six runtimes ignore them uniformly | Superseded | §9; §14 G1 |
 | `SESS-69` | Unknown fields as an extension mechanism | Not guaranteed | §9 |
 | `SESS-70` | 16 MiB default; the memory channel has no limit | Current | `crates/rutis-bridge/src/pipe/lines.rs:13-28`; `crates/rutis-bridge/src/websocket/config.rs:104-108,132-141` |
@@ -438,13 +438,15 @@ Every call-level failure ends at the call or the value. Handshake and transport 
 ### G1 Unknown fields: decided (2026-11-09)
 
 - Decision: keep rejecting (B), but handle the field at the frame's scope instead of ending the whole session: `hello` fails the handshake; `invoke`/`call`/`get`/`await` fail only that call; `return`/`throw` fail only the call waiting for it; `release`/`cancel` ignore it. Code `bad-frame`, data `{op, fields}`.
-- Current: Rust implements it (`SESS-66`); tests `unknown_frame_fields_fail_only_their_call`, `an_unknown_field_in_hello_fails_the_handshake`, `release_and_cancel_ignore_unknown_fields`.
-- Not done: Node, Bun, Python, Go, Swift and Kotlin still silently ignore unknown fields and have no call-level refusal (`SESS-67`, plan G11). Cross-implementation cases and an unknown-field group in `MALFORMED` follow each implementation.
+- Done (2026-11-10): all seven implementations have the call-level refusal (`SESS-67`); the verification column of `bridge/unknown-fields` lists each implementation's cases, and Rust's tests are `unknown_frame_fields_fail_only_their_call`, `an_unknown_field_in_hello_fails_the_handshake` and `release_and_cancel_ignore_unknown_fields`. Plan G11 is closed.
+- Unknown fields fail one call only, so they are not part of the session-ending `MALFORMED` matrix; each implementation's call-level tests are the evidence.
 - The old A (ignore everything) and C (whitelist) directions are dropped.
 
-### G2 The shared malformed matrix lacks nine cases
+### G2 The shared malformed matrix: filled (2026-11-11)
 
-Issue #635's completion list asks `session::testing::malformed` to add: a request before the handshake, a duplicate `hello`, `get` on an unknown reference, a released reference, a `release` count of 0 or above the grants, wrong field types in `cancel`/`throw`, a `throw` for an unknown call, a `path` containing the frame's id, and a call id that does not increase. These rules are enforced by code (`SESS-21`, `SESS-22`, `SESS-33`, `SESS-47`, `SESS-48`), but the shared matrix has only 13 cases (`SESS-64`), so the evidence across seven implementations is incomplete. Filling it requires editing `crates/rutis-bridge/src/session/testing.rs`; this file stays within WS2's documentation scope.
+- Decision (#635): move malformed rules that only code enforced into the shared `session::testing::malformed` matrix, so the seven implementations run the same cases.
+- Done: the matrix grew from 13 cases to 25, 13 single frames in `MALFORMED` and 12 multi-frame/ordered cases in `MALFORMED_SEQUENCES`; the original list (a request before the handshake, a duplicate `hello`, `get` on an unknown reference, a released reference, a `release` count of 0 or above the grants, wrong field types in `cancel`/`throw`, a `throw` for an unknown call, a `path` containing the frame's id, a call id that does not increase) is covered, with the call-id item covering a repeated id only, plus an invocation with no `id` (`SESS-21`, `SESS-22`, `SESS-33`, `SESS-47`, `SESS-48`; `SESS-64`). Implementation: `MALFORMED`, `MALFORMED_SEQUENCES` and `malformed` in `crates/rutis-bridge/src/session/testing.rs`; Swift's cases compile only on macOS and run in CI's `runtimes-swift` job.
+- Still outside the matrix: a method call or property read on a non-object reference; a call id that goes backwards, is not numeric, exceeds 2^53−1 or lacks the far end's prefix; `throw.error` missing `name`/`message`; a frame deeper than 208 levels; a message over the channel's limit. Code and other tests verify these (§8.1, §8.2).
 
 ### G3 The reply-after-cancel rule (#626)
 
@@ -457,14 +459,10 @@ Whether a callee replies after cancellation is not one rule (`SESS-61`). The #62
 
 Both need a later documentation revision; this file only marks them superseded and does not edit the old design texts.
 
-### G5 Rules without tests
+### G5 Rules without tests: closed (2026-11-11)
 
-- `SESS-67`'s six runtimes still ignore unknown fields; they have no `bad-frame` call-level refusal test (plan G11).
-- `SESS-22` (a second `hello`) has no test.
-- `SESS-21` has a Go test; the Rust shared matrix has no case for it.
-- `SESS-33`'s non-increasing call id and `path` self-reference are not in the shared matrix.
-
-These do not change the rules' state (code enforces them), but their evidence is weaker than the other **Current** rows; they are assigned to G2.
+- `SESS-67`: all seven implementations have call-level refusal tests (the verification column of `bridge/unknown-fields`); plan G11 is closed.
+- `SESS-22` (a second `hello`), `SESS-21` (a request before the greeting) and `SESS-33`'s repeated call id and `path` self-reference are now in the shared matrix (`SESS-64`); the other call-id forms are listed under G2's "Still outside the matrix".
 
 ### G6 Error text differences
 

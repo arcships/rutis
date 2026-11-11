@@ -177,7 +177,7 @@
 
 `SESS-47` **当前。** 发送方每授予一次加一。接收方按收到的次数持有；本地代理全部释放后，按收到的次数发 `release {reference, count}`。`count` 必须大于 0 且不超过当前的授予次数；否则会话以 `invalid reference release count` 结束。`crates/rutis-bridge/src/session/rpc.rs:992-1010,2655-2676`；`docs/guarantees.md` 的 `bridge/release-count`、`bridge/reference-release-count`
 
-`SESS-48` **当前。** `release` 指向本会话没有的引用时，会话以 `release of unknown reference` 结束。`call`、`get`、`await` 指向没有的引用时，会话以 `unknown or released reference` 结束；用方法调用或属性读取指向非对象引用时，会话以 `method call or property read on a non-object reference` 结束。`crates/rutis-bridge/src/session/rpc.rs:2504-2513,2655-2676,2699-2736`；`crates/rutis-bridge/src/session/testing.rs:173-184`
+`SESS-48` **当前。** `release` 指向本会话没有的引用时，会话以 `release of unknown reference` 结束。`call`、`get`、`await` 指向没有的引用时，会话以 `unknown or released reference` 结束；用方法调用或属性读取指向非对象引用时，会话以 `method call or property read on a non-object reference` 结束。`crates/rutis-bridge/src/session/rpc.rs:2504-2513,2655-2676,2699-2736`；`crates/rutis-bridge/src/session/testing.rs:176-191`
 
 `SESS-49` **当前。** 引用 id 从 1 到 2^53−1；超出范围或分配耗尽使会话结束（`invalid reference identity`、`reference identifiers exhausted`）；授予次数溢出同样结束会话（`reference grant overflow`）。`crates/rutis-bridge/src/session/rpc.rs:2397-2398,3085-3108`
 
@@ -226,7 +226,7 @@
 
 | 输入 | 结果 | 锚点 |
 | --- | --- | --- |
-| 畸形的 JSON、空消息、开头 BOM、无效 UTF-8、不是对象 | 会话结束，传输错误 | `crates/rutis-bridge/src/session/rpc.rs:3207-3216`；`crates/rutis-bridge/src/session/testing.rs:151-189` |
+| 畸形的 JSON、空消息、开头 BOM、无效 UTF-8、不是对象 | 会话结束，传输错误 | `crates/rutis-bridge/src/session/rpc.rs:3207-3216`；`crates/rutis-bridge/src/session/testing.rs:151-192` |
 | 未知 `op`；字段类型错；缺必需字段；未知线上值标签 | 会话结束，传输错误 | 同上；`crates/rutis-bridge/src/session/protocol.rs:154-156` |
 | `throw.error` 缺 `name`/`message` | 会话结束，传输错误 | `crates/rutis-bridge/src/session/protocol.rs:87-94` |
 | `throw.error` 带未知字段 | 只失败等待该回复的调用（`bad-frame`），会话继续 | §9；`crates/rutis-bridge/src/session/rpc.rs` 的 `reject_unknown_fields` |
@@ -253,9 +253,9 @@
 | 对不存在调用的 `cancel` | 忽略 | `crates/rutis-bridge/src/session/rpc/tests.rs:329-361` |
 | 已取消调用的迟到回复 | 丢弃并计数，不结束会话 | `crates/rutis-bridge/src/session/rpc.rs:2490-2501` |
 
-`SESS-64` **当前。** 共享的畸形帧矩阵有 13 个用例，覆盖上表第一组的语法、字段、未知引用、未知回复；Rust、Node、Bun、Python、Go、Swift、Kotlin 都运行它。`crates/rutis-bridge/src/session/testing.rs:148-243`；`crates/rutis-bridge/tests/runtime_conformance.rs:456-633`；`docs/ci.md`「一致性矩阵」
+`SESS-64` **当前。** 共享的畸形帧矩阵有 25 个用例：`MALFORMED` 的 13 个单帧（语法、字段、未知引用、未知回复）和 `MALFORMED_SEQUENCES` 的 12 个多帧/顺序用例（握手前的请求、重复 `hello`、没有 `id` 的调用、未知引用的 `get`、已释放的引用、`release` 计数为 0 或超额、`cancel`/`throw` 字段类型错、未知调用的 `throw`、`path` 含本帧 id、重复调用号）。用例要求会话以传输错误结束；除用例中有效调用欠下的回复外，对端不再回复。七种实现都有入口：Rust 走内存通道，其余走 Unix socket、loopback 或 WebSocket；Swift 的用例只在 macOS 上编译，由 CI 的 `runtimes-swift` 作业运行。`crates/rutis-bridge/src/session/testing.rs:151-392`；`crates/rutis-bridge/tests/runtime_conformance.rs:452-633`；`docs/ci.md`「一致性矩阵」
 
-`SESS-65` **当前。** 共享矩阵之外的规则（重复 `hello`、问候前的请求、`get` 未知引用、已释放引用、`release` 计数为 0 或超额、`cancel`/`throw` 字段类型错、未知调用的 `throw`、`path` 含本帧 id、调用号不递增）由代码执行，但没有进入七种实现的共享矩阵；补齐工作见 §14 的 G2。
+`SESS-65` **已取代。** “重复 `hello`、问候前的请求、`get` 未知引用、已释放引用、`release` 计数为 0 或超额、`cancel`/`throw` 字段类型错、未知调用的 `throw`、`path` 含本帧 id、调用号不递增这些规则由代码执行，但没有进入七种实现的共享矩阵。”现状不是这样：清单里的规则都已进入 25 个用例的矩阵（`SESS-64`、§14 G2），调用号一项覆盖的是重复号。仍只在代码层验证的还有：方法调用或属性读取指向非对象引用；调用号倒退、非数字、超过 2^53−1 或前缀不是对端 id；`throw.error` 缺 `name`/`message`（矩阵只含 `error` 不是对象）；超过 208 层的帧；超通道上限的消息。
 
 ## 9. 未知字段
 
@@ -361,11 +361,11 @@
 | `SESS-60` | 取消不关闭会话 | 当前 | `crates/rutis-bridge/src/session/rpc.rs:2639-2653` |
 | `SESS-61` | 取消后被调方是否回复 | 明确不保证 | #626 |
 | `SESS-62` | 取消等于关闭承载 | 已取代 | §7 |
-| `SESS-63` | 畸形输入故障闭合 | 当前 | `crates/rutis-bridge/src/session/rpc.rs:2514-2561,2598-2618`；`crates/rutis-bridge/src/session/testing.rs:148-243` |
-| `SESS-64` | 共享畸形帧矩阵 13 个用例，七种实现运行 | 当前 | `crates/rutis-bridge/tests/runtime_conformance.rs:456-633` |
-| `SESS-65` | 共享矩阵之外由代码执行的畸形规则 | 当前 | `crates/rutis-bridge/src/session/rpc.rs:2602-2618`；§8.1；§14 G2 |
+| `SESS-63` | 畸形输入故障闭合 | 当前 | `crates/rutis-bridge/src/session/rpc.rs:2514-2561,2598-2618`；`crates/rutis-bridge/src/session/testing.rs:151-392` |
+| `SESS-64` | 共享畸形帧矩阵 25 个用例（13 单帧 + 12 多帧/顺序），七种实现都有入口 | 当前 | `crates/rutis-bridge/src/session/testing.rs:154-360`；`crates/rutis-bridge/tests/runtime_conformance.rs:452-633` |
+| `SESS-65` | 旧状态“这些规则未进共享矩阵”；25 个用例的矩阵已覆盖该清单（`SESS-64`） | 已取代 | §8.1；§14 G2 |
 | `SESS-66` | Rust：未知字段只失败该调用（`hello` 失败握手，`release`/`cancel` 忽略） | 当前 | `crates/rutis-bridge/src/session/rpc.rs` 的 `parse_frame` / `reject_unknown_fields`；`rpc/tests.rs::unknown_frame_fields_fail_only_their_call`、`::an_unknown_field_in_hello_fails_the_handshake` |
-| `SESS-67` | 六种运行时仍忽略未知字段，未做调用级拒绝 | 当前（待改） | `node/rutis-runtime/src/session.mjs:702-740`；§9 的各实现锚点；§14 G1 |
+| `SESS-67` | 七种运行时都实现调用级拒绝（`bad-frame`）；`release`/`cancel` 忽略多余字段 | 当前 | `docs/guarantees.md` 的 `bridge/unknown-fields`；§9；§14 G1 |
 | `SESS-68` | 未知字段结束整个会话 / 六种无差别忽略 | 已取代 | §9；§14 G1 |
 | `SESS-69` | 未知字段可作扩展机制 | 明确不保证 | §9 |
 | `SESS-70` | 16 MiB 默认上限；内存通道无上限 | 当前 | `crates/rutis-bridge/src/pipe/lines.rs:13-28`；`crates/rutis-bridge/src/websocket/config.rs:104-108,132-141` |
@@ -438,13 +438,15 @@
 ### G1 未知字段：已定（2026-11-09）
 
 - 决定：采用 B（拒绝），但按帧的作用范围处理，不结束整个会话：`hello` 失败握手；`invoke`/`call`/`get`/`await` 只失败该调用；`return`/`throw` 只失败等待它的调用；`release`/`cancel` 忽略。错误码 `bad-frame`，data `{op, fields}`。
-- 当前：Rust 已实现（`SESS-66`），测试见 `unknown_frame_fields_fail_only_their_call`、`an_unknown_field_in_hello_fails_the_handshake`、`release_and_cancel_ignore_unknown_fields`。
-- 未完成：Node、Bun、Python、Go、Swift、Kotlin 仍静默忽略未知字段，没有调用级拒绝（`SESS-67`，计划 G11）。跨实现一致性用例和 `MALFORMED` 的未知字段分组要随各自实现补。
+- 已完成（2026-11-10）：七种实现都实现了调用级拒绝（`SESS-67`）；`bridge/unknown-fields` 的验证列列出各实现的用例，Rust 的测试见 `unknown_frame_fields_fail_only_their_call`、`an_unknown_field_in_hello_fails_the_handshake`、`release_and_cancel_ignore_unknown_fields`。计划 G11 关闭。
+- 未知字段只失败一条调用，不属于会话结束的 `MALFORMED` 矩阵；各实现的调用级测试就是证据。
 - 旧 A（全部忽略）和 C（白名单）不再采用。
 
-### G2 共享畸形矩阵缺九个用例
+### G2 共享畸形矩阵：已补齐（2026-11-11）
 
-issue #635 的完成项要求 `session::testing::malformed` 补齐：握手前的请求、重复 `hello`、对未知引用的 `get`、已释放的引用、`release` 计数为 0 或超额、`cancel`/`throw` 字段类型错、未知调用的 `throw`、`path` 含本帧 id、调用号不递增。这些规则由代码执行（`SESS-21`、`SESS-22`、`SESS-33`、`SESS-47`、`SESS-48`），但共享矩阵只有 13 个用例（`SESS-64`），所以七种实现的证据不完整。补齐需要改 `crates/rutis-bridge/src/session/testing.rs`；本文不越过 WS2 的文档范围。
+- 决定（#635）：把只由代码执行的畸形规则放进 `session::testing::malformed` 的共享矩阵，让七种实现跑同一组用例。
+- 已完成：矩阵从 13 个用例增加到 25 个，`MALFORMED` 13 个单帧、`MALFORMED_SEQUENCES` 12 个多帧/顺序；原清单（握手前的请求、重复 `hello`、对未知引用的 `get`、已释放的引用、`release` 计数为 0 或超额、`cancel`/`throw` 字段类型错、未知调用的 `throw`、`path` 含本帧 id、调用号不递增）中，除调用号只覆盖重复号外全部覆盖，另加没有 `id` 的调用（`SESS-21`、`SESS-22`、`SESS-33`、`SESS-47`、`SESS-48`；`SESS-64`）。实现见 `crates/rutis-bridge/src/session/testing.rs` 的 `MALFORMED`、`MALFORMED_SEQUENCES`、`malformed`；Swift 的用例只在 macOS 上编译，由 CI 的 `runtimes-swift` 作业运行。
+- 仍不在矩阵内：方法调用或属性读取指向非对象引用；调用号倒退、非数字、超过 2^53−1 或前缀不是对端 id；`throw.error` 缺 `name`/`message`；超过 208 层的帧；超通道上限的消息。这些由代码和其他测试验证（§8.1、§8.2）。
 
 ### G3 取消后的回复规则（#626）
 
@@ -457,14 +459,10 @@ issue #635 的完成项要求 `session::testing::malformed` 补齐：握手前�
 
 这两处需要后续的文档修订；本文只把它们标为已取代，不改旧设计正文。
 
-### G5 缺少测试的规则
+### G5 缺少测试的规则：已关闭（2026-11-11）
 
-- `SESS-67` 的六种运行时仍忽略未知字段，没有 `bad-frame` 调用级拒绝的用例（计划 G11）。
-- `SESS-22`（重复 `hello`）没有测试。
-- `SESS-21` 有 Go 测试，Rust 一侧的共享矩阵没有对应用例。
-- `SESS-33` 的调用号不递增、`path` 自指没有进入共享矩阵。
-
-这些不改变规则的状态（代码执行它们），但证据强度低于本文件的其他“当前”条目，已交给 G2。
+- `SESS-67`：七种实现都有调用级拒绝的测试（`bridge/unknown-fields` 的验证列）；计划 G11 关闭。
+- `SESS-22`（重复 `hello`）、`SESS-21`（问候前的请求）和 `SESS-33` 的重复调用号、`path` 自指已进入共享矩阵（`SESS-64`）；其余调用号形式见 G2 的“仍不在矩阵内”。
 
 ### G6 错误文字的差异
 
