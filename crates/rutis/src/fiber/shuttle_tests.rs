@@ -10,8 +10,10 @@
 //! and — for registration, event flights and the close passes — a real `Ctx`
 //! built on a tokio runtime handle, so `register_effect_named`,
 //! `Entry::start`, `set_state` and `wait_events` are the kernel's too. Models
-//! 7–9 are reference models: their comments say which bookkeeping cannot be
-//! run here and what stands in for it. Built with `--cfg rutis_shuttle`, `crate::sync` makes
+//! 7–9 and 12 are reference models: their comments say which bookkeeping
+//! cannot be run here and what stands in for it; models 10 and 11 run the
+//! bus's `Table`, `Selected` and `Entry` and mirror the emit chain and the
+//! notice delivery. Built with `--cfg rutis_shuttle`, `crate::sync` makes
 //! the driver's `alive` flag, a fiber's `lineage_closed` marker and an effect
 //! record's state shuttle primitives; the tokio channels in between (`watch`,
 //! `mpsc`, `Notify`) need no runtime and are single steps to shuttle. Shuttle
@@ -37,24 +39,25 @@
 //! `RUTIS_SHUTTLE_REPLAY=<schedule>` replays it, with the failing test's
 //! name as the filter.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool as StdBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use shuttle::future::block_on;
 use shuttle::sync::atomic::{AtomicBool, AtomicUsize as ShuttleUsize};
+use shuttle::sync::Condvar as ShuttleCondvar;
 use shuttle::thread;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, watch, Notify};
 
 use super::{
     complete_intent, join_task, mark_subtree_lineage, post_join_to, publish_subtree_closing,
-    CloseTree, FiberInner, FiberState, Intent, PluginId, TransitionTask,
+    CloseTree, FiberInner, FiberState, Intent, NextState, PluginId, TransitionTask,
 };
 use crate::bus::run::{Inv, SyncNext};
-use crate::bus::table::{Body, Entry};
+use crate::bus::table::{Body, Entry, Selected, Table};
 use crate::effect::{run_cleanups, Effect, EffectRecord, Origin};
-use crate::error::{Error, ErrorKind};
-use crate::events::{ErasedSync, ListenerInfo, Value};
+use crate::error::{aggregate_arcs, Error, ErrorKind};
+use crate::events::{ErasedSync, Event, ListenerInfo, TableChange, TableEntry, Value};
 use crate::host::CtxHost;
 use crate::internal::CtxInternal;
 use crate::key::{ScopeId, TypeKey};
@@ -470,6 +473,29 @@ fn model_entry(ctx: &Ctx, fiber: &Arc<FiberInner>) -> Entry {
         claimed: StdBool::new(false),
         calls: AtomicU64::new(0),
     }
+}
+
+/// A listener entry of the model's fiber under `name`, with the `id` and
+/// `position` a `Table` gave it (models 10 and 11 insert it as
+/// `EventBus::register` does): the kernel's own [`Entry`], generation 0 (the
+/// root fiber's live generation), its body never called by the kernel — the
+/// model runs the call itself.
+fn named_entry(ctx: &Ctx, fiber: &Arc<FiberInner>, id: u64, position: i64, name: &str) -> Entry {
+    let mut entry = model_entry(ctx, fiber);
+    entry.id = id;
+    entry.position = position;
+    entry.name = Arc::from(name);
+    entry.info = Arc::new(ListenerInfo {
+        name: name.to_string(),
+        prefix: false,
+        plugin: "model".to_string(),
+        row: None,
+        runtime: None,
+        node: None,
+        scope: Vec::new(),
+        global: true,
+    });
+    entry
 }
 
 /// Model 6, an unload waits for the calls in flight on the fiber (#622,
@@ -2136,5 +2162,1380 @@ fn shuttle_dependency_withdrawal_stops_the_loading_consumer() {
             inner.effects.lock().unwrap().is_empty(),
             "a generation's effect record was left behind"
         );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Model 10: the emit chain (#622, `core/D31a`, `core/D31c`, `events/emit b`)
+
+/// The emit half of `bus.rs::BusState`: the table the dispatches select from,
+/// the tail of each name's chain, and the accepted emits that have not
+/// finished. `starting` is the model's own guard: the chain lets one emit of
+/// a name run its start loop at a time, which this catches if the tail wait is
+/// dropped.
+#[derive(Default)]
+struct EmitBus {
+    table: Table,
+    /// `state.tails`: which emit of a name is last, and its generation.
+    tails: HashMap<Arc<str>, EmitTail>,
+    /// `state.backlog`: the accepted emits of a name whose calls are not all
+    /// finished.
+    backlog: HashMap<Arc<str>, HashSet<u64>>,
+    next_emit: u64,
+    starting: Option<u64>,
+}
+
+/// `bus.rs::Tail`: the tail the next emit of the name awaits, as a task the
+/// model's dispatch completes instead of a `JoinHandle`.
+struct EmitTail {
+    generation: u64,
+    task: Arc<TransitionTask>,
+}
+
+/// A call one dispatch started: the emit's sequence, the emitter, and that
+/// emitter's own index of the emit.
+type StartedCall = (u64, u64, u64);
+
+/// The emitter id the listener's own emit is recorded under: the two
+/// emitters of the model are 0 and 1.
+const EMIT_FROM_LISTENER: u64 = 2;
+
+struct EmitModel {
+    name: Arc<str>,
+    bus: SyncMutex<EmitBus>,
+    /// The calls each listener got, in start order.
+    calls: SyncMutex<HashMap<u64, Vec<StartedCall>>>,
+    /// The sequences whose start loop has finished.
+    finished: SyncMutex<HashSet<u64>>,
+    /// The listener that emits the name again from inside its body.
+    re_emitter: AtomicU64,
+    re_emitted: SyncMutex<bool>,
+}
+
+impl EmitModel {
+    /// `EventBus::register` under its state lock: id, position, entry,
+    /// insertion. No effect record: nothing in this model withdraws a
+    /// listener.
+    fn register(&self, ctx: &Ctx, fiber: &Arc<FiberInner>) -> Arc<Entry> {
+        let mut bus = self.bus.lock().unwrap();
+        let id = bus.table.next_id();
+        let position = bus.table.position(false);
+        let entry = Arc::new(named_entry(ctx, fiber, id, position, &self.name));
+        bus.table.insert(entry.clone());
+        entry
+    }
+
+    /// `EventBus::emit_erased`'s bookkeeping: select the listeners under the
+    /// state lock, append to the name's backlog, replace the tail, and start
+    /// the dispatch, which first waits for the tail it replaced. Returns the
+    /// emit's task, what the emitter's receiver waits on.
+    fn emit(self: &Arc<Self>, emitter: u64, index: u64) -> Arc<TransitionTask> {
+        let (selected, seq, prev, generation, task) = {
+            let mut bus = self.bus.lock().unwrap();
+            // The list the emits of the name share, plus what was appended
+            // since it was built (#977, #980); `None` with no live listener.
+            let selected = bus.table.shared(&self.name);
+            bus.next_emit += 1;
+            let seq = bus.next_emit;
+            bus.backlog
+                .entry(self.name.clone())
+                .or_default()
+                .insert(seq);
+            let generation = bus
+                .tails
+                .get(&self.name)
+                .map_or(0, |tail| tail.generation + 1);
+            let prev = bus.tails.get(&self.name).map(|tail| tail.task.clone());
+            let task = TransitionTask::new();
+            bus.tails.insert(
+                self.name.clone(),
+                EmitTail {
+                    generation,
+                    task: task.clone(),
+                },
+            );
+            (selected, seq, prev, generation, task)
+        };
+        let this = self.clone();
+        // The kernel spawns the task while it holds the state, so the task's
+        // own steps start after the lock is released. The model starts its
+        // thread here, after the lock, and its first step is the tail wait.
+        let dispatch = task.clone();
+        thread::spawn(move || {
+            this.dispatch(emitter, index, seq, generation, prev, selected, dispatch)
+        });
+        task
+    }
+
+    /// One emit's task: the tail wait, then the start loop over the entries
+    /// the dispatch selected. A synchronous listener runs inline, as the
+    /// kernel's emit runs it (`run::call_sync_listener`).
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch(
+        self: Arc<Self>,
+        emitter: u64,
+        index: u64,
+        seq: u64,
+        generation: u64,
+        prev: Option<Arc<TransitionTask>>,
+        selected: Option<Selected>,
+        task: Arc<TransitionTask>,
+    ) {
+        // `prev.await`: every call of the name's previous emit started before
+        // any of this one does.
+        if let Some(prev) = prev {
+            let _ = block_on(join_task(&prev));
+        }
+        // `Selected::to_vec`: the list as it is when the dispatch starts, so an
+        // entry appended after the base list was built is called (#980), and
+        // one withdrawn in between is skipped by `Entry::start`.
+        let entries: Vec<Arc<Entry>> = selected
+            .map(|selected| selected.to_vec())
+            .unwrap_or_default();
+        {
+            let finished = self.finished.lock().unwrap();
+            assert!(
+                (1..seq).all(|earlier| finished.contains(&earlier)),
+                "emit {seq} of {} started its calls before an earlier emit finished",
+                self.name
+            );
+        }
+        {
+            let mut bus = self.bus.lock().unwrap();
+            assert!(
+                bus.starting.is_none(),
+                "two emits of {} were in their start loop at once",
+                self.name
+            );
+            bus.starting = Some(seq);
+        }
+        let mut called = Vec::new();
+        for entry in &entries {
+            let Some(flight) = entry.start() else {
+                continue;
+            };
+            called.push(entry.id);
+            {
+                let mut calls = self.calls.lock().unwrap();
+                let record = calls.entry(entry.id).or_default();
+                if let Some((last, _, _)) = record.last() {
+                    assert!(
+                        *last < seq,
+                        "listener {} started emit {seq} before the previous emit {last}",
+                        entry.id
+                    );
+                }
+                record.push((seq, emitter, index));
+            }
+            // A listener body is user code: it yields, and this one emits the
+            // name again from here.
+            switch_point();
+            if entry.id == self.re_emitter.load(Ordering::SeqCst) {
+                self.re_emit(seq);
+            }
+            drop(flight);
+        }
+        let planned: Vec<u64> = entries.iter().map(|entry| entry.id).collect();
+        assert_eq!(
+            called, planned,
+            "an emit of {} did not call every entry it selected once",
+            self.name
+        );
+        {
+            // `TailCleanup` and `EmitTicket`: the start loop is over, so the
+            // backlog record goes, and so does the tail while this dispatch is
+            // the name's last. A later emit that replaced the tail already
+            // holds this task as its `prev`.
+            let mut bus = self.bus.lock().unwrap();
+            bus.starting = None;
+            if let Some(list) = bus.backlog.get_mut(&self.name) {
+                list.remove(&seq);
+                if list.is_empty() {
+                    bus.backlog.remove(&self.name);
+                }
+            }
+            if bus
+                .tails
+                .get(&self.name)
+                .is_some_and(|tail| tail.generation == generation)
+            {
+                bus.tails.remove(&self.name);
+            }
+        }
+        self.finished.lock().unwrap().insert(seq);
+        // `drop(ticket)` and the `started` receiver: the emit's task is done.
+        task.complete(None);
+    }
+
+    /// A listener emitting the name it is called for (`core/D31c`): the emit
+    /// is queued behind the one whose start loop this call belongs to, and the
+    /// listener does not wait for it — the chain would wait for itself.
+    fn re_emit(self: &Arc<Self>, seq: u64) {
+        if seq != 1 {
+            return;
+        }
+        {
+            let mut done = self.re_emitted.lock().unwrap();
+            if *done {
+                return;
+            }
+            *done = true;
+        }
+        drop(self.emit(EMIT_FROM_LISTENER, 0));
+    }
+}
+
+/// Model 10, the emit chain (#622, `core/D31a`, `core/D31c`, `events/emit b`):
+/// two emitters emit twice each while a third listener registers, and one
+/// listener emits the same name again from inside its body. Every emit's calls
+/// start after the previous emit's of that name did — for both emitters, in
+/// each emitter's own order — one start loop runs at a time, each dispatch
+/// calls exactly the entries it selected, once each, and the name ends with no
+/// tail and no backlog: nothing was left waiting.
+///
+/// The model runs the kernel's `Table` (the shared list and the chains of what
+/// was appended since, #977/#980), `Selected`, `Entry`, `Entry::start` and
+/// `TransitionTask`/`join_task`. What is mirrored is `emit_erased`'s
+/// bookkeeping (selection, backlog, tail, generation) and the start loop,
+/// because the kernel's tail is a `tokio::JoinHandle` that only a running
+/// runtime completes; the model's tail is a task its dispatch thread completes,
+/// which the next emit joins. The kernel spawns while holding the state lock;
+/// the model starts its thread after it, so the thread's first step is the same
+/// tail wait.
+///
+/// Mutations this model catches: dropping the tail wait (`emit_erased`'s
+/// `prev.await`) makes an emit start its calls before the earlier one finished
+/// (`emit 2 of model::emit started its calls before an earlier emit finished`),
+/// and dispatching `Selected::base()` alone (dropping `chains()`, #980) leaves
+/// the listener registered after the shared list was built uncalled (`listener
+/// 3 was never called`).
+#[test]
+fn shuttle_emit_chain_starts_calls_in_emission_order() {
+    explore(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a current-thread runtime");
+        let ctx = Ctx::root_with(runtime.handle().clone());
+        let fiber = ctx.root_view().expect("the root view").inner.clone();
+        let model = Arc::new(EmitModel {
+            name: Arc::from("model::emit"),
+            bus: SyncMutex::new(EmitBus::default()),
+            calls: SyncMutex::new(HashMap::new()),
+            finished: SyncMutex::new(HashSet::new()),
+            re_emitter: AtomicU64::new(u64::MAX),
+            re_emitted: SyncMutex::new(false),
+        });
+        // The two listeners every emit sees; the first one emits the name
+        // again from inside its body.
+        let first = model.register(&ctx, &fiber);
+        model.re_emitter.store(first.id, Ordering::SeqCst);
+        let second = model.register(&ctx, &fiber);
+
+        // The list the name's emits share is built here, as the first emit
+        // builds it and holds it (`table.shared` returns the `Selected` the
+        // emit's task keeps): a listener registered after this reaches the
+        // emits through `Selected::chains` only (#980).
+        let _priming = model.bus.lock().unwrap().table.shared(&model.name);
+        let late = model.register(&ctx, &fiber);
+        // And one registered while the emits are being queued: it may land
+        // after some dispatch took its list, so only its order is asserted.
+        let registrar = {
+            let (model, ctx, fiber) = (model.clone(), ctx.clone(), fiber.clone());
+            thread::spawn(move || {
+                switch_point();
+                model.register(&ctx, &fiber)
+            })
+        };
+        // 2 emitters × 2 emits each.
+        let emitters: Vec<_> = (0..2u64)
+            .map(|emitter| {
+                let model = model.clone();
+                thread::spawn(move || {
+                    let mut tasks = Vec::new();
+                    for index in 0..2u64 {
+                        switch_point();
+                        tasks.push(model.emit(emitter, index));
+                    }
+                    // `emit`'s receiver: it fires once every call started.
+                    for task in tasks {
+                        assert!(block_on(join_task(&task)).is_ok(), "an emit failed");
+                    }
+                })
+            })
+            .collect();
+
+        let racing = registrar.join().unwrap();
+        for emitter in emitters {
+            emitter.join().unwrap();
+        }
+        // The listener's own emit was queued last: wait for the chain's tail.
+        let tail = model
+            .bus
+            .lock()
+            .unwrap()
+            .tails
+            .get(&model.name)
+            .map(|tail| tail.task.clone());
+        if let Some(tail) = tail {
+            assert!(block_on(join_task(&tail)).is_ok(), "an emit failed");
+        }
+
+        {
+            let bus = model.bus.lock().unwrap();
+            assert!(bus.tails.is_empty(), "an emit chain was left behind");
+            assert!(
+                bus.backlog.is_empty(),
+                "an accepted emit was never finished"
+            );
+            assert!(bus.starting.is_none(), "an emit is still in its start loop");
+        }
+        assert!(
+            *model.re_emitted.lock().unwrap(),
+            "the listener never emitted the name it was called for"
+        );
+
+        let calls = model.calls.lock().unwrap();
+        // 2 emitters × 2 emits, plus the listener's own emit. The listener
+        // registered after the shared list was built is in every one of them
+        // through the chains.
+        for id in [first.id, second.id, late.id] {
+            let record = calls
+                .get(&id)
+                .unwrap_or_else(|| panic!("listener {id} was never called"));
+            assert_eq!(
+                record.len(),
+                5,
+                "listener {id} got {} calls, not 5",
+                record.len()
+            );
+            let seqs: Vec<u64> = record.iter().map(|(seq, _, _)| *seq).collect();
+            let mut ordered = seqs.clone();
+            ordered.sort_unstable();
+            assert_eq!(
+                seqs, ordered,
+                "listener {id} started the emits out of order"
+            );
+            // Each emitter's own two emits start in the order it made them.
+            for emitter in [0u64, 1u64] {
+                let own: Vec<u64> = record
+                    .iter()
+                    .filter(|(_, heard, _)| *heard == emitter)
+                    .map(|(_, _, index)| *index)
+                    .collect();
+                let mut ordered = own.clone();
+                ordered.sort_unstable();
+                assert_eq!(
+                    own, ordered,
+                    "emitter {emitter}'s emits started out of order at listener {id}"
+                );
+            }
+        }
+        // The racing listener is in the chain of every dispatch that turned
+        // its `Selected` into a list after the insertion; wherever it is
+        // called, the order is the emit order, and no emit calls it twice.
+        if let Some(record) = calls.get(&racing.id) {
+            let seqs: Vec<u64> = record.iter().map(|(seq, _, _)| *seq).collect();
+            let mut ordered = seqs.clone();
+            ordered.sort_unstable();
+            assert_eq!(
+                seqs, ordered,
+                "the racing listener started the emits out of order"
+            );
+            assert!(
+                record.len() <= 5,
+                "an emit called the racing listener more than once"
+            );
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Model 11: the listener table's watchers (#622, `events/table-watch`,
+// EVP-4.4-5, EVP-12.1-9)
+
+type Watcher = Arc<dyn Fn(&TableChange) + Send + Sync>;
+
+/// The table-watch half of `BusState`: the table and the watchers registered
+/// on it, under one lock (`EventBus::change` queues the notice of a change
+/// under it, so the notice order is the order the changes were made in).
+#[derive(Default)]
+struct WatchedTable {
+    table: Table,
+    watchers: Vec<(u64, Watcher)>,
+    next_watcher: u64,
+}
+
+/// `bus.rs::Notices`: the changes not yet heard, in the order they were made,
+/// one delivery at a time.
+#[derive(Default)]
+struct Notices {
+    queue: VecDeque<(u64, Vec<Watcher>, Vec<TableChange>)>,
+    queued: u64,
+    delivered: u64,
+    delivering: bool,
+}
+
+/// One change the watcher heard: its sequence, the entry, and whether it was
+/// an addition.
+type Heard = (u64, u64, bool);
+
+thread_local! {
+    /// The kernel's `DELIVERING`: this thread is delivering the bus's notices,
+    /// so a change a watcher makes is delivered by that delivery, not by a
+    /// nested one that would wait for itself.
+    static DELIVERING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn heard_of(seq: u64, change: &TableChange) -> Heard {
+    match change {
+        TableChange::Added(entry) => (seq, entry.id, true),
+        TableChange::Removed(entry) => (seq, entry.id, false),
+    }
+}
+
+fn delivering() -> bool {
+    DELIVERING.with(std::cell::Cell::get)
+}
+
+struct WatchModel {
+    state: SyncMutex<WatchedTable>,
+    notices: SyncMutex<Notices>,
+    delivered: ShuttleCondvar,
+    /// The model's own monitor, written without a scheduling point: the last
+    /// sequence every watcher heard. It is what a caller of `deliver` checks,
+    /// so a `deliver` that returns before the delivery finished is caught even
+    /// if another thread would deliver the change later.
+    heard: AtomicU64,
+    /// What the watcher heard, in delivery order.
+    log: SyncMutex<Vec<Heard>>,
+    /// The entries this model registered, by id, so a watcher can read the
+    /// `withdrawn` flag the disposer sets before it changes the table.
+    entries: SyncMutex<HashMap<u64, Arc<Entry>>>,
+}
+
+impl WatchModel {
+    /// `EventBus::change`: change the table and queue the notice under the same
+    /// lock, then deliver it before returning.
+    fn change_seq<R>(
+        &self,
+        f: impl FnOnce(&mut Table) -> (R, Vec<TableChange>),
+    ) -> (R, Option<u64>) {
+        let (out, seq) = {
+            let mut state = self.state.lock().unwrap();
+            let (out, changes) = f(&mut state.table);
+            let seq = self.enqueue(&state, changes);
+            (out, seq)
+        };
+        if let Some(seq) = seq {
+            self.deliver(seq);
+        }
+        (out, seq)
+    }
+
+    /// `EventBus::enqueue`: the watchers of this moment hear the changes, in
+    /// the order the changes were queued.
+    fn enqueue(&self, state: &WatchedTable, changes: Vec<TableChange>) -> Option<u64> {
+        if changes.is_empty() {
+            return None;
+        }
+        let watchers: Vec<Watcher> = state
+            .watchers
+            .iter()
+            .map(|(_, watcher)| watcher.clone())
+            .collect();
+        let mut notices = self.notices.lock().unwrap();
+        notices.queued += 1;
+        let seq = notices.queued;
+        notices.queue.push_back((seq, watchers, changes));
+        Some(seq)
+    }
+
+    /// `EventBus::deliver`: return once change `seq` and those before it were
+    /// heard — delivered here, one at a time and in order, or by the thread
+    /// delivering now. A change a watcher makes while it hears one is delivered
+    /// right after by the same delivery.
+    fn deliver(&self, seq: u64) {
+        if delivering() {
+            return;
+        }
+        let mut notices = self.notices.lock().unwrap();
+        loop {
+            if !notices.delivering {
+                let Some((at, watchers, changes)) = notices.queue.pop_front() else {
+                    return;
+                };
+                notices.delivering = true;
+                drop(notices);
+                DELIVERING.with(|delivering| delivering.set(true));
+                for change in &changes {
+                    self.log.lock().unwrap().push(heard_of(at, change));
+                    for watcher in &watchers {
+                        watcher(change);
+                    }
+                }
+                DELIVERING.with(|delivering| delivering.set(false));
+                self.heard.store(at, Ordering::SeqCst);
+                notices = self.notices.lock().unwrap();
+                notices.delivered = at;
+                notices.delivering = false;
+                self.delivered.notify_all();
+                continue;
+            }
+            if notices.delivered >= seq {
+                return;
+            }
+            notices = self.delivered.wait(notices).unwrap();
+        }
+    }
+
+    /// What `deliver`'s contract promises a caller that is not itself
+    /// delivering: the change was heard before it returned. A change made by a
+    /// watcher is heard by the delivery in progress after the watcher returns,
+    /// so it is not checked here.
+    fn heard_before_returning(&self, seq: Option<u64>) {
+        if delivering() {
+            return;
+        }
+        let Some(seq) = seq else {
+            return;
+        };
+        let heard = self.heard.load(Ordering::SeqCst);
+        assert!(
+            heard >= seq,
+            "a change was reported before the watcher heard it ({heard} < {seq})"
+        );
+    }
+
+    /// `EventBus::register`'s insertion and notice, delivered before `on`
+    /// returns (a watcher that makes the change hears it after this call).
+    fn register(&self, ctx: &Ctx, fiber: &Arc<FiberInner>, name: &str) -> (Arc<Entry>, u64) {
+        let (entry, seq) = {
+            let mut state = self.state.lock().unwrap();
+            let id = state.table.next_id();
+            let position = state.table.position(false);
+            let entry = Arc::new(named_entry(ctx, fiber, id, position, name));
+            state.table.insert(entry.clone());
+            self.entries.lock().unwrap().insert(entry.id, entry.clone());
+            let seq = self
+                .enqueue(&state, vec![TableChange::Added(entry.table_entry())])
+                .expect("an insertion is a change");
+            (entry, seq)
+        };
+        self.deliver(seq);
+        self.heard_before_returning(Some(seq));
+        (entry, seq)
+    }
+
+    /// `EventBus`'s listener disposer: withdrawn first, then the table change,
+    /// so a call that starts after the removal is skipped. `false` when the
+    /// entry was not in the table any more — no change, no notice.
+    fn withdraw(&self, entry: &Arc<Entry>) -> bool {
+        entry.withdrawn.store(true, Ordering::SeqCst);
+        let (removed, seq) = self.change_seq(|table| {
+            let removed = table.remove(entry);
+            let changes = if removed {
+                vec![TableChange::Removed(entry.table_entry())]
+            } else {
+                Vec::new()
+            };
+            (removed, changes)
+        });
+        self.heard_before_returning(seq);
+        removed
+    }
+
+    /// `EventBus::watch_table`: the current entries, then every later change,
+    /// both under the state lock, so a change made after this is queued and one
+    /// made before it is in the snapshot.
+    fn watch(&self, watcher: Watcher) -> Vec<TableEntry> {
+        let mut state = self.state.lock().unwrap();
+        let snapshot: Vec<TableEntry> = state
+            .table
+            .entries()
+            .iter()
+            .map(|entry| entry.table_entry())
+            .collect();
+        state.next_watcher += 1;
+        let id = state.next_watcher;
+        state.watchers.push((id, watcher));
+        snapshot
+    }
+}
+
+/// Model 11, the listener table's watchers (#622, `events/table-watch`,
+/// EVP-4.4-5, EVP-12.1-9): two registrars add two listeners each, a third
+/// caller withdraws one of them, and one watcher hears every change — and,
+/// while hearing one, withdraws that listener and registers another. Every
+/// change is heard exactly once, in the order it was made; each caller that is
+/// not itself delivering returns only after its own change was heard
+/// (`deliver(seq)`), and a change a watcher makes is delivered by the delivery
+/// in progress instead of one that would wait for itself. A listener withdrawn
+/// by the time a dispatch asks for it never starts a call.
+///
+/// The model runs the kernel's `Table` (insert, remove, the shared lists the
+/// emits hold, `entries`), `TableChange`/`TableEntry` and `Entry::start`. The
+/// bus's std locks and its std `Condvar` are mirrored with shuttle's
+/// (`SyncMutex`, `ShuttleCondvar`): a model that ran the real `BusState` would
+/// park on a std condvar, which shuttle cannot see. The thread-local
+/// `DELIVERING` is the kernel's.
+///
+/// Mutations this model catches: returning from `deliver` without waiting for
+/// `seq` (a registrar returns before the watcher heard its addition: `a change
+/// was reported before the watcher heard it (2 < 6)`); dropping `notify_all`
+/// after a delivery (the waiting caller never wakes: `deadlock!`); dropping the
+/// `DELIVERING` guard (a watcher that changes the table waits for its own
+/// delivery: `deadlock!`); and removing the entry before setting `withdrawn`
+/// (the removal is heard while the entry still counts as live: `a removal was
+/// heard for a listener that was not withdrawn`).
+#[test]
+fn shuttle_table_watcher_hears_each_change_once_in_order() {
+    explore(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a current-thread runtime");
+        let ctx = Ctx::root_with(runtime.handle().clone());
+        let fiber = ctx.root_view().expect("the root view").inner.clone();
+        let name = "model::watched";
+        let model = Arc::new(WatchModel {
+            state: SyncMutex::new(WatchedTable::default()),
+            notices: SyncMutex::new(Notices::default()),
+            delivered: ShuttleCondvar::new(),
+            heard: AtomicU64::new(0),
+            log: SyncMutex::new(Vec::new()),
+            entries: SyncMutex::new(HashMap::new()),
+        });
+        // The watcher: on the first addition it hears, it withdraws that
+        // listener and registers another, both from inside the delivery.
+        let reentered = StdBool::new(false);
+        let watcher: Watcher = {
+            let model = Arc::downgrade(&model);
+            let (ctx, fiber) = (ctx.clone(), fiber.clone());
+            let name = name.to_string();
+            Arc::new(move |change: &TableChange| {
+                let Some(bus) = model.upgrade() else {
+                    return;
+                };
+                // The watcher is user code: let the other threads run here.
+                switch_point();
+                if let TableChange::Removed(entry) = change {
+                    // The disposer withdraws the entry before it changes the
+                    // table, so a removal is never heard while the entry still
+                    // counts as live (`Entry::live`).
+                    let withdrawn = bus
+                        .entries
+                        .lock()
+                        .unwrap()
+                        .get(&entry.id)
+                        .map(|entry| entry.withdrawn.load(Ordering::SeqCst));
+                    assert_eq!(
+                        withdrawn,
+                        Some(true),
+                        "a removal was heard for a listener that was not withdrawn"
+                    );
+                }
+                let TableChange::Added(entry) = change else {
+                    return;
+                };
+                if reentered.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                let entry = bus.state.lock().unwrap().table.get(entry.id);
+                if let Some(entry) = entry {
+                    bus.withdraw(&entry);
+                }
+                bus.register(&ctx, &fiber, &name);
+            })
+        };
+        let snapshot = model.watch(watcher);
+        assert!(
+            snapshot.is_empty(),
+            "the watcher's snapshot is not the table before it registered"
+        );
+
+        // A dispatch over the table, interleaved with the registrations: a
+        // listener withdrawn before its call starts never runs one.
+        let dispatcher = {
+            let (model, name) = (model.clone(), name.to_string());
+            thread::spawn(move || {
+                for _ in 0..4 {
+                    switch_point();
+                    let selected = {
+                        let mut state = model.state.lock().unwrap();
+                        let name: Arc<str> = Arc::from(name.as_str());
+                        state.table.shared(&name)
+                    };
+                    let Some(selected) = selected else {
+                        continue;
+                    };
+                    for entry in selected.to_vec() {
+                        let withdrawn = entry.withdrawn.load(Ordering::SeqCst);
+                        let flight = entry.start();
+                        assert!(
+                            !withdrawn || flight.is_none(),
+                            "listener {} started a call after it was withdrawn",
+                            entry.id
+                        );
+                        if let Some(flight) = flight {
+                            // `EventBus::start` counts the call after the
+                            // liveness check.
+                            entry.calls.fetch_add(1, Ordering::Relaxed);
+                            switch_point();
+                            drop(flight);
+                        }
+                    }
+                }
+            })
+        };
+
+        // Registrar A: two listeners, then its own withdrawals.
+        let (give, given) = tokio::sync::oneshot::channel::<Arc<Entry>>();
+        let a = {
+            let (model, ctx, fiber) = (model.clone(), ctx.clone(), fiber.clone());
+            let name = name.to_string();
+            thread::spawn(move || {
+                switch_point();
+                let (first, _) = model.register(&ctx, &fiber, &name);
+                let _ = give.send(first.clone());
+                let (second, _) = model.register(&ctx, &fiber, &name);
+                switch_point();
+                // The withdrawer, or the watcher, may have taken either first:
+                // whoever did, its removal is reported once.
+                let _ = model.withdraw(&second);
+                let _ = model.withdraw(&first);
+            })
+        };
+        // Registrar B: two more, then its own withdrawals. The watcher takes
+        // one of them from inside a delivery.
+        let b = {
+            let (model, ctx, fiber) = (model.clone(), ctx.clone(), fiber.clone());
+            let name = name.to_string();
+            thread::spawn(move || {
+                switch_point();
+                let (third, _) = model.register(&ctx, &fiber, &name);
+                let (fourth, _) = model.register(&ctx, &fiber, &name);
+                switch_point();
+                let _ = model.withdraw(&fourth);
+                let _ = model.withdraw(&third);
+            })
+        };
+        // The withdrawer: one listener of A's, twice.
+        let w = {
+            let model = model.clone();
+            thread::spawn(move || {
+                switch_point();
+                let first = block_on(given).expect("the first registration");
+                let _ = model.withdraw(&first);
+                assert!(
+                    !model.withdraw(&first),
+                    "a second withdrawal reported a change"
+                );
+            })
+        };
+
+        w.join().unwrap();
+        a.join().unwrap();
+        b.join().unwrap();
+        dispatcher.join().unwrap();
+
+        // 5 additions (A's two, B's two, the watcher's one) and 4 removals
+        // (every listener A and B registered, by whoever got there first).
+        let log = model.log.lock().unwrap().clone();
+        let seqs: Vec<u64> = log.iter().map(|(seq, _, _)| *seq).collect();
+        assert_eq!(
+            seqs,
+            (1..=9u64).collect::<Vec<_>>(),
+            "the watcher did not hear every change exactly once, in order"
+        );
+        let added: HashSet<u64> = log
+            .iter()
+            .filter(|(_, _, added)| *added)
+            .map(|(_, id, _)| *id)
+            .collect();
+        let removed: HashSet<u64> = log
+            .iter()
+            .filter(|(_, _, added)| !*added)
+            .map(|(_, id, _)| *id)
+            .collect();
+        assert_eq!(added.len(), 5, "the additions heard are not five listeners");
+        assert_eq!(
+            removed.len(),
+            4,
+            "the removals heard are not four listeners"
+        );
+        for id in &added {
+            let times = log
+                .iter()
+                .filter(|(_, at, added)| at == id && *added)
+                .count();
+            assert_eq!(times, 1, "listener {id}'s addition was heard {times} times");
+        }
+        for id in &removed {
+            assert!(
+                added.contains(id),
+                "listener {id}'s removal was heard before its addition"
+            );
+            let times = log
+                .iter()
+                .filter(|(_, at, added)| at == id && !*added)
+                .count();
+            assert_eq!(times, 1, "listener {id}'s removal was heard {times} times");
+        }
+        {
+            let state = model.state.lock().unwrap();
+            let left = state.table.entries();
+            assert_eq!(
+                left.len(),
+                1,
+                "the table does not hold just the watcher's listener"
+            );
+            assert!(
+                added.contains(&left[0].id) && !removed.contains(&left[0].id),
+                "the listener left in the table is not the one the watcher added"
+            );
+            assert_eq!(
+                state.watchers.len(),
+                1,
+                "a watcher was registered or lost more than once"
+            );
+        }
+        {
+            let notices = model.notices.lock().unwrap();
+            assert!(notices.queue.is_empty(), "a notice was never delivered");
+            assert_eq!(notices.queued, 9, "a change was made without a notice");
+            assert_eq!(notices.delivered, 9, "a notice was never heard");
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Model 12: dispose registration and per-generation cancellation (#622,
+// `core/D12`, `core/features.errors`)
+
+/// The model's event: one listener per generation, never called.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ModelEvent;
+
+impl Event for ModelEvent {
+    const NAME: &'static str = "model::generation";
+    type Value = ();
+}
+
+/// The counters the model asserts over. Std atomics: they are read after the
+/// joins, where a shuttle load would itself be a scheduling point.
+#[derive(Default)]
+struct GenerationCounts {
+    /// Generations `load` started (the terminal check passed).
+    starts: AtomicUsize,
+    /// Applies that ran.
+    applies: AtomicUsize,
+    /// Applies whose `ctx.cancelled()` returned.
+    cancelled: AtomicUsize,
+    /// Applies that were cancelled at birth (`pre_cancelled` in `load`).
+    born_cancelled: AtomicUsize,
+    /// Effect factories that ran.
+    factories: AtomicUsize,
+    /// Their cleanups.
+    cleanups: AtomicUsize,
+    /// `ctx.effect`/`ctx.on_sync` calls the fiber refused.
+    refused: AtomicUsize,
+}
+
+/// What the driver hands the model's plugin: the counters, and the generation
+/// whose apply is running (the initiators wait for it, so every run registers
+/// the dispose while an apply is running).
+struct Generations {
+    counts: Arc<GenerationCounts>,
+    started: watch::Sender<u64>,
+}
+
+/// `FiberInner::post` on the model's mailbox: a stopped driver completes the
+/// intent's task at once.
+fn post_model(fiber: &FiberInner, intents: &mpsc::UnboundedSender<Intent>, intent: Intent) -> bool {
+    if !fiber.alive.load(Ordering::SeqCst) {
+        complete_intent(&intent, fiber.stopped_error());
+        return false;
+    }
+    match intents.send(intent) {
+        Ok(()) => true,
+        Err(error) => {
+            complete_intent(&error.0, fiber.stopped_error());
+            false
+        }
+    }
+}
+
+/// `FiberView::register_dispose`, mirrored on the model's mailbox: the check
+/// and the registration share the transition lock, so a restart registered
+/// after it sees the terminal task, and a `load` that starts after it is
+/// refused. The pre-cancel is the #619 fix: a running `apply` returns through
+/// `ctx.cancelled()` instead of holding the serial driver forever.
+fn register_dispose(
+    fiber: &Arc<FiberInner>,
+    intents: &mpsc::UnboundedSender<Intent>,
+) -> Arc<TransitionTask> {
+    let (task, newly_registered) = {
+        let mut tr = fiber.transition.lock().unwrap();
+        match &tr.terminal_task {
+            Some(task) => (task.clone(), false),
+            None => {
+                tr.pre_cancelled = true;
+                fiber.cancel_current();
+                let task = TransitionTask::new();
+                tr.terminal_task = Some(task.clone());
+                (task, true)
+            }
+        }
+    };
+    if newly_registered {
+        post_model(fiber, intents, Intent::Dispose);
+        if !fiber.alive.load(Ordering::SeqCst) {
+            task.complete(fiber.stopped_error());
+        }
+    }
+    task
+}
+
+/// `FiberView::restart`'s registration, mirrored: the pre-cancel is the same
+/// #619/#968 rule. The kernel reads `alive` under the transition lock only for
+/// a non-root fiber (`!this.is_root && …`); the model's fiber is the root, so
+/// the read does not happen here either — it would be a scheduling point under
+/// a std lock.
+fn register_restart(
+    fiber: &Arc<FiberInner>,
+    intents: &mpsc::UnboundedSender<Intent>,
+) -> Result<Arc<TransitionTask>, Arc<ErrorKind>> {
+    {
+        let mut tr = fiber.transition.lock().unwrap();
+        if fiber.closing.load(Ordering::SeqCst) || fiber.ctx.shared().closing.load(Ordering::SeqCst)
+        {
+            return Err(Arc::new(ErrorKind::Closed));
+        }
+        // Counted under the same lock as the load's `pre_cancelled`, so a
+        // generation that starts before the driver takes this up starts
+        // cancelled too, and neither counts as a failed load (#968).
+        tr.pending_restarts += 1;
+        tr.pre_cancelled = true;
+        fiber.cancel_current();
+    }
+    let task = TransitionTask::new();
+    post_join_to(&fiber.alive, intents, task.clone(), Intent::Restart, || {
+        fiber.stopped_error()
+    });
+    Ok(task)
+}
+
+/// `FiberView::restart`, mirrored: register, then wait for the new generation.
+fn restart(
+    fiber: &Arc<FiberInner>,
+    intents: &mpsc::UnboundedSender<Intent>,
+) -> Result<(), Arc<ErrorKind>> {
+    let task = register_restart(fiber, intents)?;
+    block_on(join_task(&task))
+}
+
+/// `FiberInner::drain_effects` for the model: take the records, drain each in
+/// reverse order (`claim`, run, `finish`, `join` — the kernel's `drain` spawns
+/// the runner on the runtime, which a shuttle model cannot pump), then clear
+/// `last_deps` and the provided table. The model has no definition copies and
+/// no provided services.
+fn drain_model_effects(fiber: &Arc<FiberInner>) -> Vec<Arc<ErrorKind>> {
+    let handle = fiber.ctx.handle().clone();
+    let effects: Vec<Arc<EffectRecord>> = std::mem::take(&mut *fiber.effects.lock().unwrap());
+    let mut errors = Vec::new();
+    for record in effects.into_iter().rev() {
+        if let Some(mut cleanups) = record.claim() {
+            let error = block_on(run_cleanups(&mut cleanups, &handle));
+            record.finish(error);
+        }
+        if let Err(error) = block_on(record.join()) {
+            errors.push(error);
+        }
+    }
+    errors.extend(std::mem::take(&mut *fiber.drained_errors.lock().unwrap()));
+    *fiber.last_deps.lock().unwrap() = None;
+    fiber.provided.lock().unwrap().clear();
+    errors
+}
+
+/// The model's plugin: one effect and one listener per generation, then the
+/// generation's cancellation (a cooperative plugin, D27). A pre-cancelled
+/// generation must see the cancellation before it registers anything (#968).
+fn apply_generation(
+    fiber: &Arc<FiberInner>,
+    generation: u64,
+    born_cancelled: bool,
+    generations: &Arc<Generations>,
+) {
+    let counts = &generations.counts;
+    let ctx = fiber.ctx.for_generation(generation);
+    let seen = ctx.cancellation_token().is_cancelled();
+    if born_cancelled {
+        assert!(
+            seen,
+            "a pre-cancelled generation's apply did not see the cancellation"
+        );
+        counts.born_cancelled.fetch_add(1, Ordering::SeqCst);
+    }
+    let registered = ctx.effect_named("model generation", || {
+        counts.factories.fetch_add(1, Ordering::SeqCst);
+        let counts = counts.clone();
+        // The factory runs outside the admission lock: a scheduling point
+        // between the two checks (`register_effect_named`).
+        switch_point();
+        Effect::Disposer(Box::new(move || {
+            counts.cleanups.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }))
+    });
+    if registered.is_err() {
+        counts.refused.fetch_add(1, Ordering::SeqCst);
+    }
+    if ctx.on_sync::<ModelEvent>(|_, _| Ok(None)).is_err() {
+        counts.refused.fetch_add(1, Ordering::SeqCst);
+    }
+    counts.applies.fetch_add(1, Ordering::SeqCst);
+    // The plugin's own work: it waits for the generation to be cancelled, so a
+    // dispose of this fiber returns instead of waiting for an apply that never
+    // ends (Bug A, #619).
+    let _ = generations.started.send(generation);
+    switch_point();
+    block_on(ctx.cancelled());
+    counts.cancelled.fetch_add(1, Ordering::SeqCst);
+}
+
+/// `FiberInner::load`, mirrored where the two checks, the token and the
+/// generation are: the terminal check and the new generation token share the
+/// transition lock the dispose registration takes, so a generation either
+/// starts and is cancelled, or does not start at all — it never starts
+/// uncancelled behind a registered dispose.
+fn load_generation(fiber: &Arc<FiberInner>, generations: &Arc<Generations>) {
+    let shared = fiber.ctx.shared().clone();
+    let _admission = shared.admission.lock().unwrap();
+    if fiber.closing.load(Ordering::SeqCst) || shared.closing.load(Ordering::SeqCst) {
+        return;
+    }
+    let (generation, born_cancelled) = {
+        let mut tr = fiber.transition.lock().unwrap();
+        if tr.terminal_task.is_some() {
+            return;
+        }
+        let token = fiber.new_generation_token();
+        // A generation that starts while a restart waits starts cancelled: the
+        // driver is stopping it before its `apply` runs (#968).
+        tr.pre_cancelled = tr.pending_restarts > 0;
+        if tr.pre_cancelled {
+            token.cancel();
+        }
+        tr.generation += 1;
+        tr.error = None;
+        fiber.set_state(&mut tr, FiberState::Loading);
+        (tr.generation, tr.pre_cancelled)
+    };
+    generations.counts.starts.fetch_add(1, Ordering::SeqCst);
+    drop(_admission);
+    // `apply` is user code and runs on the driver (D7).
+    apply_generation(fiber, generation, born_cancelled, generations);
+    if fiber.closing.load(Ordering::SeqCst) {
+        unload_generation(fiber, NextState::Disposed);
+        return;
+    }
+    // `refresh_deps` returns at the plugin check: the model declares no
+    // injects, so `apply` sets the state.
+    {
+        let mut tr = fiber.transition.lock().unwrap();
+        tr.error = None;
+        fiber.set_state(&mut tr, FiberState::Active);
+    }
+}
+
+/// `FiberInner::unload`, mirrored: `Unloading` under the admission and
+/// transition locks, cancel, the (empty) event wait, the cleanup pass, then the
+/// next state. `flush_status`'s `FiberStatusChanged` emits are not modelled:
+/// they read no lifecycle state.
+fn unload_generation(fiber: &Arc<FiberInner>, next: NextState) {
+    {
+        let _admission = fiber.ctx.shared().admission.lock().unwrap();
+        let mut tr = fiber.transition.lock().unwrap();
+        fiber.set_state(&mut tr, FiberState::Unloading);
+    }
+    fiber.cancel_current();
+    let errors = drain_model_effects(fiber);
+    let err = aggregate_arcs(errors);
+    let mut tr = fiber.transition.lock().unwrap();
+    match next {
+        NextState::Pending => {
+            if let Some(error) = err {
+                (fiber.ctx.error_sink())(error);
+            }
+            fiber.set_state(&mut tr, FiberState::Pending);
+        }
+        NextState::Disposed => {
+            tr.error = err;
+            fiber.set_state(&mut tr, FiberState::Disposed);
+        }
+    }
+}
+
+/// The root's driver, mirroring `drive`'s Dispose and Restart arms and the load
+/// they reach. The root's driver keeps running after a dispose
+/// (`terminal_dispose` is for a non-root fiber), so the model ends it by closing
+/// the mailbox.
+fn drive_generations(
+    fiber: Arc<FiberInner>,
+    mut mailbox: mpsc::UnboundedReceiver<Intent>,
+    generations: Arc<Generations>,
+) {
+    while let Some(intent) = block_on(mailbox.recv()) {
+        match intent {
+            Intent::Dispose => {
+                if fiber.state() != FiberState::Disposed {
+                    unload_generation(&fiber, NextState::Disposed);
+                }
+                let (task, err) = {
+                    let tr = fiber.transition.lock().unwrap();
+                    (tr.terminal_task.clone(), tr.error.clone())
+                };
+                if let Some(task) = task {
+                    task.complete(err);
+                }
+            }
+            Intent::Restart(task) => {
+                {
+                    let mut tr = fiber.transition.lock().unwrap();
+                    tr.pending_restarts = tr.pending_restarts.saturating_sub(1);
+                }
+                if fiber.closing.load(Ordering::SeqCst)
+                    || fiber.ctx.shared().closing.load(Ordering::SeqCst)
+                {
+                    task.complete(Some(Arc::new(ErrorKind::Closed)));
+                    continue;
+                }
+                let state = fiber.state();
+                if state == FiberState::Disposed {
+                    // The root: a disposed root becomes Active again, with a
+                    // new token and no terminal task (the kernel's
+                    // `if this.is_root` branch).
+                    fiber.new_generation_token();
+                    {
+                        let mut tr = fiber.transition.lock().unwrap();
+                        tr.error = None;
+                        tr.terminal_task = None;
+                        fiber.set_state(&mut tr, FiberState::Active);
+                    }
+                    let error = fiber.transition.lock().unwrap().error.clone();
+                    task.complete(error);
+                    continue;
+                }
+                if state != FiberState::Pending {
+                    unload_generation(&fiber, NextState::Pending);
+                }
+                load_generation(&fiber, &generations);
+                // `complete_task`: the fiber's error, which `load` sets to
+                // `None` when it refuses the generation.
+                let error = fiber.transition.lock().unwrap().error.clone();
+                task.complete(error);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// One run of model 12: two restarts start two generations — the first
+/// cancelled at birth (the second restart is still waiting), the second
+/// applying on a live token — and then a dispose registers while that apply
+/// runs, with (`with_restart`) or without a restart registering beside it.
+fn close_race(with_restart: bool) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a current-thread runtime");
+    let ctx = Ctx::root_with(runtime.handle().clone());
+    let fiber = ctx.root_view().expect("the root view").inner.clone();
+    let (started, started_rx) = watch::channel(0u64);
+    let generations = Arc::new(Generations {
+        counts: Arc::new(GenerationCounts::default()),
+        started,
+    });
+    let counts = generations.counts.clone();
+    let (intents, mailbox) = mpsc::unbounded_channel::<Intent>();
+    // Both restarts are queued before the driver starts, so the first
+    // generation starts while the second restart still waits: it is cancelled
+    // at birth, as #968 has it.
+    let prime = [
+        register_restart(&fiber, &intents).expect("a restart"),
+        register_restart(&fiber, &intents).expect("a restart"),
+    ];
+    let driver = {
+        let (fiber, generations) = (fiber.clone(), generations.clone());
+        thread::spawn(move || drive_generations(fiber, mailbox, generations))
+    };
+
+    // The initiators wait for the second generation: its apply runs on a
+    // live token, so only their registrations can cancel it.
+    let wait_for_apply = {
+        let started = started_rx.clone();
+        move || {
+            let mut started = started;
+            block_on(async {
+                while *started.borrow_and_update() < 2 {
+                    if started.changed().await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    };
+    let disposer = {
+        let (fiber, intents) = (fiber.clone(), intents.clone());
+        let wait_for_apply = wait_for_apply.clone();
+        thread::spawn(move || {
+            switch_point();
+            wait_for_apply();
+            let task = register_dispose(&fiber, &intents);
+            block_on(join_task(&task))
+        })
+    };
+    let restarter = with_restart.then(|| {
+        let (fiber, intents) = (fiber.clone(), intents.clone());
+        let wait_for_apply = wait_for_apply.clone();
+        thread::spawn(move || {
+            switch_point();
+            wait_for_apply();
+            restart(&fiber, &intents)
+        })
+    });
+
+    assert!(
+        block_on(join_task(&prime[0])).is_ok(),
+        "the first primed restart failed"
+    );
+    assert!(
+        block_on(join_task(&prime[1])).is_ok(),
+        "the second primed restart failed"
+    );
+    let dispose_result = disposer.join().unwrap();
+    assert!(
+        dispose_result.is_ok(),
+        "a dispose returned {dispose_result:?}"
+    );
+    if let Some(restarter) = restarter {
+        let restart_result = restarter.join().unwrap();
+        assert!(
+            restart_result.is_ok(),
+            "a restart returned {restart_result:?}"
+        );
+    }
+
+    // One last dispose, after the initiators: whatever the restart left is
+    // unloaded, and its cleanup runs.
+    let last = register_dispose(&fiber, &intents);
+    assert!(
+        block_on(join_task(&last)).is_ok(),
+        "the last dispose returned an error"
+    );
+    drop(intents);
+    driver.join().unwrap();
+
+    let starts = counts.starts.load(Ordering::SeqCst);
+    let applies = counts.applies.load(Ordering::SeqCst);
+    let cancelled = counts.cancelled.load(Ordering::SeqCst);
+    let born_cancelled = counts.born_cancelled.load(Ordering::SeqCst);
+    let factories = counts.factories.load(Ordering::SeqCst);
+    let cleanups = counts.cleanups.load(Ordering::SeqCst);
+    assert!(
+        starts >= 2,
+        "the priming restarts started {starts} generations, not two"
+    );
+    assert!(
+        born_cancelled >= 1,
+        "no generation was cancelled at birth while a restart waited"
+    );
+    assert_eq!(
+        applies, starts,
+        "a generation started without running its apply"
+    );
+    assert_eq!(
+        cancelled, starts,
+        "an apply returned without its generation being cancelled"
+    );
+    assert_eq!(
+        counts.refused.load(Ordering::SeqCst),
+        0,
+        "a generation's apply could not register its effect or its listener"
+    );
+    assert_eq!(
+        cleanups, factories,
+        "a generation's effect was not cleaned up exactly once ({cleanups} cleanups for \
+         {factories} factories)"
+    );
+    assert!(
+        fiber.effects.lock().unwrap().is_empty(),
+        "a generation's effect record was left in the fiber"
+    );
+    assert!(
+        fiber.effect_index.lock().unwrap().is_empty(),
+        "a generation's effect record was left in the index"
+    );
+    assert_eq!(
+        *fiber.event_flights.lock().unwrap(),
+        0,
+        "a listener call was never finished"
+    );
+    assert_eq!(
+        fiber.state(),
+        FiberState::Disposed,
+        "the last dispose did not end the root"
+    );
+    assert_eq!(
+        ctx.events().table_counts().0,
+        0,
+        "a generation's listener was left in the table"
+    );
+    assert!(
+        fiber.alive.load(Ordering::SeqCst),
+        "the root's driver stopped on a dispose"
+    );
+    assert_eq!(
+        fiber.transition.lock().unwrap().pending_restarts,
+        0,
+        "a restart was never taken up"
+    );
+}
+
+/// Model 12, dispose registration and per-generation cancellation (#622, see
+/// also Bug A / #619 and #968): a generation is applying while a dispose and a
+/// restart register. Whichever registers first, the running generation is
+/// cancelled (`ctx.cancelled()` returns, so the plugin returns and the dispose
+/// completes) — a dispose alone does too, with no restart to cancel for it — a
+/// generation that starts after the terminal registration is refused, a
+/// generation that starts while a restart waits is cancelled at birth, and
+/// every generation's effect and listener are cleaned up exactly once — the
+/// listener table and the effect lists end empty.
+///
+/// The model runs the kernel's own registration (`Ctx::effect_named` →
+/// `register_effect_named`, `on_sync`), `for_generation`, the cancellation
+/// token, `pre_cancelled`, `cancel_current`, `new_generation_token`,
+/// `set_state`, `EffectRecord` and `TransitionTask`. `register_dispose`,
+/// `restart`, `load`, `unload` and `drive`'s close arms are mirrored line for
+/// line, because the real ones post to the root's driver task, whose
+/// `drain_effects` spawns its cleanup runner on the runtime — a shuttle model
+/// cannot pump that runtime, so the model drains the records itself
+/// (`claim` → run → `finish`, as models 3 and 5 do) and owns the mailbox. The
+/// root is the fiber under test, so `restart` takes the kernel's root branch
+/// (no `alive` read under the transition lock); a non-root fiber's dispose and
+/// restart are models 5 and 8's.
+///
+/// Mutations this model catches: dropping the dispose's `cancel_current` (the
+/// apply of the second generation waits for a cancellation nobody sends, so the
+/// driver, the joining dispose and the test park: `deadlock!`), and dropping
+/// `load`'s `token.cancel()` after `pre_cancelled` (a generation that starts
+/// behind a waiting restart applies without seeing the cancellation: `a
+/// pre-cancelled generation's apply did not see the cancellation`).
+#[test]
+fn shuttle_dispose_registration_cancels_the_running_generation() {
+    explore(|| {
+        // The dispose and the restart race on the same running generation.
+        close_race(true);
+        // The dispose alone: no restart's pre-cancel can stand in for it.
+        close_race(false);
     });
 }
