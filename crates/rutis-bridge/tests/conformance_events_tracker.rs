@@ -7,21 +7,38 @@
 //! answers `events.call` as the test tells it to. Rules that name another
 //! implementation (Node's Cordis `internal/dispatch`, Go's filter errors, a
 //! JavaScript listener's signal), need a real runtime, or need a linked node
-//! stay open; the PR body lists them.
+//! stay open; the PR body lists them. Rules the 0.19 flat bus withdrew
+//! (`events.elsewhere` and the cross-session guarantee built on it, §4.4
+//! steps 3 and 5 and §4.5) are not checked here either: the tracking
+//! table's wording predates the bus.
 //!
 //! rule: EVP-3-2
 //! rule: EVP-3-5
+//! rule: EVP-4.1-3
 //! rule: EVP-4.1-6
+//! rule: EVP-4.2-1
 //! rule: EVP-4.2-2
 //! rule: EVP-4.2-4
 //! rule: EVP-4.2-5
 //! rule: EVP-4.2-10
+//! rule: EVP-4.3-1
+//! rule: EVP-4.3-2
+//! rule: EVP-4.3-3
+//! rule: EVP-5.1-1
+//! rule: EVP-5.1-3
+//! rule: EVP-5.3-2
 //! rule: EVP-5.3-6
 //! rule: EVP-5.3-7
+//! rule: EVP-5.4-1
 //! rule: EVP-5.4-2
+//! rule: EVP-5.4-7
 //! rule: EVP-5.4-14
+//! rule: EVP-5.5-5
+//! rule: EVP-5.5-6
 //! rule: EVP-5.7-4
 //! rule: EVP-6-6
+//! rule: EVP-7.1-1
+//! rule: EVP-7.1-2
 //! rule: EVP-8-3
 //! rule: EVP-8-7
 //!
@@ -29,8 +46,12 @@
 //! guarantee: events/hub-flat
 //! guarantee: events/hub-filter
 //! guarantee: events/hub-dispatch
+//! guarantee: events/hub-lifecycle
 //! guarantee: events/remote
 //! guarantee: events/framework
+//! guarantee: events/order
+//! guarantee: events/waterfall
+//! guarantee: events/emit
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -231,6 +252,35 @@ impl Rig {
         kind: &str,
         behavior: Behavior,
     ) -> Result<Value, Error> {
+        self.register_full(id, name, row, plugin, kind, false, behavior)
+            .await
+    }
+
+    /// Register the quiet listener `id` of `name` from row `row`, before
+    /// the entries already in the table (`prepend`, events protocol §4.3).
+    async fn register_prepend(
+        &self,
+        id: &str,
+        name: &str,
+        row: Option<&str>,
+        plugin: &str,
+        kind: &str,
+    ) -> Result<Value, Error> {
+        self.register_full(id, name, row, plugin, kind, true, quiet())
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn register_full(
+        &self,
+        id: &str,
+        name: &str,
+        row: Option<&str>,
+        plugin: &str,
+        kind: &str,
+        prepend: bool,
+        behavior: Behavior,
+    ) -> Result<Value, Error> {
         self.fake
             .listeners
             .lock()
@@ -240,7 +290,7 @@ impl Rig {
             "events.on",
             Value::Data(json!({
                 "id": id, "name": name, "row": row, "plugin": plugin,
-                "kind": kind, "prepend": false, "global": false,
+                "kind": kind, "prepend": prepend, "global": false,
             })),
         )
         .await
@@ -266,12 +316,81 @@ impl Rig {
         args: Vec<Value>,
         filter: Option<Value>,
     ) -> Result<impl Future<Output = Reply> + Send + 'static, Error> {
+        self.dispatch_with(row, name, mode, args, filter, None)
+    }
+
+    /// [`Rig::dispatch_started`], a waterfall's `terminal` included.
+    fn dispatch_with(
+        &self,
+        row: Option<&str>,
+        name: &str,
+        mode: &str,
+        args: Vec<Value>,
+        filter: Option<Value>,
+        terminal: Option<Value>,
+    ) -> Result<impl Future<Output = Reply> + Send + 'static, Error> {
         let mut fields = request(row, name, mode, args);
         if let Some(filter) = filter {
             fields.insert("filter".into(), filter);
         }
+        if let Some(terminal) = terminal {
+            fields.insert("terminal".into(), terminal);
+        }
         self.started("events.dispatch", Value::Record(fields))
     }
+
+    /// [`Rig::dispatch_with`], its reply settled on a task of its own: a
+    /// dispatch that is not an `emit` does its work while its reply is
+    /// settled (it is started as a task, events protocol §4.1), so a test
+    /// that watches it run must settle it meanwhile.
+    fn dispatch_running(
+        &self,
+        row: Option<&str>,
+        name: &str,
+        mode: &str,
+        args: Vec<Value>,
+        filter: Option<Value>,
+        terminal: Option<Value>,
+    ) -> tokio::task::JoinHandle<Reply> {
+        let started = self
+            .dispatch_with(row, name, mode, args, filter, terminal)
+            .unwrap();
+        tokio::spawn(async move { settle(started.await?).await })
+    }
+}
+
+/// The listeners of the `events.call` frames for `name` the far end read,
+/// in the order they arrived.
+fn calls_for(frames: &Arc<Mutex<Vec<Json>>>, name: &str) -> Vec<String> {
+    frames
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|frame| {
+            frame["op"] == json!("invoke")
+                && frame["method"] == json!("events.call")
+                && frame["args"]["value"][0]["value"]["name"]["value"] == json!(name)
+        })
+        .map(called)
+        .collect()
+}
+
+/// The listeners of the calls the fake got, in order.
+fn listeners(fake: &Fake) -> Vec<String> {
+    fake.calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|call| {
+            call["listener"]
+                .clone()
+                .json()
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect()
 }
 
 fn request(row: Option<&str>, name: &str, mode: &str, args: Vec<Value>) -> BTreeMap<String, Value> {
@@ -1018,4 +1137,641 @@ fn service(
     let available = fields["available"].as_bool().unwrap();
     let row = fields["row"].as_str().map(str::to_owned);
     (name, chain, available, row)
+}
+
+/// rule: EVP-4.3-1
+/// rule: EVP-4.3-2
+/// rule: EVP-5.1-1
+///
+/// The table keeps the entries in the order their `events.on` frames
+/// arrive, and a `prepend` entry goes before every one of them; a dispatch
+/// takes the matching entries in that order: the calls of one `serial`
+/// dispatch start prepended first, then by arrival.
+#[tokio::test(flavor = "multi_thread")]
+async fn entries_are_taken_in_arrival_order_and_prepend_first() {
+    within("positions", async {
+        let rig = rig().await;
+        rig.load("chat", None, &[]).await;
+        for id in ["1", "2", "3"] {
+            rig.register(id, "t/order", Some("chat"), "fake", "any")
+                .await
+                .unwrap();
+        }
+        rig.register_prepend("p", "t/order", Some("chat"), "fake", "any")
+            .await
+            .unwrap();
+        let result = rig
+            .dispatch(Some("chat"), "t/order", "serial", vec![])
+            .await
+            .unwrap();
+        assert_eq!(result, Value::Undefined, "no entry answers");
+        assert_eq!(listeners(&rig.fake), ["p", "1", "2", "3"]);
+    })
+    .await;
+}
+
+/// rule: EVP-4.3-3
+///
+/// A dispatch takes the entries that match the name: an exact entry of that
+/// name, and a prefix entry the name starts with (`t/ev` takes `t/ev`
+/// itself and `t/eviction`), and nothing else. The entries are taken in
+/// registration order across both kinds: the exact entry registered first
+/// is called first, and the prefix entry registered after it answers the
+/// `serial` dispatch.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_prefix_entry_takes_the_names_that_start_with_it() {
+    within("prefix names", async {
+        let rig = rig().await;
+        rig.load("chat", None, &[]).await;
+        for (id, name) in [("1", "t/ev"), ("2", "t/eviction"), ("3", "t/else")] {
+            rig.register(id, name, Some("chat"), "fake", "any")
+                .await
+                .unwrap();
+        }
+        // The host's own prefix entry, registered last, which hears the
+        // dispatched name and answers it.
+        let heard: Arc<Mutex<Vec<String>>> = Arc::default();
+        let recording = heard.clone();
+        rig.root
+            .listen::<Args>()
+            .prefix("t/ev")
+            .on(move |_: Arc<Args>, call: Call<Args>| {
+                let heard = recording.clone();
+                async move {
+                    heard.lock().unwrap().push(call.name().to_owned());
+                    Ok(Some(ArgValue(Value::Data(json!("prefix")))))
+                }
+            })
+            .unwrap();
+        // `t/ev`: the exact entry of the same name first, the prefix after.
+        let result = rig
+            .dispatch(Some("chat"), "t/ev", "serial", vec![])
+            .await
+            .unwrap();
+        assert_eq!(result, Value::Data(json!("prefix")));
+        assert_eq!(listeners(&rig.fake), ["1"]);
+        // `t/eviction` starts with `t/ev`: its own entry, then the prefix.
+        let result = rig
+            .dispatch(Some("chat"), "t/eviction", "serial", vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            Value::Data(json!("prefix")),
+            "the exact entry (no result) came before the prefix entry"
+        );
+        assert_eq!(listeners(&rig.fake), ["1", "2"]);
+        assert_eq!(*heard.lock().unwrap(), ["t/ev", "t/eviction"]);
+        // `t/other` does not start with `t/ev`, and no entry has its name.
+        let result = rig
+            .dispatch(Some("chat"), "t/other", "serial", vec![])
+            .await
+            .unwrap();
+        assert_eq!(result, Value::Undefined, "no entry takes t/other");
+        assert_eq!(listeners(&rig.fake), ["1", "2"]);
+        assert_eq!(heard.lock().unwrap().len(), 2);
+        // Nothing at all: no call, and the dispatch answers as usual.
+        let result = rig
+            .dispatch(Some("chat"), "t/nothing", "serial", vec![])
+            .await
+            .unwrap();
+        assert_eq!(result, Value::Undefined);
+        assert_eq!(listeners(&rig.fake), ["1", "2"]);
+        assert_eq!(heard.lock().unwrap().len(), 2);
+    })
+    .await;
+}
+
+/// rule: EVP-5.1-3
+///
+/// Every call checks that its entry is still there before it starts: one
+/// withdrawn after the snapshot (here while the filter was still waiting)
+/// is skipped, as if it had never been selected.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_entry_withdrawn_after_the_snapshot_is_skipped() {
+    within("withdrawn after the snapshot", async {
+        let rig = rig().await;
+        rig.load("chat", None, &[]).await;
+        rig.register("1", "t/drop", Some("chat"), "one", "any")
+            .await
+            .unwrap();
+        rig.register("2", "t/drop", Some("chat"), "two", "any")
+            .await
+            .unwrap();
+        let (release, answer) = tokio::sync::oneshot::channel::<Reply>();
+        let filtering = Arc::new(AtomicBool::new(false));
+        let awaiting: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<Reply>>>> = Arc::default();
+        *awaiting.lock().unwrap() = Some(answer);
+        let filter = {
+            let waiting = filtering.clone();
+            let awaiting = awaiting.clone();
+            Value::callback(move |_| {
+                waiting.store(true, Ordering::SeqCst);
+                let answer = awaiting.lock().unwrap().take();
+                match answer {
+                    Some(answer) => Ok(Value::future(async move {
+                        answer
+                            .await
+                            .unwrap_or_else(|_| Ok(Value::Data(json!([true, true]))))
+                    })),
+                    None => Ok(Value::Data(json!([true, true]))),
+                }
+            })
+        };
+        let held =
+            rig.dispatch_running(Some("chat"), "t/drop", "serial", vec![], Some(filter), None);
+        until(|| filtering.load(Ordering::SeqCst), "the dispatch's filter").await;
+        // The snapshot is taken and the filter has answered nothing yet:
+        // the entry leaves the table in the meantime.
+        let gone = rig
+            .send("events.off", Value::Data(json!(["2"])))
+            .await
+            .unwrap();
+        assert_eq!(gone, Value::Undefined);
+        release.send(Ok(Value::Data(json!([true, true])))).unwrap();
+        assert_eq!(held.await.unwrap().unwrap(), Value::Undefined);
+        assert_eq!(
+            listeners(&rig.fake),
+            ["1"],
+            "the withdrawn entry is skipped"
+        );
+    })
+    .await;
+}
+
+/// rule: EVP-5.4-7
+///
+/// A waterfall calls the first entry with `next`; `next` calls the next
+/// entry still there (a withdrawn one is skipped) and, after the last, the
+/// terminal with the event's arguments, whose value the reply carries; the
+/// outermost value is returned as it is. With no entry at all the terminal
+/// is called straight away, and with no terminal the reply is `undefined`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_waterfall_skips_the_withdrawn_and_ends_at_its_terminal() {
+    within("waterfall chain", async {
+        let rig = rig().await;
+        rig.load("chat", None, &[]).await;
+        // The first entry calls `next` and answers its value.
+        let rest: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let chaining = {
+            let rest = rest.clone();
+            Arc::new(move |fields: &BTreeMap<String, Value>| -> Reply {
+                let next = fields["next"].clone().reference()?;
+                let rest = rest.clone();
+                Ok(Value::future(async move {
+                    let out = settle(next.call(Value::List(vec![]))?).await?;
+                    rest.lock().unwrap().push(out.clone());
+                    Ok(out)
+                }))
+            })
+        };
+        rig.register_with("1", "t/w", Some("chat"), "one", "async", chaining)
+            .await
+            .unwrap();
+        rig.register("2", "t/w", Some("chat"), "two", "any")
+            .await
+            .unwrap();
+        let terminal_seen: Arc<Mutex<Vec<Vec<Value>>>> = Arc::default();
+        let recording = terminal_seen.clone();
+        let terminal = Value::callback(move |argument| {
+            let arguments = argument.list()?;
+            recording.lock().unwrap().push(arguments.clone());
+            Ok(Value::Data(json!("end")))
+        });
+        let (release, answer) = tokio::sync::oneshot::channel::<Reply>();
+        let filtering = Arc::new(AtomicBool::new(false));
+        let awaiting: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<Reply>>>> = Arc::default();
+        *awaiting.lock().unwrap() = Some(answer);
+        let filter = {
+            let waiting = filtering.clone();
+            let awaiting = awaiting.clone();
+            Value::callback(move |_| {
+                waiting.store(true, Ordering::SeqCst);
+                let answer = awaiting.lock().unwrap().take();
+                match answer {
+                    Some(answer) => Ok(Value::future(async move {
+                        answer
+                            .await
+                            .unwrap_or_else(|_| Ok(Value::Data(json!([true, true]))))
+                    })),
+                    None => Ok(Value::Data(json!([true, true]))),
+                }
+            })
+        };
+        let held = rig.dispatch_running(
+            Some("chat"),
+            "t/w",
+            "waterfall",
+            vec![json!(1).into(), json!("x").into()],
+            Some(filter),
+            Some(terminal),
+        );
+        until(
+            || filtering.load(Ordering::SeqCst),
+            "the waterfall's filter",
+        )
+        .await;
+        let gone = rig
+            .send("events.off", Value::Data(json!(["2"])))
+            .await
+            .unwrap();
+        assert_eq!(gone, Value::Undefined);
+        release.send(Ok(Value::Data(json!([true, true])))).unwrap();
+        let reply = held.await.unwrap().unwrap();
+        assert_eq!(
+            reply,
+            Value::Data(json!("end")),
+            "`next` skipped the withdrawn entry and reached the terminal"
+        );
+        assert_eq!(listeners(&rig.fake), ["1"]);
+        assert_eq!(*rest.lock().unwrap(), vec![Value::Data(json!("end"))]);
+        assert_eq!(
+            *terminal_seen.lock().unwrap(),
+            vec![vec![Value::Data(json!(1)), Value::Data(json!("x"))]],
+            "the terminal takes the event's arguments"
+        );
+
+        // No entry at all: the terminal answers, and its value is the reply.
+        let empty_seen: Arc<Mutex<Vec<Vec<Value>>>> = Arc::default();
+        let recording = empty_seen.clone();
+        let empty_terminal = Value::callback(move |argument| {
+            recording.lock().unwrap().push(argument.list()?);
+            Ok(Value::Data(json!(false)))
+        });
+        let answered = rig
+            .dispatch_with(
+                Some("chat"),
+                "t/w2",
+                "waterfall",
+                vec![json!(2).into()],
+                None,
+                Some(empty_terminal),
+            )
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(
+            settle(answered).await.unwrap(),
+            Value::Data(json!(false)),
+            "a waterfall returns its value as it is"
+        );
+        assert_eq!(
+            *empty_seen.lock().unwrap(),
+            vec![vec![Value::Data(json!(2))]]
+        );
+        // No entry, no terminal: `undefined`.
+        let answered = rig
+            .dispatch_with(Some("chat"), "t/w3", "waterfall", vec![], None, None)
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(settle(answered).await.unwrap(), Value::Undefined);
+    })
+    .await;
+}
+
+/// rule: EVP-4.2-1
+///
+/// The runtime picks the id a listener registers under; the host keeps the
+/// ids of a session apart: a second registration under an id still there
+/// is refused, and the entry already in the table is the one called. (The
+/// refusal's message is the host's own: the protocol's error table does not
+/// list it, `docs/formal-trace/rules/protocol-events.md`.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_listener_of_a_live_id_is_refused() {
+    within("duplicate ids", async {
+        let rig = rig().await;
+        rig.load("chat", None, &[]).await;
+        rig.register("1", "t/one", Some("chat"), "one", "any")
+            .await
+            .unwrap();
+        let refused = rig
+            .register("1", "t/two", Some("chat"), "two", "any")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            binding(&refused),
+            ("BindingError", "listener 1 is already registered")
+        );
+        let result = rig
+            .dispatch(Some("chat"), "t/two", "serial", vec![])
+            .await
+            .unwrap();
+        assert_eq!(result, Value::Undefined);
+        assert!(
+            listeners(&rig.fake).is_empty(),
+            "the refused registration brought no entry"
+        );
+        rig.dispatch(Some("chat"), "t/one", "serial", vec![])
+            .await
+            .unwrap();
+        assert_eq!(listeners(&rig.fake), ["1"]);
+    })
+    .await;
+}
+
+/// rule: EVP-7.1-1
+/// rule: EVP-7.1-2
+///
+/// `rows.ended` is a table change in the session's frame order: an
+/// `events.on` before it enters the table and leaves with the row (a
+/// dispatch between the two calls it), one after it is refused for a row
+/// that is gone, and a dispatch after it reaches no entry of that row. The
+/// runtime's own `events.off` for an id the host took with the row is
+/// ignored, not refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn rows_ended_is_a_table_change_in_frame_order() {
+    within("rows.ended", async {
+        let rig = rig().await;
+        rig.load("chat", None, &[]).await;
+        rig.register("1", "t/end", Some("chat"), "one", "any")
+            .await
+            .unwrap();
+        rig.dispatch(Some("chat"), "t/end", "serial", vec![])
+            .await
+            .unwrap();
+        assert_eq!(listeners(&rig.fake), ["1"], "registered before the end");
+        let ended = rig
+            .send("rows.ended", Value::Data(json!("chat")))
+            .await
+            .unwrap();
+        assert_eq!(ended, Value::Undefined);
+        // The row's entries are gone: no call, and no new registration.
+        // (Its own dispatch is refused, the row no longer being loaded:
+        // the mount's still runs over the table.)
+        rig.dispatch(None, "t/end", "serial", vec![]).await.unwrap();
+        assert_eq!(listeners(&rig.fake), ["1"]);
+        let refused = rig
+            .register("2", "t/end", Some("chat"), "two", "any")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            binding(&refused),
+            (
+                "BindingError",
+                "the calling row is not loaded in this runtime"
+            )
+        );
+        // Its own `events.off` for the id the host took is harmless.
+        let gone = rig
+            .send("events.off", Value::Data(json!(["1"])))
+            .await
+            .unwrap();
+        assert_eq!(gone, Value::Undefined);
+    })
+    .await;
+}
+
+/// rule: EVP-5.5-5
+/// rule: EVP-5.5-6
+///
+/// A row's end lets go of the emits that are its own: the one waiting for
+/// its filter is cancelled, the ones queued behind it are dropped, and
+/// neither starts a call. Both `events.dispatch` calls still get their
+/// answers, and the session's other emits (another row's) go on in their
+/// turn.
+///
+/// Each emit names a different event, so which listener is called says
+/// which dispatch ran: `rows.ended` is a table change in the session's
+/// frame order (§4.1), so its reply says the two emits before it were
+/// queued.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rows_end_lets_go_of_its_queued_and_running_emits() {
+    within("emit queue and rows.ended", async {
+        let rig = rig().await;
+        rig.load("a", None, &[]).await;
+        rig.load("b", None, &[]).await;
+        // Row `a`'s running emit would call "4" (of row `b`) and "1".
+        rig.register("1", "t/first", Some("a"), "one", "any")
+            .await
+            .unwrap();
+        rig.register("4", "t/first", Some("b"), "four", "any")
+            .await
+            .unwrap();
+        // Row `a`'s queued emit would call "3"; row `b`'s, "2".
+        rig.register("3", "t/queued", Some("b"), "three", "any")
+            .await
+            .unwrap();
+        rig.register("2", "t/later", Some("b"), "two", "any")
+            .await
+            .unwrap();
+        let (release, answer) = tokio::sync::oneshot::channel::<Reply>();
+        let filtering = Arc::new(AtomicBool::new(false));
+        let awaiting: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<Reply>>>> = Arc::default();
+        *awaiting.lock().unwrap() = Some(answer);
+        let filter = {
+            let waiting = filtering.clone();
+            let awaiting = awaiting.clone();
+            Value::callback(move |_| {
+                waiting.store(true, Ordering::SeqCst);
+                let answer = awaiting.lock().unwrap().take();
+                match answer {
+                    Some(answer) => Ok(Value::future(async move {
+                        answer
+                            .await
+                            .unwrap_or_else(|_| Ok(Value::Data(json!([true, true]))))
+                    })),
+                    None => Ok(Value::Data(json!([true, true]))),
+                }
+            })
+        };
+        let first = rig
+            .dispatch_started(Some("a"), "t/first", "emit", vec![], Some(filter))
+            .unwrap();
+        until(
+            || filtering.load(Ordering::SeqCst),
+            "the first emit's filter",
+        )
+        .await;
+        // Queued behind it: another of row `a`, then one of row `b`.
+        let second = rig
+            .dispatch_started(Some("a"), "t/queued", "emit", vec![], None)
+            .unwrap();
+        let third = rig
+            .dispatch_started(Some("b"), "t/later", "emit", vec![], None)
+            .unwrap();
+        // Row `a` ends: its running emit is cancelled, its queued one
+        // dropped. The filter's future goes with the first.
+        let ended = rig
+            .send("rows.ended", Value::Data(json!("a")))
+            .await
+            .unwrap();
+        assert_eq!(ended, Value::Undefined);
+        until(|| release.is_closed(), "the first emit's filter dropped").await;
+        assert_eq!(
+            settle(first.await.unwrap()).await.unwrap(),
+            Value::Undefined
+        );
+        assert_eq!(
+            settle(second.await.unwrap()).await.unwrap(),
+            Value::Undefined
+        );
+        // The other row's emit runs; nothing of the row that ended was
+        // called, and the dropped emit of that row never started.
+        until(
+            || listeners(&rig.fake) == ["2"],
+            "the third emit's only call",
+        )
+        .await;
+        assert_eq!(
+            settle(third.await.unwrap()).await.unwrap(),
+            Value::Undefined
+        );
+        assert_eq!(
+            listeners(&rig.fake),
+            ["2"],
+            "neither the cancelled nor the dropped emit called anyone"
+        );
+    })
+    .await;
+}
+
+/// rule: EVP-5.4-1
+///
+/// An `emit` starts the calls of a name in registration order and waits
+/// for none of them: the first listener here does not answer until the
+/// test lets it, and the second is called and the dispatch answered all
+/// the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_emit_starts_every_call_and_waits_for_none() {
+    within("emit starts", async {
+        let rig = rig().await;
+        rig.load("chat", None, &[]).await;
+        let (release, answer) = tokio::sync::oneshot::channel::<Reply>();
+        let awaiting: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<Reply>>>> = Arc::default();
+        *awaiting.lock().unwrap() = Some(answer);
+        rig.register_with(
+            "1",
+            "t/s",
+            Some("chat"),
+            "one",
+            "any",
+            Arc::new(move |_| {
+                let answer = awaiting.lock().unwrap().take();
+                Ok(Value::future(async move {
+                    match answer {
+                        Some(answer) => answer.await.unwrap_or(Ok(Value::Undefined)),
+                        None => Ok(Value::Undefined),
+                    }
+                }))
+            }),
+        )
+        .await
+        .unwrap();
+        rig.register("2", "t/s", Some("chat"), "two", "any")
+            .await
+            .unwrap();
+        let result = rig
+            .dispatch(Some("chat"), "t/s", "emit", vec![])
+            .await
+            .unwrap();
+        assert_eq!(result, Value::Undefined);
+        until(
+            || calls_for(&rig.frames, "t/s").len() == 2,
+            "both calls of the emit",
+        )
+        .await;
+        assert_eq!(
+            calls_for(&rig.frames, "t/s"),
+            ["1", "2"],
+            "both started, in registration order, the first still unanswered"
+        );
+        release.send(Ok(Value::Undefined)).unwrap();
+    })
+    .await;
+}
+
+/// rule: EVP-4.1-3
+///
+/// Table changes and `emit` dispatches take their turn in the session's
+/// frame stream while another dispatch runs: a `serial` dispatch held in
+/// its listener does not stop an `events.on` from entering the table or an
+/// `emit` from starting its calls.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_running_dispatch_does_not_hold_the_frame_stream() {
+    within("ordered operations", async {
+        let rig = rig().await;
+        rig.load("chat", None, &[]).await;
+        let (release, answer) = tokio::sync::oneshot::channel::<Reply>();
+        let held = Arc::new(AtomicBool::new(false));
+        let called = held.clone();
+        let waiting: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<Reply>>>> = Arc::default();
+        *waiting.lock().unwrap() = Some(answer);
+        rig.register_with(
+            "slow",
+            "t/slow",
+            Some("chat"),
+            "one",
+            "any",
+            Arc::new(move |_| {
+                called.store(true, Ordering::SeqCst);
+                let answer = waiting.lock().unwrap().take();
+                Ok(Value::future(async move {
+                    match answer {
+                        Some(answer) => answer.await.unwrap_or(Ok(Value::Undefined)),
+                        None => Ok(Value::Undefined),
+                    }
+                }))
+            }),
+        )
+        .await
+        .unwrap();
+        let held_dispatch =
+            rig.dispatch_running(Some("chat"), "t/slow", "serial", vec![], None, None);
+        until(|| held.load(Ordering::SeqCst), "the held listener").await;
+        // Both answer while the dispatch above is still in its listener.
+        rig.register("fast", "t/fast", Some("chat"), "two", "any")
+            .await
+            .unwrap();
+        let result = rig
+            .dispatch(Some("chat"), "t/fast", "emit", vec![])
+            .await
+            .unwrap();
+        assert_eq!(result, Value::Undefined);
+        until(|| listeners(&rig.fake) == ["slow", "fast"], "both calls").await;
+        release.send(Ok(Value::Undefined)).unwrap();
+        assert_eq!(held_dispatch.await.unwrap().unwrap(), Value::Undefined);
+    })
+    .await;
+}
+
+/// rule: EVP-5.3-2
+///
+/// A dispatch's `filter` and `terminal` are function references: data
+/// where one is required fails the dispatch itself, and no listener is
+/// called.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dispatchs_filter_and_terminal_must_be_functions() {
+    within("dispatch arguments", async {
+        let rig = rig().await;
+        rig.load("chat", None, &[]).await;
+        rig.register("1", "t/a", Some("chat"), "one", "any")
+            .await
+            .unwrap();
+        let mut fields = request(Some("chat"), "t/a", "serial", vec![]);
+        fields.insert("filter".into(), Value::Data(json!("not a function")));
+        let refused = rig
+            .send("events.dispatch", Value::Record(fields))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            binding(&refused),
+            ("BindingError", "events.dispatch: filter is not a function")
+        );
+        let mut fields = request(Some("chat"), "t/a", "waterfall", vec![]);
+        fields.insert("terminal".into(), Value::Data(json!(7)));
+        let refused = rig
+            .send("events.dispatch", Value::Record(fields))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            binding(&refused),
+            (
+                "BindingError",
+                "events.dispatch: terminal is not a function"
+            )
+        );
+        assert!(listeners(&rig.fake).is_empty(), "no listener was called");
+    })
+    .await;
 }
