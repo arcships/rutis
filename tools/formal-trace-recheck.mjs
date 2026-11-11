@@ -11,6 +11,18 @@
 // spec rule replaces, and which rule text relies on a mechanism that 0.19 or
 // 0.22 removed. Every entry carries the file that settles it; `--check` reads
 // those files (the anchor ids, the removed names) so a stale entry fails.
+//
+// Ownership, so the two scripts cannot drift apart: this module owns the
+// per-family current sources (`SOURCES`), the old-section anchors (`ANCHORS`),
+// the withdrawn rules (`SUPERSEDED`), the no-source reasons (`UNMAPPED`), the
+// renamed-mechanism notes (`NOTES`) and the guarantee families
+// (`REGISTRY_FAMILIES`). `formal-trace-semantic.mjs` owns the one partition
+// re-extracted semantically (`SEMANTIC`, `SEMANTIC_DOCS`). `formal-trace.mjs`
+// owns only the presentation vocabulary (columns, status words, the file list)
+// and reads the rest from these two modules; it derives nothing in a second
+// copy. `--check` verifies the literals that must agree: the family list here,
+// the register's own families, the families the generated files cover, and the
+// `SOURCES` keys against the id prefixes.
 
 // The current source of a rule family. `kind` is what the re-check may claim:
 // `spec` a current specification, `design` a current design, `guide` a current

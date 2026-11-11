@@ -1,6 +1,6 @@
 # 规则复核：按 0.22 现行规格（#634）
 
-[中文索引](README.md) · [保证登记表](../guarantees.md) · [会话协议规格](../protocol-session.md) · 议题：[#634](https://github.com/arcships/rutis/issues/634)
+[中文索引](README.md) · [英文复核页](recheck-0.22.en.md) · [保证登记表](../guarantees.md) · [会话协议规格](../protocol-session.md) · 议题：[#634](https://github.com/arcships/rutis/issues/634)
 
 状态：第一版。日期：2026-11-11。基准：`origin/main` `449ed13a`。
 
@@ -15,7 +15,7 @@
 3. **证据是否解析**：用 `现有形式化` 列里的具名路径、用例名与行号核对当前树；解析不了的降级，只有模型或没有实现检查的记「部分验证」。
 4. **状态只降不升**：以 issue 的十列映射为上限；本轮只把来源被删、登记表删行、证据不解析或来源已历史化的行降级。**没有一条因为“规格说是当前”就升为「已验证」**：规格的「当前」说的是规则现行，不是实现验证过。
 
-复核不判断规则文字的语义是否正确：它核对来源、锚点、证据路径和状态，语义重抽（逐条按现行规格重写）仍是 #634 的未完成项。
+复核不判断规则文字的语义是否正确：它核对来源、锚点、证据路径和状态。**TRC 分区的 44 行已在 §5 语义重抽**；协议清单的 1368 条现行规则仍是 issue 快照原文，逐条语义重抽尚未完成（`tools/formal-trace-semantic.mjs` 只有这一分区的数据）。
 
 ## 2. 现行来源（0.22）
 
@@ -1656,7 +1656,60 @@
 | NOD-5-3 | 不单独计数 | 不单独计数 | 连接节点指南（NOD「别的机器上的语言运行时」） | — | 无具名证据 | — |
 | NOD-6-1 | 部分验证 | 部分验证 | 连接节点指南（NOD「连进来的运行时」） | — | 无具名证据 | 现行来源：连接节点指南（NOD「连进来的运行时」）；没有会话规格锚点；无具名证据 |
 
-## 5. 没有现行锚点的规则
+## 5. 语义重抽：会话追踪契约 TRC（44 行，2026-11-11）
+
+`TRC-*` 的 44 行已按 0.22 现行来源重写（基准 `4a1ac08b`）：每行给出会话规格 §11 的 `SESS-*` 锚点（没有锚点的行写明会话规格不覆盖的部分），承诺文字改用现行规格的措辞与数字，来源章节与英文重抽文字在[英文复核页](recheck-0.22.en.md)。锚点、来源章节与英文页由 `--check` 核对：每个 `SESS-*` 都在会话规格里，并出现在该行「现行来源」。
+
+**其余分区没有重抽**：协议清单 1368 行仍是 issue 快照的十列原文（状态按本页复核），保证登记表 211 行由登记表生成，`ECA` 10 行仍是手写的设计提案。语义重抽的下一批仍是会话分区（SES、VAL、TAG、M1、CHN）。
+
+| 编号 | 状态 | 现行来源 | 现行锚点 | 证据 | 缺口 |
+| --- | --- | --- | --- | --- | --- |
+| TRC-LIFE-1 | 部分验证 | formal-trace.md §3.0 | SESS-5、SESS-28 | crates/rutis-bridge/tests/session_plugin.rs::a_handshake_alone_registers_nothing、crates/rutis-bridge/tests/session_plugin.rs::a_reconnect_is_a_new_session、node/rutis-runtime/src/runner.mjs:706-715、bun/rutis-bun/src/runner.ts:424-429、python/rutis/rutis/runner.py:676-689、go/rutis/internal/runtime/runtime.go:559-570 | 行、服务与公告不在会话规格范围内（多语言 M1 与挂载设计）；跨运行时 row 失败策略不统一（原文不主张统一）；无 trace 验证器（#624） |
+| TRC-LIFE-2 | 部分验证 | formal-trace.md §3.0 | SESS-42 | crates/rutis-bridge/src/session/plugin/rows.rs:197-207、crates/rutis-bridge/src/runtime/process.rs:1352-1365、crates/rutis-bridge/src/session/plugin/rows.rs:137-171、crates/rutis-bridge/tests/session_plugin.rs::the_far_end_leaving_unloads_its_plugins | `rows.*` 在会话规格范围外（多语言 M1 与挂载设计）；公告错误由各 SDK 各自处理，没有统一断言；无 trace 验证器（#624） |
+| TRC-LIFE-3 | 部分验证 | formal-trace.md §3.0 | SESS-5、SESS-28、SESS-29 | crates/rutis-bridge/tests/session_plugin.rs::a_reconnect_is_a_new_session、crates/rutis-bridge/tests/session_plugin.rs::the_local_end_leaving_closes_with_done、crates/rutis-bridge/tests/session_plugin.rs:182-270 | 只有 Rust 用例；替换顺序在 Go/Node/Bun/Python 没有同一用例（#624） |
+| TRC-FRAME-1 | 部分验证 | formal-trace.md §3.1 | SESS-6、SESS-2、SESS-18 | crates/rutis-bridge/src/session/protocol.rs:168-176、crates/rutis-bridge/src/session/protocol.rs:205-212、go/rutis/internal/peer/peer_test.go:55-58 | 顺序由 Go 记录器与 Rust 帧用例间接覆盖，没有断言「逐帧按序处理」的跨实现用例（#624） |
+| TRC-FRAME-2 | 部分验证 | formal-trace.md §3.1 | SESS-41、SESS-63 | crates/rutis-bridge/src/session/rpc/tests.rs::malformed_and_dangling_frames_close_the_session | 只有 Rust 矩阵；其他实现的悬空回复用例未列（#635、#624） |
+| TRC-FRAME-3 | 部分验证 | formal-trace.md §3.1 | SESS-58、SESS-60 | crates/rutis-bridge/src/session/rpc/tests.rs::a_cancel_for_an_unknown_call_is_ignored | 只有 Rust 用例；变异未被自动捕获（#631） |
+| TRC-GREET-1 | 部分验证 | formal-trace.md §3.2 | SESS-6、SESS-20、SESS-28、SESS-78 | crates/rutis-bridge/src/session/protocol.rs:157-167、crates/rutis-bridge/src/session/plugin/mod.rs:102-114、go/rutis/internal/peer/objects_test.go:35-51、go/rutis/internal/peer/peer_test.go:70-89 | 只有 Rust/Go 用例；Node、Bun、Python、Swift、Kotlin 没有同一握手用例（#624） |
+| TRC-GREET-2 | 部分验证 | formal-trace.md §3.2 | SESS-23、SESS-24、SESS-26、SESS-29 | crates/rutis-bridge/tests/session_plugin.rs::a_failed_handshake_fails_the_session、crates/rutis-bridge/tests/session_plugin.rs::a_far_end_that_does_not_greet_times_out、crates/rutis-bridge/tests/session_plugin.rs::a_missing_local_id_fails、crates/rutis-bridge/src/session/plugin/mod.rs:46-47 | 10 秒截止只有 Rust 虚拟时钟用例（`start_paused`），10 秒是调度期限不是墙上时钟承诺（`SESS-31`）；其他实现的同一截止没有确定性计时（#639） |
+| TRC-GREET-3 | 未验证 | formal-trace.md §3.2 | SESS-25、SESS-15、SESS-17 | crates/rutis-bridge/src/session/plugin/greet.rs:33-70、crates/rutis-bridge/src/session/rpc.rs:1154-1178 | 没有用例构造缺少必需能力的对端并断言 `<far> does not declare <cap>`（2026-11-09 检索 `Incompatible` 只找到版本与承载用例）；#635 补 |
+| TRC-REF-1 | 部分验证 | formal-trace.md §3.3 | SESS-46、SESS-50、SESS-52 | crates/rutis-bridge/src/session/protocol.rs:42-47、go/rutis/internal/peer/crossing_test.go::TestAnObjectFromTheFarEndIsCalledAndGoesHome | 只有 Go 用例覆盖两跳身份往返；Rust 侧只有结构与转发用例（#624） |
+| TRC-REF-2 | 部分验证 | formal-trace.md §3.3 | SESS-48、SESS-63 | crates/rutis-bridge/src/session/rpc/tests.rs::malformed_and_dangling_frames_close_the_session、crates/rutis-bridge/src/session/rpc/tests.rs:296-306 | 只有 Rust 用例；其他实现的未知引用行为未列（#635） |
+| TRC-REF-3 | 部分验证 | formal-trace.md §3.3 | SESS-47、SESS-48、SESS-51 | crates/rutis-bridge/src/session/rpc/tests.rs::handshake_and_release_count_fail_closed、go/rutis/internal/peer/peer_test.go::TestReferencesAreReleasedWithTheirCount、go/rutis/internal/peer/objects_test.go::TestAnObjectHereIsCancelledThroughAndReleased | 引用守恒没有属性测试（任意 grant/release 序列不泄漏，#631） |
+| TRC-CANCEL-1 | 部分验证 | formal-trace.md §3.4 | SESS-56、SESS-57、SESS-60 | crates/rutis-bridge/src/session/protocol.rs:217-221、go/rutis/internal/peer/objects_test.go::TestAnObjectHereIsCancelledThroughAndReleased | 只有 Go 用例覆盖端到端取消；Rust 同步调用取消另有对应用例，但没有同一套（#624） |
+| TRC-CANCEL-2 | 部分验证 | formal-trace.md §3.4 | SESS-57、SESS-60、SESS-61 | go/rutis/internal/peer/peer_test.go::TestCancellingAnAsyncCallCancelsTheMethod | 只有 Go 用例；取消后的回复规则等 #626 定下再写回规格（#624、#626） |
+| TRC-CANCEL-3 | 部分验证 | formal-trace.md §3.4 | SESS-58、SESS-59、SESS-60 | crates/rutis-bridge/src/session/rpc/tests.rs::a_cancel_for_an_unknown_call_is_ignored、go/rutis/internal/peer/objects_test.go::TestAnObjectOfTheFarEndIsCancelledAndReleased | 竞态（回复与取消同时到达）没有可控调度用例（#622、#630） |
+| TRC-ERR-1 | 部分验证 | formal-trace.md §3.5 | SESS-43 | crates/rutis-bridge/src/session/protocol.rs:87-94、crates/rutis-bridge/src/session/protocol.rs:250-301、go/rutis/internal/peer/peer_test.go::TestARustServiceErrorHasItsCodeAndData | 错误图往返没有属性测试（#631）；Go、Node、Bun、Python、Swift、Kotlin 的错误码列没有统一用例（#639） |
+| TRC-ERR-2 | 部分验证 | formal-trace.md §3.5 | SESS-44、SESS-71 | go/rutis/internal/peer/crossing_test.go::TestAnArgumentOverTheLimitFailsOnlyItsCall、go/rutis/internal/peer/crossing_test.go::TestAResultOverTheLimitIsAnsweredWithAThrow | 失败范围只在 Go 用例断言；Rust 的超限用例在会话测试里，两者没有同一套（#624） |
+| TRC-ERR-3 | 部分验证 | formal-trace.md §3.5 | SESS-43、SESS-63 | go/rutis/internal/peer/crossing_test.go::TestAMalformedErrorGraphDoesNotEndTheSession、crates/rutis-bridge/src/session/rpc/tests.rs::malformed_and_dangling_frames_close_the_session | 两种失败范围（错误图 vs 帧）只在 Go/Rust 各自有用例，没有同一实现上的对照（#624） |
+| TRC-LIMIT-1 | 部分验证 | formal-trace.md §3.6 | SESS-70、SESS-71 | crates/rutis-bridge/src/channel/mod.rs:32-42、crates/rutis-bridge/src/session/rpc.rs:1940-1946,3063-3078 | 上限值按实现不同（16 MiB 是进程管道与 WebSocket 的默认），跨实现的同一上限没有用例（#635） |
+| TRC-LIMIT-2 | 部分验证 | formal-trace.md §3.6 | SESS-71、SESS-44 | go/rutis/internal/peer/crossing_test.go::TestAnArgumentOverTheLimitFailsOnlyItsCall、crates/rutis-bridge/src/session/rpc/tests.rs::a_message_over_the_limit_fails_only_its_call、crates/rutis-bridge/src/session/rpc/tests.rs::the_limit_and_the_call_are_named | 只有 Go 的端到端用例；Rust 的调用级用例覆盖同一规则但不经过宿主；变异未被自动捕获（#631） |
+| TRC-LIMIT-3 | 部分验证 | formal-trace.md §3.6 | SESS-75、SESS-76 | crates/rutis-bridge/src/session/rpc.rs:1186-1213、crates/rutis-bridge/src/session/rpc/tests.rs::a_session_limit_the_host_turns_on_ends_a_far_end_that_never_reads、crates/rutis-bridge/src/session/rpc/tests.rs::a_limit_of_zero_still_takes_one_frame_at_a_time | 只有 Rust 用例；`None` 时无界是明确不保证（`TRC-NG-7`） |
+| TRC-MALFORMED-1 | 部分验证 | formal-trace.md §3.7 | SESS-58、SESS-63 | crates/rutis-bridge/src/session/rpc/tests.rs::a_cancel_for_an_unknown_call_is_ignored | 只有 Rust 用例（#624） |
+| TRC-MALFORMED-2 | 部分验证 | formal-trace.md §3.7 | SESS-63、SESS-64、SESS-65 | crates/rutis-bridge/src/session/rpc/tests.rs::malformed_and_dangling_frames_close_the_session、crates/rutis-bridge/src/session/testing.rs:148-243、crates/rutis-bridge/tests/runtime_conformance.rs:456-633 | 共享矩阵只有 13 个用例，§14 G2 列出缺的九个（`SESS-65`）；其他实现没有矩阵之外的逐条用例（#635、#624） |
+| TRC-MALFORMED-3 | 部分验证 | formal-trace.md §3.7 | SESS-66、SESS-67、SESS-69 | crates/rutis-bridge/src/session/rpc.rs、crates/rutis-bridge/src/session/rpc/tests.rs::unknown_frame_fields_fail_only_their_call、::an_unknown_field_in_hello_fails_the_handshake、::release_and_cancel_ignore_unknown_fields | 会话规格 §11 的 `SESS-67` 行与 §14 G1/G5 仍写“六种运行时忽略未知字段”，与 §9 的 `SESS-66`/`SESS-67` 冲突，要随 #635 修正；失败调用后 `release`/`cancel` 的行为只有单元分支，没有跨实现用例 |
+| TRC-NET-1 | 部分验证 | formal-trace.md §3.8；design-remote-session-2026-10-28.md §三 | SESS-31 | go/rutis/internal/runtime/dial_test.go::TestRetryDefaultsAndTheTestOverride、go/rutis/internal/runtime/dial_test.go::TestBackoffDoublesUpToTheMaximumWithJitter | 只有 Go 用例；其他实现的退避没有同一套（#624） |
+| TRC-NET-2 | 部分验证 | formal-trace.md §3.8；design-remote-session-2026-10-28.md §三 | SESS-31 | go/rutis/internal/runtime/dial_test.go::TestASessionsEndIsClassified | 只有 Go 用例（#624） |
+| TRC-NET-3 | 部分验证 | formal-trace.md §3.8；design-remote-session-2026-10-28.md §三 | SESS-3、SESS-5、SESS-28 | crates/rutis-host/src/connect/listen.rs:53-80、crates/rutis-host/src/connect/listen.rs:4-10、crates/rutis-bridge/tests/session_plugin.rs::a_handshake_alone_registers_nothing | 宿主监听与替换顺序没有独立的端到端用例，只在会话插件测试里覆盖（#624） |
+| TRC-INV-1 | 部分验证 | formal-trace.md §4 | SESS-18 | go/rutis/internal/peer/peer_test.go:55-58、go/rutis/internal/peer/peer_test.go::TestANotificationGoesOutBeforeTheReply | 顺序没有逐实现的断言；Go 的记录器只记录，不判定（#624） |
+| TRC-INV-2 | 部分验证 | formal-trace.md §4 | SESS-21、SESS-27 | crates/rutis-bridge/src/session/rpc.rs:1844-1848、go/rutis/internal/peer/peer_test.go::TestACallBeforeTheHandshakeEndsTheSession | Rust 只有源码，没有断言该拒绝文本的用例；Go 断言 `before protocol handshake` 并等会话结束；`SESS-21` 的共享矩阵用例在 §14 G2 的缺口里 |
+| TRC-INV-3 | 部分验证 | formal-trace.md §4 | SESS-43、SESS-44、SESS-63 | go/rutis/internal/peer/crossing_test.go::TestAnArgumentOverTheLimitFailsOnlyItsCall、crates/rutis-bridge/src/session/rpc/tests.rs::malformed_and_dangling_frames_close_the_session | 两种失败范围在 Rust 与 Go 各有用例，没有同一实现上的对照矩阵（#624） |
+| TRC-INV-4 | 部分验证 | formal-trace.md §4 | SESS-4、SESS-33、SESS-36、SESS-5 | crates/rutis-bridge/src/session/rpc.rs:1700-1734、crates/rutis-bridge/src/session/rpc/tests.rs::rebase_tags_the_source_restores_the_target_and_keeps_third_sessions、crates/rutis-bridge/src/session/rpc/tests.rs::a_call_for_another_session_s_call_carries_its_chain_rebased | 「旧会话迟到 id 不能命名新会话的调用」只有替换顺序用例，没有直接把旧 id 发给新会话的用例（#635） |
+| TRC-INV-5 | 部分验证 | formal-trace.md §4 | SESS-56、SESS-57、SESS-60 | go/rutis/internal/peer/objects_test.go::TestAnObjectHereIsCancelledThroughAndReleased、go/rutis/internal/peer/peer_test.go::TestCancellingAnAsyncCallCancelsTheMethod、crates/rutis-bridge/src/session/rpc/tests.rs::a_cancel_for_an_unknown_call_is_ignored | 竞态没有可控调度（#622、#630）；Rust 异步调用取消的用例没有与 Go 对齐（#624） |
+| TRC-INV-6 | 部分验证 | formal-trace.md §4 | SESS-47、SESS-51 | crates/rutis-bridge/src/session/rpc/tests.rs::handshake_and_release_count_fail_closed、go/rutis/internal/peer/peer_test.go::TestReferencesAreReleasedWithTheirCount | 没有「任意 grant/release 序列不泄漏」的属性测试（#631） |
+| TRC-INV-7 | 部分验证 | formal-trace.md §2 | —（会话规格不规定追踪输出；规则在 formal-trace.md §2） | crates/rutis-bridge/src/channel/trace.rs:104-133 | 会话规格不规定追踪输出，本行没有 `SESS-*` 锚点；只有 Rust 的逐字输出用例，其他实现（Go 等）的 trace 输出没有同一套（#624） |
+| TRC-INV-8 | 部分验证 | formal-trace.md §4；design-remote-session-2026-10-28.md §4.2 | SESS-5、SESS-28 | crates/rutis-host/src/connect/listen.rs:4-10、crates/rutis-bridge/tests/session_plugin.rs::a_handshake_alone_registers_nothing | 宿主侧只有源码注释；替换隔离没有独立的端到端用例（#624） |
+| TRC-NG-1 | 明确不保证 | formal-trace.md §1 | SESS-18 | — | 不要把追踪通过读成任意交错安全（`TRC-INV-1` 只保证顺序） |
+| TRC-NG-2 | 明确不保证 | formal-trace.md §1 | SESS-21、SESS-27、SESS-30 | go/rutis/internal/peer/peer_test.go::TestACallBeforeTheHandshakeEndsTheSession | 有验证锁定「确实不提供」（Go 用例）；Rust 侧未断言（§14 G2）；其他实现没有同一用例（#624） |
+| TRC-NG-3 | 明确不保证 | formal-trace.md §1 | SESS-55 | — | 无验证锁定；若有人依赖会被误读，需要补「不提供」用例（#635） |
+| TRC-NG-4 | 明确不保证 | formal-trace.md §1 | SESS-52、SESS-53、SESS-79 | — | 先复现成用例再决定是修还是写进规格（#639、#635）；`docs/formal-trace.md` §1、§3.0 仍按 `objects` 能力措辞，待 #635 改源文档 |
+| TRC-NG-5 | 明确不保证 | formal-trace.md §1 | SESS-45、SESS-61 | — | 计时承诺归 #639 的虚拟时钟；规格没有 deadline 之前不得写成保证 |
+| TRC-NG-6 | 明确不保证 | formal-trace.md §1 | SESS-63 | crates/rutis-bridge/src/session/rpc/tests.rs:312-326 | 有验证锁定「不承诺原因句子」；其他实现的等价断言未列（#624） |
+| TRC-NG-7 | 明确不保证 | formal-trace.md §1 | SESS-76 | crates/rutis-bridge/src/session/rpc/tests.rs::a_far_end_that_never_reads_keeps_its_frames_by_default | 有验证锁定默认无界；其他实现的默认值没有同一用例（#635） |
+| TRC-NG-8 | 明确不保证 | formal-trace.md §1 | SESS-66、SESS-69 | crates/rutis-bridge/src/session/rpc/tests.rs::unknown_frame_fields_fail_only_their_call | 七种运行时都已实现 `bad-frame` 调用级拒绝 |
+| TRC-NG-9 | 明确不保证 | formal-trace.md §1；design-remote-session-2026-10-28.md §三 | SESS-31 | go/rutis/internal/runtime/dial_test.go::TestBackoffDoublesUpToTheMaximumWithJitter | 计时承诺归 #639 的虚拟时钟；抖动下界以外的墙钟时间不写成保证 |
+
+## 6. 没有现行锚点的规则
 
 这些规则在 0.22 没有可引用的现行规格：来源是旧设计、设计说未实现、或会话规格写明不覆盖。它们保持原状态或降级，不当作已完成复核；下一轮要么写出对应的现行规格，要么把它们登记为明确不保证。
 
@@ -1677,9 +1730,9 @@
   `SES-13-1`、`SES-13-2`
 
 
-## 6. 这一轮改了什么、还剩什么
+## 7. 这一轮改了什么、还剩什么
 
 - **已撤回**：issue 快照的 184 条之外，本轮按 0.19 / 0.22 删除的机制追加了 98 条（见 §3 的「已撤回（本轮）」列与 §4 的缺口）。它们仍在 `rules/protocol-*.md` 里，统计不计入。
-- **未完成**：其余分区没有 0.22 的现行规格。会话层有 `protocol-session.md`（82 条 `SESS-*`）；事件、运行时、挂载、远程没有对应的新规格，只有设计稿与指南。§5 按原因列出这些规则；写规格是 #635 的后续，不是这一轮能补的。
+- **未完成**：协议分区（registry、events、session、runtime、remote）没有逐条重写规则文字，仍是 issue 快照原文；会话层有 `protocol-session.md`（82 条 `SESS-*`），事件、运行时、挂载、远程没有对应的新规格，只有设计稿与指南。§6 按原因列出这些规则；写规格是 #635 的后续，不是这一轮能补的。
 - **证据**：只核对 `现有形式化` 列的具名引用；备注列里的旧路径（如 `crates/rutis-bridge/src/cordis/server.rs`）没有逐条清，重抽时一并处理。
-- **语义**：没有逐条重写规则文字。规则的「已撤回 / 明确不保证 / 未验证 / 部分验证 / 已验证」按上面的四件事定，不按记忆。
+- **语义**：TRC 分区已在 §5 重抽；协议清单没有。规则的「已撤回 / 明确不保证 / 未验证 / 部分验证 / 已验证」按上面的四件事定，不按记忆。
