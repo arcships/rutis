@@ -627,15 +627,10 @@ async fn an_emit_answers_after_all_its_calls_started() {
 /// cancel an `emit`: this one was queued behind another, still starts its
 /// calls, and the session's emits go on after it.
 ///
-/// Ignored: the host races here. A `cancel` removes the queued
-/// `events.dispatch` from the session's incoming calls
-/// (`crates/rutis-bridge/src/session/rpc.rs`, `Frame::Cancel` and
-/// `calls.incoming`); when that happens before the session's ordered task
-/// takes the dispatch, the emit never starts its calls, though §5.7 says an
-/// emit dispatch is not cancelled. Here it loses the emit in about half of
-/// the runs. Un-ignore once the host keeps a queued emit whose caller gave
-/// up.
-#[ignore = "racy: a queued emit is dropped when `cancel` reaches the session before its ordered task (events protocol §5.7)"]
+/// This is the race that used to lose the emit (#1121): when `cancel` reaches
+/// the session before its ordered task takes the queued `events.dispatch`, the
+/// emit must still start. Deterministically covered in
+/// `crates/rutis-bridge/src/session/rpc/tests.rs::a_cancelled_emit_dispatch_stays_queued`.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_emit_is_not_cancelled() {
     within("emit cancel", async {
