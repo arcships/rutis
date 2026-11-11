@@ -973,7 +973,7 @@ ${sources.join('\n')}
 | --- | --- | --- | --- | --- |
 | ${list.length} | ${count('已验证')} | ${count('部分验证')} | ${count('未验证')} | ${count('明确不保证')} |
 
-No status moved in the re-extraction: no test was added, and the two rows that gained evidence citations (\`TRC-LIMIT-2\`, \`TRC-MALFORMED-2\`) already described that evidence in their wording, so each row keeps its status.
+No status moved in the re-extraction: no test was added, and the two rows that gained evidence citations (\`TRC-LIMIT-2\`, \`TRC-MALFORMED-2\`) already described that evidence in their wording, so each row keeps its re-extraction status. \`TRC-GREET-3\` moved from \`unverified\` to \`not guaranteed\` after #1111 removed an unreachable check: no implementation offers a required-capabilities entry point.
 
 ## 4. Per-row re-extraction
 

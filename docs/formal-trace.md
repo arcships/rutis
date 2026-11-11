@@ -27,7 +27,7 @@
 | 类别 | 当前规则 | 已取代的证据 | 不作保证 |
 | --- | --- | --- | --- |
 | 会话帧 | §3.1 的协议 4 `Frame` 词汇及有序处理 | 协议 4 以前的帧名，或依赖负载的通道日志 | 超出通道顺序的具体调度交错 |
-| 握手 | 双方 `hello`、版本 4、端点和能力检查 | 在 `Greeted` 挂载前就登记/挂载插件的握手 | `ready` 之前成功调用 |
+| 握手 | 双方 `hello`、版本 4、端点核对与能力声明 | 在 `Greeted` 挂载前就登记/挂载插件的握手 | `ready` 之前成功调用 |
 | 引用 | 带标签的引用、home 身份、计数式 `release` | 把每个引用都当作复制数据的旧假设 | 引用生命周期使运行时进程保持存活；向未声明 `objects` 能力的 runtime 跨 runtime 传递对象能力不作保证（Not guaranteed） |
 | 取消 | `cancel` 逐跳传播；迟到回复被丢弃 | 把取消当作关闭承载 | 调用截止时间（本文不作保证） |
 | 错误 | `Failure` 图及调用/会话范围的编码 | 按错误文字匹配重试或行为 | 畸形输入的稳定、平台特定承载原因 |
@@ -98,7 +98,7 @@ memory peer mac: closed: done
 
 **失败 — 版本不匹配。** 说协议 3 的远端会产生精确的本地会话失败 `the far end speaks protocol 3, this side 4: upgrade the far end`。fixture 会分别观察本端 hello，以及远端线程正常的承载结果 `Ok(())`；这里的 `Ok(())` 是传输线程的关闭结果，不是握手成功（`crates/rutis-bridge/tests/session_plugin.rs:101-126`）。握手 10 秒内未完成会失败并显示 `the far end did not greet in time`，通道结束（`crates/rutis-bridge/tests/session_plugin.rs:128-152`；超时在 `crates/rutis-bridge/src/session/plugin/mod.rs:46-47` 定义）。没有 `LocalId` 的宿主失败并显示 `the host provides no id for its sessions`，且不发送问候（`crates/rutis-bridge/tests/session_plugin.rs:154-167`）。
 
-**边界 — 能力在使用前检查。** `Greet` 声明 `node` 和配置的能力，等待问候，然后拒绝缺少的必需能力（`crates/rutis-bridge/src/session/plugin/greet.rs:33-70`）。拒绝是 `Handshake::Incompatible`；它关闭会话，而不是让调用稍后才发现不匹配。能力声明本身不授予权限（`crates/rutis-bridge/src/session/rpc.rs:1153-1158`），只是契约前置条件。
+**边界 — 能力只是声明。** `Greet` 在问候里声明 `node` 和配置的能力（`crates/rutis-bridge/src/session/plugin/greet.rs:31-36`），但不检查对端有没有声明本端需要的能力：没有实现提供“必需能力”列表的入口。Rust 曾有一个 `require` 字段，唯一的生产调用传空列表，已删除；Go 的 `peer.Options.Require` 在 `internal/peer` 里没有调用方；其余实现没有这项检查。对端缺少某个能力时，只有用到它的地方才失败；能力声明本身不授予权限（`crates/rutis-bridge/src/session/rpc.rs:1153-1158`），也不被验证。
 
 ### 3.3 引用
 
