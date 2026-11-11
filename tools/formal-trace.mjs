@@ -28,6 +28,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { ANCHORS, NOTES, REGISTRY_FAMILIES as RECHECK_REGISTRY_FAMILIES, SOURCES, SUPERSEDED, UNMAPPED } from './formal-trace-recheck.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const read = file => readFileSync(`${root}${file}`, 'utf8')
@@ -37,6 +38,10 @@ const lineCount = file => read(file).split('\n').length
 const REGISTER = 'docs/guarantees.md'
 const RULES = 'docs/formal-trace/rules'
 const INDEX = 'docs/formal-trace/README.md'
+const RECHECK = 'docs/formal-trace/recheck-0.22.md'
+const RECHECK_BEGIN = '<!-- recheck-index:begin -->'
+const RECHECK_END = '<!-- recheck-index:end -->'
+const SESSION_SPEC = 'docs/protocol-session.md'
 const INDEX_BEGIN = '<!-- index:begin -->'
 const INDEX_END = '<!-- index:end -->'
 
@@ -409,6 +414,183 @@ function protocolGap(row, status) {
   return parts.length ? parts.join('；') : '—'
 }
 
+// ── Re-check against the current 0.22 sources ───────────────────────────
+//
+// The issue snapshot is not the current rule: 0.19 changed the remote layer,
+// protocol 4 dropped compat and the old capabilities, and the session layer
+// got its own specification. `tools/formal-trace-recheck.mjs` names the
+// current source of each family and the rules a later design removed. This
+// pass only moves a row down: `已取代` and the rules listed as removed become
+// `已撤回`, a register row the register dropped becomes `已撤回`, and a row
+// whose current source is a design it replaced but has no current anchor is
+// not `已验证`.
+
+const superseded = new Map()
+for (const entry of SUPERSEDED) for (const id of entry.ids) superseded.set(id, entry)
+
+let registerStatuses = null
+function registerStatusOf(id) {
+  if (!registerStatuses) {
+    registerStatuses = new Map()
+    for (const row of register()) registerStatuses.set(row.id, status(row))
+  }
+  if (registerStatuses.has(id)) return { id, status: registerStatuses.get(id) }
+  for (const match of [`${id} a`, `${id} b`, `${id} c`]) {
+    if (registerStatuses.has(match)) return { id: match, status: registerStatuses.get(match) }
+  }
+  return null
+}
+
+// The register row a protocol-registry id belongs to: the id itself, the id
+// without a space and a letter (`boundary/5.1a`), or without a trailing letter
+// (`core/D2a` → `core/D2`).
+function registerBase(id) {
+  if (registerStatusOf(id)) return registerStatusOf(id)
+  for (const candidate of [id.replace(/ [a-g]$/, ''), id.replace(/[a-g]$/, '')]) {
+    if (candidate !== id && registerStatusOf(candidate)) return registerStatusOf(candidate)
+  }
+  return null
+}
+
+const familyOf = id => id.split('-')[0]
+
+// The current source of a row: the register row for a registry id, the
+// family's document otherwise.
+function currentSource(row) {
+  if (RECHECK_REGISTRY_FAMILIES.includes(row.id.split('/')[0])) {
+    const base = registerBase(row.id)
+    return {
+      kind: base ? 'register' : 'historical',
+      label: base ? `保证登记表 §${row.来源.replace(/^§/, '')}` : '保证登记表（0.22 已无此行）',
+      doc: REGISTER,
+      base: base?.id ?? null,
+      status: base?.status ?? null,
+      note: base ? '' : '登记表 0.22 不再登记这条规则',
+    }
+  }
+  const source = SOURCES[familyOf(row.id)]
+  if (!source) return { kind: 'historical', label: '未登记来源', doc: '', status: null, note: '来源文档未在本表登记' }
+  return { ...source, label: `${source.label}（${row.来源}）`, base: null, status: null }
+}
+
+// The current anchors of a row and the note that says what covers it.
+function anchorsOf(row) {
+  if (RECHECK_REGISTRY_FAMILIES.includes(row.id.split('/')[0])) return { ids: [], note: '' }
+  for (const [pattern, ids, note] of ANCHORS) {
+    if (pattern.test(row.来源)) return { ids, note }
+  }
+  return { ids: [], note: '' }
+}
+
+function unmappedReason(row) {
+  if (RECHECK_REGISTRY_FAMILIES.includes(row.id.split('/')[0])) {
+    return '保证登记表 0.22 没有这一行：旧编号或已并入别的行，待重抽或删除'
+  }
+  for (const [pattern, why] of UNMAPPED) if (pattern.test(row.来源)) return why
+  return '现行来源没有覆盖这条规则的规格或设计'
+}
+
+// Whether the current sources cover a rule at all: a current specification
+// section (SESS id), a current design or guide that still contains the rule,
+// or a live register row. A historical design, or a session-design section
+// the current spec puts out of scope, is not covered.
+function coveredOf(row, source, anchors) {
+  if (source.kind === 'register') return true
+  if (source.kind === 'historical') return anchors.ids.length > 0
+  if (anchors.ids.length) return true
+  if (familyOf(row.id) === 'SES' && /^SES §(?:四|五|九|十三)/.test(row.来源)) return false
+  return true
+}
+
+// The re-checked status. Only downwards from the issue mapping, except that
+// a register row whose register status says withdrawn or explicit
+// non-guarantee follows the register.
+function recheckStatus(row) {
+  if (row.状态 === '已取代') return '已撤回'
+  if (superseded.has(row.id)) return '已撤回'
+  if (explicitNonGuarantee(row)) return '明确不保证'
+  const mapped = protocolStatus(row)
+  const source = currentSource(row)
+  if (source.kind === 'register') {
+    if (/^已撤回/.test(source.status ?? '')) return '已撤回'
+    if (source.status === '明确不保证') return '明确不保证'
+    if (source.status === '—' || !source.status) return '不单独计数'
+  }
+  if (row.状态 === '不适用') return '不单独计数'
+  if (mapped === '已验证' && !coveredOf(row, source, anchorsOf(row))) return '部分验证'
+  if (mapped === '已验证' && source.kind === 'historical' && anchorsOf(row).ids.length === 0) return '部分验证'
+  return mapped
+}
+
+// The evidence cell, as the re-check scores it: implementation evidence that
+// resolves, model-only evidence, or nothing that resolves.
+function recheckEvidence(row) {
+  const items = protocolEvidenceOf(row.现有形式化)
+  const named = namedEvidence(row.现有形式化)
+  const implementation = implementationEvidence(row.现有形式化)
+  if (!items.length) {
+    if (!named) return { kind: 'none', text: '无具名证据' }
+    return {
+      kind: implementation ? 'implementation' : 'model',
+      text: implementation ? '具名证据是模块/用例名，不是文件路径；按原文保留' : '只有模型或手段不含实现检查',
+    }
+  }
+  const resolved = items.filter(item => item.kind !== 'missing' && item.kind !== 'ambiguous').length
+  const missing = items.length - resolved
+  return {
+    kind: missing ? 'partial' : implementation ? 'implementation' : 'model',
+    text: `${resolved}/${items.length} 个具名引用解析${missing ? `，${missing} 个找不到` : ''}${implementation ? '' : '；只有模型或手段不含实现检查'}`,
+  }
+}
+
+// The gap a re-checked row carries: why it is not verified against a current
+// source, or the rule that replaced it.
+function recheckGap(row, result) {
+  const parts = []
+  if (result.status === '已撤回') {
+    if (result.issueStatus !== '已取代') {
+      if (result.source.kind === 'register' && /^已撤回/.test(result.source.status ?? '')) {
+        parts.push(`登记表已撤回：${result.source.status}（${result.source.base}）`)
+      } else {
+        const entry = superseded.get(row.id)
+        parts.push(`已取代：${entry?.why ?? '当前规格已无此规则'}`)
+      }
+    }
+  } else if (result.status !== '不单独计数' && result.status !== '明确不保证') {
+    if (result.anchors.length) parts.push(`现行对应：${result.anchors.join('、')}${result.anchorNote ? `（${result.anchorNote}）` : ''}`)
+    else if (result.covered) parts.push(`现行来源：${result.source.label}；没有会话规格锚点`)
+    else parts.push(`无现行锚点：${result.unmapped}`)
+    if (result.evidence.kind === 'none' || result.evidence.kind === 'partial') parts.push(result.evidence.text)
+    if (result.status === '部分验证' && result.original === '已验证') parts.push('原状态降为部分验证：来源已历史化或证据不完整')
+  } else if (result.status === '明确不保证' && result.issueStatus !== '明确不保证' && !explicitNonGuarantee(row)) {
+    parts.push('登记表把这条登记为明确不保证')
+  }
+  if (NOTES.has(row.id) && result.status !== '已撤回') parts.push(NOTES.get(row.id))
+  return parts
+}
+
+// One protocol row with everything the re-check keeps.
+function rechecked(row) {
+  const source = currentSource(row)
+  const anchors = anchorsOf(row)
+  const evidence = recheckEvidence(row)
+  const status = recheckStatus(row)
+  return {
+    ...row,
+    issueStatus: row.状态,
+    source,
+    anchors: anchors.ids,
+    anchorNote: anchors.note,
+    covered: coveredOf(row, source, anchors),
+    unmapped: anchors.ids.length ? '' : unmappedReason(row),
+    evidence,
+    original: protocolStatus(row),
+    status,
+  }
+}
+
+const recheckOf = row => rechecked(row)
+
 // The protocol rows, with the mapped status and the nine-column fields the
 // index and the counts use.
 function protocolRows() {
@@ -417,7 +599,9 @@ function protocolRows() {
     const file = `${RULES}/${meta.file}`
     if (!exists(file)) continue
     for (const row of protocolTable(read(file))) {
-      const status = protocolStatus(row)
+      const result = recheckOf(row)
+      const status = result.status
+      const gap = [protocolGap(row, status), ...recheckGap(row, result)].filter(part => part && part !== '—')
       found.push({
         ...row,
         file,
@@ -427,7 +611,8 @@ function protocolRows() {
         证据: row.现有形式化 || '—',
         级别: protocolLevel(row),
         状态: status,
-        缺口: protocolGap(row, status),
+        缺口: gap.length ? gap.join('；') : '—',
+        recheck: result,
       })
     }
   }
@@ -598,7 +783,176 @@ function index(rows) {
   return lines.join('\n')
 }
 
-// The index block of README.md, between the markers.
+// ── The re-check page ───────────────────────────────────────────────────
+
+const countBy = (list, key) => {
+  const counted = new Map()
+  for (const row of list) counted.set(key(row), (counted.get(key(row)) ?? 0) + 1)
+  return counted
+}
+
+function recheckSummary(rows) {
+  const lines = [
+    '| 文件 | 分区 | 现行 | 已验证 | 部分验证 | 未验证 | 明确不保证 | 不单独计数 | 已撤回（快照） | 已撤回（本轮） | 有规格锚点 | 无现行来源 |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+  ]
+  const stat = list => {
+    const current = list.filter(row => row.recheck.issueStatus !== '已取代')
+    const of = status => current.filter(row => row.recheck.status === status).length
+    return {
+      current: current.length,
+      verified: of('已验证'),
+      partial: of('部分验证'),
+      unverified: of('未验证'),
+      nonGuarantee: of('明确不保证'),
+      notCounted: of('不单独计数'),
+      snapshot: list.filter(row => row.recheck.issueStatus === '已取代').length,
+      withdrawn: current.filter(row => row.recheck.status === '已撤回').length,
+      anchored: current.filter(row => row.recheck.anchors.length).length,
+      uncovered: current.filter(row => !row.recheck.covered).length,
+    }
+  }
+  for (const meta of PROTOCOL) {
+    const s = stat(rows.filter(row => row.file === `${RULES}/${meta.file}`))
+    lines.push(`| [${meta.file}](rules/${meta.file}) | ${meta.label} | ${s.current} | ${s.verified} | ${s.partial} | ${s.unverified} | ${s.nonGuarantee} | ${s.notCounted} | ${s.snapshot} | ${s.withdrawn} | ${s.anchored} | ${s.uncovered} |`)
+  }
+  const s = stat(rows)
+  lines.push(`| 合计 | — | ${s.current} | ${s.verified} | ${s.partial} | ${s.unverified} | ${s.nonGuarantee} | ${s.notCounted} | ${s.snapshot} | ${s.withdrawn} | ${s.anchored} | ${s.uncovered} |`)
+  return lines.join('\n')
+}
+
+function recheckChanges(rows) {
+  const lines = [
+    '| 快照映射状态 | 复核后状态 | 条数 |',
+    '| --- | --- | --- |',
+  ]
+  const counted = new Map()
+  for (const row of rows) {
+    if (row.recheck.issueStatus === '已取代') continue
+    const key = `${row.recheck.original} → ${row.recheck.status}`
+    counted.set(key, (counted.get(key) ?? 0) + 1)
+  }
+  for (const [key, count] of [...counted].sort((a, b) => b[1] - a[1])) {
+    const [from, to] = key.split(' → ')
+    lines.push(`| ${from} | ${to} | ${count} |`)
+  }
+  return lines.join('\n')
+}
+
+function recheckTable(rows, meta) {
+  const list = rows.filter(row => row.file === `${RULES}/${meta.file}`)
+  const lines = [
+    '| 编号 | 复核状态 | 快照映射状态 | 现行来源 | 现行锚点 | 证据 | 缺口 |',
+    '| --- | --- | --- | --- | --- | --- | --- |',
+  ]
+  for (const row of list) {
+    const source = row.recheck.source
+    const withdrawn = row.recheck.status === '已撤回'
+    const gap = withdrawn
+      ? row.recheck.issueStatus === '已取代' ? 'issue 快照：已取代，不重抽' : recheckGap(row, row.recheck).join('；') || '—'
+      : recheckGap(row, row.recheck).join('；') || '—'
+    const fields = [
+      row.id,
+      row.recheck.status,
+      row.recheck.original,
+      row.recheck.issueStatus === '已取代' ? `${source.label}（issue 快照：已取代）` : source.label,
+      withdrawn ? '—' : row.recheck.anchors.length ? row.recheck.anchors.join('、') : '—',
+      withdrawn ? '—' : row.recheck.evidence.text,
+      gap,
+    ]
+    lines.push(`| ${fields.map(cell).join(' | ')} |`)
+  }
+  return lines.join('\n')
+}
+
+function recheckUnmapped(rows) {
+  const groups = new Map()
+  for (const row of rows) {
+    if (row.recheck.issueStatus === '已取代') continue
+    if (row.recheck.covered) continue
+    const key = row.recheck.unmapped || '未给理由'
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(row)
+  }
+  const lines = []
+  for (const [why, list] of [...groups].sort((a, b) => b[1].length - a[1].length)) {
+    const ids = list.map(row => row.id)
+    lines.push(`- **${list.length} 条**：${why}`)
+    lines.push('')
+    lines.push(`  ${ids.map(id => `\`${id}\``).join('、')}`)
+    lines.push('')
+  }
+  return lines.join('\n')
+}
+
+function recheckPage(rows) {
+  const total = rows.filter(row => row.recheck.issueStatus !== '已取代').length
+  const withdrawnNow = rows.filter(row => row.recheck.issueStatus !== '已取代' && row.recheck.status === '已撤回').length
+  const sources = []
+  for (const [prefix, source] of Object.entries(SOURCES)) {
+    sources.push(`| \`${prefix}\` | ${source.label} | [${source.doc.replace(/^docs\//, '')}](../${source.doc.replace(/^docs\//, '')}) | ${source.kind === 'spec' ? '规格' : source.kind === 'design' ? '设计' : source.kind === 'guide' ? '指南' : '历史'} | ${source.note} |`)
+  }
+  return `# 规则复核：按 0.22 现行规格（#634）
+
+[中文索引](README.md) · [保证登记表](../guarantees.md) · [会话协议规格](../protocol-session.md) · 议题：[#634](https://github.com/arcships/rutis/issues/634)
+
+状态：第一版。日期：2026-11-11。基准：\`origin/main\` \`449ed13a\`。
+
+本文件由 \`node tools/formal-trace.mjs --write\` 生成，\`--check\` 检查它是否与 \`rules/protocol-*.md\` 及现行来源一致。它复核的是 \`rules/protocol-*.md\` 里的 ${total} 条现行规则（另 ${rows.filter(row => row.issueStatus === '已取代').length} 条 issue 快照里已取代的规则不重抽）。**状态是这一轮复核的结论；\`rules/protocol-*.md\` 保持 issue 的十列原文不改。**
+
+## 1. 复核口径
+
+每条规则只看四件事，能自动核对的都写进本文件，判断留在数据里（\`tools/formal-trace-recheck.mjs\`）：
+
+1. **来源是否还在**：来源文档在当前树存在，且 0.19 / 0.22 没有删掉它描述的东西。删掉的（compat 格式、\`events-v2\`、\`sync-wait\` 能力、节点 \`export\` / \`import\`、\`Registration\`、接入点、\`Revocations\`、\`PeerRows\`、\`peer:\` 行、\`runtimes.remote\`、\`Transport\`、\`ChannelInfo\`）记「已撤回」，并在缺口写取代它的规则。
+2. **有没有现行锚点**：会话层规则对到 \`docs/protocol-session.md\` 的 \`SESS-*\` 编号（§11 规则状态表）；其余分区没有新的现行规格，只有设计或指南，锚点写 \`—\`，并在缺口写明它落在哪份文档或为什么没有。
+3. **证据是否解析**：用 \`现有形式化\` 列里的具名路径、用例名与行号核对当前树；解析不了的降级，只有模型或没有实现检查的记「部分验证」。
+4. **状态只降不升**：以 issue 的十列映射为上限；本轮只把来源被删、登记表删行、证据不解析或来源已历史化的行降级。**没有一条因为“规格说是当前”就升为「已验证」**：规格的「当前」说的是规则现行，不是实现验证过。
+
+复核不判断规则文字的语义是否正确：它核对来源、锚点、证据路径和状态，语义重抽（逐条按现行规格重写）仍是 #634 的未完成项。
+
+## 2. 现行来源（0.22）
+
+| 前缀 | 现行来源 | 文件 | 类别 | 说明 |
+| --- | --- | --- | --- | --- |
+${sources.join('\n')}
+
+登记表分区（\`registry-1\`、\`registry-2\`）的规则是保证登记表的行：现行来源就是登记表当前那一行；登记表 0.22 已删的行记「已撤回」。
+
+## 3. 结果
+
+<!-- recheck-index:begin -->
+${recheckSummary(rows)}
+<!-- recheck-index:end -->
+
+状态怎么变：
+
+${recheckChanges(rows)}
+
+## 4. 逐条复核
+
+${PROTOCOL.map(meta => `### ${meta.label}\n\n${recheckTable(rows, meta)}`).join('\n\n')}
+
+## 5. 没有现行锚点的规则
+
+这些规则在 0.22 没有可引用的现行规格：来源是旧设计、设计说未实现、或会话规格写明不覆盖。它们保持原状态或降级，不当作已完成复核；下一轮要么写出对应的现行规格，要么把它们登记为明确不保证。
+
+${recheckUnmapped(rows)}
+
+## 6. 这一轮改了什么、还剩什么
+
+- **已撤回**：issue 快照的 184 条之外，本轮按 0.19 / 0.22 删除的机制追加了 ${withdrawnNow} 条（见 §3 的「已撤回（本轮）」列与 §4 的缺口）。它们仍在 \`rules/protocol-*.md\` 里，统计不计入。
+- **未完成**：其余分区没有 0.22 的现行规格。会话层有 \`protocol-session.md\`（82 条 \`SESS-*\`）；事件、运行时、挂载、远程没有对应的新规格，只有设计稿与指南。§5 按原因列出这些规则；写规格是 #635 的后续，不是这一轮能补的。
+- **证据**：只核对 \`现有形式化\` 列的具名引用；备注列里的旧路径（如 \`crates/rutis-bridge/src/cordis/server.rs\`）没有逐条清，重抽时一并处理。
+- **语义**：没有逐条重写规则文字。规则的「已撤回 / 明确不保证 / 未验证 / 部分验证 / 已验证」按上面的四件事定，不按记忆。
+`
+}
+
+function refreshRecheck(rows) {
+  const content = recheckPage(rows)
+  if (!exists(RECHECK) || read(RECHECK) !== content) writeFileSync(`${root}${RECHECK}`, content)
+}
+
 function indexBlock(text) {
   const begin = text.indexOf(INDEX_BEGIN)
   const end = text.indexOf(INDEX_END)
@@ -655,7 +1009,7 @@ for (const row of rows) {
 //    and the index is current.
 for (const row of rows) evidence(row, counts)
 const protocolFiles = PROTOCOL.map(meta => `${RULES}/${meta.file}`)
-for (const file of [INDEX, 'docs/formal-trace/README.en.md', ...FILES.map(([name]) => `${RULES}/${name}`), ...HANDWRITTEN.map(name => `${RULES}/${name}`), ...protocolFiles]) {
+for (const file of [INDEX, RECHECK, 'docs/formal-trace/README.en.md', ...FILES.map(([name]) => `${RULES}/${name}`), ...HANDWRITTEN.map(name => `${RULES}/${name}`), ...protocolFiles]) {
   if (exists(file)) for (const broken of links(file)) say(`broken link ${broken}`)
 }
 
@@ -685,6 +1039,8 @@ for (const meta of PROTOCOL) {
     if (!ISSUE_STATUSES.includes(row.状态)) say(`${file}:${row.line}: ${row.id}: issue status ${row.状态 || '(empty)'} is not one of ${ISSUE_STATUSES.join(', ')}`)
     const mapped = protocolStatus(row)
     if (!STATUSES.includes(mapped)) say(`${file}:${row.line}: ${row.id}: mapped status ${mapped} is not one of ${STATUSES.join(', ')}`)
+    const checked = recheckStatus(row)
+    if (!STATUSES.includes(checked)) say(`${file}:${row.line}: ${row.id}: re-checked status ${checked} is not one of ${STATUSES.join(', ')}`)
     protocolEvidence(row, protocolCounts, file)
   }
   const current = list.filter(row => row.状态 !== '已取代').length
@@ -693,17 +1049,41 @@ for (const meta of PROTOCOL) {
     say(`${file}: ${current} current and ${replaced} replaced rows; #634's summary table says ${meta.current} and ${meta.replaced}`)
   }
 }
-const protocolReplaced = protocol.filter(row => row.状态 === '已撤回').length
+const protocolReplaced = protocol.filter(row => row.issueStatus === '已取代').length
 const protocolCurrent = protocol.length - protocolReplaced
 if (protocolCurrent !== 1368 || protocolReplaced !== 184) {
   say(`${RULES}: ${protocolCurrent} current and ${protocolReplaced} replaced protocol rows; #634 says 1368 and 184`)
 }
 
-if (process.argv.includes('--write')) refreshIndex(allRows)
-else if (exists(INDEX)) {
+// 5. The re-check page: every current rule once, the anchors exist in the
+//    current specification, and no rule is listed as removed twice.
+const anchorIds = new Set([...read(SESSION_SPEC).matchAll(/`(SESS-\d+)`/g)].map(match => match[1]))
+for (const [pattern, ids] of ANCHORS) {
+  for (const id of ids) if (!anchorIds.has(id)) say(`${RECHECK}: anchor ${id} (${pattern}) is not in ${SESSION_SPEC}`)
+}
+const seenSuperseded = new Set()
+for (const entry of SUPERSEDED) {
+  if (!exists(entry.by)) say(`${RECHECK}: ${entry.by} does not exist`)
+  for (const id of entry.ids) {
+    if (seenSuperseded.has(id)) say(`${RECHECK}: ${id} is listed as removed more than once`)
+    seenSuperseded.add(id)
+  }
+}
+for (const [id, entry] of superseded) {
+  if (!protocol.some(row => row.id === id)) say(`${RECHECK}: ${id} is listed as removed but is not a protocol row`)
+  if (!exists(entry.by)) say(`${RECHECK}: ${id}: ${entry.by} does not exist`)
+}
+if (process.argv.includes('--write')) {
+  refreshIndex(allRows)
+  refreshRecheck(protocol)
+} else if (exists(INDEX)) {
   const block = indexBlock(read(INDEX))
   if (block !== null && block !== index(allRows)) say(`${INDEX}: the index between the markers is stale; run node tools/formal-trace.mjs --write`)
 }
+if (exists(RECHECK)) {
+  const wanted = recheckPage(protocol)
+  if (read(RECHECK) !== wanted) say(`${RECHECK}: stale or not generated; run node tools/formal-trace.mjs --write`)
+} else say(`${RECHECK}: missing; run node tools/formal-trace.mjs --write`)
 
 if (!process.argv.includes('--check')) {
   const tally = list => {
@@ -738,6 +1118,14 @@ if (!process.argv.includes('--check')) {
   console.log(`evidence (register/trace): ${counts.references} references (names ${counts.names}, line ranges ${counts.ranges}); missing files ${counts.missing}, missing names ${counts.namesMissing}, lines beyond the file ${counts.rangesMissing}`)
   console.log(`evidence (protocol): ${protocolCounts.references} references (resolved ${protocolCounts.found}, unresolved shorthand ${protocolCounts.unresolved}, ambiguous ${protocolCounts.ambiguous}); missing explicit paths ${protocolCounts.missing}, missing names ${protocolCounts.namesMissing}, lines beyond the file ${protocolCounts.rangesMissing}`)
   console.log(`protocol issue status: ${issueTally(protocol)}`)
+  const recheckedCurrent = protocol.filter(row => row.issueStatus !== '已取代')
+  const recheckTally = new Map()
+  for (const row of recheckedCurrent) recheckTally.set(row.recheck.status, (recheckTally.get(row.recheck.status) ?? 0) + 1)
+  console.log(`protocol re-check (${recheckedCurrent.length} current): ${STATUSES.filter(status => recheckTally.has(status)).map(status => `${status} ${recheckTally.get(status)}`).join(' · ')}`)
+  const withdrawnNow = recheckedCurrent.filter(row => row.recheck.status === '已撤回').length
+  const uncovered = recheckedCurrent.filter(row => !row.recheck.covered).length
+  const anchored = recheckedCurrent.filter(row => row.recheck.anchors.length).length
+  console.log(`protocol re-check: withdrawn by 0.19/0.22 ${withdrawnNow} (issue snapshot already ${protocol.filter(row => row.issueStatus === '已取代').length}); session anchors ${anchored}, no current source ${uncovered}`)
   console.log(`protocol ids also in the register: ${registerOverlap} (kept as separate rows; the totals are rows, not distinct rules)\n`)
 }
 
