@@ -1,0 +1,18 @@
+# The Miri harness (#631): the session protocol's pure frame and value
+# logic, with no thread, clock, file or network use. Its own workspace,
+# like `fuzz/`: plain `cargo test` never builds it.
+[package]
+name = "rutis-miri"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[dependencies]
+rutis-bridge = { path = "../../crates/rutis-bridge", default-features = false }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "protocol"
+path = "src/main.rs"
