@@ -13,12 +13,15 @@
 //! 7–9 and 12 are reference models: their comments say which bookkeeping
 //! cannot be run here and what stands in for it; models 10 and 11 run the
 //! bus's `Table`, `Selected` and `Entry` and mirror the emit chain and the
-//! notice delivery. Built with `--cfg rutis_shuttle`, `crate::sync` makes
-//! the driver's `alive` flag, a fiber's `lineage_closed` marker and an effect
-//! record's state shuttle primitives; the tokio channels in between (`watch`,
-//! `mpsc`, `Notify`) need no runtime and are single steps to shuttle. Shuttle
-//! switches just before an operation on its primitives, so the windows the
-//! code guards that no primitive opens are marked with
+//! notice delivery. Model 13 runs a record drained early against the unload
+//! that takes its list; model 14 pins what several completions do to one task;
+//! model 15 mirrors `load`/`unload` to check the live generation the kernel
+//! publishes across restarts. Built with `--cfg rutis_shuttle`, `crate::sync`
+//! makes the driver's `alive` flag, a fiber's `lineage_closed` marker and an
+//! effect record's state shuttle primitives; the tokio channels in between
+//! (`watch`, `mpsc`, `Notify`) need no runtime and are single steps to shuttle.
+//! Shuttle switches just before an operation on its primitives, so the windows
+//! the code guards that no primitive opens are marked with
 //! `crate::sync::switch_point()` (nothing in a plain build): between
 //! `post_join`'s check and its send, between an effect join's check and its
 //! wait, and inside an effect factory, between the two registration checks.
@@ -51,7 +54,7 @@ use tokio::sync::{mpsc, watch, Notify};
 
 use super::{
     complete_intent, join_task, mark_subtree_lineage, post_join_to, publish_subtree_closing,
-    CloseTree, FiberInner, FiberState, Intent, NextState, PluginId, TransitionTask,
+    CloseTree, FiberInner, FiberState, Intent, NextState, PluginId, TransitionTask, NOT_LIVE,
 };
 use crate::bus::run::{Inv, SyncNext};
 use crate::bus::table::{Body, Entry, Selected, Table};
@@ -3537,5 +3540,479 @@ fn shuttle_dispose_registration_cancels_the_running_generation() {
         close_race(true);
         // The dispose alone: no restart's pre-cancel can stand in for it.
         close_race(false);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Model 13: an effect record with an owner fiber (#622, "EffectRecord 加所属
+// fiber")
+
+/// What a cleanup's error says, for matching the reports: the label is the
+/// only part the model sets.
+fn cleanup_label(error: &Arc<ErrorKind>) -> String {
+    error.to_string()
+}
+
+/// Model 13, a record a `Disposer` drains early against the unload that takes
+/// the fiber's list (#622, "加强现有模型": `finish()`'s self-removal, where its
+/// error is kept, and the `mem::take` race). `EffectRecord::finish` removes the
+/// record from its owner's `effects` and `effect_index` and — only when it was
+/// still in `effects` — parks the error in `drained_errors`; `drain_effects`
+/// takes the whole list under the same lock and joins what it took. So each
+/// failed cleanup is reported by the fiber's unload exactly once: by the join
+/// of the record the unload took, or by the parked error of a record drained
+/// before the take — never twice, never not at all. A record whose cleanup is
+/// running when the take happens is reported by the unload's join, and its
+/// caller still gets the same `Arc` from its own join.
+///
+/// The model runs `push_effect`, `EffectRecord::{claim, finish, join}` and the
+/// kernel's `run_cleanups`; the unload side is `drain_model_effects`, the
+/// mirror of `FiberInner::drain_effects` models 5 and 12 use (the real drain
+/// spawns each record's runner on the runtime, which a shuttle model cannot
+/// pump).
+///
+/// Mutations this model catches (each one made in the kernel and reverted;
+/// the message after it is what this model then reports): parking the error
+/// without the "still in the list" check (`the unload's reports do not carry
+/// each failed cleanup exactly once (6 reports for 3 cleanups)`: the records
+/// the unload took are reported by their joins and again by their parked
+/// errors); dropping the parking (`(2 reports for 3 cleanups)`: the early
+/// record's error is lost); dropping the `retain` from `finish` (`(4 reports
+/// for 3 cleanups)`: the finished record stays in the list, so the unload parks
+/// its error and joins it too).
+#[test]
+fn shuttle_effect_record_owner_reports_each_cleanup_error_once() {
+    // The cleanups are synchronous; the runtime is what `run_cleanups` takes a
+    // handle for.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a current-thread runtime");
+    let handle = runtime.handle().clone();
+    let labels: Vec<String> = (0..3).map(|index| format!("cleanup {index}")).collect();
+    explore(move || {
+        let ctx = Ctx::root_with(handle.clone());
+        let fiber = ctx.root_view().expect("the root view").inner.clone();
+        let runs = Arc::new((0..3).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
+        let records: Vec<Arc<EffectRecord>> = labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                let runs = runs.clone();
+                let label = label.clone();
+                let message = label.clone();
+                let record = EffectRecord::from(
+                    Effect::Disposer(Box::new(move || {
+                        runs[index].fetch_add(1, Ordering::SeqCst);
+                        Err(Error::msg(message))
+                    })),
+                    label,
+                    crate::effect::Origin::Other,
+                    Arc::downgrade(&fiber),
+                );
+                fiber.push_effect(record.clone());
+                record
+            })
+            .collect();
+
+        // The middle record is drained early, by a `Disposer`'s caller: before
+        // the take, while the unload has the list, or while the unload drains
+        // another record.
+        let early = {
+            let early = records[1].clone();
+            let handle = handle.clone();
+            thread::spawn(move || {
+                switch_point();
+                if let Some(mut cleanups) = early.claim() {
+                    let error = block_on(run_cleanups(&mut cleanups, &handle));
+                    switch_point();
+                    early.finish(error);
+                }
+                let result = block_on(early.join());
+                (early, result)
+            })
+        };
+        let unload = {
+            let fiber = fiber.clone();
+            thread::spawn(move || drain_model_effects(&fiber))
+        };
+
+        let (early, early_result) = early.join().unwrap();
+        let reported = unload.join().unwrap();
+
+        for (index, runs) in runs.iter().enumerate() {
+            assert_eq!(
+                runs.load(Ordering::SeqCst),
+                1,
+                "the cleanup of record {index} ran more than once"
+            );
+        }
+        // The early caller's own join is the result its cleanup returned — the
+        // same `Arc`, whether this thread or the unload ran the cleanups.
+        let early_error = early_result.expect_err("the early cleanup failed");
+        assert_eq!(
+            cleanup_label(&early_error),
+            labels[1],
+            "the early join got another cleanup's result"
+        );
+        // The fiber's unload reports every failed cleanup exactly once.
+        let mut reported_labels: Vec<String> = reported.iter().map(cleanup_label).collect();
+        reported_labels.sort();
+        let mut expected = labels.clone();
+        expected.sort();
+        assert_eq!(
+            reported_labels,
+            expected,
+            "the unload's reports do not carry each failed cleanup exactly once \
+             ({} reports for {} cleanups)",
+            reported.len(),
+            labels.len()
+        );
+        assert!(
+            fiber.effects.lock().unwrap().is_empty(),
+            "a finished record was left in the fiber's effect list"
+        );
+        assert!(
+            fiber.effect_index.lock().unwrap().is_empty(),
+            "a finished record was left in the fiber's effect index"
+        );
+        assert!(
+            fiber.drained_errors.lock().unwrap().is_empty(),
+            "a parked error was left unread"
+        );
+        drop(early);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Model 14: one transition task, several completions (#622, "TransitionTask 加
+// 多个完成方")
+
+/// Model 14, `TransitionTask::complete` called more than once (#622, item 3 of
+/// "加强现有模型"; the same shape as the suspicion it lists: a clean dispose and
+/// a root close racing leave a late join with `Err(Closed)`). `complete` sends
+/// the result into the task's watch channel, so:
+///
+/// - a completion before anyone joined is kept (the keep-alive receiver), and
+///   a join that comes later returns it instead of waiting forever;
+/// - every join returns one of the results someone announced, never a made-up
+///   error;
+/// - the **last** completion is what a later join reads — the overwrite. The
+///   model asserts the current behaviour and says so: the first joiner sees the
+///   driver's result, a joiner that comes after the poster's own completion
+///   sees the poster's `Closed`, even though the transition itself succeeded.
+///   #622 lists that as a suspicion, so the model does not promise it is right;
+///   a fix would change the late assertion, not the early one.
+///
+/// Mutations this model catches (each one made in the kernel and reverted): a
+/// task with no keep-alive receiver — the completion before any subscriber is
+/// lost and every join after it blocks (`deadlock! blocked tasks: [main-thread,
+/// …]`); `complete` keeping the first result (`the last completion is not what
+/// a later join reads`).
+#[test]
+fn shuttle_transition_task_several_completions() {
+    explore(|| {
+        let driver = failed("driver");
+        let poster = failed("poster");
+
+        // A completion before any joiner exists (the driver can complete while
+        // the poster is between its send and its join).
+        let task = TransitionTask::new();
+        task.complete(Some(driver.clone()));
+        let early = {
+            let task = task.clone();
+            thread::spawn(move || block_on(join_task(&task)))
+        };
+        let early = early.join().unwrap().expect_err("the driver failed");
+        assert!(
+            Arc::ptr_eq(&early, &driver),
+            "a join started after the only completion got another result"
+        );
+
+        // The poster's second completion (`post_join_to`'s `alive` recheck):
+        // the last one wins, and every join after it reads it.
+        task.complete(Some(poster.clone()));
+        let late = block_on(join_task(&task)).expect_err("the poster failed");
+        assert!(
+            Arc::ptr_eq(&late, &poster),
+            "the last completion is not what a later join reads"
+        );
+
+        // Two completers at once, two joiners that started before them: every
+        // join returns one of the two results.
+        let raced = TransitionTask::new();
+        let (one, two) = (failed("one"), failed("two"));
+        let joiners: Vec<_> = (0..2)
+            .map(|_| {
+                let task = raced.clone();
+                thread::spawn(move || block_on(join_task(&task)))
+            })
+            .collect();
+        let completers: Vec<_> = [one.clone(), two.clone()]
+            .into_iter()
+            .map(|error| {
+                let task = raced.clone();
+                thread::spawn(move || task.complete(Some(error)))
+            })
+            .collect();
+        for completer in completers {
+            completer.join().unwrap();
+        }
+        for joiner in joiners {
+            let result = joiner.join().unwrap().expect_err("both completions failed");
+            assert!(
+                Arc::ptr_eq(&result, &one) || Arc::ptr_eq(&result, &two),
+                "a join got a result nobody completed the task with"
+            );
+        }
+
+        // A clean completion, then a late `Closed` (the suspicion): the
+        // overwrite turns a successful transition into an error for every join
+        // that comes after it.
+        let clean = TransitionTask::new();
+        clean.complete(None);
+        assert!(
+            block_on(join_task(&clean)).is_ok(),
+            "a clean completion was not reported as success"
+        );
+        clean.complete(Some(failed("closed")));
+        assert!(
+            block_on(join_task(&clean)).is_err(),
+            "the late completion did not overwrite the clean result"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Model 15: the live generation a restart publishes (#980, #622 item 3)
+
+/// A listener entry of the model's fiber in `generation`: the kernel's own
+/// [`Entry`], owned by the fiber, so `Entry::live` answers from the owner's
+/// published generation.
+fn generation_entry(ctx: &Ctx, fiber: &Arc<FiberInner>, generation: u64) -> Entry {
+    let mut entry = model_entry(ctx, fiber);
+    entry.generation = generation;
+    entry
+}
+
+/// `FiberInner::load` for the live-generation model, mirrored where the driver
+/// is: the terminal check, the new token, the generation bump and `Loading`
+/// under the transition lock, then the generation's `apply` — a listener
+/// registered through the kernel's `Ctx::on_sync`, so its `Entry` carries this
+/// generation — and `Active` under the lock again. Dependencies, the factory,
+/// `flush_status`'s emits and the pre-cancel are not modelled: none of them
+/// publishes the live generation.
+fn live_load(fiber: &Arc<FiberInner>) -> u64 {
+    let generation = {
+        let mut tr = fiber.transition.lock().unwrap();
+        assert!(
+            tr.terminal_task.is_none(),
+            "the live-generation model registers no dispose"
+        );
+        fiber.new_generation_token();
+        tr.pre_cancelled = false;
+        tr.generation += 1;
+        tr.error = None;
+        fiber.set_state(&mut tr, FiberState::Loading);
+        tr.generation
+    };
+    let ctx = fiber.ctx.for_generation(generation);
+    assert!(
+        ctx.on_sync::<ModelEvent>(|_, _| Ok(None)).is_ok(),
+        "the generation's listener was refused"
+    );
+    {
+        let mut tr = fiber.transition.lock().unwrap();
+        fiber.set_state(&mut tr, FiberState::Active);
+    }
+    generation
+}
+
+/// `FiberInner::unload` for the live-generation model, mirrored: `Unloading`
+/// under the admission and transition locks — which publishes `NOT_LIVE` before
+/// anything waits — the cancel, the kernel's own bounded `wait_events`, the
+/// cleanup pass, then `Pending` (cleanup errors to the sink, as a non-terminal
+/// unload does).
+fn live_unload(fiber: &Arc<FiberInner>) {
+    {
+        let _admission = fiber.ctx.shared().admission.lock().unwrap();
+        let mut tr = fiber.transition.lock().unwrap();
+        fiber.set_state(&mut tr, FiberState::Unloading);
+    }
+    fiber.cancel_current();
+    block_on(fiber.wait_events());
+    if let Some(error) = aggregate_arcs(drain_model_effects(fiber)) {
+        (fiber.ctx.error_sink())(error);
+    }
+    let mut tr = fiber.transition.lock().unwrap();
+    fiber.set_state(&mut tr, FiberState::Pending);
+}
+
+/// Model 15, the generation whose listeners are live across restarts (#980;
+/// #622 item 3: a listener's owner publishes the live generation, and an event
+/// call reads it instead of the snapshot). A fiber that unloads and loads again
+/// must stop admitting the old generation's listeners the moment the unload
+/// publishes `Unloading` (`NOT_LIVE`), and admit the new generation's only once
+/// the load publishes it — `live_generation` is written under the transition
+/// lock by `set_state`'s `publish_live`, in the same critical section as the
+/// state and generation a reader takes that lock to see. A listener of an old
+/// generation must never start a call after the restart, however the schedule
+/// interleaves the readers, the dispatchers and the driver.
+///
+/// The model runs the kernel's `set_state`/`publish_live`, `Entry::live`/
+/// `Entry::start`/`CallFlight`, `new_generation_token`, `cancel_current`,
+/// `wait_events` and `drain_effects`'s records (`drain_model_effects`, the
+/// mirror models 5, 12 and 13 use). `load` and `unload` are mirrored where the
+/// driver is (the real ones post to a driver task on a runtime a shuttle model
+/// cannot pump); the generation bump and the state changes they make are the
+/// steps that publish the generation.
+///
+/// Mutations this model catches (each one made in the kernel and reverted;
+/// the message after it is what this model then reports): `publish_live`
+/// answering `tr.generation` for `Unloading`/`Pending`/`Disposed` (`a reader
+/// takes the transition lock between two transitions and sees a live generation
+/// that is not running: live_generation is 0 while the fiber is Unloading at
+/// generation 0`), and `Entry::live` not comparing the generation (`the listener
+/// of generation 1 is still live after the restart`).
+#[test]
+fn shuttle_restart_publishes_the_live_generation() {
+    const RESTARTS: u64 = 3;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a current-thread runtime");
+    let handle = runtime.handle().clone();
+    explore(move || {
+        let ctx = Ctx::root_with(handle.clone());
+        let fiber = ctx.root_view().expect("the root view").inner.clone();
+        // One entry per generation the model's loads start, owned by the root.
+        let entries: Vec<Arc<Entry>> = (1..=RESTARTS)
+            .map(|generation| Arc::new(generation_entry(&ctx, &fiber, generation)))
+            .collect();
+        // The root starts `Active` at generation 0: the invariant holds before
+        // the first load, too.
+        let done = Arc::new(SyncBool::new(false));
+
+        let readers: Vec<_> = (0..2)
+            .map(|_| {
+                let (fiber, done) = (fiber.clone(), done.clone());
+                thread::spawn(move || {
+                    loop {
+                        {
+                            // The lock a `set_state` takes: the state, its
+                            // generation and the published generation are one
+                            // snapshot, never a mix of two generations.
+                            let tr = fiber.transition.lock().unwrap();
+                            let live = fiber.live_generation.load(Ordering::SeqCst);
+                            let expected = match tr.state {
+                                FiberState::Loading | FiberState::Active => tr.generation,
+                                _ => NOT_LIVE,
+                            };
+                            assert_eq!(
+                                live, expected,
+                                "live_generation is {live} while the fiber is {:?} at \
+                                 generation {}",
+                                tr.state, tr.generation
+                            );
+                        }
+                        if done.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        switch_point();
+                    }
+                })
+            })
+            .collect();
+
+        // Dispatchers hold a listener of every generation: the old ones must
+        // stop being admitted as the restart unloads, the new one must start
+        // admitting once the load publishes it.
+        let dispatchers: Vec<_> = (0..2)
+            .map(|_| {
+                let (done, entries) = (done.clone(), entries.clone());
+                thread::spawn(move || {
+                    let mut admitted = 0usize;
+                    loop {
+                        for entry in &entries {
+                            if let Some(flight) = entry.start() {
+                                admitted += 1;
+                                // The call body: user code, which yields while
+                                // the unload waits for it.
+                                switch_point();
+                                drop(flight);
+                            }
+                        }
+                        if done.load(Ordering::SeqCst) {
+                            return admitted;
+                        }
+                        switch_point();
+                    }
+                })
+            })
+            .collect();
+
+        let driver = {
+            let fiber = fiber.clone();
+            thread::spawn(move || {
+                for _ in 0..RESTARTS {
+                    switch_point();
+                    live_unload(&fiber);
+                    switch_point();
+                    live_load(&fiber);
+                }
+            })
+        };
+
+        driver.join().unwrap();
+        done.store(true, Ordering::SeqCst);
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        for dispatcher in dispatchers {
+            dispatcher.join().unwrap();
+        }
+
+        let (state, generation) = {
+            let tr = fiber.transition.lock().unwrap();
+            (tr.state, tr.generation)
+        };
+        assert_eq!(
+            (state, generation),
+            (FiberState::Active, RESTARTS),
+            "the restarts did not end on the last generation"
+        );
+        assert_eq!(
+            fiber.live_generation.load(Ordering::SeqCst),
+            RESTARTS,
+            "the last generation is not the published one"
+        );
+        assert_eq!(
+            *fiber.event_flights.lock().unwrap(),
+            0,
+            "a listener call was never finished"
+        );
+        assert!(
+            entries[RESTARTS as usize - 1].live(),
+            "the last generation's listener is not live"
+        );
+        let last = entries[RESTARTS as usize - 1]
+            .start()
+            .expect("the last generation's listener was refused");
+        drop(last);
+        for (index, entry) in entries[..RESTARTS as usize - 1].iter().enumerate() {
+            let generation = index as u64 + 1;
+            assert!(
+                !entry.live(),
+                "the listener of generation {generation} is still live after the restart"
+            );
+            assert!(
+                entry.start().is_none(),
+                "a listener of generation {generation} was admitted after {RESTARTS} restarts"
+            );
+        }
+        // The unloaded generations' records are drained; the last one is still
+        // registered, so its cleanup is not due.
+        assert!(
+            !fiber.effects.lock().unwrap().is_empty(),
+            "the last generation's effect record is missing"
+        );
     });
 }
