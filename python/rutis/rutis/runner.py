@@ -889,6 +889,10 @@ class Runtime:
         name = _entry_point(name)[0]
         module = sys.modules.get(name)
         if module is None:
+            # The finders' cached listing of each directory is dropped first:
+            # a module written since a listing was taken (the same directory
+            # mtime, as Windows' coarse timestamps give, #1139) is not in it.
+            importlib.invalidate_caches()
             try:
                 module = importlib.import_module(name)
             except ModuleNotFoundError as error:
