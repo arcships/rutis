@@ -1,7 +1,9 @@
 //! Property tests across the session (#178, part 5): data values generated
 //! on the Rust side round-trip through each runtime's `conformance` echo
-//! (risk P7, C5); references granted and released in any order leave both
-//! reference tables at the number not yet released (risk P4).
+//! (risk P7, C5); references granted and released in any order leave the
+//! reference tables at the number not yet released (risk P4) — both sides'
+//! where the fixture reports them (Rust, Node, Python, Swift), this side's
+//! where it does not (Go, Bun, Kotlin; #624).
 //!
 //! Each runtime starts once per test and runs `PROPTEST_CASES` cases (256
 //! by default). A failure prints the shrunk value and the seed; rerun with
@@ -34,7 +36,10 @@
 //! goes on. Node and Bun take them as JavaScript does (design §2): their
 //! echo sends back an instant to the millisecond and a datetime, date,
 //! time, decimal or uuid as its text, and refuses a map or set whose keys
-//! JavaScript cannot hold apart.
+//! JavaScript cannot hold apart. Python keeps microseconds (design V7):
+//! its echo sends back an instant, datetime and time truncated to the
+//! microsecond (the Python property generates no finer), and refuses a map
+//! or set whose keys it holds as one (1 and true, 1 and BigInt(1)).
 #![cfg(all(unix, feature = "testing"))]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -411,6 +416,21 @@ fn time_of_day() -> impl Strategy<Value = rpc::TimeOfDay> {
         .prop_map(|(h, m, s, ns)| rpc::TimeOfDay::new(h, m, s, ns).unwrap())
 }
 
+/// [`time_of_day`] to the microsecond: Python keeps no more (design V7).
+fn time_of_day_to_the_microsecond() -> impl Strategy<Value = rpc::TimeOfDay> {
+    (
+        0u8..24,
+        0u8..60,
+        0u8..60,
+        prop_oneof![
+            Just(0u32),
+            (0u32..1_000_000).prop_map(|micros| micros * 1_000),
+            (0u32..1000).prop_map(|ms| ms * 1_000_000)
+        ],
+    )
+        .prop_map(|(h, m, s, ns)| rpc::TimeOfDay::new(h, m, s, ns).unwrap())
+}
+
 /// Decimal digits, `0` or without a leading zero, with an optional `-`.
 fn integer_text(digits: usize) -> impl Strategy<Value = String> {
     prop_oneof![
@@ -464,8 +484,26 @@ fn inexact_whole(number: &Json) -> bool {
         && number.is_f64()
 }
 
+/// How a map or set may be filled: keys equal as the wire compares them
+/// (design §5), or as Python does (1, true, BigInt(1) and Decimal("1.0")
+/// are one key; times to the microsecond, design V7).
+#[derive(Clone, Copy)]
+enum Keys {
+    Wire,
+    Python,
+}
+
+/// [`time_of_day`], or [`time_of_day_to_the_microsecond`] for Python.
+fn time_of_day_for(keys: Keys) -> BoxedStrategy<rpc::TimeOfDay> {
+    match keys {
+        Keys::Wire => time_of_day().boxed(),
+        Keys::Python => time_of_day_to_the_microsecond().boxed(),
+    }
+}
+
 /// A value every language takes as a map key or set element (design §5).
-fn key_value() -> impl Strategy<Value = Value> {
+fn key_value(keys: Keys) -> impl Strategy<Value = Value> {
+    let time = move || time_of_day_for(keys);
     prop_oneof![
         3 => string().prop_map(|text| Value::Data(Json::String(text))),
         // An integer beyond ±(2^53−1) is a bigint key (design V6).
@@ -474,9 +512,9 @@ fn key_value() -> impl Strategy<Value = Value> {
             .prop_map(Value::Data),
         1 => any::<bool>().prop_map(|flag| Value::Data(Json::Bool(flag))),
         1 => bigint().prop_map(Value::BigInt),
-        1 => (date(), time_of_day()).prop_map(|(d, t)| Value::DateTime(rpc::DateTime::new(d, t))),
+        1 => (date(), time()).prop_map(|(d, t)| Value::DateTime(rpc::DateTime::new(d, t))),
         1 => date().prop_map(Value::Date),
-        1 => time_of_day().prop_map(Value::Time),
+        1 => time().prop_map(Value::Time),
         1 => decimal().prop_map(Value::Decimal),
         1 => any::<u128>().prop_map(|n| Value::Uuid(rpc::Uuid::from_u128(n))),
     ]
@@ -498,37 +536,129 @@ fn key_identity(key: &Value) -> String {
     }
 }
 
-/// `entries` without the later ones whose key repeats an earlier one's.
-fn distinct<T>(entries: Vec<T>, key: impl Fn(&T) -> &Value) -> Vec<T> {
+/// What makes two keys equal in Python: booleans, integers, bigints,
+/// decimals and floats by numeric value (exactly: a float as the decimal
+/// it is), a string or tagged key by kind and value.
+fn python_key_identity(key: &Value) -> String {
+    match key {
+        Value::Data(Json::Bool(flag)) => format!("number {}", u8::from(*flag)),
+        Value::Data(json @ Json::Number(_)) => format!("number {}", exact_number(json)),
+        Value::BigInt(value) => format!("number {value}"),
+        Value::Decimal(value) => format!("number {}", without_trailing_zeros(value.as_str())),
+        Value::Data(Json::String(text)) => format!("string {text:?}"),
+        Value::DateTime(value) => format!("datetime {value}"),
+        Value::Date(value) => format!("date {value}"),
+        Value::Time(value) => format!("time {value}"),
+        Value::Uuid(value) => format!("uuid {value}"),
+        other => format!("{other:?}"),
+    }
+}
+
+/// `number` as the exact decimal it is: an integer as its digits, a float
+/// as the exact expansion of the double (at most 1074 fraction digits),
+/// zero without a sign.
+fn exact_number(number: &Json) -> String {
+    let Json::Number(number) = number else {
+        unreachable!("a JSON number expected")
+    };
+    if let Some(integer) = number.as_i64() {
+        return integer.to_string();
+    }
+    if let Some(integer) = number.as_u64() {
+        return integer.to_string();
+    }
+    let text = format!("{:.1074}", number.as_f64().unwrap());
+    let (integer, fraction) = text.split_once('.').expect("a fixed decimal has a point");
+    let fraction = fraction.trim_end_matches('0');
+    let text = if fraction.is_empty() {
+        integer.to_owned()
+    } else {
+        format!("{integer}.{fraction}")
+    };
+    if text == "-0" {
+        "0".to_owned()
+    } else {
+        text
+    }
+}
+
+/// Decimal text without its trailing fraction zeros and, for zero, its
+/// sign: `1.10`, `1.1` and `1.100` as Python compares them.
+fn without_trailing_zeros(text: &str) -> String {
+    let (sign, text) = match text.strip_prefix('-') {
+        Some(text) => ("-", text),
+        None => ("", text),
+    };
+    let (integer, fraction) = match text.split_once('.') {
+        Some((integer, fraction)) => (integer, fraction),
+        None => (text, ""),
+    };
+    let fraction = fraction.trim_end_matches('0');
+    let text = if fraction.is_empty() {
+        integer.to_owned()
+    } else {
+        format!("{integer}.{fraction}")
+    };
+    if text == "0" {
+        text
+    } else {
+        format!("{sign}{text}")
+    }
+}
+
+/// `entries` without the later ones whose key repeats an earlier one's:
+/// two keys equal by `identity`.
+fn distinct_as<T>(
+    entries: Vec<T>,
+    key: impl Fn(&T) -> &Value,
+    identity: impl Fn(&Value) -> String,
+) -> Vec<T> {
     let mut seen = BTreeSet::new();
     entries
         .into_iter()
-        .filter(|entry| seen.insert(key_identity(key(entry))))
+        .filter(|entry| seen.insert(identity(key(entry))))
         .collect()
 }
 
-fn tagged_leaf() -> impl Strategy<Value = Value> {
-    let instant = (-62_135_596_800i64..=253_402_300_799, 0u32..1_000_000_000)
-        .prop_map(|(s, ns)| Value::Instant(rpc::Instant::from_unix(s, ns).unwrap()));
+/// An instant, to the microsecond when the far end is Python.
+fn instant_for(keys: Keys) -> BoxedStrategy<Value> {
+    let nanos = match keys {
+        Keys::Wire => (0u32..1_000_000_000).boxed(),
+        Keys::Python => (0u32..1_000_000).prop_map(|micros| micros * 1_000).boxed(),
+    };
+    (-62_135_596_800i64..=253_402_300_799, nanos)
+        .prop_map(|(seconds, nanos)| {
+            Value::Instant(rpc::Instant::from_unix(seconds, nanos).unwrap())
+        })
+        .boxed()
+}
+
+fn tagged_leaf(keys: Keys) -> impl Strategy<Value = Value> {
     prop_oneof![
         3 => leaf().prop_map(Value::Data),
-        2 => key_value(),
-        1 => instant,
+        2 => key_value(keys),
+        1 => instant_for(keys),
         1 => prop::collection::vec(any::<u8>(), 0..48).prop_map(Value::Bytes),
     ]
 }
 
 /// Data, tagged values, lists, records, maps and sets, nested up to 6
-/// levels.
-fn tagged_value() -> impl Strategy<Value = Value> {
-    tagged_leaf().prop_recursive(6, 48, 4, |inner| {
+/// levels, with keys distinct as `keys` compares them.
+fn tagged_value(keys: Keys) -> impl Strategy<Value = Value> {
+    let identity: fn(&Value) -> String = match keys {
+        Keys::Wire => key_identity,
+        Keys::Python => python_key_identity,
+    };
+    tagged_leaf(keys).prop_recursive(6, 48, 4, move |inner| {
         prop_oneof![
             prop::collection::vec(inner.clone(), 0..4).prop_map(Value::List),
             prop::collection::btree_map(key(), inner.clone(), 0..4).prop_map(Value::Record),
-            prop::collection::vec((key_value(), inner), 0..4)
-                .prop_map(|entries| Value::Map(distinct(entries, |(key, _)| key))),
-            prop::collection::vec(key_value(), 0..4)
-                .prop_map(|elements| Value::Set(distinct(elements, |element| element))),
+            prop::collection::vec((key_value(keys), inner), 0..4).prop_map(move |entries| {
+                Value::Map(distinct_as(entries, |(key, _)| key, identity))
+            }),
+            prop::collection::vec(key_value(keys), 0..4).prop_map(move |elements| Value::Set(
+                distinct_as(elements, |element| element, identity)
+            )),
         ]
     })
 }
@@ -538,7 +668,7 @@ fn tagged_value() -> impl Strategy<Value = Value> {
 fn tagged_round_trip(far: &Connection, name: &str) {
     check(
         &format!("{name} tagged round trip"),
-        tagged_value(),
+        tagged_value(Keys::Wire),
         |sent| {
             let args = Value::List(vec![sent.clone()]);
             let echoed = far
@@ -654,7 +784,7 @@ fn written(value: &Value) -> Json {
 fn javascript_tagged_round_trip(far: &Connection, name: &str) {
     check(
         &format!("{name} tagged round trip"),
-        tagged_value(),
+        tagged_value(Keys::Wire),
         |sent| {
             let echoed = far.invoke("conformance", "echo", Value::List(vec![sent.clone()]));
             // Integers beyond ±(2^53−1) cross as bigints (V6).
@@ -688,6 +818,55 @@ fn javascript_tagged_round_trip(far: &Connection, name: &str) {
             Ok(())
         },
     );
+}
+
+/// guarantee: bridge/value-tags. Tagged values come back from Python's
+/// echo as Python holds them: times to the microsecond (design V7), which
+/// [`Keys::Python`] keeps, so unchanged; data lists and records that hold
+/// no tagged value come back as data; the elements of a set in Python's
+/// order, which is not the one sent.
+fn python_tagged_round_trip(far: &Connection, name: &str) {
+    check(
+        &format!("{name} tagged round trip"),
+        tagged_value(Keys::Python),
+        |sent| {
+            let echoed = far
+                .invoke("conformance", "echo", Value::List(vec![sent.clone()]))
+                .map_err(|error| TestCaseError::fail(format!("echo failed: {error}")))?;
+            // Integers beyond ±(2^53−1) cross as bigints (V6).
+            prop_assert_eq!(
+                order_free(as_data(echoed)),
+                order_free(as_data(as_received(sent)))
+            );
+            Ok(())
+        },
+    );
+}
+
+/// `value` with the elements of every set in one order, by what they are
+/// written as: a set has no order on the wire, and Python's is its own.
+fn order_free(value: Value) -> Value {
+    match value {
+        Value::Set(elements) => {
+            let mut elements: Vec<Value> = elements.into_iter().map(order_free).collect();
+            elements.sort_by_key(|element| written(element).to_string());
+            Value::Set(elements)
+        }
+        Value::List(items) => Value::List(items.into_iter().map(order_free).collect()),
+        Value::Record(fields) => Value::Record(
+            fields
+                .into_iter()
+                .map(|(key, value)| (key, order_free(value)))
+                .collect(),
+        ),
+        Value::Map(entries) => Value::Map(
+            entries
+                .into_iter()
+                .map(|(key, value)| (order_free(key), order_free(value)))
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 /// `value` as it comes back: an integer beyond ±(2^53−1) in data as the
@@ -744,33 +923,37 @@ fn holds_tagged(value: &Value) -> bool {
 /// tagged values, a call carrying one fails on this side, naming the
 /// capability; data still crosses; the session goes on.
 fn tagged_refused(far: &Connection, name: &str) {
-    check(&format!("{name} tagged refused"), tagged_value(), |sent| {
-        let tagged = holds_tagged(&sent);
-        let echoed = far.invoke("conformance", "echo", Value::List(vec![sent.clone()]));
-        match (tagged, echoed) {
-            (
-                true,
-                Err(Error::Value {
-                    message,
-                    reason: None,
-                }),
-            ) => {
-                prop_assert!(
-                    message.contains("did not declare the capability value-"),
-                    "{}",
-                    message
-                );
+    check(
+        &format!("{name} tagged refused"),
+        tagged_value(Keys::Wire),
+        |sent| {
+            let tagged = holds_tagged(&sent);
+            let echoed = far.invoke("conformance", "echo", Value::List(vec![sent.clone()]));
+            match (tagged, echoed) {
+                (
+                    true,
+                    Err(Error::Value {
+                        message,
+                        reason: None,
+                    }),
+                ) => {
+                    prop_assert!(
+                        message.contains("did not declare the capability value-"),
+                        "{}",
+                        message
+                    );
+                }
+                (false, Ok(echoed)) => prop_assert_eq!(echoed, sent),
+                (_, other) => {
+                    return Err(TestCaseError::fail(format!(
+                        "tagged {tagged}: unexpected {other:?}"
+                    )))
+                }
             }
-            (false, Ok(echoed)) => prop_assert_eq!(echoed, sent),
-            (_, other) => {
-                return Err(TestCaseError::fail(format!(
-                    "tagged {tagged}: unexpected {other:?}"
-                )))
-            }
-        }
-        prop_assert!(far.close_reason().is_none());
-        Ok(())
-    });
+            prop_assert!(far.close_reason().is_none());
+            Ok(())
+        },
+    );
 }
 
 // ── The depth limit ──────────────────────────────────────────────────
@@ -1121,6 +1304,114 @@ fn releases_balance(near: &Connection, name: &str) {
     });
 }
 
+// ── Release counts where the far end reports no table ────────────────
+
+#[derive(Clone, Debug)]
+enum OneOp {
+    /// Pass this side's callback `slot` to the far end, which drops what
+    /// it held.
+    Hold(u8),
+    /// The far end drops what it holds.
+    Release,
+    /// The far end makes a function; this side keeps it in `slot`
+    /// (dropping what was there). One live made function at a time: the
+    /// Kotlin fixture hands back the same reference for each `make` it
+    /// runs (the string it exports by), which the far table would count
+    /// once.
+    Make(u8),
+    /// This side drops the function in `slot`.
+    Drop(u8),
+}
+
+fn one_ops() -> impl Strategy<Value = Vec<OneOp>> {
+    let slot = 0..SLOTS;
+    let op = prop_oneof![
+        3 => slot.clone().prop_map(OneOp::Hold),
+        2 => Just(OneOp::Release),
+        3 => slot.clone().prop_map(OneOp::Make),
+        3 => slot.prop_map(OneOp::Drop),
+    ];
+    prop::collection::vec(op, 0..24)
+}
+
+/// guarantee: bridge/release-count. Risk P4, for the runtimes whose
+/// fixtures keep one callback (`hold`/`drop`) and make functions (`make`)
+/// but report no reference table (Go, Bun, Kotlin; #624): after any
+/// sequence of these operations this side's tables hold exactly the
+/// references not yet released, and return to the start once all are
+/// released. A round trip before each reading waits for the releases the
+/// far end sent. The far end's own table is not observable, so that its
+/// numbers agree with this side's is not checked. Not among the
+/// operations: passing a function back for the far end to echo — these
+/// runtimes release a call's argument references when the collector runs,
+/// not when the call ends, so the tables would be read too early.
+fn releases_balance_without_tables(near: &Connection, name: &str) {
+    check(&format!("{name} release counts"), one_ops(), |ops| {
+        // Counted from where this case starts, so that a case shrunk after
+        // an earlier one leaked still shows its own leak.
+        let base = near.references();
+        let call = |method: &str, args: Vec<Value>| {
+            near.invoke("conformance", method, Value::List(args))
+                .map_err(|error| TestCaseError::fail(format!("{method}: {error}")))
+        };
+        let callbacks: Vec<Value> = (0..SLOTS)
+            .map(|_| Value::callback(|_| Ok(Value::Undefined)))
+            .collect();
+        // The model: what the far end holds (one callback at most), what
+        // this side keeps.
+        let mut held: Option<u8> = None;
+        let mut made: BTreeMap<u8, Value> = BTreeMap::new();
+        let expect = |held: Option<u8>, made: &BTreeMap<u8, Value>, after: &str| {
+            // A round trip, so that what the far end sent has arrived.
+            call("echo", vec![Value::Data(json!(0))])?;
+            let expected = (base.0 + usize::from(held.is_some()), base.1 + made.len());
+            let actual = near.references();
+            if actual == expected {
+                Ok(())
+            } else {
+                Err(TestCaseError::fail(format!(
+                    "after {after}: tables {actual:?}, expected {expected:?} \
+                     (far holds {held:?}, near keeps {:?})",
+                    made.keys().collect::<Vec<_>>()
+                )))
+            }
+        };
+        for (index, op) in ops.iter().enumerate() {
+            match op {
+                OneOp::Hold(s) => {
+                    // The fixture keeps one: let the far end drop it first,
+                    // as a holder replacing its callback would.
+                    if held.is_some() {
+                        call("drop", vec![])?;
+                    }
+                    call("hold", vec![callbacks[*s as usize].clone()])?;
+                    held = Some(*s);
+                }
+                OneOp::Release => {
+                    call("drop", vec![])?;
+                    held = None;
+                }
+                OneOp::Make(s) => {
+                    made.clear();
+                    let function = call("make", vec![])?;
+                    made.insert(*s, function);
+                }
+                OneOp::Drop(s) => {
+                    made.remove(s);
+                }
+            }
+            expect(held, &made, &format!("op {index} {op:?}"))?;
+        }
+        // Let everything go: this side is back where it started.
+        if held.is_some() {
+            call("drop", vec![])?;
+        }
+        held = None;
+        made.clear();
+        expect(held, &made, "releasing everything")
+    });
+}
+
 // ── Rust ─────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1256,6 +1547,17 @@ async fn python_values_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn python_tagged_values_round_trip() {
+    if !rutis_test_support::runtimes::enabled("python") {
+        return;
+    }
+    let (near, _child) = far_end(python(), "python").await;
+    tokio::task::spawn_blocking(move || python_tagged_round_trip(&near, "python"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn python_depth_limit() {
     if !rutis_test_support::runtimes::enabled("python") {
         return;
@@ -1289,7 +1591,7 @@ async fn python_releases_balance() {
         .unwrap();
 }
 
-// ── Go, Bun: values only (their fixtures have no reference tables) ───
+// ── Go, Bun: values, and release counts of this side (no far table) ──
 
 /// The Go fixture echoes the raw JSON (`json.RawMessage`): this checks the
 /// Go session, not how `encoding/json` decodes into Go types (the table's
@@ -1351,6 +1653,19 @@ async fn go_bad_values() {
         .unwrap();
 }
 
+/// guarantee: bridge/release-count. The Go fixture keeps one callback and
+/// makes functions; its tables are not observable (#624).
+#[tokio::test(flavor = "multi_thread")]
+async fn go_reference_counts() {
+    if !rutis_test_support::runtimes::enabled("go") {
+        return;
+    }
+    let (near, _child) = go_far_end().await;
+    tokio::task::spawn_blocking(move || releases_balance_without_tables(&near, "go"))
+        .await
+        .unwrap();
+}
+
 /// `value` as a far end that holds lists and records of data as data
 /// sends it back: a list or record holding no tagged value is data (on the
 /// wire, the two are the same value).
@@ -1403,7 +1718,7 @@ async fn go_tagged_values_round_trip() {
     }
     let (near, _child) = go_far_end().await;
     tokio::task::spawn_blocking(move || {
-        check("go tagged round trip", tagged_value(), |sent| {
+        check("go tagged round trip", tagged_value(Keys::Wire), |sent| {
             let echoed = near
                 .invoke("conformance", "echo", Value::List(vec![sent.clone()]))
                 .map_err(|error| TestCaseError::fail(format!("echo failed: {error}")))?;
@@ -1568,7 +1883,20 @@ async fn bun_bad_values() {
         .unwrap();
 }
 
-// ── Kotlin: values only (its fixture has no reference tables) ────────
+/// guarantee: bridge/release-count. The Bun fixture keeps one callback and
+/// makes functions; its tables are not observable (#624).
+#[tokio::test(flavor = "multi_thread")]
+async fn bun_reference_counts() {
+    if !rutis_test_support::runtimes::enabled("bun") {
+        return;
+    }
+    let (near, _child) = bun_far_end().await;
+    tokio::task::spawn_blocking(move || releases_balance_without_tables(&near, "bun"))
+        .await
+        .unwrap();
+}
+
+// ── Kotlin: values, and release counts of this side (no far table) ───
 
 mod kotlin;
 
@@ -1623,14 +1951,31 @@ async fn kotlin_tagged_values_round_trip() {
     }
     let (near, _child) = kotlin_far_end().await;
     tokio::task::spawn_blocking(move || {
-        check("kotlin tagged round trip", tagged_value(), |sent| {
-            let echoed = near
-                .invoke("conformance", "echo", Value::List(vec![sent.clone()]))
-                .map_err(|error| TestCaseError::fail(format!("echo failed: {error}")))?;
-            prop_assert_eq!(as_data(echoed), as_data(as_received(sent)));
-            Ok(())
-        })
+        check(
+            "kotlin tagged round trip",
+            tagged_value(Keys::Wire),
+            |sent| {
+                let echoed = near
+                    .invoke("conformance", "echo", Value::List(vec![sent.clone()]))
+                    .map_err(|error| TestCaseError::fail(format!("echo failed: {error}")))?;
+                prop_assert_eq!(as_data(echoed), as_data(as_received(sent)));
+                Ok(())
+            },
+        )
     })
     .await
     .unwrap();
+}
+
+/// guarantee: bridge/release-count. The Kotlin fixture keeps one callback
+/// and makes functions; its tables are not observable (#624).
+#[tokio::test(flavor = "multi_thread")]
+async fn kotlin_reference_counts() {
+    if !rutis_test_support::runtimes::enabled("kotlin") {
+        return;
+    }
+    let (near, _child) = kotlin_far_end().await;
+    tokio::task::spawn_blocking(move || releases_balance_without_tables(&near, "kotlin"))
+        .await
+        .unwrap();
 }
