@@ -14,6 +14,7 @@
 //!
 //! rule: EVP-3-2
 //! rule: EVP-3-5
+//! rule: EVP-3-10
 //! rule: EVP-4.1-3
 //! rule: EVP-4.1-6
 //! rule: EVP-4.2-1
@@ -35,12 +36,21 @@
 //! rule: EVP-5.4-14
 //! rule: EVP-5.5-5
 //! rule: EVP-5.5-6
+//! rule: EVP-5.6-5
 //! rule: EVP-5.7-4
 //! rule: EVP-6-6
+//! rule: EVP-6-10
 //! rule: EVP-7.1-1
 //! rule: EVP-7.1-2
 //! rule: EVP-8-3
 //! rule: EVP-8-7
+//! rule: EVP-10-1
+//! rule: EVP-10-2
+//! rule: EVP-11-3
+//! rule: EVP-11-4
+//! rule: EVP-11-7
+//! rule: EVP-11-8
+//! rule: EVP-12.2-9
 //!
 //! guarantee: events/hub-reserved
 //! guarantee: events/hub-flat
@@ -59,8 +69,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use rutis::events::{Call, Scope};
-use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect};
+use rutis::events::{Call, Scope, SyncCall};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind};
 use rutis::internal::CtxInternal;
 use rutis::{Ctx, Event};
 use rutis_bridge::channel::PeerId;
@@ -167,6 +177,10 @@ struct Rig {
 }
 
 async fn rig_on(root: Ctx, name: &str) -> Rig {
+    rig_endpoint(root, name, Endpoint::rust(id(name))).await
+}
+
+async fn rig_endpoint(root: Ctx, name: &str, mut endpoint: Endpoint) -> Rig {
     let (a, b) = rutis_bridge::memory::pair();
     let fake = Arc::new(Fake::default());
     let frames: Arc<Mutex<Vec<Json>>> = Arc::default();
@@ -179,7 +193,6 @@ async fn rig_on(root: Ctx, name: &str) -> Rig {
         closer: b.closer,
     };
     // A language runtime, which the session mounts a process on.
-    let mut endpoint = Endpoint::rust(id(name));
     endpoint.capabilities.push("runtime".into());
     let far = Connection::open(far, fake.clone(), endpoint).unwrap();
     let process = common::runtime::attached(&root, name, a)
@@ -192,6 +205,18 @@ async fn rig_on(root: Ctx, name: &str) -> Rig {
         far,
         frames,
     }
+}
+
+/// A root whose error sink records what a host reports, for the §5.6 lines.
+fn capturing_root() -> (Ctx, Arc<Mutex<Vec<Arc<ErrorKind>>>>) {
+    let errors: Arc<Mutex<Vec<Arc<ErrorKind>>>> = Arc::default();
+    let into = errors.clone();
+    let root = Ctx::root_with_sink(
+        tokio::runtime::Handle::current(),
+        Arc::new(move |error| into.lock().unwrap().push(error)),
+    );
+    common::runtime::greet_as_main(&root);
+    (root, errors)
 }
 
 async fn rig() -> Rig {
@@ -221,11 +246,26 @@ impl Rig {
     /// Load row `key`, named `id` (its configuration's id) when given, in
     /// `scope`.
     async fn load(&self, key: &str, id: Option<&str>, scope: &[Scope]) {
+        self.load_with(key, id, &[], scope).await;
+    }
+
+    /// [`Rig::load`], with the `isolate` labels a row keeps its services to.
+    async fn load_with(
+        &self,
+        key: &str,
+        id: Option<&str>,
+        isolate: &[(&str, &str)],
+        scope: &[Scope],
+    ) {
         if let Some(id) = id {
             self.process.name_row(key, id);
         }
+        let isolate: Vec<(String, String)> = isolate
+            .iter()
+            .map(|(name, label)| ((*name).into(), (*label).into()))
+            .collect();
         self.process
-            .load_row(key, Path::new("fake"), json!({}), &[], &[], scope)
+            .load_row(key, Path::new("fake"), json!({}), &isolate, &[], scope)
             .await
             .unwrap();
     }
@@ -1767,6 +1807,685 @@ async fn a_dispatchs_filter_and_terminal_must_be_functions() {
             )
         );
         assert!(listeners(&rig.fake).is_empty(), "no listener was called");
+    })
+    .await;
+}
+
+/// The name and message of an error a far end read.
+fn thrown(error: &Error) -> (&str, &str) {
+    match error {
+        Error::Remote { name, message, .. } => (name, message),
+        other => panic!("expected a remote error, got {other:?}"),
+    }
+}
+
+/// A typed event a host filter is used on: a name in the table.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Filtered(String);
+
+impl Event for Filtered {
+    const NAME: &'static str = "t/f";
+    type Value = ();
+}
+
+/// A `WaterfallNext` misuse a Rust listener recorded: its message and its
+/// wire name.
+type Misuse = Arc<Mutex<Option<(String, Option<&'static str>)>>>;
+
+/// rule: EVP-3-10
+///
+/// The `isolate` labels a row is loaded with (a service it keeps to a scope
+/// of its own, a lease among them) are no event scope: its listeners'
+/// descriptors carry the `rows.load` scope chain, `[]` when the row has
+/// none, and nothing of the labels.
+#[tokio::test(flavor = "multi_thread")]
+async fn isolate_labels_are_not_event_scopes() {
+    within("isolate labels", async {
+        let rig = rig().await;
+        let chain = scope(&[("17", "tenant")]);
+        // A row keeps a service and a lease to itself; another only a
+        // service. The labels are `(service, label)` pairs of `rows.load`.
+        rig.load_with(
+            "iso",
+            Some("iso-row"),
+            &[("weather", "private"), ("lease", "\u{1}iso")],
+            &chain,
+        )
+        .await;
+        rig.load_with("plain", None, &[("weather", "private")], &[])
+            .await;
+        rig.register("1", "t/iso", Some("iso"), "one", "any")
+            .await
+            .unwrap();
+        rig.register("2", "t/iso", Some("plain"), "two", "any")
+            .await
+            .unwrap();
+        let seen: Arc<Mutex<Vec<Json>>> = Arc::default();
+        let recorded = seen.clone();
+        let selector = Value::callback(move |argument| {
+            let descriptors = argument.list()?.remove(0).json()?;
+            recorded.lock().unwrap().push(descriptors.clone());
+            let answers = descriptors.as_array().unwrap().len();
+            Ok(Value::Data(json!(vec![false; answers])))
+        });
+        let answered = rig
+            .dispatch_started(Some("iso"), "t/iso", "serial", vec![], Some(selector))
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(settle(answered).await.unwrap(), Value::Undefined);
+        let seen = seen.lock().unwrap().clone();
+        let described = &seen[0];
+        // The isolated row: its id and chain; the plain row: an empty one.
+        assert_eq!(described[0]["row"], json!("iso-row"), "{described:#?}");
+        assert_eq!(
+            described[0]["scope"],
+            json!([{ "id": "17", "group": "tenant" }]),
+            "{described:#?}"
+        );
+        assert_eq!(described[1]["row"], json!("plain"), "{described:#?}");
+        assert_eq!(described[1]["scope"], json!([]), "{described:#?}");
+        // A label is not part of a descriptor at all: neither the service's
+        // nor the lease's (whose U+0001 shows escaped in JSON text).
+        let text = described.to_string();
+        assert!(!text.contains("private"), "{text}");
+        assert!(!text.contains("0001"), "{text}");
+    })
+    .await;
+}
+
+/// rule: EVP-5.6-5
+///
+/// A call that cannot be delivered (here the runtime answers that its
+/// listener is withdrawn) is reported by the dispatching side, once, in the
+/// §5.6 words for a listener that is no row's (`in runtime <r>`); the
+/// emitter still gets its `undefined` and the session goes on.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_emit_reports_a_listener_that_is_gone() {
+    within("withdrawn listener report", async {
+        let (root, errors) = capturing_root();
+        let rig = rig_on(root, "rt").await;
+        rig.load("chat", None, &[]).await;
+        rig.register("1", "t/gone", None, "one", "any")
+            .await
+            .unwrap();
+        // The runtime no longer has listener 1: the call reaches it and is
+        // refused there.
+        rig.fake.listeners.lock().unwrap().remove("1");
+        let answered = rig
+            .dispatch(Some("chat"), "t/gone", "emit", vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            answered,
+            Value::Undefined,
+            "an emit answers its emitter as usual"
+        );
+        until(
+            || {
+                errors.lock().unwrap().iter().any(|error| {
+                    rutis_bridge::events::report_line(error)
+                        .is_some_and(|line| line.contains("t/gone"))
+                })
+            },
+            "the report",
+        )
+        .await;
+        let lines: Vec<String> = errors
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|error| rutis_bridge::events::report_line(error))
+            .filter(|line| line.contains("t/gone"))
+            .collect();
+        assert_eq!(
+            lines,
+            ["listener of t/gone in runtime rt failed: BindingError: listener \"1\" is withdrawn"],
+            "{lines:?}"
+        );
+        // The session goes on.
+        let answered = rig
+            .dispatch(Some("chat"), "t/gone", "emit", vec![])
+            .await
+            .unwrap();
+        assert_eq!(answered, Value::Undefined);
+    })
+    .await;
+}
+
+/// rule: EVP-6-10
+///
+/// A filter's error is the dispatch's failure as it is, and a plain `bool`
+/// filter (0.22's `filter`; the rule's `try_filter`, whose error is now the
+/// selector's) can only fail by panicking: the panic, like the error, fails
+/// the whole dispatch before any call.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_filter_error_fails_the_dispatch_and_a_panic_is_it() {
+    within("filter errors", async {
+        let rig = rig().await;
+        rig.load("chat", None, &[]).await;
+        rig.register("1", "t/f", Some("chat"), "one", "any")
+            .await
+            .unwrap();
+        // The emitter's selector throws: the dispatch fails with that
+        // error, as it is.
+        let throwing = Value::callback(|_| {
+            Err(Error::Remote {
+                name: "StopFilter".into(),
+                message: "the predicate said no".into(),
+                graph: None,
+            })
+        });
+        let refused = rig
+            .dispatch_started(Some("chat"), "t/f", "serial", vec![], Some(throwing))
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(
+            thrown(&settle(refused).await.unwrap_err()),
+            ("StopFilter", "the predicate said no")
+        );
+        assert!(
+            rig.fake.calls.lock().unwrap().is_empty(),
+            "no listener is called"
+        );
+        // A Rust filter that panics: the whole dispatch fails with the
+        // panic's error.
+        let failed = rig
+            .root
+            .filter(|_| -> bool { panic!("filter broke") })
+            .serial(Filtered("x".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(failed.to_string(), "filter broke");
+        assert!(
+            rig.fake.calls.lock().unwrap().is_empty(),
+            "no listener is called"
+        );
+    })
+    .await;
+}
+
+/// rule: EVP-10-1
+///
+/// A signal is a session value on the event path both ways: an argument a
+/// listener in another session receives as one, and a result it answers
+/// with, which the dispatch hands on as it is. A result nested deeper than
+/// the 64-level limit fails the call that answers it, not the session.
+#[tokio::test(flavor = "multi_thread")]
+async fn signals_cross_the_event_path_and_a_deep_result_is_refused() {
+    within("event values", async {
+        let rig = rig().await;
+        rig.load("chat", None, &[]).await;
+        // The listener records the arguments it was called with.
+        let received: Arc<Mutex<Vec<Vec<Value>>>> = Arc::default();
+        let recording = received.clone();
+        rig.register_with(
+            "1",
+            "t/sig",
+            Some("chat"),
+            "one",
+            "any",
+            Arc::new(move |fields| {
+                if let Value::List(arguments) = fields["args"].clone() {
+                    recording.lock().unwrap().push(arguments);
+                }
+                Ok(Value::Signal)
+            }),
+        )
+        .await
+        .unwrap();
+        let answered = rig
+            .dispatch(Some("chat"), "t/sig", "serial", vec![Value::Signal])
+            .await
+            .unwrap();
+        assert_eq!(
+            answered,
+            Value::Signal,
+            "a signal result reaches the emitter"
+        );
+        assert_eq!(
+            *received.lock().unwrap(),
+            vec![vec![Value::Signal]],
+            "a signal argument reaches the listener"
+        );
+        // A waterfall's value too.
+        let answered = rig
+            .dispatch(Some("chat"), "t/sig", "waterfall", vec![Value::Signal])
+            .await
+            .unwrap();
+        assert_eq!(answered, Value::Signal);
+        // A result nested deeper than the protocol's 64 levels fails its
+        // call with the `BindingError`; the session goes on.
+        let deep = {
+            let mut value = Value::Data(json!("bottom"));
+            for _ in 0..65 {
+                value = Value::List(vec![value]);
+            }
+            value
+        };
+        rig.root
+            .listen::<Args>()
+            .name("t/deep")
+            .on(move |_: Arc<Args>, _: Call<Args>| {
+                let deep = deep.clone();
+                async move { Ok(Some(ArgValue(deep))) }
+            })
+            .unwrap();
+        let refused = rig
+            .dispatch(Some("chat"), "t/deep", "serial", vec![])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            thrown(&refused),
+            (
+                "BindingError",
+                "events.dispatch: the result cannot be sent: the value nests deeper than 64 \
+                 levels"
+            )
+        );
+        // The session is still usable.
+        let answered = rig
+            .dispatch(Some("chat"), "t/sig", "serial", vec![])
+            .await
+            .unwrap();
+        assert_eq!(answered, Value::Signal);
+    })
+    .await;
+}
+
+/// rule: EVP-10-2
+///
+/// A value the listener's runtime does not take is refused by the sender's
+/// side, and only that call fails: an `emit` reports one line, a `serial`
+/// dispatch's reply is that `BindingError`, and a `parallel`'s is an
+/// `AggregateError` whose child is it. Nothing of the call reaches the
+/// listener: it is refused before its frame is made.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_value_the_far_end_does_not_take_fails_only_its_call() {
+    within("value capability", async {
+        let (root, errors) = capturing_root();
+        let mut endpoint = Endpoint::rust(id("rt"));
+        endpoint
+            .capabilities
+            .retain(|capability| capability != "value-bytes");
+        let rig = rig_endpoint(root, "rt", endpoint).await;
+        rig.load("chat", None, &[]).await;
+        rig.register("1", "t/cap", None, "one", "any")
+            .await
+            .unwrap();
+        let bytes = || Value::Bytes(b"x".to_vec());
+        let refused_at = "events.call: argument 1 cannot be sent: cannot send bytes: the far end \
+                          does not take bytes values (it did not declare the capability \
+                          value-bytes)";
+        // emit: a line, and the emitter hears `undefined`.
+        let answered = rig
+            .dispatch(Some("chat"), "t/cap", "emit", vec![bytes()])
+            .await
+            .unwrap();
+        assert_eq!(answered, Value::Undefined);
+        until(
+            || {
+                errors.lock().unwrap().iter().any(|error| {
+                    rutis_bridge::events::report_line(error)
+                        .is_some_and(|line| line.contains("t/cap"))
+                })
+            },
+            "the emit's report",
+        )
+        .await;
+        let lines: Vec<String> = errors
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|error| rutis_bridge::events::report_line(error))
+            .filter(|line| line.contains("t/cap"))
+            .collect();
+        assert_eq!(
+            lines,
+            [format!(
+                "listener of t/cap in runtime rt failed: BindingError: {refused_at}"
+            )]
+        );
+        // serial: the dispatch's reply is the failure.
+        let refused = rig
+            .dispatch(Some("chat"), "t/cap", "serial", vec![bytes()])
+            .await
+            .unwrap_err();
+        assert_eq!(thrown(&refused), ("BindingError", refused_at));
+        // parallel: one `AggregateError`, its child that same failure.
+        let refused = rig
+            .dispatch(Some("chat"), "t/cap", "parallel", vec![bytes()])
+            .await
+            .unwrap_err();
+        let Error::Remote {
+            name,
+            message,
+            graph,
+        } = &refused
+        else {
+            panic!("expected AggregateError, got {refused:?}");
+        };
+        assert_eq!(name, "AggregateError");
+        assert_eq!(message, "1 listener of t/cap failed");
+        let graph = graph.as_ref().expect("the children's graph");
+        let nodes = graph["nodes"].as_array().unwrap();
+        assert_eq!(nodes[0]["name"], json!("AggregateError"), "{graph:#?}");
+        assert_eq!(nodes[1]["name"], json!("BindingError"), "{graph:#?}");
+        assert_eq!(nodes[1]["message"], json!(refused_at), "{graph:#?}");
+        assert!(
+            rig.fake.calls.lock().unwrap().is_empty(),
+            "no call reached the listener"
+        );
+    })
+    .await;
+}
+
+/// rule: EVP-11-3
+///
+/// `AsyncListener`'s message names the listener by the first descriptor
+/// field with a value: a row's listener is `row <id>` (the configuration's
+/// id, not the key), a mount's is `runtime <r>`, and a Rust listener of
+/// this host has only its plugin.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_async_listener_is_named_by_its_first_described_place() {
+    within("async listener labels", async {
+        let rig = rig().await;
+        rig.load("chat", Some("chat-ui"), &[]).await;
+        rig.register("1", "t/row", Some("chat"), "chat-plugin", "async")
+            .await
+            .unwrap();
+        rig.register("2", "t/mount", None, "mount-plugin", "async")
+            .await
+            .unwrap();
+        rig.root.listen::<Args>().name("t/host").on(hear).unwrap();
+        let refused = rig
+            .dispatch(Some("chat"), "t/row", "bail", vec![])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            thrown(&refused),
+            (
+                "AsyncListener",
+                "listener of t/row in row chat-ui is asynchronous and cannot run in a synchronous \
+                 bail"
+            )
+        );
+        let refused = rig
+            .dispatch(Some("chat"), "t/mount", "bail", vec![])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            thrown(&refused),
+            (
+                "AsyncListener",
+                "listener of t/mount in runtime rt is asynchronous and cannot run in a \
+                 synchronous bail"
+            )
+        );
+        let refused = rig
+            .dispatch(Some("chat"), "t/host", "bail", vec![])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            thrown(&refused),
+            (
+                "AsyncListener",
+                "listener of t/host in plugin root is asynchronous and cannot run in a \
+                 synchronous bail"
+            )
+        );
+    })
+    .await;
+}
+
+/// rule: EVP-11-4
+///
+/// `WaterfallNext`'s messages, word for word: `next` outside a waterfall
+/// says which mode it was, and a synchronous listener in an asynchronous
+/// waterfall is told to register with `on`. (The twice and ended cases are
+/// in `next_runs_once_and_not_after_the_waterfall_ended`.)
+#[tokio::test(flavor = "multi_thread")]
+async fn next_outside_a_waterfall_and_in_an_asynchronous_one() {
+    within("next messages", async {
+        let rig = rig().await;
+        rig.load("chat", None, &[]).await;
+        let serial_seen: Misuse = Arc::default();
+        let seen = serial_seen.clone();
+        rig.root
+            .listen::<Args>()
+            .name("t/ns")
+            .on(move |_: Arc<Args>, call: Call<Args>| {
+                let seen = seen.clone();
+                async move {
+                    let refused = call.next().await.unwrap_err();
+                    *seen.lock().unwrap() = Some((refused.to_string(), refused.wire_name()));
+                    Ok(None)
+                }
+            })
+            .unwrap();
+        let answered = rig
+            .dispatch(Some("chat"), "t/ns", "serial", vec![])
+            .await
+            .unwrap();
+        assert_eq!(answered, Value::Undefined);
+        assert_eq!(
+            serial_seen.lock().unwrap().take().unwrap(),
+            (
+                "next is available only in a waterfall (this is serial)".to_owned(),
+                Some("WaterfallNext")
+            )
+        );
+        let bail_seen: Misuse = Arc::default();
+        let seen = bail_seen.clone();
+        rig.root
+            .listen::<Args>()
+            .name("t/nb")
+            .on_sync(move |_: Arc<Args>, call: SyncCall<'_, Args>| {
+                let refused = call.next().unwrap_err();
+                *seen.lock().unwrap() = Some((refused.to_string(), refused.wire_name()));
+                Ok(None)
+            })
+            .unwrap();
+        let answered = rig
+            .dispatch(Some("chat"), "t/nb", "bail", vec![])
+            .await
+            .unwrap();
+        assert_eq!(answered, Value::Undefined);
+        assert_eq!(
+            bail_seen.lock().unwrap().take().unwrap(),
+            (
+                "next is available only in a waterfall (this is bail)".to_owned(),
+                Some("WaterfallNext")
+            )
+        );
+        let async_seen: Misuse = Arc::default();
+        let seen = async_seen.clone();
+        rig.root
+            .listen::<Args>()
+            .name("t/na")
+            .on_sync(move |_: Arc<Args>, call: SyncCall<'_, Args>| {
+                let refused = call.next().unwrap_err();
+                *seen.lock().unwrap() = Some((refused.to_string(), refused.wire_name()));
+                Ok(None)
+            })
+            .unwrap();
+        let answered = rig
+            .dispatch(Some("chat"), "t/na", "waterfall", vec![])
+            .await
+            .unwrap();
+        assert_eq!(answered, Value::Undefined);
+        assert_eq!(
+            async_seen.lock().unwrap().take().unwrap(),
+            (
+                "a synchronous listener cannot call next in an asynchronous waterfall; register \
+                 it with on"
+                    .to_owned(),
+                Some("WaterfallNext")
+            )
+        );
+    })
+    .await;
+}
+
+/// rule: EVP-11-7
+///
+/// A frame the host rejects fails with a `BindingError` carrying the
+/// message the protocol gives for that operation: a dispatch that is not a
+/// record, one without a name or a mode, one with an unknown mode, and an
+/// operation the session does not offer. The session goes on afterwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn rejected_frames_are_binding_errors_with_the_protocol_message() {
+    within("rejected frames", async {
+        let rig = rig().await;
+        let refused = rig
+            .send("events.dispatch", Value::Data(json!("not a dispatch")))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            binding(&refused),
+            ("BindingError", "events.dispatch needs its dispatch")
+        );
+        let refused = rig
+            .send("events.dispatch", Value::Record(BTreeMap::new()))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            binding(&refused),
+            ("BindingError", "events.dispatch needs a name")
+        );
+        let mut fields = BTreeMap::new();
+        fields.insert("name".into(), Value::Data(json!("t/x")));
+        let refused = rig
+            .send("events.dispatch", Value::Record(fields.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            binding(&refused),
+            ("BindingError", "events.dispatch needs a mode")
+        );
+        fields.insert("mode".into(), Value::Data(json!("sync")));
+        let refused = rig
+            .send("events.dispatch", Value::Record(fields))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            binding(&refused),
+            ("BindingError", "events.dispatch: unknown mode sync")
+        );
+        let refused = rig
+            .send("events.reload", Value::Undefined)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            binding(&refused),
+            ("BindingError", "events.reload is not offered here")
+        );
+        // Still there.
+        rig.load("chat", None, &[]).await;
+        let answered = rig
+            .dispatch(Some("chat"), "t/none", "serial", vec![])
+            .await
+            .unwrap();
+        assert_eq!(answered, Value::Undefined);
+    })
+    .await;
+}
+
+/// rule: EVP-11-8
+///
+/// A listener's own error crosses the event path with its name, message and
+/// error graph, as a call's error does: `serial`, `waterfall` and `bail`
+/// each hand the emitter the very error the listener threw.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_listener_error_carries_its_graph_across_the_event_path() {
+    within("listener error graph", async {
+        let rig = rig().await;
+        rig.load("chat", None, &[]).await;
+        let graph = json!({
+            "root": { "type": "reference", "value": 1 },
+            "nodes": [
+                null,
+                {
+                    "type": "error",
+                    "name": "KeyError",
+                    "message": "'region'",
+                    "cause": { "type": "reference", "value": 2 },
+                },
+                { "type": "data", "value": { "region": null } },
+            ],
+        });
+        let throwing = {
+            let graph = graph.clone();
+            Arc::new(move |_: &BTreeMap<String, Value>| -> Reply {
+                Err(Error::Remote {
+                    name: "KeyError".into(),
+                    message: "'region'".into(),
+                    graph: Some(graph.clone()),
+                })
+            })
+        };
+        rig.register_with("1", "t/err", Some("chat"), "one", "sync", throwing)
+            .await
+            .unwrap();
+        for mode in ["serial", "waterfall", "bail"] {
+            let refused = rig
+                .dispatch(Some("chat"), "t/err", mode, vec![])
+                .await
+                .unwrap_err();
+            let Error::Remote {
+                name,
+                message,
+                graph: seen,
+            } = &refused
+            else {
+                panic!("{mode}: expected KeyError, got {refused:?}");
+            };
+            assert_eq!(name, "KeyError", "{mode}");
+            assert_eq!(message, "'region'", "{mode}");
+            assert_eq!(
+                seen.as_ref(),
+                Some(&graph),
+                "{mode}: the graph crossed as it was"
+            );
+        }
+    })
+    .await;
+}
+
+/// rule: EVP-12.2-9
+///
+/// A runtime's plugin hears `rutis/*` (the host emits it), but cannot emit
+/// it: a dispatch of such a name in any of the five modes is refused with
+/// `ReservedEvent`, and no listener is called. (`internal/*` is covered by
+/// `internal_names_are_refused_and_never_registered`.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_runtime_hears_rutis_events_but_cannot_emit_them() {
+    within("rutis/* emitted", async {
+        let rig = rig().await;
+        rig.load("chat", None, &[]).await;
+        // Listening to one is allowed.
+        rig.register("1", "rutis/service", None, "one", "any")
+            .await
+            .unwrap();
+        for mode in ["emit", "parallel", "serial", "waterfall", "bail"] {
+            let refused = rig
+                .dispatch(Some("chat"), "rutis/service", mode, vec![])
+                .await
+                .unwrap_err();
+            assert_eq!(
+                thrown(&refused),
+                (
+                    "ReservedEvent",
+                    "rutis/* events are emitted by rutis only: rutis/service"
+                ),
+                "{mode}"
+            );
+        }
+        assert!(
+            rig.fake.calls.lock().unwrap().is_empty(),
+            "no listener was called"
+        );
     })
     .await;
 }
