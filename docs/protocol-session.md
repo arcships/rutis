@@ -76,13 +76,13 @@
 
 ### 2.4 能力
 
-`SESS-15` **当前。** 能力是 `hello.capabilities` 里的字符串；能力声明的是“这一端能做什么”，不是权限。会话层读取三类：`value-<tag>`（能否发某种值）、`reentrant-sync` 与 `sync-stack`（同步等待图里的运行时形状）。插件与挂载层读取 `node`、`runtime`、`plugins`。开场的 `require` 列表在握手后检查缺失的能力。`crates/rutis-bridge/src/session/rpc.rs:1154-1178,1590-1611,2204-2214`；`crates/rutis-bridge/src/session/plugin/greet.rs:33-38,57-70`；`crates/rutis-bridge/src/session/plugin/mod.rs:353,369`；`docs/guarantees.md` 的 `bridge/sync-wait-cycle-refused`
+`SESS-15` **当前。** 能力是 `hello.capabilities` 里的字符串；能力声明的是“这一端能做什么”，不是权限。会话层读取三类：`value-<tag>`（能否发某种值）、`reentrant-sync` 与 `sync-stack`（同步等待图里的运行时形状）。插件与挂载层读取 `node`、`runtime`、`plugins`。能力只是声明：没有“必需能力”列表，缺少某种能力时的处理在用到它的那一层（`SESS-25`）。`crates/rutis-bridge/src/session/rpc.rs:1154-1178,1590-1611,2204-2214`；`crates/rutis-bridge/src/session/plugin/greet.rs:31-36`；`crates/rutis-bridge/src/session/plugin/mod.rs:352,368`；`docs/guarantees.md` 的 `bridge/sync-wait-cycle-refused`
 
 | 能力 | 声明者 | 含义 |
 | --- | --- | --- |
 | `reentrant-sync` | Rust、Python、Go、Swift、Kotlin | 同步调用可以在同一执行栈上重入；每个进来的调用有自己的线程或栈。 |
 | `sync-stack` | Node、Bun、Python | 单线程、单栈；同步等待会叠在这一个栈上。 |
-| `node` | 会话插件（宿主一侧的 `Greet`）加在自己的声明里 | 这一端是完整的框架节点。`crates/rutis-bridge/src/session/plugin/greet.rs:33-38`；`crates/rutis-bridge/src/session/plugin/mod.rs:353` |
+| `node` | 会话插件（宿主一侧的 `Greet`）加在自己的声明里 | 这一端是完整的框架节点。`crates/rutis-bridge/src/session/plugin/greet.rs:34-36`；`crates/rutis-bridge/src/session/plugin/mod.rs:352` |
 | `runtime` | Node、Bun、Python、Go、Swift、Kotlin 运行时进程 | 这一端是运行时进程，可被宿主挂载或拨号。`node/rutis-runtime/src/runner.mjs:39`；`bun/rutis-bun/src/main.ts:118`；`python/rutis/rutis/__main__.py:72`；`go/rutis/internal/runtime/serve.go:99`；`swift/rutis/Sources/Rutis/Remote/App.swift:356`；`kotlin/rutis/rutis/src/shared/kotlin/arcships/rutis/RutisApp.kt:122`；`crates/rutis-bridge/src/session/plugin/mod.rs:369` |
 | `plugins` | Rust；Node/Bun 作为宿主时 | 这一端收插件定义值。`crates/rutis-bridge/src/session/rpc.rs:918-922`；`docs/guarantees.md` 的 `bridge/plugin-values` |
 | `value-<tag>` | 所有实现，十种 | 这一端收该种带标记的值。`crates/rutis-bridge/src/session/rpc.rs:904-917` |
@@ -109,7 +109,7 @@
 
 `SESS-24` **当前。** `hello.endpoint` 必须存在且是合法端点 id：非空，只含小写字母、数字和 `-`。缺失、非法，或（设置了期望时）与本端期望的不一致都使握手失败：缺失与非法是 `Incompatible`（Rust 内层原因：`the far end named no endpoint` / `invalid endpoint id …`），期望不符或自称本端 id 是 `IdentityMismatch`。`crates/rutis-bridge/src/session/rpc.rs:2463-2479`；`crates/rutis-bridge/src/channel/mod.rs:77-109`；测试 `crates/rutis-bridge/src/session/rpc/tests.rs::endpoint_format::a_greeting_from_another_endpoint_fails_the_handshake`
 
-`SESS-25` **当前。** 开场的 `require` 列表每个能力都必须在对方问候里出现；缺一个就失败（`Incompatible`，文字 `incompatible session: <far> does not declare <capability>`），会话关闭，而不是等调用时才发现。`crates/rutis-bridge/src/session/plugin/greet.rs:57-70`
+`SESS-25` **明确不保证。** 没有实现提供“声明必需能力”的入口，握手不会因为对端缺少某个能力而拒绝。Rust 的 `Greet` 曾有一个 `require` 字段，唯一的生产调用传的是空列表，没有入口能传入非空能力，已删除；Go 的 `peer.Options.Require` 在 `internal/peer` 里，同样没有调用方；Node、Bun、Python、Swift、Kotlin 没有这项检查。对端不声明某种能力时，只有用到它的地方才失败（例如带标记的值不发送，`SESS-11`）。`crates/rutis-bridge/src/session/plugin/greet.rs:12-19`；`go/rutis/internal/peer/peer.go:111-114`
 
 `SESS-26` **当前。** 会话插件等待问候最多 10 秒；超时以传输错误 `the far end did not greet in time` 结束会话。`crates/rutis-bridge/src/session/plugin/mod.rs:46-47,102-110`；测试 `crates/rutis-bridge/tests/session_plugin.rs:130-154`
 
@@ -313,7 +313,7 @@
 | `SESS-12` | 只有端点格式、协议 4 | 当前 | `docs/migration-0.19.md`「一起升级」；`crates/rutis-bridge/src/session/rpc.rs:2456-2462` |
 | `SESS-13` | 两种格式（compat 2、endpoint 3） | 已取代 | `docs/migration-0.19.md`「一起升级」 |
 | `SESS-14` | `sync` 只发给声明 `sync-wait` 的对端 | 已取代 | 协议 4 无此能力；`crates/rutis-bridge/src/session/protocol.rs:174-176` |
-| `SESS-15` | 能力声明及其被读取的范围 | 当前 | `crates/rutis-bridge/src/session/rpc.rs:1154-1178,1590-1611`；`crates/rutis-bridge/src/session/plugin/greet.rs:57-70` |
+| `SESS-15` | 能力声明及其被读取的范围 | 当前 | `crates/rutis-bridge/src/session/rpc.rs:1154-1178,1590-1611`；`crates/rutis-bridge/src/session/plugin/greet.rs:31-36` |
 | `SESS-16` | `sync-wait`、`events-v2`、`objects` 能力 | 已取代 | 实现无此常量；§6.2 |
 | `SESS-17` | 未知能力名忽略；声明不被验证；能力不是权限 | 明确不保证 | §2.4 |
 | `SESS-18` | 帧按到达顺序一次一帧；调用可并发 | 当前 | `crates/rutis-bridge/src/session/rpc.rs:1557-1570,2792-2839`；`go/rutis/internal/peer/peer_test.go:55-58` |
@@ -323,7 +323,7 @@
 | `SESS-22` | 重复 `hello` 结束会话 | 当前 | `crates/rutis-bridge/src/session/rpc.rs:2602-2614` |
 | `SESS-23` | 版本不匹配时说明升级哪一端 | 当前 | `crates/rutis-bridge/src/session/rpc.rs:1224-1242,2456-2462`；`bridge/version-refusal` |
 | `SESS-24` | 端点 id 必填、格式与身份核对 | 当前 | `crates/rutis-bridge/src/session/rpc.rs:2463-2479`；`crates/rutis-bridge/src/channel/mod.rs:77-109` |
-| `SESS-25` | 必需能力缺失时拒绝握手 | 当前 | `crates/rutis-bridge/src/session/plugin/greet.rs:57-70` |
+| `SESS-25` | 必需能力缺失时拒绝握手 | 明确不保证 | 没有实现提供声明必需能力的入口：`crates/rutis-bridge/src/session/plugin/greet.rs:12-19`；`go/rutis/internal/peer/peer.go:111-114` |
 | `SESS-26` | 10 秒问候时限 | 当前 | `crates/rutis-bridge/src/session/plugin/mod.rs:46-47`；`crates/rutis-bridge/tests/session_plugin.rs:130-154` |
 | `SESS-27` | `ready` 前发送被拒 | 当前 | `crates/rutis-bridge/src/session/rpc.rs:1844-1848` |
 | `SESS-28` | 握手成功不挂载 | 当前 | `crates/rutis-bridge/src/session/plugin/mod.rs:102-153,178-184` |
@@ -396,7 +396,6 @@
 | 对端版本更新 | `incompatible session: the far end speaks protocol 99, this side 4: upgrade this side (Rust crates rutis-host / rutis-bridge)` |
 | 对端没在 10 秒内问候 | `the far end did not greet in time` |
 | 宿主没有会话 id | `the host provides no id for its sessions` |
-| 缺少要求的能力 | `incompatible session: py does not declare plugins` |
 | 值超过消息上限 | `svc.take: argument 2 cannot be sent: the message would be over the limit of 16777216 bytes (16 MiB)`；错误码 `bad-value`；`data` 是 `{"argument":2,"limit":16777216,"part":"argument"}` |
 | 对象所在的运行时退出 | `a call on an object from py failed: runtime py exited`；错误码 `peer-gone` |
 
@@ -423,13 +422,13 @@
 
 **失败：** 畸形帧用例逐条打印是哪一条消息；规则类别见 §8。错误文字可以与其他实现不同（`SESS-77`），但必须仍以传输错误结束会话，或只让所属调用失败，范围与 §8 一致。
 
-**需要学习的概念：** 帧、`op`、调用号、`path`、引用授予/释放、调用级失败、会话级失败、能力协商。它们只用于实现与验证，不进入用户 API。
+**需要学习的概念：** 帧、`op`、调用号、`path`、引用授予/释放、调用级失败、会话级失败、能力声明。它们只用于实现与验证，不进入用户 API。
 
 ## 13. 兼容性与迁移
 
 `SESS-79` **当前。** 协议 4 只与协议 4 通信。0.18 及更早的宿主、运行时、节点和 SDK 在握手时被拒；迁移是把所有端一起升级到 0.19 或更高。`docs/migration-0.19.md`「一起升级」；`docs/guarantees.md` 的 `bridge/cross-version-meetings`
 
-`SESS-80` **当前。** 新增能力不需要提升协议版本：发送方按 `value-<tag>` 或 `require` 判断；对端不声明就不发（值）或拒绝握手（必需能力）。由于旧实现会失败带未知字段的调用（`SESS-66`）、拒绝未知 `op`，新增**帧**或**改变已有字段含义**只能提升协议版本，并同时更新本文、`Frame`/`WireValue`、畸形帧矩阵和七种实现。新增能力不必提升版本，按 `value-<tag>` 或 `require` 协商（§2.4）。
+`SESS-80` **当前。** 新增能力不需要提升协议版本：发送方按 `value-<tag>` 判断，对端不声明就不发。由于旧实现会失败带未知字段的调用（`SESS-66`）、拒绝未知 `op`，新增**帧**或**改变已有字段含义**只能提升协议版本，并同时更新本文、`Frame`/`WireValue`、畸形帧矩阵和七种实现。新增能力不必提升版本，只按声明使用（§2.4）；没有“必需能力”可协商（`SESS-25`）。
 
 `SESS-81` **明确不保证。** 相邻版本之外的跨版本相遇；新旧实现混用；不带版本号的新字段。`docs/guarantees.md` 的 `bridge/cross-version-meetings` 只承诺相邻、其间没有不兼容变更的两个发布版本。
 

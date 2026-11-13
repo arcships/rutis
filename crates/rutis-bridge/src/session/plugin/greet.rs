@@ -7,24 +7,22 @@ use std::time::Duration;
 use crate::channel::{Channel, PeerId};
 use crate::peer::Operations;
 use crate::session::rpc::{Connection, Endpoint, SessionOptions};
-use crate::session::{Error, Handshake};
+use crate::session::Error;
 
 /// How this end opens a session: as `local`, expecting a far end (if it
-/// names one), declaring and requiring capabilities, under the limits the
-/// host turns on.
+/// names one), declaring capabilities, under the limits the host turns on.
 pub(crate) struct Greet<'a> {
     pub(crate) local: PeerId,
     pub(crate) expected: Option<PeerId>,
     pub(crate) declare: &'a [String],
-    pub(crate) require: &'a [String],
     pub(crate) timeout: Duration,
     pub(crate) options: SessionOptions,
 }
 
 impl Greet<'_> {
     /// Open a session on `channel` and wait, at most `timeout`, for the far
-    /// end to greet as expected, declaring what is required. On failure the
-    /// session is closed, and so it is when this is dropped before it ends
+    /// end to greet as expected, declaring what the host asked for. On failure
+    /// the session is closed, and so it is when this is dropped before it ends
     /// (its channel closed with `Close::Done`).
     pub(crate) async fn open(
         &self,
@@ -51,22 +49,6 @@ impl Greet<'_> {
                 session.close(error.clone());
                 return Err(error);
             }
-        }
-        // The contract is checked before use, not guessed from failing calls.
-        let missing = self
-            .require
-            .iter()
-            .find(|capability| !session.supports(capability));
-        if let Some(missing) = missing {
-            let far = session.greeting().map_or_else(
-                || "the far end".to_owned(),
-                |greeting| greeting.endpoint.to_string(),
-            );
-            let error = Error::Handshake(Handshake::Incompatible(format!(
-                "{far} does not declare {missing}"
-            )));
-            session.close(error.clone());
-            return Err(error);
         }
         closing.disarm();
         // Not attached here: what this end offers (`link.offers`) is told
