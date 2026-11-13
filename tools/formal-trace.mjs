@@ -1003,7 +1003,7 @@ ${sources.join('\n')}
 | --- | --- | --- | --- | --- | --- | --- | --- |
 ${partitionCounts.join('\n')}
 
-No status moved in the re-extraction of either partition: no test was added, the two trace rows that gained evidence citations (\`TRC-LIMIT-2\`, \`TRC-MALFORMED-2\`) already described that evidence in their wording, and each \`registry-1\` row keeps the status the re-check gave it (the issue snapshot is the ceiling).
+No status moved because of the re-extraction itself in either partition: no test was added, the two trace rows that gained evidence citations (\`TRC-LIMIT-2\`, \`TRC-MALFORMED-2\`) already described that evidence in their wording, and each \`registry-1\` row keeps the status the re-check gave it (the issue snapshot is the ceiling). \`TRC-GREET-3\` moved from \`unverified\` to \`not guaranteed\` after #1111 removed an unreachable check: no implementation offers a required-capabilities entry point.
 
 ## 4. Per-row re-extraction: session trace contract
 
