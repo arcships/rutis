@@ -6,6 +6,8 @@
 
 抽取基线：`main` `3496669b`（issue 正文的统计口径）。**这批行没有按 0.22 的现行规格复核**：状态列仍是 issue 的词汇，`node tools/formal-trace.mjs` 在统计时按 `README.md` §3 的映射换成追踪表状态；映射只降不升，不改写本文件。
 
+2026-11-11：EVP-5.7-4 按 #1121 的修复更新「现有形式化」「状态」「备注」（宿主侧已有用例，状态从「未覆盖」改为「部分」）；其余行仍是 issue 快照。
+
 分区合计：现行 253 条，已取代 9 条，共 262 行（与 issue 正文的统计表一致）。
 
 ## 分区 `events`
@@ -151,7 +153,7 @@
 | EVP-5.7-1 | §5.7 | 发出方放弃（Rust future 丢弃、Python 任务取消、Go context 取消）时，经宿主的运行时对它的 `events.dispatch` 发 `cancel` | 跨进程 | K + TLA | — | K `cancel/emitter-gives-up` | 部分 | #626 | #626 `CancelReaches`（通用调用的取消）；Swift / Kotlin 规格未写 |
 | EVP-5.7-2 | §5.7 | 分发方不再开始新的调用，对每个进行中的调用发 `cancel`（其 `signal` 中止），之后的 `next` 调用以 `WaterfallNext` 失败 | 跨进程 | TV + K | — | K `cancel/emitter-gives-up` | 部分 | #616 | 取消之后调 `next` 无用例 |
 | EVP-5.7-3 | §5.7 | 发出方的调用以本语言的取消结束 | 跨进程 | K | — | K `cancel/emitter-gives-up` | 已覆盖 | — | 期望 `cancelled` 按语言核对 |
-| EVP-5.7-4 | §5.7 | `emit` 分发不被取消 | 跨进程 | K | events/emit | — | 未覆盖 | #639 ※ | Go `Emit` 的 ctx 取消、Python 任务取消对 emit 无效，无用例 |
+| EVP-5.7-4 | §5.7 | `emit` 分发不被取消 | 跨进程 | K | events/emit | `crates/rutis-bridge/tests/conformance_events_tracker.rs::an_emit_is_not_cancelled`、`crates/rutis-bridge/src/session/rpc/tests.rs::a_cancelled_emit_dispatch_stays_queued` | 部分 | #639 ※、#1121 | 宿主侧已修（#1121）：`cancel` 先于有序任务到达时，已接纳的 emit 仍开始；Go `Emit` 的 ctx 取消、Python 任务取消对 emit 无效的运行时用例仍无 |
 | EVP-5.7-5 | §5.7 | JavaScript 没有取消分发的办法（明确不保证） | 纯逻辑 | 测试 | — | — | 不适用 | — | 明确不保证，没有要验证的行为 |
 | EVP-5.7-6 | §5.7 | 接收方把中止的 `signal` 对应为：Go 监听器的 context 取消；Python 监听器的任务取消；Rust 监听器的 future 丢弃 | 跨进程 | K | — | K `cancel/emitter-gives-up`（b 在 Go、Python、Rust、Swift、Kotlin） | 已覆盖 | — | 规格未写 Swift / Kotlin 的对应 |
 | EVP-5.7-7 | §5.7 | JavaScript 监听器没有逐次调用的信号：调用继续执行，回复被丢弃（只有卸载中止 `ctx.signal`） | 跨进程 | K | — | — | 未覆盖 | #639 ※ | 套件以 `except` 排除 JS 监听器；"回复被丢弃"无检查 |

@@ -44,8 +44,9 @@ export function refuseReserved(name) {
 
 const errorText = error => `${error?.name ?? 'Error'}: ${error?.message ?? String(error)}`
 
-// How many dispatch ids this process remembers having fired
-// `internal/dispatch` for (§5.3); the oldest are forgotten.
+// How many ids this process remembers: dispatch ids it fired
+// `internal/dispatch` for (§5.3), and listeners it withdrew and told the host
+// about (#1135); the oldest are forgotten.
 const SEEN = 4096
 
 // The session with the host ended: nothing more is dispatched.
@@ -58,6 +59,9 @@ export class Bus {
   #next = 0
   // Dispatch ids `internal/dispatch` was fired for here.
   #seen = new Set()
+  // Ids withdrawn here and told to the host (`events.off`): a dispatch it
+  // picked one for before the off reached it still calls it (`call`).
+  #gone = new Set()
   // Invocations still running, by row (§7.1).
   #running = new Map()
   // Listeners still inside their synchronous start, by row: a synchronous
@@ -139,8 +143,19 @@ export class Bus {
   // A listener's disposer: it leaves the table, here and on the host.
   off(entry) {
     if (!this.#remove(entry)) return false
-    if (this.peer) this.peer.callAsync('', 'events.off', [[entry.id]]).catch(() => {})
+    if (this.peer) {
+      this.#announced([entry.id])
+      this.peer.callAsync('', 'events.off', [[entry.id]]).catch(() => {})
+    }
     return true
+  }
+
+  // `ids` left the table here and the host is told (`events.off`): until that
+  // frame reaches it, a dispatch can still pick one of them, and the call it
+  // sends meets a listener that is gone (`call`).
+  #announced(ids) {
+    for (const id of ids) this.#gone.add(id)
+    while (this.#gone.size > SEEN) this.#gone.delete(this.#gone.values().next().value)
   }
 
   #remove(entry) {
@@ -160,11 +175,12 @@ export class Bus {
   // Withdraw `row`'s listeners at once (§7.1 1–2): the host withdrew them
   // itself; calls for them fail as withdrawn from now on. `restart`: the row
   // restarts with a new config (`rows.update`), so it stays loaded, and the
-  // host, which keeps the row, is told (`events.off`). `emitting`: the row
-  // is on its unload stack, whose cleanups still emit, and the other rows
-  // hear them until it ends (§7.1 5): it may emit until a later `withdraw`
-  // without `emitting`. A failure of an invocation the row's unload stops
-  // (its signal's AbortError) is not reported (§5.6).
+  // host, which keeps the row, is told (`events.off`): until its table has
+  // them gone, a call it picked one for answers nothing (`#announced`).
+  // `emitting`: the row is on its unload stack, whose cleanups still emit, and
+  // the other rows hear them until it ends (§7.1 5): it may emit until a later
+  // `withdraw` without `emitting`. A failure of an invocation the row's unload
+  // stops (its signal's AbortError) is not reported (§5.6).
   withdraw(row, { restart = false, emitting = false } = {}) {
     const ids = []
     for (const entry of [...this.#entries]) {
@@ -173,7 +189,10 @@ export class Bus {
       ids.push(entry.id)
     }
     if (restart) {
-      if (ids.length && this.peer) this.peer.callAsync('', 'events.off', [ids]).catch(() => {})
+      if (ids.length && this.peer) {
+        this.#announced(ids)
+        this.peer.callAsync('', 'events.off', [ids]).catch(() => {})
+      }
     } else if (row !== null && row !== undefined && !emitting) this.#unloaded.add(row)
   }
 
@@ -339,13 +358,32 @@ export class Bus {
 
   // ── events.call (§5.3) ────────────────────────────────────────
 
+  // What a listener withdrawn here answers a call that was already on its way
+  // (#1135): nothing, as one that returns no result (§1), and a waterfall's
+  // `next` gives the rest of the chain, as if it had not been there. Nothing
+  // of the listener runs.
+  #goneCall(mode, next, sync) {
+    if (mode !== 'waterfall' || typeof next !== 'function' || !this.peer) return undefined
+    return sync ? this.peer.callFunctionSync(next, []) : this.peer.callFunctionAsync(next, [])
+  }
+
   // Run one listener of this process for the host. Returns its result (a
   // Promise for an asynchronous one), or throws its error.
   // `sync`: a synchronous waterfall's call (a Cordis `waterfall`): the
   // listener's `next` returns the rest of the chain's value at once.
   call({ listener, dispatch, own, name, mode, args, next, sync = false } = {}) {
-    const entry = this.#byId.get(String(listener))
-    if (!entry?.live) throw named('BindingError', `listener ${listener} of ${name ?? entry?.name} is withdrawn`)
+    const id = String(listener)
+    const entry = this.#byId.get(id)
+    if (!entry?.live) {
+      // Withdrawn here, and the `events.off` that says so may not have reached
+      // the host when it picked the listener for this dispatch: the listener is
+      // gone, and the call answers as one that returns nothing, instead of
+      // failing a dispatch that was already under way (#1135). An id this
+      // process never registered, and one the host withdrew itself (a row's
+      // unload), stay the protocol failure they were.
+      if (this.#gone.has(id)) return this.#goneCall(mode, next, sync)
+      throw named('BindingError', `listener ${listener} of ${name ?? entry?.name} is withdrawn`)
+    }
     const values = Array.isArray(args) ? args : []
     // Cordis's internal/dispatch, once per dispatch from elsewhere in this
     // process, before its first listener here runs.

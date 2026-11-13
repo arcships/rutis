@@ -1003,7 +1003,7 @@ ${sources.join('\n')}
 | --- | --- | --- | --- | --- | --- | --- | --- |
 ${partitionCounts.join('\n')}
 
-No status moved because of the re-extraction itself in either partition: no test was added, the two trace rows that gained evidence citations (\`TRC-LIMIT-2\`, \`TRC-MALFORMED-2\`) already described that evidence in their wording, and each \`registry-1\` row keeps the status the re-check gave it (the issue snapshot is the ceiling). \`TRC-GREET-3\` moved from \`unverified\` to \`not guaranteed\` after #1111 removed an unreachable check: no implementation offers a required-capabilities entry point.
+No status moved because of the re-extraction itself in either partition: no test was added, the two trace rows that gained evidence citations (\`TRC-LIMIT-2\`, \`TRC-MALFORMED-2\`) already described that evidence in their wording, and each \`registry-1\` row keeps the status the re-check gave it (the issue snapshot is the ceiling). \`TRC-GREET-3\` moved from \`unverified\` to \`not guaranteed\` after #1111 removed an unreachable check: no implementation offers a required-capabilities entry point. \`TRC-NG-4\` is withdrawn: protocol 4 no longer has the \`objects\` capability it described (#1123).
 
 ## 4. Per-row re-extraction: session trace contract
 
@@ -1047,7 +1047,7 @@ function recheckPage(rows, lists) {
   const semanticSections = lists.map(list => {
     const table = list.partition.translate ? semanticTableZh(list.rows) : registryTableZh(list.rows)
     const intro = list.partition.translate
-      ? `\`TRC-*\` 的 ${list.rows.length} 行已按 0.22 现行来源重写：每行给出会话规格 §11 的 \`SESS-*\` 锚点（没有锚点的行写明会话规格不覆盖的部分），承诺文字改用现行规格的措辞与数字，来源章节与英文重抽文字在[英文复核页](recheck-0.22.en.md)。锚点、来源章节与英文页由 \`--check\` 核对：每个 \`SESS-*\` 都在会话规格里，并出现在该行「现行来源」。`
+      ? `\`TRC-*\` 的 ${list.rows.length} 行已按 0.22 现行来源重写：每行给出会话规格 §11 的 \`SESS-*\` 锚点（没有锚点的行写明会话规格不覆盖的部分），承诺文字改用现行规格的措辞与数字，来源章节与英文重抽文字在[英文复核页](recheck-0.22.en.md)。锚点、来源章节与英文页由 \`--check\` 核对：每个 \`SESS-*\` 都在会话规格里，并出现在该行「现行来源」。\`TRC-GREET-3\` 因 #1111 改记「明确不保证」，\`TRC-NG-4\` 已撤回：协议 4 没有它所描述的 \`objects\` 能力（#1123）。`
       : `这些行是保证登记表的行被 #634 拆出的要求，规则文字仍是 issue 快照原文（\`rules/protocol-registry-1.md\`，中文），没有重写。每行重抽四件事：现行来源（登记表的哪一节）、现行锚点（登记表的哪一行）、承载这条拆分要求的现行证据、以及状态与理由。\`--check\` 核对：登记表行在它所在的节里、证据路径与用例名在当前树里、状态与复核结论一致。`
     return `### ${list.partition.label}（${list.rows.length} 行）\n\n${intro}\n\n${table}`
   })

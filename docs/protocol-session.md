@@ -201,20 +201,20 @@
 
 `SESS-57` **当前。**（Rust 被调方）收到 `cancel` 时：
 
-- 还在排队、尚未开始的调用被丢掉，不回复。
+- 还在排队、尚未开始的调用被丢掉，不回复；例外是已接纳的 `emit` 方式的 `events.dispatch`：它照常开始（[事件协议](design-events-protocol-2026-10-18.md) §5.7），调用方丢弃它的迟到回复（#1121）。
 - 正在等待的 `await` 被丢掉，不回复。
 - 已经开始运行的同步调用照常完成并回复；取消不打断已经在运行的方法。
 - 对已取消调用的迟到回复被丢弃并计数（`orphans()`），不当作协议错误，也不关闭会话。
 
-`crates/rutis-bridge/src/session/rpc.rs:2639-2653,2490-2501,2050-2053`
+`crates/rutis-bridge/src/session/rpc.rs:2702-2721,2503-2516,2047-2060`；测试 `crates/rutis-bridge/src/session/rpc/tests.rs::a_cancelled_emit_dispatch_stays_queued`
 
-`SESS-58` **当前。** 对不存在的调用发 `cancel` 被忽略；这可能是取消越过了它要取消的回复。这是唯一被容忍的悬空调用号。`crates/rutis-bridge/src/session/rpc.rs:2639-2653`；测试 `crates/rutis-bridge/src/session/rpc/tests.rs::a_cancel_for_an_unknown_call_is_ignored`
+`SESS-58` **当前。** 对不存在的调用发 `cancel` 被忽略；这可能是取消越过了它要取消的回复。这是唯一被容忍的悬空调用号。`crates/rutis-bridge/src/session/rpc.rs:2702-2721`；测试 `crates/rutis-bridge/src/session/rpc/tests.rs::a_cancel_for_an_unknown_call_is_ignored`
 
 `SESS-59` **当前。** 取消逐跳传播：中继转发中的等待被取消时，被丢弃的转发请求会向下一跳发出 `cancel`；跨 link 时同样。取消不撤销已经提交的引用授予。`crates/rutis-bridge/src/session/rpc/relay.rs:148-173`；`crates/rutis-bridge/src/session/rpc.rs:2020-2031`；`docs/guarantees.md` 的 `bridge/multihop-cancel-and-release`
 
-`SESS-60` **当前。** 取消本身不关闭会话；取消后其他调用照常进行。`crates/rutis-bridge/src/session/rpc.rs:2639-2653`；`go/rutis/internal/peer/peer_test.go:135-170`；`go/rutis/internal/peer/objects_test.go:66-103`
+`SESS-60` **当前。** 取消本身不关闭会话；取消后其他调用照常进行。`crates/rutis-bridge/src/session/rpc.rs:2702-2721`；`go/rutis/internal/peer/peer_test.go:135-170`；`go/rutis/internal/peer/objects_test.go:66-103`
 
-`SESS-61` **明确不保证。** 取消之后被调方要不要回复，各实现尚未统一成一条规则：Rust 对排队中的调用和 `await` 不回复，已在运行的同步调用照常回复；其他语言由方法和信号决定。这条规则由 #626 的模型定下后写回本文。`docs/guarantees.md` 的 `bridge/cancel-reaches-callee` 只承诺取消到达，不承诺回复；#626；取消表清理与取消确认规则见 #1099。
+`SESS-61` **明确不保证。** 取消之后被调方要不要回复，各实现尚未统一成一条规则：Rust 对排队中的调用和 `await` 不回复，对已接纳的 `emit` 分发照常执行、回复被调用方丢弃，已在运行的同步调用照常回复；其他语言由方法和信号决定。这条规则由 #626 的模型定下后写回本文。`docs/guarantees.md` 的 `bridge/cancel-reaches-callee` 只承诺取消到达，不承诺回复；#626；取消表清理与取消确认规则见 #1099。
 
 `SESS-62` **已取代。** “取消等于关闭承载”；“取消后会话进入不可用状态”。取消只作用于一次调用。
 
