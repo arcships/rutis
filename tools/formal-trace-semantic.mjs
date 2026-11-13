@@ -84,8 +84,8 @@ export const SEMANTIC = {
     'TRC-GREET-3': {
       source: 'formal-trace.md §3.2',
       anchors: ['SESS-25', 'SESS-15', 'SESS-17'],
-      en: 'Capabilities are checked before use: `Greet` checks the opening `require` list after the greeting and refuses a missing one (`Handshake::Incompatible`, text `incompatible session: <far> does not declare <capability>`), closing the session instead of letting a call fail later (`SESS-25`); a declaration grants no permission and is not verified, and unknown capability names are ignored (`SESS-15`, `SESS-17`).',
-      gapEn: 'No test builds a far end that lacks a required capability and asserts `<far> does not declare <cap>` (a 2026-11-09 search for `Incompatible` found only version and transport cases); #635 covers it.',
+      en: 'Capabilities are declarations, not requirements: no implementation offers an entry point for a required-capabilities list, so the handshake does not refuse a far end that lacks one (`SESS-25` is not guaranteed); a declaration grants no permission and is not verified, and unknown capability names are ignored (`SESS-15`, `SESS-17`).',
+      gapEn: 'Rust\'s `Greet.require` had one production call passing an empty list and is removed; Go\'s `peer.Options.Require` sits in `internal/peer` with no caller; Node, Bun, Python, Swift and Kotlin have no such check (#1111).',
     },
     'TRC-REF-1': {
       source: 'formal-trace.md §3.3',

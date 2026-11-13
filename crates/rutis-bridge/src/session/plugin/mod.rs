@@ -131,7 +131,6 @@ impl Session {
             local: local.0.clone(),
             expected: None,
             declare: &[],
-            require: &[],
             timeout: HANDSHAKE,
             options,
         };
