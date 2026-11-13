@@ -6,16 +6,24 @@ Nothing here waits on a wall clock: `SteppedLoop` runs the loop's ready
 callbacks only when the test steps it and moves the clock only when the test
 advances it; `ScriptedChannel` hands over one incoming frame at a time and
 waits for the answer to the previous one. `tests/scheduling.py` says how.
+
+`ControlFrameTests` is the one place a loop thread still waits in the
+synchronous pump (peer.py `_call_sync`): the test drives that pump through
+the channel, handing over the frames in the order it chooses.
 """
 
 import asyncio
+import sys
 import threading
+import types
+import unittest
 
 import background
 from scheduling import ScriptedChannel, SteppedLoop
 from support import HANG_GUARD, LOCAL, hello
 
 from rutis.peer import Peer
+from rutis.runner import Runtime
 
 
 def data(value):
@@ -251,3 +259,262 @@ class SynchronousWaitTests(background.TestCase):
             channel.close("the test is done")
             thread.join(HANG_GUARD)
             self.assertFalse(thread.is_alive(), "the runtime thread did not stop")
+
+
+class ControlFrameTests(background.TestCase):
+    """A control operation — an `invoke` whose `target` is empty (session
+    protocol SESS-6: `events.*`, `rows.*` 等) — that arrives while a
+    synchronous call waits is taken in place, in frame order: the frame
+    behind it, the call's reply, sees its effect (#630 "控制帧原地处理").
+
+    The loop thread is inside the pump here (peer.py `_call_sync`): the test
+    hands over both frames, the control one first, and takes the answers in
+    the order they were written.
+    """
+
+    def test_a_control_call_arriving_during_a_synchronous_wait_is_taken_in_place(self):
+        channel = ScriptedChannel()
+        runtime = Runtime()
+        made = {}
+        failure = []
+        log = []
+
+        def dispatch(target, method, args):
+            if target == "":
+                return runtime.dispatch(target, method, args)
+            log.append(("start", method))
+            if method == "outer":
+                inner = made["peer"].call("host", "inner", [])
+                log.append(("resumed", inner))
+                # The control frame came first: the service it provided is
+                # here before the reply that resumed this call.
+                return f"outer:{inner}:{sorted(runtime.hosts)}"
+            return method
+
+        def serve():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            made["loop"] = loop
+            try:
+                async def setup():
+                    peer = Peer(channel, dispatch, endpoint=LOCAL)
+                    runtime.peer = peer
+                    peer.start()
+                    return peer
+
+                made["peer"] = loop.run_until_complete(setup())
+                made["started"].set()
+                loop.run_forever()
+            except BaseException as error:  # noqa: BLE001 - reported by the test
+                failure.append(error)
+            finally:
+                loop.close()
+
+        made["started"] = threading.Event()
+        thread = threading.Thread(target=serve, name="scripted runtime", daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(made["started"].wait(HANG_GUARD), "the runtime did not start")
+            self.assertEqual(channel.take("the greeting", lambda frame: frame["op"] == "hello")["endpoint"], "py")
+            channel.feed(hello())
+            channel.feed(invoke("main:1", "outer", sync=True))
+            inner = channel.take(
+                "the inner call", lambda frame: frame["op"] == "invoke" and frame.get("method") == "inner"
+            )
+            # The host's control call arrives while the loop thread waits in
+            # the pump; the reply behind it is what lets the call go on.
+            channel.feed({
+                "op": "invoke", "id": "main:2", "path": [], "target": "",
+                "method": "hosts.provide", "args": data(["status", [], None]),
+            })
+            channel.feed({"op": "return", "id": inner["id"], "value": data("inner-result")})
+            # Taken in place, before the next frame: its answer goes out
+            # first, then the answer of the call the reply resumed.
+            control = channel.take("the control call's answer", lambda frame: frame["op"] in ("return", "throw"))
+            self.assertEqual(control, {"op": "return", "id": "main:2", "value": data(None)})
+            outer = channel.take("the call's answer", lambda frame: frame["op"] in ("return", "throw"))
+            self.assertEqual(outer["id"], "main:1")
+            self.assertEqual(outer["value"], data("outer:inner-result:['status']"))
+            self.assertEqual(log, [("start", "outer"), ("resumed", "inner-result")])
+            self.assertEqual(failure, [])
+        finally:
+            loop = made.get("loop")
+            peer = made.get("peer")
+            if loop is not None and peer is not None:
+                loop.call_soon_threadsafe(peer.close)
+                loop.call_soon_threadsafe(loop.stop)
+            channel.close("the test is done")
+            thread.join(HANG_GUARD)
+            self.assertFalse(thread.is_alive(), "the runtime thread did not stop")
+
+
+class Count:
+    """A service a plugin provides: a method the host may call."""
+
+    def count(self):
+        return 1
+
+
+class RuntimeOnASteppedLoop(background.TestCase):
+    """The runtime's rows on a loop the test steps: what a plugin thread
+    hands to `ctx.on` / `ctx.provide` is marshalled onto the loop, and the
+    unload that follows is ordered by the test, not the scheduler (#630
+    "线程里的 ctx.on / provide 与卸载")."""
+
+    def setUp(self):
+        self.loop = SteppedLoop()
+        self.channel = ScriptedChannel()
+        self.runtime = Runtime()
+        self.contexts = {}
+        self.entered = self.loop.entered()
+        self.entered.__enter__()
+        self.addCleanup(self.closed)
+        self.peer = Peer(self.channel, self.runtime.dispatch, endpoint=LOCAL)
+        self.runtime.peer = self.peer
+        self.peer.receive(hello())
+
+    def closed(self):
+        peer = getattr(self, "peer", None)
+        if peer is not None:
+            peer.close()
+        self.loop.finish()
+        self.entered.__exit__(None, None, None)
+
+    def load(self, key, apply):
+        entry = types.ModuleType(f"scheduled_{key}")
+        entry.apply = apply
+        sys.modules[entry.__name__] = entry
+        loading = self.loop.create_task(self.runtime.load(key, entry.__name__, {}, None))
+        self.step_until("the row to load", loading.done)
+        loading.result()
+
+    def step_until(self, what, check, limit=1000):
+        for _ in range(limit):
+            if check():
+                return
+            if not self.loop.step():
+                self.fail(f"nothing was ready before {what}")
+        self.fail(f"{what} did not happen in {limit} steps")
+
+    def thread(self, call):
+        """`call()` on a thread of its own; the exceptions it raised."""
+        raised = []
+
+        def run():
+            try:
+                call()
+            except BaseException as error:  # noqa: BLE001 - raised by the test
+                raised.append(error)
+
+        thread = threading.Thread(target=run, name="a plugin thread")
+        thread.start()
+        thread.join()
+        return raised
+
+    def test_a_thread_s_registration_and_service_go_out_in_call_order_before_the_unload(self):
+        def apply(ctx, config):
+            self.contexts["a"] = ctx
+
+        self.load("a", apply)
+        ctx = self.contexts["a"]
+        self.assertEqual(self.thread(lambda: (ctx.on("t/x", lambda: None), ctx.provide("tally", Count()))), [])
+        self.assertEqual(self.channel.pending(), [], "a thread's work waits for the loop to run it")
+
+        self.step_until("the registration and the announcement", lambda: len(self.channel.pending()) >= 2)
+        frames = self.channel.pending()
+        self.assertEqual(
+            [frame["method"] for frame in frames],
+            ["events.on", "service"],
+            "the thread's calls keep their order on the loop",
+        )
+        registration, announcement = frames
+        self.assertEqual(announcement["args"]["value"][0], "tally")
+        self.assertEqual(announcement["args"]["value"][3]["row"], "a")
+
+        # The host answers both before the row unloads.
+        for frame in (registration, announcement):
+            self.channel.take("an answer", lambda sent, id=frame["id"]: sent["id"] == id)
+            self.peer.receive({"op": "return", "id": frame["id"], "value": {"type": "undefined"}})
+        self.loop.run_ready()
+
+        unloading = self.loop.create_task(self.runtime.unload("a"))
+        self.step_until("the row to unload", unloading.done)
+        self.loop.run_ready()
+        frames = self.channel.pending()
+        self.assertEqual(
+            [frame["method"] for frame in frames],
+            ["events.off", "service"],
+            "the unload withdraws what the thread registered, after it went out",
+        )
+        withdrawal, gone = frames
+        listener = registration["args"]["value"][0]["id"]
+        self.assertEqual(withdrawal["args"]["value"], [[listener]], "the listener the registration made")
+        self.assertEqual(gone["args"]["value"][0], "tally")
+        self.assertIsNone(gone["args"]["value"][1], "the service is withdrawn")
+        self.assertGreater(gone["args"]["value"][2], announcement["args"]["value"][2])
+        self.assertEqual(self.runtime.rows, {})
+        self.assertEqual(self.runtime.services, {})
+        self.assertEqual(self.runtime.bus.entries, [])
+
+    def test_a_registration_from_a_thread_after_the_unload_started_is_refused(self):
+        release = asyncio.Event()
+
+        def apply(ctx, config):
+            self.contexts["a"] = ctx
+
+            async def cleanup():
+                await release.wait()
+
+            ctx.effect(cleanup)
+
+        self.load("a", apply)
+        ctx = self.contexts["a"]
+        unloading = self.loop.create_task(self.runtime.unload("a"))
+        self.loop.step()
+        self.assertTrue(self.runtime.rows["a"].unloading, "the row is on its unload stack")
+        self.assertFalse(unloading.done(), "a cleanup is waiting")
+
+        raised = self.thread(lambda: ctx.on("t/late", lambda: None))
+        self.assertEqual([str(error) for error in raised], ["row a is not active"])
+        self.assertEqual(
+            [frame for frame in self.channel.pending() if frame.get("method") == "events.on"],
+            [],
+            "a refused registration sends nothing",
+        )
+        release.set()
+        self.step_until("the unload", unloading.done)
+
+    # `ctx.provide` has no such guard: on a row already unloading it is
+    # accepted, the withdrawal it adds to the stack never runs (the stack
+    # was taken), and the host is told about a service of a row that is
+    # gone (#1143; Rust refuses with InactiveEffect, Bun accepts it too).
+    @unittest.expectedFailure
+    def test_a_service_provided_after_the_unload_started_is_refused(self):
+        release = asyncio.Event()
+
+        def apply(ctx, config):
+            self.contexts["a"] = ctx
+
+            async def cleanup():
+                await release.wait()
+
+            ctx.effect(cleanup)
+
+        self.load("a", apply)
+        ctx = self.contexts["a"]
+        unloading = self.loop.create_task(self.runtime.unload("a"))
+        self.loop.step()
+        self.assertTrue(self.runtime.rows["a"].unloading, "the row is on its unload stack")
+
+        refused = self.thread(lambda: ctx.provide("late", Count()))
+        self.assertEqual(len(refused), 1, "providing on a row on its way out is refused")
+        release.set()
+        self.step_until("the unload", unloading.done)
+        self.loop.run_ready()
+        self.assertEqual(self.runtime.services, {}, "nothing a row on its way out provided is left")
+        self.assertEqual(
+            [frame for frame in self.channel.pending() if frame.get("method") == "service"],
+            [],
+            "the host is not told about it",
+        )
+
