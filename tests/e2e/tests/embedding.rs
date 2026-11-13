@@ -613,7 +613,9 @@ const MORE_FDS: u64 = 8;
 /// Resident memory a process may grow by during `cycles` cycles after the
 /// warm-up, in KiB. The application (Rust, where rutis runs): 1 MiB and
 /// 256 B per cycle. The runtimes and what they start: 32 MiB and 1 KiB per
-/// cycle, for a heap that a garbage collector sizes as it likes.
+/// cycle, for a heap that a garbage collector sizes as it likes. esbuild,
+/// the compiler service of the Node runtime's TypeScript loader, is not
+/// asserted at all ([`is_esbuild`]).
 ///
 /// Measured on macOS (debug build, 3000 cycles): the application stayed
 /// at 10.3 MiB; Node went 143 → 147 MiB (151 halfway); Python
@@ -633,11 +635,83 @@ fn more_rss(application: bool, cycles: usize) -> u64 {
     }
 }
 
+/// Whether a process is esbuild, the compiler service the Node runtime's
+/// TypeScript loader (tsx) starts to compile a file it has not cached: a
+/// build tool, not a runtime. No row runs in it, and no tenant's state is
+/// in it, so its resident memory says nothing about what closing a tenant
+/// leaves behind; what it holds that does say something, its descriptors,
+/// is still asserted, and so are its process and the numbers `inspect`
+/// reports.
+///
+/// Its memory is left out of the assertion because its heap is Go's,
+/// which sizes it as it likes and keeps what it compiled for the next
+/// file: it is the same process from the baseline to the end, seen going
+/// 12,988 → 52,744 KiB on Windows in a run of step 6 (against the 32 MiB
+/// and 20 KiB a runtime may grow by there), with nothing left behind
+/// anywhere else. The threshold a runtime gets would have to be raised for it, and
+/// raising it for the runtimes would hide in them the leak of a task or a
+/// row per cycle (#191) that step 6 is for.
+fn is_esbuild(command: &str) -> bool {
+    is_esbuild_program(command, cfg!(windows))
+}
+
+/// [`is_esbuild`] on a listing that gives a command line (`path_only`
+/// false: Unix, the program first, then its arguments) or the program's
+/// path alone (`true`: Windows).
+fn is_esbuild_program(command: &str, path_only: bool) -> bool {
+    // A path may have spaces in it (`C:\Program Files\…`), so it is
+    // taken whole; a command line names esbuild only as its first word
+    // (`<…>/node_modules/@esbuild/linux-x64/bin/esbuild --service=0.25.5
+    // --ping`, which tsx starts), never as an argument of a runtime that
+    // runs rows (`node --import tsx <…>/src/runner.mjs`).
+    let program = match path_only {
+        true => command,
+        false => command.split_whitespace().next().unwrap_or(command),
+    };
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    name.eq_ignore_ascii_case("esbuild") || name.eq_ignore_ascii_case("esbuild.exe")
+}
+
+/// The compiler service is told apart from the runtimes that run rows,
+/// on the listings of both platforms; a runtime whose arguments name it
+/// is not it, and neither is the application.
+#[test]
+fn the_compiler_service_is_told_apart_from_the_runtimes() {
+    // Unix: the command line, its program first.
+    for command in [
+        "/tmp/rutis-e2e/embedding-churn/node_modules/@esbuild/linux-x64/bin/esbuild --service=0.25.5 --ping",
+        "/tmp/rutis-e2e/embedding-churn/node_modules/@esbuild/linux-x64/bin/esbuild",
+    ] {
+        assert!(is_esbuild_program(command, false), "{command}");
+    }
+    // Windows: the program's path alone, with spaces in it or not.
+    for path in [
+        r"C:\hostedtoolcache\windows\rutis\node\rutis-runtime\node_modules\@esbuild\win32-x64\esbuild.exe",
+        r"C:\Program Files\nodejs\node_modules\@esbuild\win32-x64\esbuild.exe",
+    ] {
+        assert!(is_esbuild_program(path, true), "{path}");
+    }
+    // The runtimes: the Node one tsx runs rows in, one that names esbuild
+    // in an argument, the Python one, the application.
+    for command in [
+        "node --import tsx /tmp/rutis-e2e/embedding-churn/node_modules/tsx/dist/cli.mjs",
+        "/usr/bin/node -e require('esbuild').transformSync('let x')",
+        "python3 -m rutis",
+        "the application",
+    ] {
+        assert!(!is_esbuild_program(command, false), "{command}");
+    }
+    assert!(!is_esbuild_program(
+        r"C:\Program Files\nodejs\node.exe",
+        true
+    ));
+}
+
 /// Step 6 of #191: tenants created and closed over and over, next to a
 /// tenant that stays open, hold nothing more: the same processes, the
 /// numbers of what rutis, the loader and the runtimes hold back to the
-/// baseline exactly, descriptors and memory flat; the resident tenant is
-/// never restarted.
+/// baseline exactly, descriptors and memory flat (esbuild's memory
+/// excepted, [`is_esbuild`]); the resident tenant is never restarted.
 ///
 /// risk: D3 (instances created and closed many times pile up tasks,
 /// memory, table entries)
@@ -702,8 +776,12 @@ fn creating_and_closing_tenants_over_and_over_holds_nothing_more() {
                 .as_ref()
                 .and_then(|m| m.get(pid))
                 .map(|(_, held)| *held);
+            let note = match is_esbuild(command) {
+                true => " (its resident memory is not asserted: a build tool's heap is Go's)",
+                false => "",
+            };
             format!(
-                "{command} ({pid}): fds {:?} → {:?} → {:?}, rss KiB {:?} → {:?} → {:?}",
+                "{command} ({pid}): fds {:?} → {:?} → {:?}, rss KiB {:?} → {:?} → {:?}{note}",
                 before.fds,
                 middle.and_then(|h| h.fds),
                 after.and_then(|h| h.fds),
@@ -730,10 +808,15 @@ fn creating_and_closing_tenants_over_and_over_holds_nothing_more() {
             );
         }
         if let (Some(before), Some(after)) = (before.rss, after.rss) {
-            assert!(
-                after <= before + more_rss(*pid == app.pid(), cycles),
-                "{command}: resident KiB {before} → {after}\n{report:#?}"
-            );
+            // esbuild's heap is Go's to size, and what it compiled it
+            // keeps for its next file (`is_esbuild`); its descriptors,
+            // above, are still asserted.
+            if !is_esbuild(command) {
+                assert!(
+                    after <= before + more_rss(*pid == app.pid(), cycles),
+                    "{command}: resident KiB {before} → {after}\n{report:#?}"
+                );
+            }
         }
     }
     assert_eq!(

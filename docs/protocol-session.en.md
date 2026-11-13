@@ -76,13 +76,13 @@ The rules are the contract. Error **text** is a contract only where this file qu
 
 ### 2.4 Capabilities
 
-`SESS-15` **Current.** A capability is a string in `hello.capabilities`; it declares what an end can do, not a permission. The session layer reads three kinds: `value-<tag>` (whether a value kind may be sent), and `reentrant-sync` and `sync-stack` (the runtime's shape in the synchronous wait graph). The plugin and mount layers read `node`, `runtime` and `plugins`. The opener's `require` list is checked for missing capabilities after the greeting. `crates/rutis-bridge/src/session/rpc.rs:1154-1178,1590-1611,2204-2214`; `crates/rutis-bridge/src/session/plugin/greet.rs:33-38,57-70`; `crates/rutis-bridge/src/session/plugin/mod.rs:353,369`; `bridge/sync-wait-cycle-refused` in `docs/guarantees.en.md`
+`SESS-15` **Current.** A capability is a string in `hello.capabilities`; it declares what an end can do, not a permission. The session layer reads three kinds: `value-<tag>` (whether a value kind may be sent), and `reentrant-sync` and `sync-stack` (the runtime's shape in the synchronous wait graph). The plugin and mount layers read `node`, `runtime` and `plugins`. A capability is a declaration only: there is no "required capabilities" list, and a missing capability is handled by the layer that uses it (`SESS-25`). `crates/rutis-bridge/src/session/rpc.rs:1154-1178,1590-1611,2204-2214`; `crates/rutis-bridge/src/session/plugin/greet.rs:31-36`; `crates/rutis-bridge/src/session/plugin/mod.rs:352,368`; `bridge/sync-wait-cycle-refused` in `docs/guarantees.en.md`
 
 | Capability | Declared by | Meaning |
 | --- | --- | --- |
 | `reentrant-sync` | Rust, Python, Go, Swift, Kotlin | Synchronous calls may re-enter on the same execution stack; every incoming call has its own thread or stack. |
 | `sync-stack` | Node, Bun, Python | One thread, one stack; a synchronous wait stacks on that one stack. |
-| `node` | The session plugin (the host-side `Greet`) adds it to its own declaration | This end is a full framework node. `crates/rutis-bridge/src/session/plugin/greet.rs:33-38`; `crates/rutis-bridge/src/session/plugin/mod.rs:353` |
+| `node` | The session plugin (the host-side `Greet`) adds it to its own declaration | This end is a full framework node. `crates/rutis-bridge/src/session/plugin/greet.rs:34-36`; `crates/rutis-bridge/src/session/plugin/mod.rs:352` |
 | `runtime` | Node, Bun, Python, Go, Swift and Kotlin runtime processes | This end is a runtime process a host may mount or dial. `node/rutis-runtime/src/runner.mjs:39`; `bun/rutis-bun/src/main.ts:118`; `python/rutis/rutis/__main__.py:72`; `go/rutis/internal/runtime/serve.go:99`; `swift/rutis/Sources/Rutis/Remote/App.swift:356`; `kotlin/rutis/rutis/src/shared/kotlin/arcships/rutis/RutisApp.kt:122`; `crates/rutis-bridge/src/session/plugin/mod.rs:369` |
 | `plugins` | Rust; Node/Bun when hosting | This end takes plugin definition values. `crates/rutis-bridge/src/session/rpc.rs:918-922`; `bridge/plugin-values` in `docs/guarantees.en.md` |
 | `value-<tag>` | Every implementation, ten kinds | This end takes that kind of tagged value. `crates/rutis-bridge/src/session/rpc.rs:904-917` |
@@ -109,7 +109,7 @@ The rules are the contract. Error **text** is a contract only where this file qu
 
 `SESS-24` **Current.** `hello.endpoint` must exist and be a valid endpoint id: non-empty, only lowercase letters, digits and `-`. Missing or invalid ids, and an id other than the expected one when the opener expects one, all fail the handshake: missing and invalid are `Incompatible` (Rust's inner reasons: `the far end named no endpoint` / `invalid endpoint id …`), an unexpected id or this end's own id is `IdentityMismatch`. `crates/rutis-bridge/src/session/rpc.rs:2463-2479`; `crates/rutis-bridge/src/channel/mod.rs:77-109`; test `crates/rutis-bridge/src/session/rpc/tests.rs::endpoint_format::a_greeting_from_another_endpoint_fails_the_handshake`
 
-`SESS-25` **Current.** Every capability in the opener's `require` list must appear in the far end's greeting; one missing fails the handshake (`Incompatible`, reading `incompatible session: <far> does not declare <capability>`) and closes the session, instead of surfacing later on a call. `crates/rutis-bridge/src/session/plugin/greet.rs:57-70`
+`SESS-25` **Not guaranteed.** No implementation offers a way to declare required capabilities, and the handshake does not refuse a far end that lacks one. Rust's `Greet` had a `require` field whose only production call passed an empty list, with no entry point that could pass a non-empty one; it is removed. Go's `peer.Options.Require` sits in `internal/peer` and has no caller either; Node, Bun, Python, Swift and Kotlin have no such check. When the far end does not declare a capability, only the place that uses it fails (a tagged value is not sent, `SESS-11`). `crates/rutis-bridge/src/session/plugin/greet.rs:12-19`; `go/rutis/internal/peer/peer.go:111-114`
 
 `SESS-26` **Current.** The session plugin waits at most 10 seconds for the greeting; a timeout ends the session with the transport error `the far end did not greet in time`. `crates/rutis-bridge/src/session/plugin/mod.rs:46-47,102-110`; test `crates/rutis-bridge/tests/session_plugin.rs:130-154`
 
@@ -313,7 +313,7 @@ The table is this file's rule list, for #634's trace table and #613's models. Ev
 | `SESS-12` | One format only: endpoint, protocol 4 | Current | `docs/migration-0.19.en.md` "Upgrading together"; `crates/rutis-bridge/src/session/rpc.rs:2456-2462` |
 | `SESS-13` | Two formats (compat 2, endpoint 3) | Superseded | `docs/migration-0.19.en.md` "Upgrading together" |
 | `SESS-14` | `sync` sent only to ends declaring `sync-wait` | Superseded | Protocol 4 has no such capability; `crates/rutis-bridge/src/session/protocol.rs:174-176` |
-| `SESS-15` | Capability declarations and what reads them | Current | `crates/rutis-bridge/src/session/rpc.rs:1154-1178,1590-1611`; `crates/rutis-bridge/src/session/plugin/greet.rs:57-70` |
+| `SESS-15` | Capability declarations and what reads them | Current | `crates/rutis-bridge/src/session/rpc.rs:1154-1178,1590-1611`; `crates/rutis-bridge/src/session/plugin/greet.rs:31-36` |
 | `SESS-16` | The `sync-wait`, `events-v2`, `objects` capabilities | Superseded | No such constants; §6.2 |
 | `SESS-17` | Unknown capability names ignored; declarations unverified; capabilities are not permissions | Not guaranteed | §2.4 |
 | `SESS-18` | Frames in arrival order, one at a time; calls may run concurrently | Current | `crates/rutis-bridge/src/session/rpc.rs:1557-1570,2792-2839`; `go/rutis/internal/peer/peer_test.go:55-58` |
@@ -323,7 +323,7 @@ The table is this file's rule list, for #634's trace table and #613's models. Ev
 | `SESS-22` | A second `hello` ends the session | Current | `crates/rutis-bridge/src/session/rpc.rs:2602-2614` |
 | `SESS-23` | A version mismatch says which end to upgrade | Current | `crates/rutis-bridge/src/session/rpc.rs:1224-1242,2456-2462`; `bridge/version-refusal` |
 | `SESS-24` | Endpoint id required, well-formed and checked | Current | `crates/rutis-bridge/src/session/rpc.rs:2463-2479`; `crates/rutis-bridge/src/channel/mod.rs:77-109` |
-| `SESS-25` | A missing required capability refuses the handshake | Current | `crates/rutis-bridge/src/session/plugin/greet.rs:57-70` |
+| `SESS-25` | A missing required capability refuses the handshake | Not guaranteed | No implementation offers an entry point for required capabilities: `crates/rutis-bridge/src/session/plugin/greet.rs:12-19`; `go/rutis/internal/peer/peer.go:111-114` |
 | `SESS-26` | 10-second greeting deadline | Current | `crates/rutis-bridge/src/session/plugin/mod.rs:46-47`; `crates/rutis-bridge/tests/session_plugin.rs:130-154` |
 | `SESS-27` | Sending before `ready` is refused | Current | `crates/rutis-bridge/src/session/rpc.rs:1844-1848` |
 | `SESS-28` | A greeting does not mount | Current | `crates/rutis-bridge/src/session/plugin/mod.rs:102-153,178-184` |
@@ -396,7 +396,6 @@ The table is this file's rule list, for #634's trace table and #613's models. Ev
 | The far end is newer | `incompatible session: the far end speaks protocol 99, this side 4: upgrade this side (Rust crates rutis-host / rutis-bridge)` |
 | The far end did not greet within 10 seconds | `the far end did not greet in time` |
 | The host has no session id | `the host provides no id for its sessions` |
-| A required capability is missing | `incompatible session: py does not declare plugins` |
 | A value is over the message limit | `svc.take: argument 2 cannot be sent: the message would be over the limit of 16777216 bytes (16 MiB)`; code `bad-value`; `data` is `{"argument":2,"limit":16777216,"part":"argument"}` |
 | The runtime owning an object exits | `a call on an object from py failed: runtime py exited`; code `peer-gone` |
 
@@ -423,13 +422,13 @@ Every call-level failure ends at the call or the value. Handshake and transport 
 
 **When it fails:** each malformed case prints which message it was; the rule categories are in §8. Error text may differ from other implementations (`SESS-77`), but the session must still end with a transport error, or only the call involved must fail, with the scope of §8.
 
-**Concepts to learn:** frames, `op`, call ids, `path`, reference grants/releases, call-level failure, session-level failure, capability negotiation. They are for implementation and verification only and do not enter the user API.
+**Concepts to learn:** frames, `op`, call ids, `path`, reference grants/releases, call-level failure, session-level failure, capability declarations. They are for implementation and verification only and do not enter the user API.
 
 ## 13. Compatibility and migration
 
 `SESS-79` **Current.** Protocol 4 speaks only to protocol 4. Hosts, runtimes, nodes and SDKs of 0.18 and earlier are refused at the handshake; migrating means upgrading every end to 0.19 or later. `docs/migration-0.19.en.md` "Upgrading together"; `bridge/cross-version-meetings` in `docs/guarantees.en.md`
 
-`SESS-80` **Current.** Adding a capability does not need a protocol version: a sender checks `value-<tag>` before sending a tagged value; an opener checks `require` after the greeting and refuses a far end missing a required capability (`SESS-25`). Because old implementations fail a call with an unknown field (`SESS-66`) and reject unknown `op`s, a new **frame** or a **change in an existing field's meaning** can only ship with a protocol version bump, updating this file, `Frame`/`WireValue`, the malformed matrix and the seven implementations together.
+`SESS-80` **Current.** Adding a capability does not need a protocol version: a sender checks `value-<tag>` before sending a tagged value, and does not send it when the far end does not declare it. Because old implementations fail a call with an unknown field (`SESS-66`) and reject unknown `op`s, a new **frame** or a **change in an existing field's meaning** can only ship with a protocol version bump, updating this file, `Frame`/`WireValue`, the malformed matrix and the seven implementations together. A new capability needs no version bump and is used only as declared (§2.4); there is no required capability to negotiate (`SESS-25`).
 
 `SESS-81` **Not guaranteed.** Cross-version meetings beyond adjacent releases; mixing new and old implementations; a new field without a version. `bridge/cross-version-meetings` in `docs/guarantees.en.md` promises only two adjacent releases with no incompatible change between them.
 

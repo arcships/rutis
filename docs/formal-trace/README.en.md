@@ -7,6 +7,8 @@ Issue: [#634](https://github.com/arcships/rutis/issues/634) (the 0.21 trace tabl
 
 2026-11-11: the 1368 protocol rules were re-checked against the current 0.22 sources; the result is in the [re-check page](recheck-0.22.md) (Chinese). A protocol row's status now comes from that re-check, not from the issue snapshot.
 
+2026-11-11 (#1123): protocol 4 has no `objects` capability (`SESS-16`, `SESS-53`), so `TRC-NG-4` moved from "not guaranteed" to "withdrawn"; §1 and §3.0 of the [session trace contract](../formal-trace.en.md) were updated with it.
+
 2026-11-11 (semantic re-extraction, baseline `4a1ac08b`): the 44 rows of the session trace contract (`TRC-*`) were rewritten against their current sources; 43 rows name `SESS-*` anchors, and `TRC-INV-7` says the session specification does not cover trace output. The Chinese table is §5 of the [re-check page](recheck-0.22.md), the English per-row text is the [English re-check page](recheck-0.22.en.md). No status moved (the re-extraction added no implementation evidence). The other partitions are still not re-extracted.
 
 2026-11-09: WS1 landed the core of #1025 (marker publication, `Entry::live`, deterministic race tests, a shuttle model), which lifts blockers G3 and G4 of plan §3; the `ECA-*` rows with implementation or tests became seven `部分验证` rows, the rest stay `未验证`.
@@ -24,7 +26,7 @@ node tools/formal-trace.mjs --check    # the checks only
 In the table:
 
 - **All 211 rows of the guarantee register**: 200 current, 8 withdrawn, 3 duplicate numbers that are not counted on their own (`core/D20`, `core/D26`, `core/D27`). The script extracts them from the register's Markdown tables; id, level, status and evidence are copied, never remembered. The script counts the table's rows; §16 of the register still disagrees (see §5).
-- **The nine categories of the [session trace contract](../formal-trace.en.md)** (success, failure and boundary of each), its 8 trace invariants and its 9 explicit non-guarantees: 44 rows, ids `TRC-*`.
+- **The nine categories of the [session trace contract](../formal-trace.en.md)** (success, failure and boundary of each), its 8 trace invariants and its 9 non-guarantee items (8 explicit non-guarantees; `TRC-NG-4` is withdrawn for protocol 4): 44 rows, ids `TRC-*`.
 - **The 10 proposed rules in §3 of the [event-close admission design](../design-event-close-admission-2026-11-08.en.md)**: ids `ECA-*`; seven have implementation, deterministic tests or a shuttle model and are `部分验证`, three stay `未验证`.
 - **The 1368 rules of #634**: six files, 1552 rows (1368 current + 184 replaced), in `rules/protocol-*.md`. Each file is one section comment's Markdown table exported verbatim (the two session comments make one file); the columns are still the issue's ten. The script maps the issue's status at read time (§3). Rows per section:
 
@@ -38,7 +40,7 @@ In the table:
   | [protocol-remote.md](rules/protocol-remote.md) | `remote` | 231 | 17 | 248 |
   | Total | — | 1368 | 184 | 1552 |
 
-- **The TRC partition (44 rows) is re-extracted semantically** (2026-11-11, baseline `4a1ac08b`): the nine trace categories, the 8 invariants and the 9 explicit non-guarantees in `rules/trace-contract.md` were rewritten row by row against `docs/formal-trace.md`, §11 of `docs/protocol-session.md` and `docs/design-remote-session-2026-10-28.md`. 43 rows name `SESS-*` anchors; `TRC-INV-7` has none and says the session specification does not specify trace output. `--check` verifies the source sections, the anchors, the statuses and the English page. **The other partitions are not re-extracted**: the 1552 protocol rows keep the issue's wording, the 211 register rows are generated from the register, and the 10 `ECA` rows are design proposals. The re-extraction data is this partition only (`tools/formal-trace-semantic.mjs`).
+- **The TRC partition (44 rows) is re-extracted semantically** (2026-11-11, baseline `4a1ac08b`): the nine trace categories, the 8 invariants and the 9 non-guarantee items (`TRC-NG-4` was later withdrawn for protocol 4, #1123) in `rules/trace-contract.md` were rewritten row by row against `docs/formal-trace.md`, §11 of `docs/protocol-session.md` and `docs/design-remote-session-2026-10-28.md`. 43 rows name `SESS-*` anchors; `TRC-INV-7` has none and says the session specification does not specify trace output. `--check` verifies the source sections, the anchors, the statuses and the English page. **The other partitions are not re-extracted**: the 1552 protocol rows keep the issue's wording, the 211 register rows are generated from the register, and the 10 `ECA` rows are design proposals. The re-extraction data is this partition only (`tools/formal-trace-semantic.mjs`).
 - **Status of the 1368 after the 0.22 re-check** ([re-check page](recheck-0.22.md), Chinese): 111 `已验证`, 376 `部分验证`, 540 `未验证`, 42 `明确不保证`, 201 `不单独计数`, and 98 rows withdrawn because 0.19 or 0.22 removed the mechanism they describe. The issue snapshot's 184 `已取代` rows were not re-checked. 1368 = 111 + 376 + 540 + 42 + 201 + 98.
 
 **Re-check method.** Four checks per rule: the source still exists (and 0.19 / 0.22 did not remove what it describes), a current anchor (a `SESS-*` id from `docs/protocol-session.md`; 161 rows have one), the named evidence resolves, and a status that only moves down. 261 rows have no current source — the multi-language runtimes design of 0.9, the remote-plugins design, register rows the register dropped — and are listed by reason in the re-check page §5. The specification's `当前` is not this table's `已验证`. Register rows the register withdrew follow the register. Protocol row text was not rewritten: semantic re-extraction covers the `TRC` partition (44 rows) only.
@@ -61,7 +63,7 @@ So the release gate (design §5, quality standard Q13.1) **cannot** be judged fr
 | `<prefix>-<section>-<number>` | #634 `events`, `session`, `runtime`, `remote` | `EVP-2.1-1`, `SES-6.1-12`, `VAL-1-V10`, `TAG-3-R1` | prefixes `EVP`, `EVD`, `SES`, `VAL`, `TAG`, `M1`, `CHN`, `SYN`, `M2`, `MNT`, `REQ`, `RTP`, `INS`, `MSV`, `REM`, `DIA`, `APP`, `NOD`; sections may carry dots (`6.1`), numbers may carry letters (`9a`, `V10`, `R1`) |
 | `TRC-<category>-<n>` | session trace contract §3 | `TRC-GREET-2` | categories `LIFE`, `FRAME`, `GREET`, `REF`, `CANCEL`, `ERR`, `LIMIT`, `MALFORMED`, `NET`; `1` success, `2` failure, `3` boundary |
 | `TRC-INV-<n>` | session trace contract §4 | `TRC-INV-2` | the eight trace invariants |
-| `TRC-NG-<n>` | session trace contract §1, "not guaranteed" | `TRC-NG-4` | explicit non-guarantees |
+| `TRC-NG-<n>` | session trace contract §1, "not guaranteed" | `TRC-NG-3` | non-guarantee items; withdrawn ones are kept |
 | `ECA-<n>` | event-close admission design §3 | `ECA-4` | the design's own rule numbers |
 
 Numbers are only added, never changed: moving a row to another section, renaming it or moving it to another file keeps its number; a deleted row stays with a status and a reason.
@@ -80,7 +82,7 @@ Numbers are only added, never changed: moving a row to another section, renaming
 | status | `已验证`, `部分验证`, `未验证`, `明确不保证`; `已撤回` and `不单独计数` are not counted | script (register rows; protocol rows from the [re-check](recheck-0.22.md)) / hand |
 | gap | the next issue; an uncovered rule is never written as passing | register rows start from the register's notes column; protocol rows combine the issue, the note and the reason a `已覆盖` row was downgraded |
 
-Explicit non-guarantees follow the register's convention (as `core/D15` does): level and status are both `明确不保证`, and they are not counted as unverified. A model passing marks only the model; a rule is `已验证` only with implementation evidence. A trace row is `部分验证` only when a named test asserts a point of it; source code or comments alone leave it `未验证`.
+Explicit non-guarantees follow the register's convention (as `core/D15` does): level and status are both `明确不保证`, and they are not counted as unverified. The 9 rows from §1 of the trace contract are registered this way, and so is `TRC-GREET-3`, because no implementation has an entry point for required capabilities (#1111). A model passing marks only the model; a rule is `已验证` only with implementation evidence. A trace row is `部分验证` only when a named test asserts a point of it; source code or comments alone leave it `未验证`.
 
 **Protocol rows (`rules/protocol-*.md`).** The files keep the issue's ten columns and status words; the script maps them to the nine columns at read time, downwards only:
 
@@ -117,10 +119,9 @@ Nine-column alignment: id=`编号`; current source=`来源`; promise=`规则`; l
 2. **10 bare file names do not resolve in the current tree** (7 names, 7 rows, all in the protocol `现有形式化` column): `events-conformance.test.mjs`, `test_events_conformance.py`, `events-conformance.test.ts`, `node_conformance.rs`, `websocket_conformance.rs`, `leases.rs` (3 rows), `memory_mux.rs` (2 rows). Those rows are only `部分验证` or `未验证`; they can move up after a current path or test is supplied. The note column also has paths that no longer exist (spot-checked: `crates/rutis-bridge/src/cordis/server.rs`, `go/rutis/dial.go`, `runtime/plugin.rs`); `--check` only scans the `现有形式化` column, so the re-extraction has to clean those too.
 3. **A real hole in the register's evidence**: `loader/remote-runtime-lease` (the only `未验证` core commitment) lists `rutis-loader/tests/leases.rs`, deleted with the connection plugin (`ec47944c`); §16 of the register already says the test is to be added. The checker skips paths inside parentheses, as `tools/check-guarantees.mjs` does (there the parenthesis says there is no evidence), so the hole sits in the known blind spot of both checks.
 4. **The register's §16 totals do not match its rows**: §16 says 194 current rows, the tables have 200; by section, §10 has 1 more, §12 2 more and §14 2 more. The table counts the rows; §16 needs a maintainer's check.
-5. **`TRC-GREET-3` (refusing a missing required capability) has no test**: the code is at `crates/rutis-bridge/src/session/plugin/greet.rs:33-70`; searching `Incompatible` finds only version and transport cases.
-6. **`TRC-INV-2` (the handshake gate) has no Rust assertion**: the text `protocol handshake incomplete` is implemented and untested; Go's `TestACallBeforeTheHandshakeEndsTheSession` asserts its own words.
-7. **Scope and mutation are mostly empty**: they come from the support matrix (quality standard §10) and the mutation results of #624, #630 and #631. Protocol rows carry participants in the scope column and `未登记` in the mutation column.
-8. **Semantic re-extraction covers the TRC partition only**: its 44 rows are rewritten against current sources; the 1368 protocol rules have been re-checked (source, anchor, evidence, status) but their text is the issue snapshot's. The re-check page §4 says for every protocol row which `SESS-*` or current document it falls under, and §6 lists the rows with none.
+5. **`TRC-INV-2` (the handshake gate) has no Rust assertion**: the text `protocol handshake incomplete` is implemented and untested; Go's `TestACallBeforeTheHandshakeEndsTheSession` asserts its own words.
+6. **Scope and mutation are mostly empty**: they come from the support matrix (quality standard §10) and the mutation results of #624, #630 and #631. Protocol rows carry participants in the scope column and `未登记` in the mutation column.
+7. **Semantic re-extraction covers the TRC partition only**: its 44 rows are rewritten against current sources; the 1368 protocol rules have been re-checked (source, anchor, evidence, status) but their text is the issue snapshot's. The re-check page §4 says for every protocol row which `SESS-*` or current document it falls under, and §6 lists the rows with none.
 
 ## 6. Next steps
 
