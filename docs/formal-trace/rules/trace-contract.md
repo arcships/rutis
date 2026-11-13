@@ -2,11 +2,11 @@
 
 [中文索引](../README.md) · [English](../README.en.md) · [英文复核页](../recheck-0.22.en.md) · 数据来源：[会话追踪契约](../../formal-trace.md)、[会话协议规格](../../protocol-session.md)、[远程连接设计](../../design-remote-session-2026-10-28.md)
 
-本文件是手写的：九类追踪规则（§3.0–§3.8，每类成功、失败、边界各一行）、§4 的 8 条追踪不变量、§1「不作保证」列的 9 条明确不保证。编号 `TRC-<类别>-<序号>`、`TRC-INV-<n>`、`TRC-NG-<n>` 一经分配不复用；条目移动章节时编号不变。
+本文件是手写的：九类追踪规则（§3.0–§3.8，每类成功、失败、边界各一行）、§4 的 8 条追踪不变量、§1「不作保证」列的 9 条（8 条明确不保证、`TRC-NG-4` 已按协议 4 撤回）。编号 `TRC-<类别>-<序号>`、`TRC-INV-<n>`、`TRC-NG-<n>` 一经分配不复用；条目移动章节时编号不变。
 
 2026-11-11 语义重抽：44 行都按 0.22 的现行来源重写。每行的「现行来源」给出 `SESS-*` 锚点（`docs/protocol-session.md` §11 的规则状态表），或写明会话规格不覆盖、规则在哪份文档；承诺文字按现行规格的措辞与数字校订，原本已一致的句子保留。锚点、来源章节与状态由 `node tools/formal-trace.mjs --check` 核对：每个 `SESS-*` 都在会话规格里，并出现在本行的「现行来源」；英文重抽文字在同目录的[英文复核页](../recheck-0.22.en.md)。这一轮没有新增实现证据，按设计 §5 不上调；`TRC-GREET-3` 因实现里没有入口（#1111）改记「明确不保证」。
 
-状态按设计 §5：有实现证据但只覆盖一部分要点（典型是只有 Rust/Go 用例、没有 trace 验证器和逐实现一致性列）记「部分验证」；只有源码和注释、没有断言该行为的用例记「未验证」。级别暂按「契约行为」登记——设计 §5 要求每条写明级别，会话协议规格（WS2）已落地，分级仍等维护者复核。「不作保证」的行按登记表惯例级别与状态都是「明确不保证」：§1「不作保证」列的 9 条，加上 `TRC-GREET-3`。
+状态按设计 §5：有实现证据但只覆盖一部分要点（典型是只有 Rust/Go 用例、没有 trace 验证器和逐实现一致性列）记「部分验证」；只有源码和注释、没有断言该行为的用例记「未验证」。级别暂按「契约行为」登记——设计 §5 要求每条写明级别，会话协议规格（WS2）已落地，分级仍等维护者复核。「不作保证」的行按登记表惯例级别与状态都是「明确不保证」：§1「不作保证」列的 9 条，加上 `TRC-GREET-3`；`TRC-NG-4` 随协议 4 去掉 `objects` 能力而撤回（#1123）。
 
 | 编号 | 现行来源 | 人话承诺 | 级别 | 适用范围 | 证据 | 变异或反例 | 状态 | 缺口 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -48,7 +48,7 @@
 | `TRC-NG-1` | [formal-trace.md §1](../../formal-trace.md)（不作保证）；[protocol-session.md](../../protocol-session.md) `SESS-18` | 超出通道顺序的具体调度交错不作保证：只承诺帧一次一个、按到达顺序与调用号接纳串行（`SESS-18`）；追踪只回答一次真实执行是否属于当前允许的追踪语言 | 明确不保证 | 全部运行时 | — | — | 明确不保证 | 不要把追踪通过读成任意交错安全（`TRC-INV-1` 只保证顺序） |
 | `TRC-NG-2` | [formal-trace.md §1](../../formal-trace.md)（不作保证）；[protocol-session.md](../../protocol-session.md) `SESS-21`、`SESS-27`、`SESS-30` | `ready` 之前成功调用不作保证；按现行规则它失败并结束会话：本端发起调用得到 `protocol handshake incomplete`（`SESS-27`），对端未问候时收到任何帧以传输错误结束（`SESS-21`）；`SESS-30` 已取代旧的两条规则 | 明确不保证 | 全部运行时 | `go/rutis/internal/peer/peer_test.go::TestACallBeforeTheHandshakeEndsTheSession` | — | 明确不保证 | 有验证锁定「确实不提供」（Go 用例）；Rust 侧未断言（§14 G2）；其他实现没有同一用例（#624） |
 | `TRC-NG-3` | [formal-trace.md §1](../../formal-trace.md)（不作保证）；[protocol-session.md](../../protocol-session.md) `SESS-55` | 引用生命周期不让运行时进程保持存活；持有方进程退出后，对它的对象的调用以 `peer-gone` 失败，而不是让运行时继续运行（`SESS-55`） | 明确不保证 | 全部运行时 | — | — | 明确不保证 | 无验证锁定；若有人依赖会被误读，需要补「不提供」用例（#635） |
-| `TRC-NG-4` | [formal-trace.md §1](../../formal-trace.md)（不作保证）；[protocol-session.md](../../protocol-session.md) `SESS-52`、`SESS-53`、`SESS-79` | 跨运行时的对象能力互操作不作保证：协议 4 没有 `objects` 能力（`SESS-16`、`SESS-53` 已取代该能力与它的拒绝分支），所有协议 4 实现都收对象引用（`SESS-52`）；#639 的“Rust 中继不查 `objects`”在协议 4 没有可触发的检查点，0.18 及更早的对端在握手时被拒（`SESS-79`） | 明确不保证 | 全部运行时 | — | #639 疑点：Rust 中继把对象发给不支持对象调用的运行时可能结束会话；未复现、未修复 | 明确不保证 | 先复现成用例再决定是修还是写进规格（#639、#635）；`docs/formal-trace.md` §1、§3.0 仍按 `objects` 能力措辞，待 #635 改源文档 |
+| `TRC-NG-4` | [formal-trace.md §1](../../formal-trace.md)（已取代）；[protocol-session.md](../../protocol-session.md) `SESS-52`、`SESS-53`、`SESS-79` | 已撤回：“跨运行时的对象能力互操作不作保证”按 0.18 的 `objects` 能力写。协议 4 没有这个能力（`SESS-16`、`SESS-53` 已取代该能力与它的拒绝分支），所有协议 4 实现都收对象引用（`SESS-52`），跨语言的对象引用由 `bridge/object-refs` 覆盖；#639 的“Rust 中继不查 `objects`”在协议 4 没有可触发的检查点，0.18 及更早的对端在握手时被拒（`SESS-79`） | — | 全部运行时 | — | — | 已撤回 | 0.18 的 `objects` 能力在协议 4 已不存在，这条不保证随之撤回；不再按能力措辞（#1123） |
 | `TRC-NG-5` | [formal-trace.md §1](../../formal-trace.md)（不作保证）；[protocol-session.md](../../protocol-session.md) `SESS-45`、`SESS-61` | 调用截止时间不作保证：协议没有 deadline，超时由调用方自己实现；本文的 `cancel` 规则不包含 deadline（`SESS-45`），取消后被调方是否回复也另行决定（`SESS-61`） | 明确不保证 | 全部运行时 | — | — | 明确不保证 | 计时承诺归 #639 的虚拟时钟；规格没有 deadline 之前不得写成保证 |
 | `TRC-NG-6` | [formal-trace.md §1](../../formal-trace.md)（不作保证）；[protocol-session.md](../../protocol-session.md) `SESS-63` | 畸形输入的稳定、平台特定承载原因不作保证；测试只承诺 `Error::Transport(_)` 与失败范围（`SESS-63`） | 明确不保证 | 全部运行时 | `crates/rutis-bridge/src/session/rpc/tests.rs:312-326` | — | 明确不保证 | 有验证锁定「不承诺原因句子」；其他实现的等价断言未列（#624） |
 | `TRC-NG-7` | [formal-trace.md §1](../../formal-trace.md)（不作保证）；[protocol-session.md](../../protocol-session.md) `SESS-76` | `outbound_limit` 为 `None`（默认）时出站积压无界不作保证（`SESS-76`） | 明确不保证 | 全部运行时 | `crates/rutis-bridge/src/session/rpc/tests.rs::a_far_end_that_never_reads_keeps_its_frames_by_default` | — | 明确不保证 | 有验证锁定默认无界；其他实现的默认值没有同一用例（#635） |

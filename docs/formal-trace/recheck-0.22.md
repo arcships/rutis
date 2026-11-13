@@ -1658,7 +1658,7 @@
 
 ## 5. 语义重抽：会话追踪契约 TRC（44 行，2026-11-11）
 
-`TRC-*` 的 44 行已按 0.22 现行来源重写（基准 `4a1ac08b`）：每行给出会话规格 §11 的 `SESS-*` 锚点（没有锚点的行写明会话规格不覆盖的部分），承诺文字改用现行规格的措辞与数字，来源章节与英文重抽文字在[英文复核页](recheck-0.22.en.md)。锚点、来源章节与英文页由 `--check` 核对：每个 `SESS-*` 都在会话规格里，并出现在该行「现行来源」。
+`TRC-*` 的 44 行已按 0.22 现行来源重写（基准 `4a1ac08b`）：每行给出会话规格 §11 的 `SESS-*` 锚点（没有锚点的行写明会话规格不覆盖的部分），承诺文字改用现行规格的措辞与数字，来源章节与英文重抽文字在[英文复核页](recheck-0.22.en.md)。锚点、来源章节与英文页由 `--check` 核对：每个 `SESS-*` 都在会话规格里，并出现在该行「现行来源」。`TRC-NG-4` 已撤回：协议 4 没有它所描述的 `objects` 能力（#1123）。
 
 **其余分区没有重抽**：协议清单 1368 行仍是 issue 快照的十列原文（状态按本页复核），保证登记表 211 行由登记表生成，`ECA` 10 行仍是手写的设计提案。语义重抽的下一批仍是会话分区（SES、VAL、TAG、M1、CHN）。
 
@@ -1702,7 +1702,7 @@
 | TRC-NG-1 | 明确不保证 | formal-trace.md §1 | SESS-18 | — | 不要把追踪通过读成任意交错安全（`TRC-INV-1` 只保证顺序） |
 | TRC-NG-2 | 明确不保证 | formal-trace.md §1 | SESS-21、SESS-27、SESS-30 | go/rutis/internal/peer/peer_test.go::TestACallBeforeTheHandshakeEndsTheSession | 有验证锁定「确实不提供」（Go 用例）；Rust 侧未断言（§14 G2）；其他实现没有同一用例（#624） |
 | TRC-NG-3 | 明确不保证 | formal-trace.md §1 | SESS-55 | — | 无验证锁定；若有人依赖会被误读，需要补「不提供」用例（#635） |
-| TRC-NG-4 | 明确不保证 | formal-trace.md §1 | SESS-52、SESS-53、SESS-79 | — | 先复现成用例再决定是修还是写进规格（#639、#635）；`docs/formal-trace.md` §1、§3.0 仍按 `objects` 能力措辞，待 #635 改源文档 |
+| TRC-NG-4 | 已撤回 | formal-trace.md §1 | SESS-52、SESS-53、SESS-79 | — | 0.18 的 `objects` 能力在协议 4 已不存在，这条不保证随之撤回；不再按能力措辞（#1123） |
 | TRC-NG-5 | 明确不保证 | formal-trace.md §1 | SESS-45、SESS-61 | — | 计时承诺归 #639 的虚拟时钟；规格没有 deadline 之前不得写成保证 |
 | TRC-NG-6 | 明确不保证 | formal-trace.md §1 | SESS-63 | crates/rutis-bridge/src/session/rpc/tests.rs:312-326 | 有验证锁定「不承诺原因句子」；其他实现的等价断言未列（#624） |
 | TRC-NG-7 | 明确不保证 | formal-trace.md §1 | SESS-76 | crates/rutis-bridge/src/session/rpc/tests.rs::a_far_end_that_never_reads_keeps_its_frames_by_default | 有验证锁定默认无界；其他实现的默认值没有同一用例（#635） |
