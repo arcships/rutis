@@ -137,23 +137,51 @@ impl Drop for MemoryReceiver {
     }
 }
 
+/// What the two ends of one pair share: why it closed, decided once by the
+/// first end to close (#624).
+#[derive(Default)]
+struct Pair {
+    /// The first close's reason. Both directions end with it, so a far end
+    /// reads the rejection even when this end's own teardown (`Done`) closes
+    /// at the same time.
+    reason: Mutex<Option<Close>>,
+    /// A test's step between a close's two directions (#624).
+    #[cfg(test)]
+    between: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+
 struct MemoryCloser {
     incoming: Arc<Direction>,
     outgoing: Arc<Direction>,
     own: Arc<Mutex<bool>>,
+    pair: Arc<Pair>,
 }
 impl Closer for MemoryCloser {
     fn close(&self, why: Close) {
+        // One reason for the pair, decided before either direction closes: a
+        // far end's rejection (4003) must not be lost to this end's own
+        // teardown (`Done`) racing it (#624).
+        let why = {
+            let mut reason = self.pair.reason.lock().unwrap();
+            reason.get_or_insert(why).clone()
+        };
         *self.own.lock().unwrap() = true;
         for direction in [&self.incoming, &self.outgoing] {
             direction.update(|state| {
                 state.closed.get_or_insert_with(|| why.clone());
             });
+            #[cfg(test)]
+            {
+                let between = self.pair.between.lock().unwrap().take();
+                if let Some(between) = between {
+                    between();
+                }
+            }
         }
     }
 }
 
-fn end(incoming: &Arc<Direction>, outgoing: &Arc<Direction>) -> Channel {
+fn end(incoming: &Arc<Direction>, outgoing: &Arc<Direction>, pair: &Arc<Pair>) -> Channel {
     let own = Arc::new(Mutex::new(false));
     Channel {
         sender: Box::new(MemorySender(outgoing.clone())),
@@ -165,6 +193,7 @@ fn end(incoming: &Arc<Direction>, outgoing: &Arc<Direction>) -> Channel {
             incoming: incoming.clone(),
             outgoing: outgoing.clone(),
             own,
+            pair: pair.clone(),
         }),
     }
 }
@@ -172,7 +201,8 @@ fn end(incoming: &Arc<Direction>, outgoing: &Arc<Direction>) -> Channel {
 /// Two channels joined end to end: what one sends, the other receives.
 pub fn pair() -> (Channel, Channel) {
     let (a, b) = (Arc::default(), Arc::default());
-    (end(&a, &b), end(&b, &a))
+    let pair = Arc::default();
+    (end(&a, &b, &pair), end(&b, &a, &pair))
 }
 
 /// [`pair`], with what the first channel sends into and what it receives
@@ -180,7 +210,8 @@ pub fn pair() -> (Channel, Channel) {
 #[cfg(test)]
 fn pair_watched() -> (Channel, Channel, Arc<Direction>, Arc<Direction>) {
     let (a, b): (Arc<Direction>, Arc<Direction>) = (Arc::default(), Arc::default());
-    (end(&a, &b), end(&b, &a), b, a)
+    let pair = Arc::default();
+    (end(&a, &b, &pair), end(&b, &a, &pair), b, a)
 }
 
 #[cfg(test)]

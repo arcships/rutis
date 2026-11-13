@@ -140,6 +140,44 @@ fn the_far_end_sees_a_close_as_the_end_after_draining() {
 }
 
 #[test]
+fn a_close_racing_the_far_ends_teardown_keeps_its_reason() {
+    // One close, one reason (#624). The listen side closes with 4003
+    // (`Rejected`) while the session it was reading tears its own channel
+    // down with `Done`, landing between this end's two directions: the far
+    // end must still read the rejection, not a plain end.
+    let (a, b): (Arc<Direction>, Arc<Direction>) = (Arc::default(), Arc::default());
+    let pair: Arc<Pair> = Arc::default();
+    let ours = end(&a, &b, &pair);
+    let theirs = end(&b, &a, &pair);
+    let far = theirs.closer.clone();
+    pair.between
+        .lock()
+        .unwrap()
+        .replace(Box::new(move || far.close(Close::Done)));
+    ours.closer.close(Close::Rejected("revoked".into()));
+
+    let rejection = ChannelError::Rejected {
+        reason: "rejected: revoked".into(),
+    };
+    assert_eq!(
+        (MemoryReceiver {
+            incoming: a.clone(),
+            own: Arc::default(),
+        })
+        .recv(),
+        Err(rejection.clone())
+    );
+    assert_eq!(
+        (MemoryReceiver {
+            incoming: b.clone(),
+            own: Arc::default(),
+        })
+        .recv(),
+        Err(rejection)
+    );
+}
+
+#[test]
 fn the_far_end_learns_why_a_channel_closed() {
     let (a, mut b) = pair();
     a.closer.close(Close::Done);
