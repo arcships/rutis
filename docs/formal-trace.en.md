@@ -27,7 +27,7 @@ The status vocabulary is deliberately strict. **Current** means that the rule is
 | Category | Current rule | Superseded evidence | Not guaranteed |
 | --- | --- | --- | --- |
 | Session frames | The protocol-4 `Frame` vocabulary and ordered handling in §3.1 | Pre-protocol-4 frame names or payload-dependent channel logs | A particular scheduler interleaving beyond channel order |
-| Handshake | Mutual `hello`, version 4, endpoint and capability checks | A handshake that registers/mounts plugins before `Greeted` is mounted | Successful calls before `ready` |
+| Handshake | Mutual `hello`, version 4, endpoint check and capability declarations | A handshake that registers/mounts plugins before `Greeted` is mounted | Successful calls before `ready` |
 | References | Tagged references, home identity, counted `release` | The old assumption that every reference is copied data; choosing the far end by the `objects` capability (0.18) | Reference lifetime keeping a runtime process alive (Not guaranteed) |
 | Cancellation | `cancel` is hop-by-hop; late replies are discarded | Treating cancellation as a transport close | A deadline for calls (none is promised here) |
 | Errors | `Failure` graphs and coded call/session scopes | Matching retry or behaviour by error text | A stable platform-specific transport reason for malformed input |
@@ -98,7 +98,7 @@ Accepted trace:
 
 **Failure — version mismatch.** A far end speaking version 3 produces the exact local session failure `the far end speaks protocol 3, this side 4: upgrade the far end`. The fixture separately observes the local side's hello and the far-end thread's normal channel result `Ok(())`; that `Ok(())` is the transport thread's close result, not a successful handshake (`crates/rutis-bridge/tests/session_plugin.rs:101-126`). A handshake that does not finish within 10 seconds fails with `the far end did not greet in time` and the channel ends (`crates/rutis-bridge/tests/session_plugin.rs:128-152`; timeout is defined at `crates/rutis-bridge/src/session/plugin/mod.rs:46-47`). A host without `LocalId` fails with `the host provides no id for its sessions` and sends no greeting (`crates/rutis-bridge/tests/session_plugin.rs:154-167`).
 
-**Boundary — capabilities are checked before use.** `Greet` declares `node` and configured capabilities, waits for the greeting, then refuses a missing required capability (`crates/rutis-bridge/src/session/plugin/greet.rs:33-70`). The refusal is `Handshake::Incompatible`; it closes the session rather than allowing a call to discover the mismatch later. Capability declarations grant no permission by themselves (`crates/rutis-bridge/src/session/rpc.rs:1153-1158`); they are a contract precondition.
+**Boundary — capabilities are declarations.** `Greet` declares `node` and the configured capabilities in its greeting (`crates/rutis-bridge/src/session/plugin/greet.rs:31-36`), but does not check whether the far end declares what this end needs: no implementation offers an entry point for a "required capabilities" list. Rust had a `require` field whose only production call passed an empty list; it is removed. Go's `peer.Options.Require` sits in `internal/peer` with no caller; the other implementations have no such check. When the far end lacks a capability, only the place that uses it fails; a capability declaration grants no permission by itself (`crates/rutis-bridge/src/session/rpc.rs:1153-1158`) and is not verified.
 
 ### 3.3 References
 

@@ -76,7 +76,7 @@ node tools/formal-trace.mjs --check    # 只检查，不打印统计
 | 状态 | 已验证、部分验证、未验证、明确不保证；已撤回和不单独计数不计入统计 | 脚本（登记表行；协议行按[复核表](recheck-0.22.md)的结论）/ 手写 |
 | 缺口 | 下一步 issue；不能把「未覆盖」写成「通过」 | 登记表行初始值取「说明」列，之后可手工补充；协议行取「归属 issue」+「备注」+ 降级原因 |
 
-**关于「明确不保证」行**：按登记表的惯例（如 `core/D15`），级别与状态都是「明确不保证」，不计入未验证数。会话追踪契约 §1 的 9 条不作保证条目按这条惯例登记；`TRC-NG-4` 已按协议 4 撤回（#1123），不计入。
+**关于「明确不保证」行**：按登记表的惯例（如 `core/D15`），级别与状态都是「明确不保证」，不计入未验证数。会话追踪契约 §1 的 9 条不作保证条目按这条惯例登记；`TRC-GREET-3` 因实现里没有入口（#1111）也按同一惯例记；`TRC-NG-4` 已按协议 4 撤回（#1123），不计入。
 
 **状态的边界**：模型通过只把模型列为通过；必须有实现证据才能把规则写「已验证」。本表引用 `TRC`/`ECA` 行时，只有具名测试断言了要点才算「部分验证」，只有源码或注释的记「未验证」。
 
@@ -111,7 +111,7 @@ node tools/formal-trace.mjs --check    # 只检查，不打印统计
 | [guarantees-host.md](rules/guarantees-host.md) | `host/*`、`dsh/*` | 35 | 31 | 4 | 0 | 0 | 0 | 0 |
 | [guarantees-sdk.md](rules/guarantees-sdk.md) | `sdk/*` | 11 | 11 | 0 | 0 | 0 | 0 | 0 |
 | [guarantees-loader.md](rules/guarantees-loader.md) | `loader/*`、`swift/*` | 48 | 42 | 5 | 1 | 0 | 0 | 0 |
-| [trace-contract.md](rules/trace-contract.md) | 手写 | 44 | 0 | 34 | 1 | 8 | 1 | 0 |
+| [trace-contract.md](rules/trace-contract.md) | 手写 | 44 | 0 | 34 | 0 | 9 | 1 | 0 |
 | [event-close-admission.md](rules/event-close-admission.md) | 手写 | 10 | 0 | 7 | 3 | 0 | 0 | 0 |
 | [protocol-registry-1.md](rules/protocol-registry-1.md) | #634 · registry-1 | 165 | 4 | 48 | 62 | 6 | 21 | 24 |
 | [protocol-registry-2.md](rules/protocol-registry-2.md) | #634 · registry-2 | 218 | 8 | 29 | 126 | 5 | 14 | 36 |
@@ -119,7 +119,7 @@ node tools/formal-trace.mjs --check    # 只检查，不打印统计
 | [protocol-session.md](rules/protocol-session.md) | #634 · session 上/下 | 350 | 13 | 99 | 86 | 7 | 118 | 27 |
 | [protocol-runtime.md](rules/protocol-runtime.md) | #634 · runtime | 309 | 8 | 38 | 140 | 10 | 50 | 63 |
 | [protocol-remote.md](rules/protocol-remote.md) | #634 · remote | 248 | 4 | 70 | 73 | 13 | 56 | 32 |
-| 合计 | — | 1817 | 294 | 431 | 545 | 52 | 291 | 204 |
+| 合计 | — | 1817 | 294 | 431 | 544 | 53 | 291 | 204 |
 <!-- index:end -->
 
 脚本还会打印这些数字（只算本表内的行）：
@@ -149,10 +149,9 @@ node tools/formal-trace.mjs --check    # 只检查，不打印统计
 2. **10 个裸文件名引用在当前树找不到**（7 个名字、7 行，全部在协议清单的「现有形式化」列）：`events-conformance.test.mjs`、`test_events_conformance.py`、`events-conformance.test.ts`、`node_conformance.rs`、`websocket_conformance.rs`、`leases.rs`（3 行）、`memory_mux.rs`（2 行）。这些行都只记「部分验证」或「未验证」；补上现行路径或新用例后才能上调。备注列里还有已不存在的路径（抽查到 `crates/rutis-bridge/src/cordis/server.rs`、`go/rutis/dial.go`、`runtime/plugin.rs`），`--check` 目前只查「现有形式化」列，重抽时要一并处理。
 3. **证据检查的一个真实缺口**：`loader/remote-runtime-lease`（唯一「未验证」的核心承诺）的验证列写 `rutis-loader/tests/leases.rs`，该文件已随连接插件删除（`ec47944c`），登记表 §16 也注明了「待补」。检查器按与 `tools/check-guarantees.mjs` 相同的规则跳过括号里的路径（那里是「说明没有证据」，不是证据），所以它落在已知的检查盲区里；补测试后这一行才能改状态。
 4. **登记表 §16 的合计与表内行数不一致**：§16 写 194 条现行，表内有 200 条；按节核对是 §10 多 1 条、§12 多 2 条、§14 多 2 条。本表按表内行计数，§16 需要维护者核对。
-5. **`TRC-GREET-3`（缺少必需能力时拒绝）没有用例**：源码在 `crates/rutis-bridge/src/session/plugin/greet.rs:33-70`，检索 `Incompatible` 只找到版本与承载用例。
-6. **`TRC-INV-2`（握手门）Rust 侧没有断言**：异常文本 `protocol handshake incomplete` 有实现、没有用例；Go 的 `TestACallBeforeTheHandshakeEndsTheSession` 只断言自己的文字。
-7. **适用范围与变异两列基本是空的**：它们的来源是支持矩阵（质量规范 §10）和各 issue 的变异结果，等 #624、#630、#631 的产物。协议行的「适用范围」填的是 issue 的参与方，不是实现矩阵；「变异或反例」全部「未登记」。
-8. **语义重抽只完成 TRC 分区**：44 行追踪规则已按现行来源重写；协议清单的 1368 条仍只有复核（来源、锚点、证据、状态），没有重写规则文字。复核表 §4 的每一行都注明了它落在哪条 `SESS-*` 或哪份现行文档；没有锚点的行在 §6。
+5. **`TRC-INV-2`（握手门）Rust 侧没有断言**：异常文本 `protocol handshake incomplete` 有实现、没有用例；Go 的 `TestACallBeforeTheHandshakeEndsTheSession` 只断言自己的文字。
+6. **适用范围与变异两列基本是空的**：它们的来源是支持矩阵（质量规范 §10）和各 issue 的变异结果，等 #624、#630、#631 的产物。协议行的「适用范围」填的是 issue 的参与方，不是实现矩阵；「变异或反例」全部「未登记」。
+7. **语义重抽只完成 TRC 分区**：44 行追踪规则已按现行来源重写；协议清单的 1368 条仍只有复核（来源、锚点、证据、状态），没有重写规则文字。复核表 §4 的每一行都注明了它落在哪条 `SESS-*` 或哪份现行文档；没有锚点的行在 §6。
 
 ## 7. 下一步
 

@@ -973,7 +973,7 @@ ${sources.join('\n')}
 | --- | --- | --- | --- | --- | --- |
 | ${list.length} | ${count('已验证')} | ${count('部分验证')} | ${count('未验证')} | ${count('明确不保证')} | ${count('已撤回')} |
 
-No status moved in the re-extraction: no test was added, and the two rows that gained evidence citations (\`TRC-LIMIT-2\`, \`TRC-MALFORMED-2\`) already described that evidence in their wording, so each row keeps its status. \`TRC-NG-4\` is withdrawn: protocol 4 no longer has the \`objects\` capability it described (#1123).
+No status moved in the re-extraction: no test was added, and the two rows that gained evidence citations (\`TRC-LIMIT-2\`, \`TRC-MALFORMED-2\`) already described that evidence in their wording, so each row keeps its re-extraction status. \`TRC-GREET-3\` moved from \`unverified\` to \`not guaranteed\` after #1111 removed an unreachable check: no implementation offers a required-capabilities entry point. \`TRC-NG-4\` is withdrawn: protocol 4 no longer has the \`objects\` capability it described (#1123).
 
 ## 4. Per-row re-extraction
 
