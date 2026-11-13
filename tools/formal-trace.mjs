@@ -29,7 +29,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ANCHORS, NOTES, REGISTRY_FAMILIES, SOURCES, SUPERSEDED, UNMAPPED } from './formal-trace-recheck.mjs'
-import { SEMANTIC, SEMANTIC_DOCS } from './formal-trace-semantic.mjs'
+import { SEMANTIC_DOCS, SEMANTIC_PAGE, SEMANTIC_PARTITIONS } from './formal-trace-semantic.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const read = file => readFileSync(`${root}${file}`, 'utf8')
@@ -885,11 +885,12 @@ function recheckUnmapped(rows) {
   return lines.join('\n')
 }
 
-// ── The semantically re-extracted partition ─────────────────────────────
+// ── The semantically re-extracted partitions ───────────────────────────
 //
-// The rows of `rules/trace-contract.md` plus their entries in
-// `tools/formal-trace-semantic.mjs`. The Chinese re-check page gets a section,
-// the English page is generated whole; both come from this one join.
+// Each partition is a file of rows plus its entries in
+// `tools/formal-trace-semantic.mjs`. The Chinese re-check page gets a section
+// per partition, the English page is generated whole; both come from this one
+// join.
 
 const STATUS_EN = new Map([
   ['已验证', 'verified'],
@@ -913,23 +914,43 @@ function semanticTableZh(list) {
   ]
   for (const row of list) {
     const entry = row.semantic
+    if (!entry) continue
     const anchors = entry.anchors.length ? entry.anchors.join('、') : `—（${entry.whyNoAnchor}）`
     lines.push(`| ${row.id} | ${row.状态} | ${cell(semanticSource(entry))} | ${cell(anchors)} | ${cell(evidencePaths(row.证据).join('、') || '—')} | ${cell(row.缺口)} |`)
   }
   return lines.join('\n')
 }
 
-function englishRecheckPage(list) {
+// A registry row keeps the issue's rule wording; the table carries the four
+// re-extracted things: source, register anchor, evidence and status with its
+// reason.
+function registryTableZh(list) {
+  const lines = [
+    '| 编号 | 状态 | 现行来源 | 现行锚点 | 证据 | 来源与状态说明 |',
+    '| --- | --- | --- | --- | --- | --- |',
+  ]
+  for (const row of list) {
+    const entry = row.semantic
+    if (!entry) continue
+    const anchors = entry.anchors.length ? entry.anchors.join('、') : `—（${entry.whyNoAnchor}）`
+    lines.push(`| ${row.id} | ${row.状态} | ${cell(semanticSource(entry))} | ${cell(anchors)} | ${cell(entry.evidence)} | ${cell(entry.why)} |`)
+  }
+  return lines.join('\n')
+}
+
+function englishRecheckPage(lists) {
   const status = code => STATUS_EN.get(code) ?? code
-  const count = code => list.filter(row => row.状态 === code).length
+  const all = lists.flatMap(list => list.rows).filter(row => row.semantic)
+  const trace = lists.find(list => list.partition.translate)
+  const registry = lists.find(list => !list.partition.translate)
   const sources = Object.entries(SEMANTIC_DOCS).map(([name, document]) => {
     let sections
     if (name === 'protocol-session.md') {
-      const ids = [...new Set(list.flatMap(row => row.semantic.anchors))]
+      const ids = [...new Set(all.flatMap(row => row.semantic.anchors))].filter(id => id.startsWith('SESS-'))
       ids.sort((a, b) => Number(a.slice('SESS-'.length)) - Number(b.slice('SESS-'.length)))
       sections = [`§11: ${ids.join(', ')}`]
     } else {
-      sections = [...new Set(list.flatMap(row => [row.semantic.source, row.semantic.extra])
+      sections = [...new Set(all.flatMap(row => [row.semantic.source, row.semantic.extra])
         .filter(source => source?.startsWith(`${name} `))
         .map(source => source.slice(name.length + 1)))]
       const order = section => Number(/^§(\d+(?:\.\d+)?)/.exec(section)?.[1] ?? Number.MAX_SAFE_INTEGER)
@@ -937,26 +958,35 @@ function englishRecheckPage(list) {
     }
     return `| ${document.labelEn} | [${document.doc.replace(/^docs\//, '')}](../${document.doc.replace(/^docs\//, '')}) | ${document.kind} | ${sections.join(', ') || '—'} |`
   })
-  const rows = list.map(row => {
+  const traceRows = trace ? trace.rows.filter(row => row.semantic).map(row => {
     const entry = row.semantic
     const anchors = entry.anchors.length ? entry.anchors.join(', ') : `— (${entry.whyNoAnchorEn})`
     const evidence = evidencePaths(row.证据).join(', ') || '—'
     return `| ${row.id} | ${status(row.状态)} | ${cell(semanticSource(entry))} | ${cell(anchors)} | ${cell(entry.en)} | ${cell(evidence)} | ${cell(entry.gapEn)} |`
+  }) : []
+  const registryRows = registry ? registry.rows.filter(row => row.semantic).map(row => {
+    const entry = row.semantic
+    const anchors = entry.anchors.length ? entry.anchors.join(', ') : `— (${entry.whyNoAnchorEn})`
+    return `| ${row.id} | ${status(row.状态)} | ${cell(semanticSource(entry))} | ${cell(anchors)} | ${cell(entry.evidence)} | ${cell(entry.whyEn)} |`
+  }) : []
+  const partitionCounts = lists.map(list => {
+    const count = code => list.rows.filter(row => row.状态 === code).length
+    return `| ${list.partition.labelEn} | ${list.rows.length} | ${count('已验证')} | ${count('部分验证')} | ${count('未验证')} | ${count('明确不保证')} | ${count('已撤回')} | ${count('不单独计数')} |`
   })
   return `# Rule re-check against the 0.22 sources (#634)
 
 [中文](recheck-0.22.md) · [Guarantee register](../guarantees.en.md) · [Session protocol specification](../protocol-session.md) · [Session trace contract](../formal-trace.en.md) · Issue: [#634](https://github.com/arcships/rutis/issues/634)
 
-Status: first version. Date: ${SEMANTIC.date}. Baseline: \`origin/main\` \`${SEMANTIC.baseline}\`.
+Status: first version. Date: ${SEMANTIC_PAGE.date}. Baseline: \`origin/main\` \`${SEMANTIC_PAGE.baseline}\`.
 
-Generated by \`node tools/formal-trace.mjs --write\`; \`--check\` compares this page with \`rules/trace-contract.md\` and the data in \`tools/formal-trace-semantic.mjs\`. This page carries the one partition that has been re-extracted semantically: the ${list.length} rows of the session trace contract (\`TRC-*\`). The protocol partitions (registry, events, session, runtime, remote: 1368 current rules and 184 replaced rows) were re-checked for source, anchor, evidence and status, but their rule text has not been re-extracted; their per-rule tables are in the Chinese page.
+Generated by \`node tools/formal-trace.mjs --write\`; \`--check\` compares this page with \`rules/trace-contract.md\`, \`rules/protocol-registry-1.md\` and the data in \`tools/formal-trace-semantic.mjs\`. Two partitions have been re-extracted semantically: the ${trace ? trace.rows.length : 0} rows of the session trace contract (\`TRC-*\`), rewritten whole, and the ${registry ? registry.rows.length : 0} rows of the protocol list \`registry-1\`, where the rule wording is still the issue snapshot's and the source, anchor, evidence and status are re-extracted. The other protocol partitions (registry-2, events, session, runtime, remote) were re-checked for source, anchor, evidence and status; their rule text has not been re-extracted, and their per-rule tables are in the Chinese page.
 
 ## 1. Method
 
 The protocol rules pass four checks, and the trace rows pass a fifth. Every check that can be automated is in the generated pages; the judgement is in \`tools/formal-trace-recheck.mjs\` and \`tools/formal-trace-semantic.mjs\`.
 
 1. **The source still exists**: the source document is in the current tree and 0.19 / 0.22 did not remove what it describes. Removed mechanisms (compat format, \`events-v2\`, the \`sync-wait\` capability, node \`export\` / \`import\`, \`Registration\`, the access point, \`Revocations\`, \`PeerRows\`, \`peer:\` rows, \`runtimes.remote\`, \`Transport\`, \`ChannelInfo\`) are \`withdrawn\`, and the gap names the rule that replaced them.
-2. **A current anchor**: session rules map onto the \`SESS-*\` ids of \`docs/protocol-session.md\` §11; for the other partitions the gap says which document covers the rule or why none does.
+2. **A current anchor**: session rules map onto the \`SESS-*\` ids of \`docs/protocol-session.md\` §11; a registry row maps onto the guarantee-register row the issue split; for the other partitions the gap says which document covers the rule or why none does.
 3. **The evidence resolves**: the paths, test names and line ranges of the evidence column are checked against the current tree; a rule with only a model, or without an implementation check, is \`partial\`.
 4. **The status only moves down**: the issue snapshot is the ceiling. A rule is never raised to \`verified\` because a specification calls it current; current describes the rule, not its implementation evidence.
 5. **The rule text is re-extracted** (trace rows only): the wording is the current source's, not the old design's, and the row names the \`SESS-*\` ids that carry it — or says why the session specification does not cover it.
@@ -969,40 +999,59 @@ ${sources.join('\n')}
 
 ## 3. Result
 
-| Rows | Verified | Partial | Unverified | Not guaranteed | Withdrawn |
-| --- | --- | --- | --- | --- | --- |
-| ${list.length} | ${count('已验证')} | ${count('部分验证')} | ${count('未验证')} | ${count('明确不保证')} | ${count('已撤回')} |
+| Partition | Rows | Verified | Partial | Unverified | Not guaranteed | Withdrawn | Not counted |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+${partitionCounts.join('\n')}
 
-No status moved in the re-extraction: no test was added, and the two rows that gained evidence citations (\`TRC-LIMIT-2\`, \`TRC-MALFORMED-2\`) already described that evidence in their wording, so each row keeps its re-extraction status. \`TRC-GREET-3\` moved from \`unverified\` to \`not guaranteed\` after #1111 removed an unreachable check: no implementation offers a required-capabilities entry point. \`TRC-NG-4\` is withdrawn: protocol 4 no longer has the \`objects\` capability it described (#1123).
+No status moved because of the re-extraction itself in either partition: no test was added, the two trace rows that gained evidence citations (\`TRC-LIMIT-2\`, \`TRC-MALFORMED-2\`) already described that evidence in their wording, and each \`registry-1\` row keeps the status the re-check gave it (the issue snapshot is the ceiling). \`TRC-GREET-3\` moved from \`unverified\` to \`not guaranteed\` after #1111 removed an unreachable check: no implementation offers a required-capabilities entry point. \`TRC-NG-4\` is withdrawn: protocol 4 no longer has the \`objects\` capability it described (#1123).
 
-## 4. Per-row re-extraction
+## 4. Per-row re-extraction: session trace contract
 
 | Id | Status | Current source | Anchors | Rule (re-extracted) | Evidence | Gap |
 | --- | --- | --- | --- | --- | --- | --- |
-${rows.join('\n')}
+${traceRows.join('\n')}
 
-## 5. What is still not re-extracted
+## 5. Per-row re-extraction: protocol list \`registry-1\`
 
-- The 1368 current protocol rules and the 184 replaced rows of \`rules/protocol-*.md\`: the re-check maps them onto sources, anchors, evidence and status; it does not rewrite them. Their per-rule table is Chinese only.
+The rule wording of these rows is the issue snapshot's (Chinese, \`rules/protocol-registry-1.md\`); it was not rewritten. Each row was re-extracted on four points: the guarantee-register row that is its current source, that row as the anchor, the current evidence for the split claim, and the status with its reason.
+
+| Id | Status | Current source | Anchor | Evidence | Status and source |
+| --- | --- | --- | --- | --- | --- |
+${registryRows.join('\n')}
+
+## 6. What is still not re-extracted
+
+- The 1368 current protocol rules and the 184 replaced rows of \`rules/protocol-*.md\`, except \`registry-1\`: the re-check maps them onto sources, anchors, evidence and status; it does not rewrite them. Their per-rule table is Chinese only.
+- The rule wording of the 165 \`registry-1\` rows: source, anchor, evidence and status are re-extracted, the wording is the issue snapshot's, and the table above does not translate it.
 - The 211 guarantee-register rows: generated from \`docs/guarantees.md\`, so the register's wording is the source, not a re-extraction.
 - The 10 \`ECA-*\` rows: hand-written proposals of the event-close admission design, with no current specification behind them yet.
-- The English table of the protocol partitions: a gap (#634). This page translates the trace partition only.
+- The English table of the remaining protocol partitions: a gap (#634).
 `
 }
 
-function refreshSemantic(list) {
-  const content = englishRecheckPage(list)
-  if (!exists(SEMANTIC.pageEn) || read(SEMANTIC.pageEn) !== content) writeFileSync(`${root}${SEMANTIC.pageEn}`, content)
+function refreshSemantic(lists) {
+  const content = englishRecheckPage(lists)
+  if (!exists(SEMANTIC_PAGE.pageEn) || read(SEMANTIC_PAGE.pageEn) !== content) writeFileSync(`${root}${SEMANTIC_PAGE.pageEn}`, content)
 }
 
-function recheckPage(rows, traceRows = []) {
+function recheckPage(rows, lists) {
   const total = rows.filter(row => row.recheck.issueStatus !== '已取代').length
   const withdrawnNow = rows.filter(row => row.recheck.issueStatus !== '已取代' && row.recheck.status === '已撤回').length
   const sources = []
   for (const [prefix, source] of Object.entries(SOURCES)) {
     sources.push(`| \`${prefix}\` | ${source.label} | [${source.doc.replace(/^docs\//, '')}](../${source.doc.replace(/^docs\//, '')}) | ${source.kind === 'spec' ? '规格' : source.kind === 'design' ? '设计' : source.kind === 'guide' ? '指南' : '历史'} | ${source.note} |`)
   }
-  const semantic = traceRows.filter(row => row.semantic)
+  const semantic = lists.flatMap(list => list.rows)
+  const traceList = lists.find(list => list.partition.translate)
+  const registryList = lists.find(list => !list.partition.translate)
+  const semanticSections = lists.map(list => {
+    const table = list.partition.translate ? semanticTableZh(list.rows) : registryTableZh(list.rows)
+    const intro = list.partition.translate
+      ? `\`TRC-*\` 的 ${list.rows.length} 行已按 0.22 现行来源重写：每行给出会话规格 §11 的 \`SESS-*\` 锚点（没有锚点的行写明会话规格不覆盖的部分），承诺文字改用现行规格的措辞与数字，来源章节与英文重抽文字在[英文复核页](recheck-0.22.en.md)。锚点、来源章节与英文页由 \`--check\` 核对：每个 \`SESS-*\` 都在会话规格里，并出现在该行「现行来源」。\`TRC-GREET-3\` 因 #1111 改记「明确不保证」，\`TRC-NG-4\` 已撤回：协议 4 没有它所描述的 \`objects\` 能力（#1123）。`
+      : `这些行是保证登记表的行被 #634 拆出的要求，规则文字仍是 issue 快照原文（\`rules/protocol-registry-1.md\`，中文），没有重写。每行重抽四件事：现行来源（登记表的哪一节）、现行锚点（登记表的哪一行）、承载这条拆分要求的现行证据、以及状态与理由。\`--check\` 核对：登记表行在它所在的节里、证据路径与用例名在当前树里、状态与复核结论一致。`
+    return `### ${list.partition.label}（${list.rows.length} 行）\n\n${intro}\n\n${table}`
+  })
+  const semanticCurrent = registryList ? registryList.rows.filter(row => row.issueStatus !== '已取代').length : 0
   return `# 规则复核：按 0.22 现行规格（#634）
 
 [中文索引](README.md) · [英文复核页](recheck-0.22.en.md) · [保证登记表](../guarantees.md) · [会话协议规格](../protocol-session.md) · 议题：[#634](https://github.com/arcships/rutis/issues/634)
@@ -1020,7 +1069,7 @@ function recheckPage(rows, traceRows = []) {
 3. **证据是否解析**：用 \`现有形式化\` 列里的具名路径、用例名与行号核对当前树；解析不了的降级，只有模型或没有实现检查的记「部分验证」。
 4. **状态只降不升**：以 issue 的十列映射为上限；本轮只把来源被删、登记表删行、证据不解析或来源已历史化的行降级。**没有一条因为“规格说是当前”就升为「已验证」**：规格的「当前」说的是规则现行，不是实现验证过。
 
-复核不判断规则文字的语义是否正确：它核对来源、锚点、证据路径和状态。**TRC 分区的 ${semantic.length} 行已在 §5 语义重抽**；协议清单的 ${total} 条现行规则仍是 issue 快照原文，逐条语义重抽尚未完成（\`tools/formal-trace-semantic.mjs\` 只有这一分区的数据）。
+复核不判断规则文字的语义是否正确：它核对来源、锚点、证据路径和状态。**TRC 分区的 ${traceList ? traceList.rows.length : 0} 行与协议清单 \`registry-1\` 的 ${registryList ? registryList.rows.length : 0} 行已在 §5 语义重抽**；协议清单其余 ${total - semanticCurrent} 条现行规则仍是 issue 快照原文，逐条语义重抽尚未完成。
 
 ## 2. 现行来源（0.22）
 
@@ -1044,13 +1093,11 @@ ${recheckChanges(rows)}
 
 ${PROTOCOL.map(meta => `### ${meta.label}\n\n${recheckTable(rows, meta)}`).join('\n\n')}
 
-## 5. 语义重抽：${SEMANTIC.label}（${semantic.length} 行，${SEMANTIC.date}）
+## 5. 语义重抽（${semantic.length} 行，${SEMANTIC_PAGE.date}，基准 \`${SEMANTIC_PAGE.baseline}\`）
 
-\`TRC-*\` 的 ${semantic.length} 行已按 0.22 现行来源重写（基准 \`${SEMANTIC.baseline}\`）：每行给出会话规格 §11 的 \`SESS-*\` 锚点（没有锚点的行写明会话规格不覆盖的部分），承诺文字改用现行规格的措辞与数字，来源章节与英文重抽文字在[英文复核页](recheck-0.22.en.md)。锚点、来源章节与英文页由 \`--check\` 核对：每个 \`SESS-*\` 都在会话规格里，并出现在该行「现行来源」。\`TRC-NG-4\` 已撤回：协议 4 没有它所描述的 \`objects\` 能力（#1123）。
+两个分区已按 0.22 现行来源重抽；**其余分区没有重抽**：协议清单其余 ${total - semanticCurrent} 条现行规则仍是 issue 快照的十列原文（状态按本页复核；\`registry-1\` 另含 ${registryList ? registryList.rows.length - semanticCurrent : 0} 条 issue 快照已取代行，也一并重抽），保证登记表 211 行由登记表生成，\`ECA\` 10 行仍是手写的设计提案。语义重抽的下一批是会话分区（SES、VAL、TAG、M1、CHN），事件、运行时、远程随后。
 
-**其余分区没有重抽**：协议清单 ${total} 行仍是 issue 快照的十列原文（状态按本页复核），保证登记表 211 行由登记表生成，\`ECA\` 10 行仍是手写的设计提案。语义重抽的下一批仍是会话分区（SES、VAL、TAG、M1、CHN）。
-
-${semanticTableZh(semantic)}
+${semanticSections.join('\n\n')}
 
 ## 6. 没有现行锚点的规则
 
@@ -1061,14 +1108,14 @@ ${recheckUnmapped(rows)}
 ## 7. 这一轮改了什么、还剩什么
 
 - **已撤回**：issue 快照的 184 条之外，本轮按 0.19 / 0.22 删除的机制追加了 ${withdrawnNow} 条（见 §3 的「已撤回（本轮）」列与 §4 的缺口）。它们仍在 \`rules/protocol-*.md\` 里，统计不计入。
-- **未完成**：协议分区（registry、events、session、runtime、remote）没有逐条重写规则文字，仍是 issue 快照原文；会话层有 \`protocol-session.md\`（82 条 \`SESS-*\`），事件、运行时、挂载、远程没有对应的新规格，只有设计稿与指南。§6 按原因列出这些规则；写规格是 #635 的后续，不是这一轮能补的。
+- **未完成**：协议分区（registry-1 以外的 registry-2、events、session、runtime、remote）没有逐条重写规则文字，仍是 issue 快照原文；会话层有 \`protocol-session.md\`（82 条 \`SESS-*\`），事件、运行时、挂载、远程没有对应的新规格，只有设计稿与指南。§6 按原因列出这些规则；写规格是 #635 的后续，不是这一轮能补的。
 - **证据**：只核对 \`现有形式化\` 列的具名引用；备注列里的旧路径（如 \`crates/rutis-bridge/src/cordis/server.rs\`）没有逐条清，重抽时一并处理。
-- **语义**：TRC 分区已在 §5 重抽；协议清单没有。规则的「已撤回 / 明确不保证 / 未验证 / 部分验证 / 已验证」按上面的四件事定，不按记忆。
+- **语义**：TRC 分区（规则文字整体重写）与 \`registry-1\`（来源、锚点、证据、状态）已在 §5 重抽；协议清单其余分区没有。规则的「已撤回 / 明确不保证 / 未验证 / 部分验证 / 已验证」按上面的四件事定，不按记忆。
 `
 }
 
-function refreshRecheck(rows, traceRows) {
-  const content = recheckPage(rows, traceRows)
+function refreshRecheck(rows, lists) {
+  const content = recheckPage(rows, lists)
   if (!exists(RECHECK) || read(RECHECK) !== content) writeFileSync(`${root}${RECHECK}`, content)
 }
 
@@ -1121,10 +1168,10 @@ for (const [prefix, source] of Object.entries(SOURCES)) {
   if (!['spec', 'design', 'guide', 'historical'].includes(source.kind)) say(`${RECHECK}: ${prefix}: kind ${source.kind} is not spec, design, guide or historical`)
 }
 
-// 0b. The semantically re-extracted partition: one entry per trace row, the
-//     anchors exist and the row names them, the source sections exist, and a
-//     row without a session anchor says why.
-const semanticRows = () => rows.filter(row => row.file === SEMANTIC.file)
+// 0b. The semantically re-extracted partitions: one entry per row, the anchors
+//     exist and the row names them, the source sections exist, a row without an
+//     anchor says why, a registry entry's status agrees with the re-check, and
+//     its evidence resolves against the current tree.
 const sourceProblem = (id, source) => {
   const [name, ...rest] = String(source ?? '').split(' ')
   const section = rest.join(' ')
@@ -1136,24 +1183,61 @@ const sourceProblem = (id, source) => {
   const heading = new RegExp(`^#{2,4} ${escaped}(?:[ 、]|\\.\\s)`, 'm')
   return heading.test(read(document.doc)) ? null : `${id}: ${document.doc} has no section ${section}`
 }
-for (const document of Object.values(SEMANTIC_DOCS)) if (!exists(document.doc)) say(`${SEMANTIC.pageEn}: ${document.doc} does not exist`)
-for (const row of semanticRows()) {
-  const entry = SEMANTIC.rows[row.id]
-  if (!entry) { say(`${row.file}:${row.line}: ${row.id}: no semantic entry in tools/formal-trace-semantic.mjs`); continue }
-  if (!entry.en) say(`${row.file}:${row.line}: ${row.id}: the semantic entry has no English rule`)
-  if (!entry.gapEn) say(`${row.file}:${row.line}: ${row.id}: the semantic entry has no English gap`)
-  if (!entry.anchors.length && !entry.whyNoAnchor) say(`${row.file}:${row.line}: ${row.id}: no anchors and no whyNoAnchor`)
-  for (const anchor of entry.anchors) {
-    if (!anchorIds.has(anchor)) say(`${row.file}:${row.line}: ${row.id}: anchor ${anchor} is not in ${SESSION_SPEC}`)
-    if (!String(row.现行来源).includes(anchor)) say(`${row.file}:${row.line}: ${row.id}: ${anchor} is not named in 现行来源`)
+const sectionOf = source => /§(\S+)$/.exec(String(source ?? ''))?.[1] ?? ''
+const registerSections = new Map(registerRows.map(row => [row.id, row.section]))
+for (const document of Object.values(SEMANTIC_DOCS)) if (!exists(document.doc)) say(`${SEMANTIC_PAGE.pageEn}: ${document.doc} does not exist`)
+const semanticLists = SEMANTIC_PARTITIONS.map(partition => ({
+  partition,
+  rows: allRows.filter(row => row.file === partition.file).map(row => ({ ...row, semantic: partition.rows[row.id] })),
+}))
+const semanticsOf = partition => semanticLists.find(list => list.partition === partition)?.rows ?? []
+for (const { partition, rows: list } of semanticLists) {
+  for (const row of list) {
+    const entry = row.semantic
+    const at = `${row.file}:${row.line}: ${row.id}`
+    if (!entry) { say(`${at}: no semantic entry in tools/formal-trace-semantic.mjs`); continue }
+    if (partition.translate) {
+      if (!entry.en) say(`${at}: the semantic entry has no English rule`)
+      if (!entry.gapEn) say(`${at}: the semantic entry has no English gap`)
+    } else {
+      if (!entry.evidence) say(`${at}: the semantic entry has no evidence`)
+      if (!entry.why) say(`${at}: the semantic entry has no why`)
+      if (!entry.whyEn) say(`${at}: the semantic entry has no whyEn`)
+      if (!STATUSES.includes(entry.status)) say(`${at}: semantic status ${entry.status} is not one of ${STATUSES.join(', ')}`)
+      else if (entry.status !== row.状态) say(`${at}: semantic status ${entry.status} differs from the re-checked status ${row.状态}`)
+      for (const token of backticked(entry.evidence)) {
+        const [file, name] = token.split('::')
+        if (!/\.(?:rs|mjs|ts|js|py|go|swift|kt)$/.test(file)) continue
+        const path = locate(file)
+        if (!exists(path)) { say(`${at}: evidence ${token}: ${path} does not exist`); continue }
+        if (name && !defines(path, name)) say(`${at}: evidence ${token}: ${path} does not define ${name}`)
+      }
+    }
+    if (!entry.anchors.length && !entry.whyNoAnchor) say(`${at}: no anchors and no whyNoAnchor`)
+    if (!entry.anchors.length && !entry.whyNoAnchorEn) say(`${at}: no anchors and no whyNoAnchorEn`)
+    for (const anchor of entry.anchors) {
+      if (partition.anchorKind === 'session') {
+        if (!anchorIds.has(anchor)) say(`${at}: anchor ${anchor} is not in ${SESSION_SPEC}`)
+        if (!String(row.现行来源).includes(anchor)) say(`${at}: ${anchor} is not named in 现行来源`)
+      } else {
+        if (!registerSections.has(anchor)) { say(`${at}: anchor ${anchor} is not a row of ${REGISTER}`); continue }
+        const section = registerSections.get(anchor)
+        const wanted = sectionOf(entry.source)
+        if (wanted && section !== wanted) say(`${at}: anchor ${anchor} sits under §${section}, not §${wanted}`)
+      }
+    }
+    if (partition.anchorKind === 'register' && entry.anchors.length) {
+      const base = registerBase(row.id)
+      if (base && !entry.anchors.includes(base.id)) say(`${at}: the register row is ${base.id}; the entry does not anchor on it`)
+    }
+    for (const source of [entry.source, entry.extra].filter(Boolean)) {
+      const problem = sourceProblem(row.id, source)
+      if (problem) say(`${row.file}:${row.line}: ${problem}`)
+    }
   }
-  for (const source of [entry.source, entry.extra].filter(Boolean)) {
-    const problem = sourceProblem(row.id, source)
-    if (problem) say(`${row.file}:${row.line}: ${problem}`)
+  for (const id of Object.keys(partition.rows)) {
+    if (!list.some(row => row.id === id)) say(`${partition.file}: the semantic entry ${id} has no row`)
   }
-}
-for (const id of Object.keys(SEMANTIC.rows)) {
-  if (!semanticRows().some(row => row.id === id)) say(`${SEMANTIC.file}: the semantic entry ${id} has no row`)
 }
 
 // 1. Every register row is in the table once, with the register's columns.
@@ -1183,7 +1267,7 @@ for (const row of rows) {
 //    and the index is current.
 for (const row of rows) evidence(row, counts)
 const protocolFiles = PROTOCOL.map(meta => `${RULES}/${meta.file}`)
-for (const file of [INDEX, RECHECK, SEMANTIC.pageEn, 'docs/formal-trace/README.en.md', ...FILES.map(([name]) => `${RULES}/${name}`), ...HANDWRITTEN.map(name => `${RULES}/${name}`), ...protocolFiles]) {
+for (const file of [INDEX, RECHECK, SEMANTIC_PAGE.pageEn, 'docs/formal-trace/README.en.md', ...FILES.map(([name]) => `${RULES}/${name}`), ...HANDWRITTEN.map(name => `${RULES}/${name}`), ...protocolFiles]) {
   if (exists(file)) for (const broken of links(file)) say(`broken link ${broken}`)
 }
 
@@ -1246,22 +1330,21 @@ for (const [id, entry] of superseded) {
   if (!protocol.some(row => row.id === id)) say(`${RECHECK}: ${id} is listed as removed but is not a protocol row`)
   if (!exists(entry.by)) say(`${RECHECK}: ${id}: ${entry.by} does not exist`)
 }
-const semanticList = semanticRows().map(row => ({ ...row, semantic: SEMANTIC.rows[row.id] }))
 if (process.argv.includes('--write')) {
   refreshIndex(allRows)
-  refreshRecheck(protocol, semanticList)
-  refreshSemantic(semanticList)
+  refreshRecheck(protocol, semanticLists)
+  refreshSemantic(semanticLists)
 } else if (exists(INDEX)) {
   const block = indexBlock(read(INDEX))
   if (block !== null && block !== index(allRows)) say(`${INDEX}: the index between the markers is stale; run node tools/formal-trace.mjs --write`)
 }
 if (exists(RECHECK)) {
-  const wanted = recheckPage(protocol, semanticList)
+  const wanted = recheckPage(protocol, semanticLists)
   if (read(RECHECK) !== wanted) say(`${RECHECK}: stale or not generated; run node tools/formal-trace.mjs --write`)
 } else say(`${RECHECK}: missing; run node tools/formal-trace.mjs --write`)
-if (exists(SEMANTIC.pageEn)) {
-  if (read(SEMANTIC.pageEn) !== englishRecheckPage(semanticList)) say(`${SEMANTIC.pageEn}: stale or not generated; run node tools/formal-trace.mjs --write`)
-} else say(`${SEMANTIC.pageEn}: missing; run node tools/formal-trace.mjs --write`)
+if (exists(SEMANTIC_PAGE.pageEn)) {
+  if (read(SEMANTIC_PAGE.pageEn) !== englishRecheckPage(semanticLists)) say(`${SEMANTIC_PAGE.pageEn}: stale or not generated; run node tools/formal-trace.mjs --write`)
+} else say(`${SEMANTIC_PAGE.pageEn}: missing; run node tools/formal-trace.mjs --write`)
 
 if (!process.argv.includes('--check')) {
   const tally = list => {
@@ -1305,8 +1388,14 @@ if (!process.argv.includes('--check')) {
   const anchored = recheckedCurrent.filter(row => row.recheck.anchors.length).length
   console.log(`protocol re-check: withdrawn by 0.19/0.22 ${withdrawnNow} (issue snapshot already ${protocol.filter(row => row.issueStatus === '已取代').length}); session anchors ${anchored}, no current source ${uncovered}`)
   console.log(`protocol ids also in the register: ${registerOverlap} (kept as separate rows; the totals are rows, not distinct rules)`)
-  const semanticAnchored = semanticList.filter(row => row.semantic.anchors.length).length
-  console.log(`semantic re-extraction: ${semanticList.length} rows (${SEMANTIC.label}), ${semanticAnchored} with SESS anchors, ${semanticList.length - semanticAnchored} without (why named); not re-extracted: ${protocolCurrent} protocol rules, 211 register rows, 10 ECA rows\n`)
+  for (const { partition, rows: list } of semanticLists) {
+    const anchored = list.filter(row => row.semantic.anchors.length).length
+    const kind = partition.anchorKind === 'session' ? 'SESS anchors' : 'register anchors'
+    console.log(`semantic re-extraction: ${list.length} rows (${partition.label}), ${anchored} with ${kind}, ${list.length - anchored} without (why named)`)
+  }
+  const reExtractedCurrent = SEMANTIC_PARTITIONS.filter(partition => !partition.translate)
+    .reduce((total, partition) => total + semanticsOf(partition).filter(row => row.issueStatus !== '已取代').length, 0)
+  console.log(`not semantically re-extracted: ${protocolCurrent - reExtractedCurrent} protocol rules, 211 register rows, 10 ECA rows\n`)
 }
 
 if (process.argv.includes('--check') && (protocolCounts.unresolved || protocolCounts.ambiguous)) {

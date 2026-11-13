@@ -16,8 +16,9 @@
 // per-family current sources (`SOURCES`), the old-section anchors (`ANCHORS`),
 // the withdrawn rules (`SUPERSEDED`), the no-source reasons (`UNMAPPED`), the
 // renamed-mechanism notes (`NOTES`) and the guarantee families
-// (`REGISTRY_FAMILIES`). `formal-trace-semantic.mjs` owns the one partition
-// re-extracted semantically (`SEMANTIC`, `SEMANTIC_DOCS`). `formal-trace.mjs`
+// (`REGISTRY_FAMILIES`). `formal-trace-semantic.mjs` owns the two partitions
+// re-extracted semantically (`SEMANTIC`, `SEMANTIC_REGISTRY`, `SEMANTIC_DOCS`,
+// `SEMANTIC_PAGE`). `formal-trace.mjs`
 // owns only the presentation vocabulary (columns, status words, the file list)
 // and reads the rest from these two modules; it derives nothing in a second
 // copy. `--check` verifies the literals that must agree: the family list here,
