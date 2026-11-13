@@ -276,6 +276,38 @@ test('unload waits for running listeners, at most the deadline', async () => {
   assert.deepEqual(reported, ['rutis: listeners of row stuck still running after 0.02s; unloading anyway'])
 })
 
+test('a listener withdrawn here answers a call already on its way with nothing (#1135)', async () => {
+  const host = peer()
+  const dispatched = []
+  const bus = new Bus({ peer: host, dispatched: (...args) => dispatched.push(args) })
+  const a = bus.on({ name: 'n', callback: () => 'a', row: 'r' })
+  const b = bus.on({ name: 'n', callback: () => 'b', row: 'r' })
+  assert.equal(bus.off(a), true)
+  assert.deepEqual(host.sent.at(-1), ['events.off', [[a.id]]])
+  // The host picked it for a dispatch before its `events.off` reached it: the
+  // listener is gone, and the call answers as one that returns nothing, so the
+  // dispatch under way goes on instead of failing (a test's `off` and the emit
+  // right after it, #1135).
+  for (const mode of ['emit', 'serial', 'parallel', 'bail']) {
+    assert.equal(bus.call({ listener: a.id, dispatch: 'd9', own: false, name: 'n', mode, args: [] }), undefined, mode)
+  }
+  // A waterfall goes on with the rest of its chain, as if it had not been there.
+  assert.equal(await bus.call({ listener: a.id, dispatch: 'd9', own: false, name: 'n', mode: 'waterfall', args: [], next: () => 'rest' }), 'rest')
+  assert.equal(bus.call({ listener: a.id, dispatch: 'd9', own: false, name: 'n', mode: 'waterfall', args: [], next: () => 'rest', sync: true }), 'rest')
+  assert.deepEqual(dispatched, [], 'nothing of it runs: no internal/dispatch, no listener')
+  // An id this process never registered, and one a row's withdrawal took (the
+  // host withdrew it itself), stay the protocol failure they were.
+  assert.throws(() => bus.call({ listener: '999', name: 'n', mode: 'serial', args: [] }), { name: 'BindingError', message: 'listener 999 of n is withdrawn' })
+  bus.withdraw('r')
+  assert.throws(() => bus.call({ listener: b.id, dispatch: 'd10', own: false, name: 'n', mode: 'serial', args: [] }), { name: 'BindingError', message: `listener ${b.id} of n is withdrawn` })
+  // A restart tells the host, and the calls it already picked answer the same
+  // until its table has them.
+  const c = bus.on({ name: 'm', callback: () => 'c', row: 's' })
+  bus.withdraw('s', { restart: true })
+  assert.deepEqual(host.sent.at(-1), ['events.off', [[c.id]]])
+  assert.equal(bus.call({ listener: c.id, dispatch: 'd11', own: false, name: 'm', mode: 'serial', args: [] }), undefined)
+})
+
 test('the bus is one file in the Node runtime and the Bun runtime', () => {
   const read = path => readFileSync(new URL(path, import.meta.url), 'utf8')
   assert.equal(read('../../../bun/rutis-bun/src/events.mjs'), read('../src/events.mjs'), 'bun/rutis-bun/src/events.mjs')
