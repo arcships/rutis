@@ -1068,6 +1068,15 @@ struct Incoming {
     call: Accepted,
     _flight: Option<Flight>,
 }
+impl Incoming {
+    /// Whether this is an `emit` dispatch: once admitted, it keeps its turn
+    /// when its caller gives up (events protocol §5.7).
+    fn is_emit(&self) -> bool {
+        matches!(&self.call, Accepted::Invoke(target, method, args)
+            if target.is_empty() && method.as_str() == "events.dispatch"
+                && inline_event_op(method, args))
+    }
+}
 #[derive(Default)]
 struct Calls {
     next: u64,
@@ -2692,15 +2701,24 @@ impl Connection {
             }
             Frame::Cancel { id } => {
                 // Stop awaiting on the caller's behalf; queued work is dropped.
-                // A synchronous call already running completes normally.
-                let (awaiting, incoming) = {
+                // An `emit` dispatch that was admitted keeps its turn (events
+                // protocol §5.7): its caller gave up, the listeners still hear
+                // it, and the caller discards the late reply. A synchronous
+                // call already running completes normally.
+                let (awaiting, incoming, kept) = {
                     let mut calls = self.0.calls.lock().unwrap();
-                    (calls.awaiting.remove(&id), calls.incoming.remove(&id))
+                    let kept = calls.incoming.get(&id).is_some_and(Incoming::is_emit);
+                    let incoming = if kept {
+                        None
+                    } else {
+                        calls.incoming.remove(&id)
+                    };
+                    (calls.awaiting.remove(&id), incoming, kept)
                 };
                 // The caller no longer waits for it. A synchronous call
                 // already started keeps its mark: it still runs on that
                 // stack and may forward calls.
-                if incoming.is_some() || awaiting.is_some() {
+                if kept || incoming.is_some() || awaiting.is_some() {
                     waits::answered(&self.0.tag, &id);
                 }
                 drop((awaiting, incoming));

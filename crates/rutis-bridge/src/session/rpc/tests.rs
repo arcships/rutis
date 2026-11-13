@@ -360,6 +360,74 @@ async fn a_cancel_for_an_unknown_call_is_ignored() {
     assert!(peer.close_reason().is_none());
 }
 
+/// An `emit` dispatch already admitted keeps its turn when its caller gives
+/// up: `cancel` drops queued calls, but not this one (events protocol §5.7).
+/// The ordered task is held inside an earlier operation, so the dispatch is
+/// still queued when the cancel is read — the race the conformance test
+/// `an_emit_is_not_cancelled` lost about half the time (#1121).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_emit_dispatch_stays_queued() {
+    struct Held {
+        started: Mutex<mpsc::Sender<()>>,
+        release: Mutex<mpsc::Receiver<()>>,
+        dispatched: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    }
+    impl Dispatch for Held {
+        fn invoke(&self, _: &Connection, _: &str, method: &str, _: Value) -> Reply {
+            if method == "rows.ended" {
+                self.started.lock().unwrap().send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+            } else if method == "events.dispatch" {
+                if let Some(sender) = self.dispatched.lock().unwrap().take() {
+                    let _ = sender.send(());
+                }
+            }
+            Ok(Value::Undefined)
+        }
+    }
+    let (started, has_started) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let (dispatched, was_dispatched) = tokio::sync::oneshot::channel();
+    let held = Arc::new(Held {
+        started: Mutex::new(started),
+        release: Mutex::new(released),
+        dispatched: Mutex::new(Some(dispatched)),
+    });
+    let (peer, _far) = connected(held);
+    peer.receive(hello(ENDPOINT_PROTOCOL)).unwrap();
+    // An ordered operation in progress: the dispatch admitted behind it is
+    // still in `calls.incoming`, so the cancel below can reach it.
+    peer.receive(Frame::Invoke {
+        id: "node:1".into(),
+        path: vec![],
+        target: String::new(),
+        method: "rows.ended".into(),
+        args: data(json!([])),
+        sync: false,
+    })
+    .unwrap();
+    has_started.recv().unwrap();
+    peer.receive(Frame::Invoke {
+        id: "node:2".into(),
+        path: vec![],
+        target: String::new(),
+        method: "events.dispatch".into(),
+        args: data(json!([{ "name": "t/e", "mode": "emit", "args": [] }])),
+        sync: false,
+    })
+    .unwrap();
+    peer.receive(Frame::Cancel {
+        id: "node:2".into(),
+    })
+    .unwrap();
+    release.send(()).unwrap();
+    tokio::time::timeout(STEP, was_dispatched)
+        .await
+        .expect("the cancelled emit dispatch still starts")
+        .unwrap();
+    assert!(peer.close_reason().is_none());
+}
+
 fn invoke(id: &str, method: &str, sync: bool) -> Frame {
     Frame::Invoke {
         id: id.into(),

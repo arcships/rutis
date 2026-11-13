@@ -201,20 +201,20 @@ Receivers are not equally strict: Node, Bun, Go, Swift and Kotlin require `^[1-9
 
 `SESS-57` **Current.** (Rust callee) On `cancel`:
 
-- a call still queued and not started is dropped without a reply.
+- a call still queued and not started is dropped without a reply; the exception is an admitted `emit`-mode `events.dispatch`: it starts as usual ([events protocol](design-events-protocol-2026-10-18.en.md) §5.7) and the caller discards its late reply (#1121).
 - an `await` in progress is dropped without a reply.
 - a synchronous call already running completes and replies as usual; cancellation does not interrupt a method already running.
 - a late reply to a cancelled call is discarded and counted (`orphans()`), not treated as a protocol error and not closing the session.
 
-`crates/rutis-bridge/src/session/rpc.rs:2639-2653,2490-2501,2050-2053`
+`crates/rutis-bridge/src/session/rpc.rs:2702-2721,2503-2516,2047-2060`; test `crates/rutis-bridge/src/session/rpc/tests.rs::a_cancelled_emit_dispatch_stays_queued`
 
-`SESS-58` **Current.** A `cancel` for a call that does not exist is ignored; it may have crossed the reply of the call it cancels. This is the only tolerated dangling call id. `crates/rutis-bridge/src/session/rpc.rs:2639-2653`; test `crates/rutis-bridge/src/session/rpc/tests.rs::a_cancel_for_an_unknown_call_is_ignored`
+`SESS-58` **Current.** A `cancel` for a call that does not exist is ignored; it may have crossed the reply of the call it cancels. This is the only tolerated dangling call id. `crates/rutis-bridge/src/session/rpc.rs:2702-2721`; test `crates/rutis-bridge/src/session/rpc/tests.rs::a_cancel_for_an_unknown_call_is_ignored`
 
 `SESS-59` **Current.** Cancellation propagates hop by hop: when a wait forwarding through a relay is cancelled, the dropped forwarded request sends `cancel` to the next hop; across a link likewise. Cancellation does not undo reference grants already made. `crates/rutis-bridge/src/session/rpc/relay.rs:148-173`; `crates/rutis-bridge/src/session/rpc.rs:2020-2031`; `bridge/multihop-cancel-and-release` in `docs/guarantees.en.md`
 
-`SESS-60` **Current.** Cancellation itself does not close the session; other calls go on. `crates/rutis-bridge/src/session/rpc.rs:2639-2653`; `go/rutis/internal/peer/peer_test.go:135-170`; `go/rutis/internal/peer/objects_test.go:66-103`
+`SESS-60` **Current.** Cancellation itself does not close the session; other calls go on. `crates/rutis-bridge/src/session/rpc.rs:2702-2721`; `go/rutis/internal/peer/peer_test.go:135-170`; `go/rutis/internal/peer/objects_test.go:66-103`
 
-`SESS-61` **Not guaranteed.** Whether a callee replies after a cancellation is not yet one rule across implementations: Rust does not reply to queued calls and awaits, and replies as usual to a synchronous call already running; the other languages leave it to the method and the signal. The rule is written back here once the #626 model decides it. `bridge/cancel-reaches-callee` in `docs/guarantees.en.md` only promises that cancellation arrives, not a reply; #626; the cancel-table cleanup and cancel-ack rule is #1099.
+`SESS-61` **Not guaranteed.** Whether a callee replies after a cancellation is not yet one rule across implementations: Rust does not reply to queued calls and awaits, runs an admitted `emit` dispatch and lets the caller discard its reply, and replies as usual to a synchronous call already running; the other languages leave it to the method and the signal. The rule is written back here once the #626 model decides it. `bridge/cancel-reaches-callee` in `docs/guarantees.en.md` only promises that cancellation arrives, not a reply; #626; the cancel-table cleanup and cancel-ack rule is #1099.
 
 `SESS-62` **Superseded.** "Cancellation is closing the transport" and "a cancelled session is unusable". Cancellation affects only one call.
 
