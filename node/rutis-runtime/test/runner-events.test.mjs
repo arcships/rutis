@@ -15,6 +15,10 @@ const conformance = fileURLToPath(new URL('./fixtures/conformance-events.mjs', i
 const cordis = fileURLToPath(new URL('./fixtures/events-cordis.mjs', import.meta.url))
 const scopeFilter = fileURLToPath(new URL('./fixtures/events-scope-filter.mjs', import.meta.url))
 const cleanupEmit = fileURLToPath(new URL('./fixtures/events-cleanup-emit.mjs', import.meta.url))
+const withdrawFixture = fileURLToPath(new URL('./fixtures/events-withdraw.mjs', import.meta.url))
+// A record (the session's mark): its functions cross as references, as the
+// host sends them.
+const RECORD = Symbol.for('rutis.session.record')
 const T1 = { id: '17', group: 'tenant' }
 const T2 = { id: '18', group: 'tenant' }
 
@@ -194,6 +198,35 @@ test('rows.update unloads (signalled, waited for) and loads the row again', asyn
     assert.equal(after.length, 1)
     assert.notEqual(after[0].id, before.id)
     assert.equal(await emit({ mode: 'serial', name: 't/update', args: [] }), 'again')
+  } finally {
+    await host.end()
+  }
+})
+
+// A dispatch the host picked a listener for before its `events.off` reached
+// it: the listener is gone, and the call answers as one that returns nothing,
+// so an emission that raced the withdrawal goes on (#1135).
+test('a listener disposed here answers a call already on its way with nothing', async () => {
+  const host = await fakeHost([process.execPath, runner, withdrawFixture])
+  await within('the handshake', host.ready)
+  await host.call('mount', { plugins: [], announce: true, scope: [] })
+  try {
+    await host.call('rows.load', ['w', withdrawFixture, {}, [], [], { 'events-withdraw': { off: 'sync' } }, { scope: [] }])
+    const [entry] = host.entries.filter(one => one.name === 't/x')
+    const [kept] = host.entries.filter(one => one.name === 't/keep')
+    const call = (listener, name = 't/x', mode = 'serial', more = {}) => host.call('events.call', [{ [RECORD]: true, listener, dispatch: 'dx', own: false, name, mode, args: [], ...more }])
+    // The row withdraws its listener, and the host's table has not taken the
+    // off yet (the call it picked the listener for is on its way).
+    await host.session.invokeAsync(host.services.get('events-withdraw'), 'off', [])
+    assert.ok(!host.entries.some(one => one.id === entry.id))
+    assert.equal(await call(entry.id), undefined)
+    assert.equal(await call(entry.id, 't/x', 'bail'), undefined)
+    assert.equal(await call(entry.id, 't/x', 'waterfall', { next: () => 'rest' }), 'rest')
+    // An id the runtime never registered, and one a row's unload took (the
+    // host withdrew it itself), stay the protocol failure they were.
+    await assert.rejects(call('999'), { name: 'BindingError', message: 'listener 999 of t/x is withdrawn' })
+    await host.call('rows.unload', ['w'])
+    await assert.rejects(call(kept.id, 't/keep'), { name: 'BindingError', message: `listener ${kept.id} of t/keep is withdrawn` })
   } finally {
     await host.end()
   }

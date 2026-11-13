@@ -560,8 +560,11 @@ export function host({ services = {} } = {}) {
         }
         const off = () => {
           if (!mine.delete(off)) return
-          served.delete(target)
+          // The runtime's listener goes first, then what answers for it here: a
+          // call the host picked before it heard of the withdrawal finds no
+          // listener there, instead of one that is gone (#1135).
           call('off', target)
+          served.delete(target)
         }
         mine.add(off)
         return off
