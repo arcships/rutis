@@ -42,6 +42,27 @@ def read(ctx, name="tally") -> str:
         return f"error {getattr(error, 'code', type(error).__name__)}"
 
 
+class Told:
+    """The frames a host would hear, recorded: `refresh` hands the `service`
+    frames it would send here instead of to a session."""
+
+    def __init__(self, loop):
+        self.loop = loop
+        self.frames = []
+        self.closed_error = None
+
+    def notify(self, target, method, args):
+        self.frames.append({"target": target, "method": method, "args": args})
+
+    def call_async(self, target, method, args):
+        self.frames.append({"target": target, "method": method, "args": args})
+        # Sent at once: the test reads what was told without stepping the
+        # loop again (a real session answers later).
+        done = self.loop.create_future()
+        done.set_result(None)
+        return done
+
+
 class Order(background.TestCase):
     def runtime(self):
         runtime = Runtime()
@@ -153,6 +174,56 @@ class Order(background.TestCase):
             self.assertIn("tally", runtime.services)
             await runtime.unload("g")
             self.assertNotIn("tally", runtime.services)
+
+        asyncio.run(run())
+
+    def test_a_service_provided_after_the_unload_started_is_refused(self):
+        # A row on its unload stack registers nothing any more (#1143): its
+        # withdrawal would join a stack the unload had already taken, so it
+        # would never run and the service would stay in the table with no
+        # row, and the host would be told about it by `refresh` while it is
+        # being told that this row's services are gone.
+        started, release = asyncio.Event(), asyncio.Event()
+        holder = {}
+
+        def apply(ctx, config):
+            holder["ctx"] = ctx
+
+            async def cleanup():
+                started.set()
+                await release.wait()
+
+            ctx.provide("kept", Tally(4))
+            ctx.effect(cleanup)
+
+        async def run():
+            runtime = self.runtime()
+            runtime.peer = Told(asyncio.get_running_loop())
+            await runtime.load("late", module("late_provide", apply), None, None)
+            ctx = holder["ctx"]
+            unloading = asyncio.create_task(runtime.unload("late"))
+            # The cleanup waits: the unload is inside its stack, past the
+            # point where it took it.
+            await started.wait()
+            self.assertTrue(runtime.rows["late"].unloading, "the row is on its unload stack")
+
+            with self.assertRaises(RuntimeError) as refused:
+                ctx.provide("late", Tally(9))
+            self.assertEqual(str(refused.exception), "row late is not active")
+            self.assertEqual(list(runtime.services), ["kept"], "nothing new was provided")
+            self.assertNotIn("late", runtime.slots, "the host has no slot to hear about")
+
+            release.set()
+            await unloading
+            # The same once the row has gone.
+            with self.assertRaises(RuntimeError):
+                ctx.provide("late", Tally(9))
+            self.assertEqual(runtime.services, {}, "the row's own service was withdrawn")
+            # `kept` was announced and withdrawn, as before; `late` was
+            # never a frame.
+            self.assertEqual([frame["args"][0] for frame in runtime.peer.frames], ["kept", "kept"])
+            self.assertIsNone(runtime.peer.frames[1]["args"][1], "the withdrawal says it is gone")
+            self.assertIn("count", runtime.peer.frames[0]["args"][3]["methods"], "the announcement still says its methods")
 
         asyncio.run(run())
 

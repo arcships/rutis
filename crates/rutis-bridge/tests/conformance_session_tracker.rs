@@ -9,6 +9,10 @@
 //! runtime that does not take object references does with one is tested on
 //! that runtime's side.
 //!
+//! rule: SES-1-1
+//! rule: SES-1-2
+//! rule: SES-2-2
+//! rule: SES-2-7
 //! rule: SES-6.1-1
 //! rule: SES-6.1-3
 //! rule: SES-6.1-4
@@ -31,18 +35,25 @@
 //! rule: SES-6.1-26
 //! rule: SES-6.1-27
 //! rule: SES-7.1-6
+//! rule: SES-7.2-5
+//! rule: SES-12-8
+//! rule: CHN-0-1
+//! rule: CHN-2-3
 //! rule: CHN-4-4
 //! rule: CHN-4-6
 //! rule: CHN-4-8
 //! rule: CHN-4-9
 //! rule: CHN-4-10
+//! rule: CHN-4-11
 //! rule: TAG-2-1
+//! rule: TAG-5-1
 //! rule: M1-7.1-1
 //! rule: M1-13-3
 //! guarantee: bridge/value-tags
 //! guarantee: bridge/object-refs
+//! guarantee: bridge/unknown-fields
 
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 
 use rutis_bridge::channel::{Channel, PeerId};
 use rutis_bridge::session::{
@@ -2188,4 +2199,796 @@ async fn an_object_relayed_to_a_far_end_without_objects_is_still_sent() {
     )
     .await
     .unwrap();
+}
+
+// ── Third batch: proxies, names, frames (#639) ───────────────────────────
+
+/// A far end that records the `target` and `method` of every call it gets.
+struct Recording {
+    seen: Arc<Mutex<Vec<(String, String)>>>,
+}
+impl Dispatch for Recording {
+    fn invoke(&self, _: &Connection, target: &str, method: &str, _: Value) -> Reply {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((target.to_owned(), method.to_owned()));
+        Ok(Value::Data(json!("ok")))
+    }
+}
+
+/// One reference of `kind`, exported by the far end as its reference `id`.
+fn reference(id: u64, kind: &str) -> Json {
+    json!({ "type": "reference", "value": {
+        "id": id, "home": false, "kind": kind, "origin": [],
+    } })
+}
+
+/// Wait for the far end's thread, so its asserts fail this test; what it
+/// returns stays with the caller, which keeps the channel open.
+async fn far_end<T: Send + 'static>(handle: std::thread::JoinHandle<T>) -> T {
+    within(
+        "the far end",
+        tokio::task::spawn_blocking(move || handle.join().unwrap()),
+    )
+    .await
+    .unwrap()
+}
+
+/// A live object at the far end stays there (SES-1-1): an object reference
+/// arrives as a proxy, its methods and its live properties are asked of the
+/// owner in `call` and `get` frames, and the object itself never crosses.
+/// rule: SES-1-1
+#[tokio::test(flavor = "multi_thread")]
+async fn an_object_reference_from_the_far_end_is_a_proxy() {
+    let (peer, mut far) = session(Arc::new(Nothing));
+    greet(&mut far, "node", &[]);
+    peer.ready().await.unwrap();
+    let end = std::thread::spawn(move || {
+        let call = read(&mut far);
+        send(
+            &mut far,
+            json!({ "op": "return", "id": frame_id(&call), "value": {
+                "type": "list",
+                "value": [reference(7, "object")],
+            } }),
+        );
+        // The method call: the reference's id, not a serialized object.
+        let call = read(&mut far);
+        assert_eq!(call["op"], json!("call"), "{call}");
+        assert_eq!(call["reference"], json!(7), "{call}");
+        assert_eq!(call["method"], json!("greet"), "{call}");
+        assert_eq!(
+            call["args"],
+            json!({ "type": "list", "value": [{ "type": "data", "value": "Oslo" }] }),
+            "{call}"
+        );
+        send(
+            &mut far,
+            json!({ "op": "return", "id": frame_id(&call), "value": { "type": "data", "value": "hello" } }),
+        );
+        // The property read: every read is live.
+        let read_back = read(&mut far);
+        assert_eq!(read_back["op"], json!("get"), "{read_back}");
+        assert_eq!(read_back["reference"], json!(7), "{read_back}");
+        assert_eq!(read_back["property"], json!("name"), "{read_back}");
+        send(
+            &mut far,
+            json!({ "op": "return", "id": frame_id(&read_back), "value": { "type": "data", "value": "cache" } }),
+        );
+        // Holding a proxy is holding the owner's reference.
+        assert_eq!(
+            read(&mut far),
+            json!({ "op": "release", "reference": 7, "count": 1 })
+        );
+        far
+    });
+    let object = peer
+        .invoke("svc", "give", Value::Undefined)
+        .unwrap()
+        .list()
+        .unwrap()
+        .remove(0)
+        .reference()
+        .unwrap();
+    assert!(object.is_object(), "an object reference is a proxy");
+    assert_eq!(
+        object
+            .call_method("greet", Value::List(vec![Value::Data(json!("Oslo"))]))
+            .unwrap()
+            .json()
+            .unwrap(),
+        json!("hello")
+    );
+    assert_eq!(object.get("name").unwrap().json().unwrap(), json!("cache"));
+    drop(object);
+    let _far = far_end(end).await;
+    assert!(peer.close_reason().is_none(), "the session goes on");
+}
+
+/// References in a return value are live (SES-1-2): a returned function is
+/// called with a `call` frame and a returned future is awaited with `await`,
+/// both back in the session that returned them.
+///
+/// A reference in an event payload is the events side of the same rule
+/// (`events.expected.json`), not this file's.
+/// rule: SES-1-2
+#[tokio::test(flavor = "multi_thread")]
+async fn references_in_a_return_value_are_live() {
+    let (peer, mut far) = session(Arc::new(Nothing));
+    greet(&mut far, "node", &[]);
+    peer.ready().await.unwrap();
+    let end = std::thread::spawn(move || {
+        let call = read(&mut far);
+        send(
+            &mut far,
+            json!({ "op": "return", "id": frame_id(&call), "value": {
+                "type": "list",
+                "value": [reference(8, "function"), reference(9, "future")],
+            } }),
+        );
+        // The function: a `call` with no method.
+        let call = read(&mut far);
+        assert_eq!(call["op"], json!("call"), "{call}");
+        assert_eq!(call["reference"], json!(8), "{call}");
+        assert_eq!(call.get("method"), None, "{call}");
+        assert_eq!(
+            call["args"],
+            json!({ "type": "list", "value": [] }),
+            "{call}"
+        );
+        send(
+            &mut far,
+            json!({ "op": "return", "id": frame_id(&call), "value": { "type": "data", "value": "called" } }),
+        );
+        // The future: an `await` of its reference.
+        let awaited = read(&mut far);
+        assert_eq!(awaited["op"], json!("await"), "{awaited}");
+        assert_eq!(awaited["reference"], json!(9), "{awaited}");
+        send(
+            &mut far,
+            json!({ "op": "return", "id": frame_id(&awaited), "value": { "type": "data", "value": "settled" } }),
+        );
+        for expected in [8, 9] {
+            assert_eq!(
+                read(&mut far),
+                json!({ "op": "release", "reference": expected, "count": 1 })
+            );
+        }
+        far
+    });
+    let values = peer
+        .invoke("svc", "give", Value::Undefined)
+        .unwrap()
+        .list()
+        .unwrap();
+    let mut values = values.into_iter();
+    let function = values.next().unwrap().reference().unwrap();
+    let future = values.next().unwrap().reference().unwrap();
+    assert!(function.is_function(), "a function reference");
+    assert!(future.is_future(), "a future reference");
+    assert_eq!(
+        function
+            .call(Value::List(Vec::new()))
+            .unwrap()
+            .json()
+            .unwrap(),
+        json!("called")
+    );
+    assert_eq!(future.wait().unwrap().json().unwrap(), json!("settled"));
+    drop(function);
+    drop(future);
+    let _far = far_end(end).await;
+    assert!(peer.close_reason().is_none(), "the session goes on");
+}
+
+/// A live object is handed over as a reference that keeps its identity
+/// (SES-2-2): twice the same exported object is one proxy, no body of it
+/// crosses, and both grants are released with one counted `release`.
+/// rule: SES-2-2
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_object_twice_is_one_proxy() {
+    let (peer, mut far) = session(Arc::new(Nothing));
+    greet(&mut far, "node", &[]);
+    peer.ready().await.unwrap();
+    let end = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let call = read(&mut far);
+            send(
+                &mut far,
+                json!({ "op": "return", "id": frame_id(&call), "value": {
+                    "type": "list",
+                    "value": [reference(7, "object")],
+                } }),
+            );
+        }
+        assert_eq!(
+            read(&mut far),
+            json!({ "op": "release", "reference": 7, "count": 2 })
+        );
+        far
+    });
+    let first = peer
+        .invoke("svc", "give", Value::Undefined)
+        .unwrap()
+        .list()
+        .unwrap()
+        .remove(0)
+        .reference()
+        .unwrap();
+    let second = peer
+        .invoke("svc", "give", Value::Undefined)
+        .unwrap()
+        .list()
+        .unwrap()
+        .remove(0)
+        .reference()
+        .unwrap();
+    assert_eq!(first, second, "one proxy for one exported object");
+    drop(first);
+    drop(second);
+    let _far = far_end(end).await;
+    assert!(peer.close_reason().is_none(), "the session goes on");
+}
+
+/// A proxy answers nothing itself (SES-2-7): every property name, the ones
+/// a prototype chain would answer included, is a live read at the owner, and
+/// there is no frame that would assign a field or enumerate a proxy.
+/// rule: SES-2-7
+#[tokio::test(flavor = "multi_thread")]
+async fn a_proxy_answers_no_property_locally() {
+    let (peer, mut far) = session(Arc::new(Nothing));
+    greet(&mut far, "node", &[]);
+    peer.ready().await.unwrap();
+    let end = std::thread::spawn(move || {
+        let call = read(&mut far);
+        send(
+            &mut far,
+            json!({ "op": "return", "id": frame_id(&call), "value": {
+                "type": "list",
+                "value": [reference(7, "object")],
+            } }),
+        );
+        for property in ["constructor", "__proto__", "hasOwnProperty", "toString"] {
+            let read_back = read(&mut far);
+            assert_eq!(read_back["op"], json!("get"), "{read_back}");
+            assert_eq!(read_back["property"], json!(property), "{read_back}");
+            send(
+                &mut far,
+                json!({ "op": "return", "id": frame_id(&read_back), "value": {
+                    "type": "data", "value": format!("of {property}"),
+                } }),
+            );
+        }
+        assert_eq!(
+            read(&mut far),
+            json!({ "op": "release", "reference": 7, "count": 1 })
+        );
+        far
+    });
+    let object = peer
+        .invoke("svc", "give", Value::Undefined)
+        .unwrap()
+        .list()
+        .unwrap()
+        .remove(0)
+        .reference()
+        .unwrap();
+    for property in ["constructor", "__proto__", "hasOwnProperty", "toString"] {
+        assert_eq!(
+            object.get(property).unwrap().json().unwrap(),
+            json!(format!("of {property}")),
+            "{property} is the owner's to answer"
+        );
+    }
+    drop(object);
+    let _far = far_end(end).await;
+    assert!(peer.close_reason().is_none(), "the session goes on");
+
+    // A field assignment and an enumeration are not frames at all: an `op`
+    // the protocol does not have ends the session.
+    for op in ["set", "keys"] {
+        unreadable(
+            json!({ "op": op, "id": "node:1", "reference": 7, "property": "name",
+                    "value": { "type": "data", "value": 1 } }),
+            &format!("unknown variant `{op}`"),
+        )
+        .await;
+    }
+}
+
+/// A method or a property is one name (SES-12-8): a name with dots in it
+/// crosses as it is — a path is never split off it, in either direction.
+/// rule: SES-12-8
+#[tokio::test(flavor = "multi_thread")]
+async fn a_method_or_property_name_is_one_name() {
+    // This side calls a proxy: the dotted name goes as one `method` and one
+    // `property`.
+    let (peer, mut far) = session(Arc::new(Nothing));
+    greet(&mut far, "node", &[]);
+    peer.ready().await.unwrap();
+    let end = std::thread::spawn(move || {
+        let call = read(&mut far);
+        send(
+            &mut far,
+            json!({ "op": "return", "id": frame_id(&call), "value": {
+                "type": "list",
+                "value": [reference(7, "object")],
+            } }),
+        );
+        let call = read(&mut far);
+        assert_eq!(call["op"], json!("call"), "{call}");
+        assert_eq!(call["method"], json!("inner.method"), "{call}");
+        send(
+            &mut far,
+            json!({ "op": "return", "id": frame_id(&call), "value": { "type": "data", "value": "called" } }),
+        );
+        let read_back = read(&mut far);
+        assert_eq!(read_back["op"], json!("get"), "{read_back}");
+        assert_eq!(
+            read_back["property"],
+            json!("inner.property"),
+            "{read_back}"
+        );
+        send(
+            &mut far,
+            json!({ "op": "return", "id": frame_id(&read_back), "value": { "type": "data", "value": "read" } }),
+        );
+        assert_eq!(
+            read(&mut far),
+            json!({ "op": "release", "reference": 7, "count": 1 })
+        );
+        far
+    });
+    let object = peer
+        .invoke("svc", "give", Value::Undefined)
+        .unwrap()
+        .list()
+        .unwrap()
+        .remove(0)
+        .reference()
+        .unwrap();
+    assert_eq!(
+        object
+            .call_method("inner.method", Value::List(Vec::new()))
+            .unwrap()
+            .json()
+            .unwrap(),
+        json!("called")
+    );
+    assert_eq!(
+        object.get("inner.property").unwrap().json().unwrap(),
+        json!("read")
+    );
+    drop(object);
+    let _far = far_end(end).await;
+    assert!(peer.close_reason().is_none(), "the session goes on");
+}
+
+/// The far end's dotted target and method reach this side's dispatch as the
+/// one name each they are: no path is resolved from them.
+/// rule: SES-12-8
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dotted_target_is_one_name_at_the_far_ends_call() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (peer, mut far) = session_with(
+        Arc::new(Recording { seen: seen.clone() }),
+        Endpoint::rust(id("main")),
+    );
+    greet(&mut far, "node", &[]);
+    peer.ready().await.unwrap();
+    send(
+        &mut far,
+        invoke(
+            "node:1",
+            "svc.inner",
+            "inner.method",
+            one(&json!({ "type": "data", "value": 1 })),
+        ),
+    );
+    assert_eq!(
+        read(&mut far),
+        json!({ "id": "node:1", "op": "return", "value": { "type": "data", "value": "ok" } })
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![("svc.inner".to_owned(), "inner.method".to_owned())],
+        "one target, one method"
+    );
+    assert!(peer.close_reason().is_none(), "the session goes on");
+}
+
+/// A reference outlives its session as an error, not as a gate (SES-7.2-5):
+/// an operation on a held reference after the session ended fails with the
+/// end of that session.
+/// rule: SES-7.2-5
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reference_after_the_session_ends_fails_alone() {
+    let (peer, mut far) = session(Arc::new(Nothing));
+    greet(&mut far, "node", &[]);
+    peer.ready().await.unwrap();
+    let end = std::thread::spawn(move || {
+        let call = read(&mut far);
+        send(
+            &mut far,
+            json!({ "op": "return", "id": frame_id(&call), "value": {
+                "type": "list",
+                "value": [reference(7, "object"), reference(8, "function")],
+            } }),
+        );
+        // The far end goes: its session ends.
+        drop(far);
+    });
+    let mut held = peer
+        .invoke("svc", "give", Value::Undefined)
+        .unwrap()
+        .list()
+        .unwrap()
+        .into_iter();
+    let object = held.next().unwrap().reference().unwrap();
+    let function = held.next().unwrap().reference().unwrap();
+    within("the session's end", peer.closed()).await;
+    assert!(peer.close_reason().is_some(), "the far end went");
+
+    // The object's owner is gone: the call says so, by code and by data.
+    let object_error = object
+        .call_method("greet", Value::List(Vec::new()))
+        .expect_err("the owner's session ended");
+    assert_eq!(object_error.code(), Some("peer-gone"), "{object_error}");
+    assert_eq!(
+        object_error.data(),
+        Some(json!({ "runtime": "node", "reason": "peer disconnected" })),
+        "{object_error}"
+    );
+    assert_eq!(
+        object_error.to_string(),
+        "a call on an object from node failed: runtime node disconnected",
+        "the error names where the object came from"
+    );
+    let read_error = object.get("name").expect_err("the owner's session ended");
+    assert!(
+        matches!(&read_error, Error::Transport(message)
+            if message.contains("peer disconnected") || message.contains("connection closed")),
+        "{read_error}"
+    );
+    // A function reference from the same session fails the same way.
+    let function_error = function
+        .call(Value::List(Vec::new()))
+        .expect_err("the session that returned it ended");
+    assert!(
+        matches!(&function_error, Error::Transport(message)
+            if message.contains("peer disconnected") || message.contains("connection closed")),
+        "{function_error}"
+    );
+    far_end(end).await;
+}
+
+/// An `origin` entry carries a session tag that is only `s` and digits
+/// (TAG-5-1): a tagged entry of another session is accepted as it is — the
+/// format needs no protocol version, and a tagged entry is not taken for a
+/// call of this session.
+///
+/// This closes the Rust column; what each runtime's own origin validation
+/// does with a new tag (Node, Python, Go, Bun) stays open.
+/// rule: TAG-5-1
+#[tokio::test(flavor = "multi_thread")]
+async fn origin_entries_with_a_new_tag_are_accepted() {
+    let (peer, mut far) = session(Arc::new(Echo));
+    greet(&mut far, "node", &[]);
+    peer.ready().await.unwrap();
+    let end = std::thread::spawn(move || {
+        // An object whose chain runs through other sessions: an older
+        // counter tag and a newer long one.
+        let call = read(&mut far);
+        let mut answered = reference(7, "object");
+        answered["value"]["origin"] = json!(["s1/node:3", "s0123456789012347/node:4"]);
+        send(
+            &mut far,
+            json!({ "op": "return", "id": frame_id(&call), "value": {
+                "type": "list", "value": [answered],
+            } }),
+        );
+        let call = read(&mut far);
+        assert_eq!(call["op"], json!("call"), "{call}");
+        assert_eq!(call["reference"], json!(7), "{call}");
+        assert_eq!(call["path"], json!([]), "{call}");
+        send(
+            &mut far,
+            json!({ "op": "return", "id": frame_id(&call), "value": { "type": "data", "value": "reached" } }),
+        );
+        assert_eq!(
+            read(&mut far),
+            json!({ "op": "release", "reference": 7, "count": 1 })
+        );
+        // A call whose chain carries tagged entries of other sessions is
+        // dispatched here, not taken for one of this session's calls.
+        let mut called = invoke(
+            "node:2",
+            "svc",
+            "echo",
+            one(&json!({ "type": "data", "value": "chained" })),
+        );
+        called["path"] = json!(["s1/node:3", "s0123456789012347/node:4"]);
+        send(&mut far, called);
+        assert_eq!(
+            read(&mut far),
+            json!({ "id": "node:2", "op": "return",
+                    "value": { "type": "list", "value": [{ "type": "data", "value": "chained" }] } })
+        );
+        far
+    });
+    let object = peer
+        .invoke("svc", "give", Value::Undefined)
+        .unwrap()
+        .list()
+        .unwrap()
+        .remove(0)
+        .reference()
+        .unwrap();
+    assert!(object.is_object(), "the tagged origin does not refuse it");
+    assert_eq!(
+        object
+            .call_method("greet", Value::List(Vec::new()))
+            .unwrap()
+            .json()
+            .unwrap(),
+        json!("reached")
+    );
+    drop(object);
+    let _far = far_end(end).await;
+    assert!(peer.close_reason().is_none(), "the session goes on");
+}
+
+/// A synchronous call keeps its session able to take calls the other way
+/// (CHN-2-3): while this side waits for a reply, a reverse call arrives,
+/// runs and is answered on the same channel before the reply.
+/// rule: CHN-2-3
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reverse_call_is_answered_while_a_synchronous_call_waits() {
+    let (peer, mut far) = session(Arc::new(Echo));
+    greet(&mut far, "node", &[]);
+    peer.ready().await.unwrap();
+    let end = std::thread::spawn(move || {
+        let call = read(&mut far);
+        assert_eq!(call["op"], json!("invoke"), "{call}");
+        assert_eq!(call["sync"], json!(true), "the caller waits: {call}");
+        // Asked before the reply to the waiting call: the answer comes back
+        // while that call still waits.
+        send(
+            &mut far,
+            invoke(
+                "node:1",
+                "svc",
+                "echo",
+                one(&json!({ "type": "data", "value": "reverse" })),
+            ),
+        );
+        assert_eq!(
+            read(&mut far),
+            json!({ "id": "node:1", "op": "return",
+                    "value": { "type": "list", "value": [{ "type": "data", "value": "reverse" }] } })
+        );
+        // Only then the first call's reply.
+        send(
+            &mut far,
+            json!({ "op": "return", "id": frame_id(&call), "value": { "type": "data", "value": "slow" } }),
+        );
+        far
+    });
+    let answering = peer.clone();
+    let call =
+        tokio::task::spawn_blocking(move || answering.invoke("svc", "slow", Value::Undefined));
+    let far_thread = tokio::task::spawn_blocking(move || end.join().unwrap());
+    let (answer, far) = within("the waiting call and the far end", async move {
+        tokio::join!(call, far_thread)
+    })
+    .await;
+    let _far = far.unwrap();
+    assert_eq!(
+        answer.unwrap().unwrap().json().unwrap(),
+        json!("slow"),
+        "the waiting call's own reply"
+    );
+    assert!(peer.close_reason().is_none(), "the session goes on");
+}
+
+/// Unknown fields do not end a session (CHN-4-11): a frame with a call's id
+/// fails only that call with code `bad-frame` and its `{op, fields}` data; a
+/// greeting with a field this side does not know fails the handshake;
+/// `release` and `cancel` ignore the extra fields.
+/// rule: CHN-4-11
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_field_fails_only_its_call() {
+    // A call frame from the far end: its call fails, and only it.
+    {
+        let (peer, mut far) = session(Arc::new(Echo));
+        greet(&mut far, "node", &[]);
+        peer.ready().await.unwrap();
+        let mut frame = invoke(
+            "node:1",
+            "svc",
+            "echo",
+            one(&json!({ "type": "data", "value": 1 })),
+        );
+        frame["extra"] = json!(1);
+        send(&mut far, frame);
+        let (name, message, code, data) = thrown(&read(&mut far));
+        assert_eq!(name, "BindingError");
+        assert_eq!(message, "unknown field \"extra\" in invoke");
+        assert_eq!(code.as_deref(), Some("bad-frame"));
+        assert_eq!(data, Some(json!({ "op": "invoke", "fields": ["extra"] })));
+        // The session goes on.
+        let reply = echo(
+            &mut far,
+            "node:2",
+            &json!({ "type": "data", "value": "after" }),
+        );
+        assert_eq!(
+            reply["value"],
+            one(&json!({ "type": "data", "value": "after" }))
+        );
+        assert!(peer.close_reason().is_none(), "the session goes on");
+    }
+    // A reply with an extra field fails the call waiting for it.
+    {
+        let (peer, mut far) = session(Arc::new(Nothing));
+        greet(&mut far, "node", &[]);
+        peer.ready().await.unwrap();
+        let end = std::thread::spawn(move || {
+            let call = read(&mut far);
+            send(
+                &mut far,
+                json!({ "op": "return", "id": frame_id(&call),
+                        "value": { "type": "data", "value": "late" }, "extra": 1 }),
+            );
+            // The next call is answered as usual.
+            let call = read(&mut far);
+            send(
+                &mut far,
+                json!({ "op": "return", "id": frame_id(&call), "value": { "type": "data", "value": "after" } }),
+            );
+            far
+        });
+        let error = peer
+            .invoke("svc", "answer", Value::Undefined)
+            .expect_err("the reply named a field this side does not know");
+        assert_eq!(error.code(), Some("bad-frame"), "{error}");
+        assert_eq!(
+            error.data(),
+            Some(json!({ "op": "return", "fields": ["extra"] })),
+            "{error}"
+        );
+        assert_eq!(
+            peer.invoke("svc", "answer", Value::Undefined)
+                .unwrap()
+                .json()
+                .unwrap(),
+            json!("after"),
+            "the session goes on"
+        );
+        let _far = far_end(end).await;
+        assert!(peer.close_reason().is_none(), "the session goes on");
+    }
+    // `release` and `cancel` ignore a field they do not know.
+    {
+        let (peer, mut far) = session(Arc::new(Giving));
+        greet(&mut far, "node", &[]);
+        peer.ready().await.unwrap();
+        send(
+            &mut far,
+            invoke("node:1", "svc", "give", json!({ "type": "undefined" })),
+        );
+        let reply = read(&mut far);
+        let exported = reply["value"]["value"]["id"]
+            .as_u64()
+            .expect("a reference id");
+        send(
+            &mut far,
+            json!({ "op": "release", "reference": exported, "count": 1, "extra": true }),
+        );
+        send(
+            &mut far,
+            json!({ "op": "cancel", "id": "node:9", "extra": true }),
+        );
+        send(
+            &mut far,
+            invoke("node:2", "svc", "give", json!({ "type": "undefined" })),
+        );
+        let reply = read(&mut far);
+        assert_eq!(reply["op"], json!("return"), "{reply}");
+        assert_eq!(
+            reply["value"]["value"]["kind"],
+            json!("function"),
+            "{reply}"
+        );
+        assert!(peer.close_reason().is_none(), "the session goes on");
+    }
+    // A greeting with a field this side does not know fails the handshake.
+    {
+        let (peer, mut far) = session(Arc::new(Echo));
+        let hello = read(&mut far);
+        assert_eq!(hello["op"], json!("hello"), "{hello}");
+        send(
+            &mut far,
+            json!({ "op": "hello", "version": ENDPOINT_PROTOCOL, "endpoint": "node",
+                    "capabilities": [], "extra": 1 }),
+        );
+        match peer.ready().await {
+            Err(Error::Handshake(rutis_bridge::session::Handshake::Incompatible(message))) => {
+                assert_eq!(message, "unknown field \"extra\" in hello")
+            }
+            other => panic!("a refused handshake expected, got {other:?}"),
+        }
+    }
+}
+
+/// A session speaks on its own logical channel (CHN-0-1): no frame carries a
+/// channel or a session identifier — each session is one channel, and what
+/// one session's far end sends is answered there alone; a session's end
+/// stays on its own channel.
+///
+/// The rule's other half, several sessions over one shared physical
+/// connection (CHN-5-4), is not shown: this crate has no multiplexing
+/// adapter to share one.
+/// rule: CHN-0-1
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_speaks_on_its_own_channel() {
+    let (first_session, mut first) = session(Arc::new(Echo));
+    let (second_session, mut second) = session(Arc::new(Echo));
+    greet(&mut first, "node", &[]);
+    greet(&mut second, "node", &[]);
+    first_session.ready().await.unwrap();
+    second_session.ready().await.unwrap();
+
+    // The same frame on both channels: each session answers its own.
+    let frame = invoke(
+        "node:1",
+        "svc",
+        "echo",
+        one(&json!({ "type": "data", "value": "both" })),
+    );
+    let mut fields: Vec<&str> = frame
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        vec!["args", "id", "method", "op", "path", "target"],
+        "no channel or session identifier in a call frame"
+    );
+    send(&mut first, frame.clone());
+    send(&mut second, frame.clone());
+    let expected = json!({ "id": "node:1", "op": "return",
+                           "value": { "type": "list", "value": [{ "type": "data", "value": "both" }] } });
+    assert_eq!(read(&mut first), expected, "the first channel's answer");
+    assert_eq!(read(&mut second), expected, "the second channel's answer");
+
+    // Ending one session's channel ends that session alone.
+    drop(first);
+    within("the first session's end", first_session.closed()).await;
+    assert!(
+        first_session.close_reason().is_some(),
+        "the first session ended"
+    );
+    send(
+        &mut second,
+        invoke(
+            "node:2",
+            "svc",
+            "echo",
+            one(&json!({ "type": "data", "value": "still" })),
+        ),
+    );
+    assert_eq!(
+        read(&mut second),
+        json!({ "id": "node:2", "op": "return",
+                "value": { "type": "list", "value": [{ "type": "data", "value": "still" }] } })
+    );
+    assert!(
+        second_session.close_reason().is_none(),
+        "the second session goes on"
+    );
 }
