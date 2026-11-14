@@ -1058,6 +1058,10 @@ async fn a_restart_given_up_half_way_still_finishes_before_the_next() {
         "the row after the restarts",
     )
     .await;
+    // Active is not yet published: the row's service follows (#403), as it
+    // did after the first load.
+    COLD.eventually(|| service(&fixture.root, "ping"), "the row's service")
+        .await;
     assert_eq!(
         call(&fixture.root, "ping", "echo", json!(["again"]))
             .await
