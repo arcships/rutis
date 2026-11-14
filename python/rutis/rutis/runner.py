@@ -401,6 +401,12 @@ class Context(sdk.Context):
         return closest(name, sorted(known))
 
     def provide(self, name: str, value: Any) -> Callable[[], None]:
+        # As `ctx.on` and `ctx.effect`, and Rust's InactiveEffect: the
+        # withdrawal this would put on the unload stack would never run once
+        # the unload took it, leaving the service with no row and telling the
+        # host about it (#1143).
+        if self._runtime.rows.get(self._row.key) is not self._row or self._row.unloading:
+            raise RuntimeError(f"row {self._row.named or self._row.key} is not active")
         return self._runtime.provide(self._row, name, value)
 
     def effect(self, cleanup: Callable) -> None:
