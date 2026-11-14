@@ -156,6 +156,12 @@ impl Proxy {
     /// Break the network: close every connection relayed now, and stop
     /// listening, so new connections are refused. When it returns, both
     /// are done.
+    ///
+    /// A platform may take a connection on the port in the moment after
+    /// the listener closes and end it at once (macOS,
+    /// docs/releases/0.21.0.md, #1052; Windows, #1150): the network is
+    /// broken either way, so a caller checks that nothing comes back, not
+    /// the refusal alone (`nothing_gets_through` in `tests/proxy.rs`).
     pub fn cut(&self) {
         self.shared.stop(false);
     }
