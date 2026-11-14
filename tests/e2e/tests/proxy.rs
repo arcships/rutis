@@ -40,6 +40,53 @@ fn round_trip(stream: &mut TcpStream, reader: &mut BufReader<TcpStream>, text: &
     assert_eq!(line.trim_end(), text);
 }
 
+/// Nothing gets through `addr`: the network is broken.
+///
+/// The usual answer is a refused connection. A port whose listener has
+/// just gone may instead take the connection and end it at once, with a
+/// reset or an end of stream (Windows, #1150; macOS,
+/// docs/releases/0.21.0.md, #1052); that is a broken network too, as long
+/// as nothing comes back.
+///
+/// Taking the connection is not the proxy listening: `cut` joins the
+/// accepting thread before it returns, so the proxy's listener is closed
+/// by then, and the port takes the connection around that close. The far
+/// end would echo the line written below, and with no far end the
+/// connection ends instead of answering.
+fn nothing_gets_through(addr: std::net::SocketAddr) {
+    let mut attempt = match TcpStream::connect(addr) {
+        Ok(attempt) => attempt,
+        Err(error) => {
+            // Closed, or reset at once: broken either way.
+            assert!(
+                matches!(
+                    error.kind(),
+                    ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset
+                ),
+                "the cut proxy's port: {error}"
+            );
+            return;
+        }
+    };
+    attempt.set_read_timeout(Some(hang_guard())).unwrap();
+    // What the far end would echo back, were the connection relayed.
+    let _ = writeln!(attempt, "through");
+    let mut buffer = [0u8; 1024];
+    match attempt.read(&mut buffer) {
+        // Ended, with nothing through.
+        Ok(0) => {}
+        Ok(n) => panic!(
+            "the cut proxy relayed {:?}",
+            String::from_utf8_lossy(&buffer[..n])
+        ),
+        Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+            panic!("the cut proxy held the connection to the hang guard: it relayed it")
+        }
+        // A reset ends it too.
+        Err(_) => {}
+    }
+}
+
 #[test]
 fn a_proxy_relays_cuts_and_restores() {
     let s = Scenario::new("proxy");
@@ -59,9 +106,8 @@ fn a_proxy_relays_cuts_and_restores() {
             "not closed within the hang guard"
         ),
     }
-    // New connections are refused.
-    let refused = TcpStream::connect(proxy.addr()).expect_err("the proxy is cut");
-    assert_eq!(refused.kind(), ErrorKind::ConnectionRefused, "{refused}");
+    // New connections get nowhere.
+    nothing_gets_through(proxy.addr());
 
     proxy.restore();
     let (mut stream, mut reader) = connect(proxy.addr());
@@ -181,4 +227,38 @@ fn a_cut_ends_a_transfer_in_progress() {
         .expect("the client's connection ends");
     server.join().expect("the server");
     s.finish();
+}
+
+/// A port that takes a connection and closes it at once (#1150) is a
+/// broken network: nothing comes back.
+#[test]
+fn a_port_that_closes_the_connection_at_once_is_a_broken_network() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let answering = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("the port's accept");
+        drop(stream);
+    });
+    nothing_gets_through(addr);
+    answering.join().expect("the port");
+}
+
+/// What [`nothing_gets_through`] is for: a far end that answers is not a
+/// broken network, and the check says so.
+#[test]
+#[should_panic(expected = "the cut proxy relayed")]
+fn a_far_end_that_answers_is_caught() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let answering = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("the far end's accept");
+        let mut writer = stream.try_clone().unwrap();
+        let mut request = String::new();
+        BufReader::new(stream)
+            .read_line(&mut request)
+            .expect("the request");
+        write!(writer, "{request}").expect("the answer");
+    });
+    nothing_gets_through(addr);
+    answering.join().expect("the far end");
 }
