@@ -1,9 +1,16 @@
-"""rutis.testing: the test listens on the host (`t.on`, #670 C4)."""
+"""rutis.testing: the test listens on the host (`t.on`, #670 C4).
+
+The host starts an `emit`'s invocations on a task of its own and answers the
+dispatch once they started (events protocol §5.5), so a round trip through
+the host after an emission of a plugin's is no barrier for it: where a test
+needs the listener to have run, it waits for the listener.
+"""
 
 import asyncio
 import unittest
 
 import background
+from support import within
 
 from rutis import define_plugin
 from rutis.testing import Bus, PluginTestError, load
@@ -40,11 +47,18 @@ class On(background.TestCase):
     def test_it_hears_the_plugins_emissions(self):
         async def go():
             async with load(weather(), config={"city": "Oslo"}) as t:
-                asked = []
-                off = t.on("weather/asked", lambda city: asked.append(city))
+                asked, heard = [], asyncio.Event()
+
+                def hear(city):
+                    asked.append(city)
+                    heard.set()
+
+                off = t.on("weather/asked", hear)
                 await t.service("weather").today()
-                # Through the host: a round trip after the emit, in order.
-                await t.parallel("weather/sync")
+                # The host starts an emit's invocations on a task of its own
+                # (events protocol §5.5): a round trip after the emit may be
+                # answered before the listener ran, so wait for the listener.
+                await within("the plugin's emission to reach the test", heard.wait())
                 self.assertEqual(asked, ["Oslo"])
                 off()
 
@@ -53,9 +67,18 @@ class On(background.TestCase):
     def test_it_hears_the_tests_own_emissions(self):
         async def go():
             async with load(weather(), config={"city": "Oslo"}) as t:
-                heard = []
-                t.on("weather/asked", lambda city, n: heard.append((city, n)))
+                heard, first = [], asyncio.Event()
+
+                def hear(city, n):
+                    heard.append((city, n))
+                    first.set()
+
+                t.on("weather/asked", hear)
                 t.emit("weather/asked", "Bergen", 2)
+                # An emit and a dispatch are not ordered against each other
+                # (§5.5), so the next emission waits for this one: heard in
+                # emission order is then what the assertions below check.
+                await within("the test's own emit to reach its listener", first.wait())
                 await t.parallel("weather/asked", "Tromsø", 3)
                 self.assertEqual(heard, [("Bergen", 2), ("Tromsø", 3)])
 
@@ -65,11 +88,16 @@ class On(background.TestCase):
         # objects-case(python): data-stays-data
         async def go():
             entry = {"city": "Oslo", "tags": ("a", "b")}
-            got = []
+            got, heard = [], asyncio.Event()
+
+            def hear(received):
+                got.append(received)
+                heard.set()
+
             async with load(weather(), config={"city": "Oslo"}) as t:
-                t.on("weather/told", got.append)
+                t.on("weather/told", hear)
                 await t.service("weather").tell(entry)
-                await t.parallel("weather/sync")
+                await within("the plugin's emission to reach the test", heard.wait())
             # A copy, a tuple arriving as a list: the event went through the host.
             self.assertIsNot(got[0], entry)
             self.assertEqual(got[0], {"city": "Oslo", "tags": ["a", "b"]})
@@ -122,11 +150,18 @@ class On(background.TestCase):
     def test_update_keeps_it(self):
         async def go():
             async with load(weather(), config={"city": "Oslo"}) as t:
-                asked = []
-                t.on("weather/asked", asked.append)
+                asked, heard = [], asyncio.Event()
+
+                def hear(city):
+                    asked.append(city)
+                    heard.set()
+
+                t.on("weather/asked", hear)
                 await t.update({"city": "Bergen"})
                 await t.service("weather").today()
-                await t.parallel("weather/sync")
+                # A round trip after the emit does not wait for it (§5.5),
+                # before or after the update: wait for the listener.
+                await within("the updated plugin's emission to reach the test", heard.wait())
                 self.assertEqual(asked, ["Bergen"])
 
         run(go())
