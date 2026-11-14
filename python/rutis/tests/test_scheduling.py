@@ -16,7 +16,6 @@ import asyncio
 import sys
 import threading
 import types
-import unittest
 
 import background
 from scheduling import ScriptedChannel, SteppedLoop
@@ -484,11 +483,9 @@ class RuntimeOnASteppedLoop(background.TestCase):
         release.set()
         self.step_until("the unload", unloading.done)
 
-    # `ctx.provide` has no such guard: on a row already unloading it is
-    # accepted, the withdrawal it adds to the stack never runs (the stack
-    # was taken), and the host is told about a service of a row that is
-    # gone (#1143; Rust refuses with InactiveEffect, Bun accepts it too).
-    @unittest.expectedFailure
+    # `ctx.provide` has the guard `ctx.on` / `ctx.effect` have, as Rust's
+    # InactiveEffect (#1143): the service of a row on its way out is not
+    # registered and the host is not told about it.
     def test_a_service_provided_after_the_unload_started_is_refused(self):
         release = asyncio.Event()
 
@@ -507,7 +504,12 @@ class RuntimeOnASteppedLoop(background.TestCase):
         self.assertTrue(self.runtime.rows["a"].unloading, "the row is on its unload stack")
 
         refused = self.thread(lambda: ctx.provide("late", Count()))
-        self.assertEqual(len(refused), 1, "providing on a row on its way out is refused")
+        self.assertEqual(
+            [(type(error).__name__, str(error)) for error in refused],
+            [("RuntimeError", "row a is not active")],
+            "providing on a row on its way out is refused",
+        )
+        self.assertNotIn("late", self.runtime.services, "nothing is registered")
         release.set()
         self.step_until("the unload", unloading.done)
         self.loop.run_ready()
