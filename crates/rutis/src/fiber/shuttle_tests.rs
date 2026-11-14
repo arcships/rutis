@@ -16,18 +16,55 @@
 //! notice delivery. Model 13 runs a record drained early against the unload
 //! that takes its list; model 14 pins what several completions do to one task;
 //! model 15 mirrors `load`/`unload` to check the live generation the kernel
-//! publishes across restarts. Built with `--cfg rutis_shuttle`, `crate::sync`
-//! makes the driver's `alive` flag, a fiber's `lineage_closed` marker and an
-//! effect record's state shuttle primitives; the tokio channels in between
-//! (`watch`, `mpsc`, `Notify`) need no runtime and are single steps to shuttle.
-//! Shuttle switches just before an operation on its primitives, so the windows
-//! the code guards that no primitive opens are marked with
+//! publishes across restarts; model 16 closes a real fiber tree while its
+//! listeners dispatch, so `CloseTree for FiberInner` and the walk over the real
+//! child lists run, not a stand-in. Built with `--cfg rutis_shuttle`,
+//! `crate::sync` makes the driver's `alive` flag, a fiber's `lineage_closed`
+//! marker and an effect record's state shuttle primitives; the tokio channels
+//! in between (`watch`, `mpsc`, `Notify`) need no runtime and are single steps
+//! to shuttle. Shuttle switches just before an operation on its primitives, so
+//! the windows the code guards that no primitive opens are marked with
 //! `crate::sync::switch_point()` (nothing in a plain build): between
 //! `post_join`'s check and its send, between an effect join's check and its
 //! wait, and inside an effect factory, between the two registration checks.
 //! What stands in for the rest of the fiber (the driver's exit, `drain()`'s
 //! spawned runner, the unload's async steps) is written out below, each next
 //! to the code it follows.
+//!
+//! What is *not* modelled here, and why (#622's remaining items):
+//!
+//! - **The sequential property test over operation sequences.** It belongs to
+//!   `crates/rutis/tests/interleave.rs`: its operations (mount, restart,
+//!   update, dispose, `dispose_self`, a failing or panicking `apply`) run
+//!   through `FiberView`'s public futures, which post to a driver task on the
+//!   runtime. A shuttle thread that parks on that mailbox stops shuttle's
+//!   scheduler, so a model would have to write the driver out — and a
+//!   reference model compared against a written-out driver tests the copy, not
+//!   the kernel. Its one kernel-only piece, a panic in the driver, is out too:
+//!   `recover_driver_panic` stores `alive` (a shuttle primitive) while holding
+//!   the transition lock (`fiber.rs:1440`), so a waiter that takes that lock
+//!   through `stopped_error` parks on a real mutex while the holder is stopped
+//!   at the switch point and the model hangs (observed before it was written).
+//!   It is pinned by `crates/rutis/tests/contract.rs::driver_panic_completes_waiters_with_error`.
+//! - **The kernel side of a child process ending (#623).** The kernel sees it
+//!   only as an event call that never returns; its part is the unload deadline:
+//!   `wait_events` gives up at `shutdown_deadline()` (`fiber.rs:582`), fed by
+//!   `RUTIS_SHUTDOWN_TIMEOUT` (`fiber.rs:1201`), and reports
+//!   `ListenersStillRunning`. The timer is a real `std::thread` with
+//!   `recv_timeout` and has no seam a model can drive; the variable is
+//!   process-wide, so shortening it for one model would shorten it for model 6
+//!   too — a timing gamble, not an interleaving. Pinned end to end by
+//!   `crates/rutis/tests/unload_deadline.rs::an_unload_gives_up_on_running_listeners_at_the_deadline`.
+//! - **The kernel side of a host reload (#627).** It is mount admission:
+//!   `spawn_fiber_inner` and `Ctx::register_mount_effect` check `is_closed()`
+//!   under `Shared.admission`, a **std** mutex (`ctx.rs:30`), and inside that
+//!   critical section they touch `crate::sync::AtomicBool` — a shuttle switch
+//!   point. A second shuttle thread taking that lock parks on a real mutex and
+//!   the model hangs, as model 7's note says, so the race cannot be modelled
+//!   until `Shared.admission` is a stand-in (`#622` item 1, outside these
+//!   files). Pinned deterministically by
+//!   `crates/rutis/src/ctx.rs::child_created_before_root_closes_but_mounted_afterward_never_applies`,
+//!   which splits the public mount path at its two admission points.
 //!
 //! Run (CONTRIBUTING.md):
 //!
@@ -54,7 +91,8 @@ use tokio::sync::{mpsc, watch, Notify};
 
 use super::{
     complete_intent, join_task, mark_subtree_lineage, post_join_to, publish_subtree_closing,
-    CloseTree, FiberInner, FiberState, Intent, NextState, PluginId, TransitionTask, NOT_LIVE,
+    spawn_fiber, CloseTree, FiberInner, FiberState, Intent, NextState, PluginId, TransitionTask,
+    NOT_LIVE,
 };
 use crate::bus::run::{Inv, SyncNext};
 use crate::bus::table::{Body, Entry, Selected, Table};
@@ -4013,6 +4051,300 @@ fn shuttle_restart_publishes_the_live_generation() {
         assert!(
             !fiber.effects.lock().unwrap().is_empty(),
             "the last generation's effect record is missing"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Model 16: a close over a real fiber tree, while its listeners dispatch
+// (#622; the kernel side of removing a row on a reload, `events/lifecycle`)
+
+/// A plugin the tree model only needs for its fiber's name: the model runs the
+/// members' generations itself, so `apply` never runs.
+struct Named(&'static str);
+
+impl crate::DynPlugin for Named {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    fn apply<'a>(&'a self, _ctx: &'a Ctx) -> crate::BoxFuture<'a, Result<Effect, crate::Error>> {
+        Box::pin(async { Ok(Effect::Done) })
+    }
+}
+
+/// `FiberInner::load` for the tree model, mirrored where the driver is: the
+/// generation bump, the new token and `Loading` → `Active` under the transition
+/// lock — the same critical section that publishes the live generation. The
+/// plugin's `apply`, the dependencies, the factory and `flush_status`'s emits
+/// are not modelled: none of them decides whether a listener is admitted.
+fn tree_activate(fiber: &Arc<FiberInner>) -> u64 {
+    let _admission = fiber.ctx.shared().admission.lock().unwrap();
+    let mut tr = fiber.transition.lock().unwrap();
+    fiber.new_generation_token();
+    tr.generation += 1;
+    tr.error = None;
+    fiber.set_state(&mut tr, FiberState::Loading);
+    fiber.set_state(&mut tr, FiberState::Active);
+    tr.generation
+}
+
+/// A listener entry owned by `fiber` in `generation`: the kernel's own
+/// [`Entry`], so `live()` and `start()` read the owner's markers and published
+/// generation.
+fn tree_entry(fiber: &Arc<FiberInner>, generation: u64) -> Arc<Entry> {
+    let mut entry = model_entry(&fiber.ctx, fiber);
+    entry.generation = generation;
+    Arc::new(entry)
+}
+
+/// `FiberInner::unload` for one member of the closing tree, mirrored where the
+/// driver is: `Unloading` under the admission and transition locks (which
+/// publishes `NOT_LIVE`), the cancel, the kernel's own `wait_events`, then
+/// `Disposed`. The member registers no cleanup, so the cleanup pass is empty.
+fn tree_unload(fiber: &Arc<FiberInner>) {
+    {
+        let _admission = fiber.ctx.shared().admission.lock().unwrap();
+        let mut tr = fiber.transition.lock().unwrap();
+        fiber.set_state(&mut tr, FiberState::Unloading);
+    }
+    fiber.cancel_current();
+    block_on(fiber.wait_events());
+    let mut tr = fiber.transition.lock().unwrap();
+    fiber.set_state(&mut tr, FiberState::Disposed);
+}
+
+/// The window [`mark_subtree_lineage`]'s two-phase publication must never
+/// leave open, read over a real fiber: no node may have its own `closing` flag
+/// (or an ancestor's `closing`/marker) set while its own marker is clear.
+fn tree_close_window(fiber: &Arc<FiberInner>) -> Option<String> {
+    let own_closing = fiber.closing.load(Ordering::SeqCst);
+    let mut ancestor_closed = false;
+    let mut current = fiber.parent_fiber.as_ref().and_then(Weak::upgrade);
+    while let Some(parent) = current {
+        if parent.closing.load(Ordering::SeqCst) || parent.lineage_closed.load(Ordering::SeqCst) {
+            ancestor_closed = true;
+            break;
+        }
+        current = parent.parent_fiber.as_ref().and_then(Weak::upgrade);
+    }
+    if (own_closing || ancestor_closed) && !fiber.lineage_closed.load(Ordering::SeqCst) {
+        return Some(if own_closing {
+            format!(
+                "the {} is closing while its lineage marker is clear",
+                fiber.name
+            )
+        } else {
+            format!(
+                "an ancestor of the {} is closed while its marker is clear",
+                fiber.name
+            )
+        });
+    }
+    None
+}
+
+/// Model 16, a subtree close over a real fiber tree while its listeners are
+/// dispatching (#622; the kernel side of what a host reload does when it
+/// removes a row): the fixed set is collected from the kernel's own
+/// `FiberInner::children` ([`CloseTree`]), every member is marked before any
+/// `closing` flag is published, a member that unloads waits for the calls it
+/// admitted, and after the close a member admits no new call — its marker and
+/// `closing` flag alone say so for the grandchild, which never unloads. A
+/// sibling outside the closed subtree keeps admitting calls: the collection
+/// must not reach past the root it was given. The subtree is three deep, so a
+/// walk that stops at the direct children leaves the great-grandchild open.
+///
+/// The model runs the kernel's own `mark_subtree_lineage` /
+/// `publish_subtree_closing` over real [`FiberInner`]s (model 4's tree is a
+/// stand-in with a hand-written `close_children`, so the walk over the real
+/// child lists was not covered), real [`Entry`]s owned by the members (`live`,
+/// `start`, `CallFlight` → `begin_event`/`finish_event`), real
+/// `set_state`/`publish_live`, `new_generation_token`, `cancel_current` and
+/// `wait_events`. The members' drivers are written out: `tree_activate` stands
+/// in for `load`, `tree_unload` for the unload `drive`'s Shutdown arm runs, and
+/// the dispatcher's body is the model's (a listener body is user code).
+///
+/// Mutations this model catches (each made in the kernel and reverted; the
+/// message after it is what this model then reports): `collect_postorder` not
+/// recursing, so the walk stops at the direct children (`an ancestor of the
+/// great-grandchild is closed while its marker is clear` from the monitor; the
+/// marker pass left it unmarked), publishing `closing` before the marker pass
+/// (`the grandchild is closing while its lineage marker is clear`), `Entry::live`
+/// keeping only the published-generation check, with no `alive`, `closing` or
+/// `lineage_closed` read (`the grandchild's listener was admitted after the
+/// close`), and `wait_events` returning without waiting (`the child's unload
+/// returned while 1 call(s) of it were running`).
+#[test]
+fn shuttle_subtree_close_marks_every_member_of_a_real_tree() {
+    explore(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a current-thread runtime");
+        let ctx = Ctx::root_with(runtime.handle().clone());
+        // The closed subtree is `child` → `grandchild` → `great`; `sibling` is
+        // outside it.
+        let tree = |name, parent: Option<&Ctx>| {
+            spawn_fiber(
+                ctx.shared(),
+                parent,
+                Some(Arc::new(Named(name)) as Arc<dyn crate::DynPlugin>),
+                false,
+            )
+        };
+        let child = tree("child", Some(&ctx));
+        let grandchild = tree("grandchild", Some(&child.ctx));
+        let great = tree("great-grandchild", Some(&grandchild.ctx));
+        let sibling = tree("sibling", Some(&ctx));
+        let entries = [
+            tree_entry(&child, tree_activate(&child)),
+            tree_entry(&grandchild, tree_activate(&grandchild)),
+            tree_entry(&sibling, tree_activate(&sibling)),
+        ];
+        tree_activate(&great);
+        // Bodies running per entry. Shuttle atomics: the dispatchers only
+        // read them after their joins, where a load is not a scheduling point
+        // that matters.
+        let running: Arc<Vec<ShuttleUsize>> = Arc::new(vec![
+            ShuttleUsize::new(0),
+            ShuttleUsize::new(0),
+            ShuttleUsize::new(0),
+        ]);
+
+        let dispatchers: Vec<_> = entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let (entry, running) = (entry.clone(), running.clone());
+                thread::spawn(move || {
+                    for _ in 0..2 {
+                        switch_point();
+                        let Some(flight) = entry.start() else {
+                            continue;
+                        };
+                        // The listener body, while the flight is held.
+                        running[index].fetch_add(1, Ordering::SeqCst);
+                        switch_point();
+                        running[index].fetch_sub(1, Ordering::SeqCst);
+                        drop(flight);
+                    }
+                })
+            })
+            .collect();
+
+        let done = Arc::new(SyncBool::new(false));
+        let monitor = {
+            let members = vec![child.clone(), grandchild.clone(), great.clone()];
+            let done = done.clone();
+            thread::spawn(move || {
+                while !done.load(Ordering::SeqCst) {
+                    for member in &members {
+                        if let Some(window) = tree_close_window(member) {
+                            panic!("{window}");
+                        }
+                    }
+                    switch_point();
+                }
+            })
+        };
+
+        let closer = {
+            let (child, done) = (child.clone(), done.clone());
+            thread::spawn(move || {
+                switch_point();
+                let subtree = mark_subtree_lineage(&child);
+                // The publication point the kernel's admission lock leaves
+                // between the marker pass and the flags.
+                switch_point();
+                publish_subtree_closing(&subtree);
+                done.store(true, Ordering::SeqCst);
+            })
+        };
+        let unloader = {
+            let (child, running) = (child.clone(), running.clone());
+            thread::spawn(move || {
+                switch_point();
+                tree_unload(&child);
+                let still = running[0].load(Ordering::SeqCst);
+                assert_eq!(
+                    still, 0,
+                    "the child's unload returned while {still} call(s) of it were running"
+                );
+            })
+        };
+
+        closer.join().unwrap();
+        unloader.join().unwrap();
+        monitor.join().unwrap();
+        for dispatcher in dispatchers {
+            dispatcher.join().unwrap();
+        }
+
+        for (name, member) in [
+            ("child", &child),
+            ("grandchild", &grandchild),
+            ("great-grandchild", &great),
+        ] {
+            assert!(
+                member.lineage_closed.load(Ordering::SeqCst),
+                "the {name} of the closed subtree was not marked"
+            );
+            assert!(
+                member.closing.load(Ordering::SeqCst),
+                "the {name} of the closed subtree was not closed"
+            );
+            assert_eq!(
+                *member.event_flights.lock().unwrap(),
+                0,
+                "the {name} left a call flight behind"
+            );
+        }
+        assert_eq!(
+            child.state(),
+            FiberState::Disposed,
+            "the member that unloaded did not end Disposed"
+        );
+        assert!(
+            entries[0].start().is_none(),
+            "the unloaded member's listener was admitted after its unload"
+        );
+        assert_eq!(
+            grandchild.state(),
+            FiberState::Active,
+            "the grandchild is the member that never unloads"
+        );
+        // Its generation is still the live one; only the close's marker and
+        // flag keep its listener out.
+        assert!(
+            entries[1].start().is_none(),
+            "the grandchild's listener was admitted after the close"
+        );
+
+        assert!(
+            !sibling.lineage_closed.load(Ordering::SeqCst),
+            "the sibling outside the closed subtree was marked"
+        );
+        assert!(
+            !sibling.closing.load(Ordering::SeqCst),
+            "the sibling outside the closed subtree was closed"
+        );
+        assert_eq!(
+            sibling.state(),
+            FiberState::Active,
+            "the sibling outside the closed subtree changed state"
+        );
+        assert!(
+            entries[2].live(),
+            "the sibling outside the closed subtree stopped being live"
+        );
+        assert!(
+            entries[2].start().is_some(),
+            "the sibling outside the closed subtree stopped admitting calls"
+        );
+        assert_eq!(
+            running[2].load(Ordering::SeqCst),
+            0,
+            "the sibling left a call body running"
         );
     });
 }
