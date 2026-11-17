@@ -892,25 +892,13 @@ impl Generator<'_> {
         };
         self.py_declarations.push(py_declaration);
         let docs = jsdoc(&attrs, "");
-        let declaration = match body {
-            Body::Object {
-                fields, flattened, ..
-            } if flattened.is_empty() => {
-                format!(
-                    "{docs}export interface {header} {}\n",
-                    object(&fields, false)
-                )
-            }
-            body => {
-                let expression = body.inline(false);
-                let space = if expression.starts_with('\n') {
-                    ""
-                } else {
-                    " "
-                };
-                format!("{docs}export type {header} ={space}{expression}\n")
-            }
+        let expression = body.inline(false);
+        let space = if expression.starts_with('\n') {
+            ""
+        } else {
+            " "
         };
+        let declaration = format!("{docs}export type {header} ={space}{expression}\n");
         self.declarations.push(declaration);
         Ok(name)
     }
@@ -3348,7 +3336,7 @@ impl Jot {
             "  tied(n: number): Promise<void>",
             "  /** @throws {StringThrown} */\n  count(): Promise<number | bigint>",
             "export type Item = {\n  itemName: string\n  n: number | bigint\n  pages: Page<number[]>\n} & Meta",
-            "export interface Page<T> {\n  items: T\n  next?: string | null\n}",
+            "export type Page<T> = {\n  items: T\n  next?: string | null\n}",
             "export type Problem = { kind: \"not-there\" } | { kind: \"too-big\"; detail: number | bigint }",
             "export type ProblemThrown = RustError<\"Problem\", \"not-there\" | \"too-big\", Problem>",
             "export interface Services {\n  store: Store\n}",
@@ -3520,7 +3508,7 @@ impl Jot {
         assert!(
             generated
                 .typescript
-                .contains("export interface Item6 {\n  at?: string | null\n}"),
+                .contains("export type Item6 = {\n  at?: string | null\n}"),
             "{}",
             generated.typescript
         );
