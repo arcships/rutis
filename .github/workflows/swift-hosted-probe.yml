@@ -1,0 +1,50 @@
+name: swift hosted probe
+
+# TEMPORARY (#1273): the `runtimes-swift` steps on a GitHub-hosted macOS
+# runner, because the self-hosted Mac is stuck busy. Deleted before the pull
+# request; never merged.
+on:
+  pull_request:
+
+jobs:
+  swift:
+    runs-on: ${{ vars.HOSTED_MACOS || 'macos-15' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: |
+          swift --version
+          xcodebuild -version || true
+          cargo --version || true
+      - name: swift build and the SDK's tests
+        run: |
+          cargo build -p rutis-host
+          mkdir -p .build
+          set -o pipefail
+          swift build 2>&1 | tee .build/swift-build.log
+          RUTIS_HOST="${CARGO_TARGET_DIR:-$PWD/target}/debug/rutis-host" swift run RutisSelfTest
+      - name: strict concurrency report (#630, #1273)
+        if: always()
+        continue-on-error: true
+        run: tools/swift-strict-concurrency.sh --log .build/swift-build.log
+      - name: ThreadSanitizer
+        if: always()
+        run: |
+          export RUTIS_HOST="${CARGO_TARGET_DIR:-$PWD/target}/debug/rutis-host"
+          export TSAN_OPTIONS=halt_on_error=1
+          for suite in PeerTests WriterTests EventsConformanceTests AppTests ConcurrencyTests; do
+            echo "::group::RutisSelfTest $suite under ThreadSanitizer"
+            swift run --sanitize=thread --build-path .build/tsan RutisSelfTest "$suite"
+            echo "::endgroup::"
+          done
+      - name: public API of the Swift SDK
+        if: always()
+        run: tools/public-api-swift.sh
+      - name: upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-hosted-logs
+          path: |
+            .build/swift-build.log
+            .build/strict-concurrency-report.txt
