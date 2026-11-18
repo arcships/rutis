@@ -7,7 +7,7 @@ on:
 
 jobs:
   swift-app:
-    runs-on: ${{ vars.HOSTED_MACOS || 'macos-15' }}
+    runs-on: ${{ vars.HOSTED_MACOS || 'macos-26' }}
     steps:
       - uses: actions/checkout@v4
       - name: toolchain
