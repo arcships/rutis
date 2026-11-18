@@ -1,0 +1,29 @@
+name: swift_app diag self-hosted
+
+# TEMPORARY (#1273): the same diagnostic on the self-hosted Mac, where the
+# regression is seen.
+on:
+  pull_request:
+
+jobs:
+  swift-app:
+    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '["self-hosted","macOS","ARM64"]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: |
+          swift --version
+          cargo --version
+          python3 --version || true
+      - name: build host and app, run swift_app
+        run: |
+          cargo build -p rutis-host
+          swift build --product RutisAppFixture
+          set -o pipefail
+          cargo test -p rutis-host --test swift_app -- --nocapture 2>&1 | tee swift-app.log
+      - name: upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-app-diag-selfhosted
+          path: swift-app.log
