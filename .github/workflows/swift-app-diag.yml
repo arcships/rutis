@@ -1,0 +1,30 @@
+name: swift_app diag
+
+# TEMPORARY (#1273): runs `cargo test -p rutis-host --test swift_app` on a
+# GitHub-hosted macOS with the install-path diagnostics in the Swift runtime.
+on:
+  pull_request:
+
+jobs:
+  swift-app:
+    runs-on: ${{ vars.HOSTED_MACOS || 'macos-15' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: |
+          swift --version
+          cargo --version
+          python3 --version || true
+      - name: build host and app, run swift_app
+        run: |
+          cargo build -p rutis-host
+          swift build --product RutisAppFixture
+          export RUTIS_PYTHON="$(command -v python3)"
+          set -o pipefail
+          cargo test -p rutis-host --test swift_app -- --nocapture 2>&1 | tee swift-app.log
+      - name: upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-app-diag
+          path: swift-app.log

@@ -456,6 +456,7 @@ public final class RutisApp: Observable, @unchecked Sendable {
     /// An app's plugins installed on a session rutis greeted, in order; a
     /// stop or a lost connection unloads them, latest first.
     private func install(_ runtime: Runtime, _ installing: [(definition: Rutis.Definition, config: Value)]) {
+        say("diag: app install \(installing.count) plugins, installs=\(installs)")
         guard installs else { return }
         runtime.install(installing)
     }

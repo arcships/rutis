@@ -593,6 +593,7 @@ final class Runtime: @unchecked Sendable {
         let entry = Provided(row: row.key, value: value, shape: shape)
         services[id] = entry
         row.provided.append(id)
+        settings.log("rutis-diag: provide \(name) as \(id) own=\(row.own)")
         if row.own {
             share(row, id, value, shape)
         } else if slots[id] == nil, !name.contains("#") {
@@ -633,6 +634,7 @@ final class Runtime: @unchecked Sendable {
         announcements += 1
         let service = Shared(row: row.key, plugin: row.definition.name, value: value, shape: shape, version: announcements)
         shared[id] = service
+        settings.log("rutis-diag: share \(id), servicesOffer=\(String(describing: servicesOffer))")
         if servicesOffer != nil { announce(id, service) }
         reconcile()
     }
@@ -643,13 +645,18 @@ final class Runtime: @unchecked Sendable {
         let args = [servicesAnnounce(plugin: service.plugin, name: id, service: service.value, shape: service.shape,
                                      version: service.version)]
         let log = settings.log
+        settings.log("rutis-diag: announce queued \(id) live=\(live)")
         post {
-            guard let call = try? session.send(target: "", method: "services.announce", args: args, sync: false) else { return }
+            guard let call = try? session.send(target: "", method: "services.announce", args: args, sync: false) else {
+                log("rutis-diag: announce send failed \(id)")
+                return
+            }
             Task.detached {
                 do {
                     // rutis answers with a result to await: the announcement
                     // is taken (or refused) once it is awaited.
                     _ = try await settle(try await call.value())
+                    log("rutis-diag: announced \(id)")
                 } catch {
                     log("rutis: cannot announce \(id): \(Events.failure(error))")
                 }
@@ -663,12 +670,14 @@ final class Runtime: @unchecked Sendable {
     private func offered(_ offers: JSON) {
         lock.lock()
         let version = offers["version"]?.int64Value.map(Int.init) ?? 0
+        settings.log("rutis-diag: offered version=\(version) families=\(offers["families"]?.arrayValue?.compactMap(\.stringValue) ?? [])")
         guard version > farOffers else { return lock.unlock() }
         farOffers = version
         let families = offers["families"]?.arrayValue?.compactMap(\.stringValue) ?? []
         let offer = families.contains("services") ? (offers["since"]?["services"]?.int64Value.map(Int.init) ?? 0) : nil
         if families.contains("events"), !hosting {
             hosting = true
+            settings.log("rutis-diag: hosting on")
             reconcile()
         }
         if offer != servicesOffer {
@@ -722,9 +731,15 @@ final class Runtime: @unchecked Sendable {
     /// runtime session: the plugins have nothing to install into and do not
     /// install.
     func install(_ plugins: [(definition: Rutis.Definition, config: Value)]) {
+        settings.log("rutis-diag: install \(plugins.count) plugins, session=\(session != nil)")
         guard let session else { return }
         lock.withLock { own = plugins }
-        _ = try? session.send(target: "", method: "link.offers", args: [linkOffers()], sync: false)
+        do {
+            _ = try session.send(target: "", method: "link.offers", args: [linkOffers()], sync: false)
+            settings.log("rutis-diag: install sent link.offers")
+        } catch {
+            settings.log("rutis-diag: install link.offers failed: \(error)")
+        }
         reconcile()
     }
 
@@ -739,11 +754,13 @@ final class Runtime: @unchecked Sendable {
     }
 
     private func reconciling() async {
-        guard lock.withLock({ () -> Bool in
+        let entered = lock.withLock { () -> Bool in
+            settings.log("rutis-diag: reconciling entered, own=\(own.count) settling=\(settling) hosting=\(hosting)")
             if settling || own.isEmpty { return false }
             settling = true
             return true
-        }) else { return }
+        }
+        guard entered else { return }
         while true {
             let next: (Rutis.Definition, Value, Bool)? = lock.withLock {
                 if !closing {
@@ -766,11 +783,13 @@ final class Runtime: @unchecked Sendable {
             }
             guard let (definition, config, loading) = next else { return }
             let name = definition.name
+            settings.log("rutis-diag: next plugin \(name) loading=\(loading)")
             if loading {
                 do {
                     try await load(key: name, name: name, entry: name, definition: try supported(definition), config: config,
                                    exports: [:], isolate: [:], scope: [], own: true)
                     lock.withLock { ownStates[name] = .loaded }
+                settings.log("rutis-diag: loaded plugin \(name)")
                 } catch {
                     let closed = lock.withLock { () -> Bool in
                         ownStates[name] = .failed
