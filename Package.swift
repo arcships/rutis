@@ -1,4 +1,4 @@
-// swift-tools-version:5.9
+// swift-tools-version:6.0
 // The Swift SDK of rutis (swift/rutis): the library `Rutis` that writes
 // plugins and runs them as a runtime, its macros, and the testing tool
 // `RutisTest`. Design: docs/design-swift-sdk-2026-10-12.md. SwiftPM takes a
@@ -131,5 +131,5 @@ let package = Package(
             swiftSettings: strictConcurrency
         ),
     ],
-    swiftLanguageVersions: [.v5]
+    swiftLanguageVersions: [.v6]
 )

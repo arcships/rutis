@@ -1,0 +1,33 @@
+name: swift v6 probe
+
+# TEMPORARY (#1273): measures what the Swift 6 language mode reports, on the
+# self-hosted Macs. Deleted before the pull request.
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '["self-hosted","macOS","ARM64"]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: swift --version
+      - name: Rutis, Swift 6 language mode, clean build
+        run: |
+          mkdir -p .build
+          rm -rf .build/v6probe
+          set -o pipefail
+          swift build --target Rutis --scratch-path .build/v6probe 2>&1 | tee .build/v6-rutis.log
+      - name: RutisTest
+        if: always()
+        run: |
+          set -o pipefail
+          swift build --target RutisTest --scratch-path .build/v6probe 2>&1 | tee .build/v6-rutistest.log
+      - name: upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v6-logs
+          path: |
+            .build/v6-rutis.log
+            .build/v6-rutistest.log
