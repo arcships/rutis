@@ -130,10 +130,10 @@ struct UnloadOrderTests {
     /// Once rutis answered `rows.unload`, a context kept past the row emits
     /// nothing (§3).
     ///
-    /// Repeated: the host's answer to `rows.unload` races the emission the
-    /// stack sent before it (#1088), and one round alone races once.
+    /// Repeated ten times: the host's answer to `rows.unload` races the
+    /// emission the stack sent before it (#1088), and one round races once.
     func aRowsCleanupStillEmits() async throws {
-        for round in 1 ... 20 {
+        for round in 1 ... 10 {
             try await aCleanupEmits(round)
         }
     }

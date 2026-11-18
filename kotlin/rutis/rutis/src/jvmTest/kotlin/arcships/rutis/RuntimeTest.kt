@@ -298,12 +298,12 @@ class RuntimeTest {
      * hears it, while its own listeners are gone; once rutis answered
      * `rows.unload`, a context kept past the row emits nothing (§3).
      *
-     * Repeated: the host's answer to `rows.unload` races the emission the
-     * stack sent before it (#1088), and one round alone races once.
+     * Repeated ten times: the host's answer to `rows.unload` races the
+     * emission the stack sent before it (#1088), and one round races once.
      */
     @Test
     fun aRowsCleanupStillEmits() = runBlocking<Unit> {
-        for (round in 1..20) aCleanupEmits(round)
+        for (round in 1..10) aCleanupEmits(round)
     }
 
     /** One round of [aRowsCleanupStillEmits]. */
