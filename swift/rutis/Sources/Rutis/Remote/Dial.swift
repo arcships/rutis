@@ -158,6 +158,7 @@ final class DialedSocket: NSObject, Channel, URLSessionWebSocketDelegate, @unche
     /// The code of the far end's close frame, once it closed with one.
     private var farCode: Int?
     private var farReason = ""
+    private let received = Locked(0)
 
     private init(host: String, anchors: [SecCertificate]) {
         self.host = host
@@ -328,6 +329,13 @@ final class DialedSocket: NSObject, Channel, URLSessionWebSocketDelegate, @unche
     }
 
     func receive() throws -> [UInt8]? {
+        let count = received.withLock { value -> Int in
+            value += 1
+            return value
+        }
+        if count <= 20 || count % 10 == 0 {
+            FileHandle.standardError.write(Data("rutis-diag: ws receive #\(count)\n".utf8))
+        }
         let done = DispatchSemaphore(value: 0)
         let result = SentBox<URLSessionWebSocketTask.Message>()
         task.receive { received in

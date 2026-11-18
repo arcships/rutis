@@ -412,6 +412,7 @@ public final class RutisApp: Observable, @unchecked Sendable {
                     peer.close(ChannelError("the access point did not greet in time"))
                     socket.close("no greeting")
                 } else if peer.error == nil {
+                    say("diag: greeted, install next")
                     say("connected to \(address)")
                     publish(.connected)
                     install(runtime, installing)
