@@ -2,7 +2,7 @@
 
 [中文](design-chunked-frames-2026-11-19.md)
 
-Status: implemented (0.23 is unreleased; this joins session protocol 5). Date: 2026-11-19.
+Status: implemented (0.23 is unreleased; this joins session protocol 5; Rust, Node and Swift). Date: 2026-11-19.
 Issue: [#1361](https://github.com/arcships/rutis/issues/1361), part of the 0.23 beta.
 
 ## 1. Where things stand
@@ -38,6 +38,8 @@ The receiver adds up as it buffers: over the same configured value ends the sess
 **D6 An incomplete transfer is dropped when the session ends and never dispatched.** The receiver hands a frame to the session only after `last`, reassembly and decoding all succeeded. If the session ends midway (the transport closes, the far end exits, a protocol error), the buffer goes with it and the callee never ran. That is one acceptance item of #1361 and the other side of "exactly once": a chunk is not a call; only the whole frame is. **Dropped:** dispatch the chunks received so far — the business would see half a value, with no way to say "not finished".
 
 **D7 Land in the Rust host ↔ Node runtime first; the other five implementations declare nothing.** `crates/rutis-bridge/src/session` (Rust) and `node/rutis-runtime/src/session.mjs` implement sending and receiving; Bun, Python, Go, Swift and Kotlin are untouched and do not declare `chunked`, so Rust never chunks to them and their behaviour is as today. When they implement it later, they add the frame and the capability the same way, with no business API change. **Dropped:** all seven at once — that turns #1361 into a chain of seven PRs, while acceptance needs one real cross-language path.
+
+> Follow-up (#1363): the Swift SDK implements sending and receiving by the same rules and declares `chunked` in its greeting; D7's range is now Rust, Node and Swift, and the other four (Bun, Python, Go, Kotlin) are unchanged. See §6.
 
 **D8 The plugin API, service signatures and public API are unchanged.** No new required configuration, no new plugin-visible concept, no signature change in `Endpoint`/`Connection`; what is added is protocol constants (`CHUNK_SIZE`, `DEFAULT_MAX_TRANSFER`), a session option (`SessionOptions::max_transfer` and `RUTIS_MAX_TRANSFER`), a capability string and one `op` on the wire. The business keeps writing one call.
 
@@ -121,7 +123,7 @@ A 20 MiB value crosses between the Rust host and the Node runtime with one call 
 | Situation | Output |
 | --- | --- |
 | The value encodes to over the session's cap (256 MiB by default, a host may raise it) | `svc.take: argument 2 cannot be sent: the message would be 300000000 bytes, over the limit of 268435456 bytes (256 MiB)`; code `bad-value`; `data` is `{"argument":2,"limit":268435456,"part":"argument"}` |
-| The far-end runtime did not declare `chunked` (Bun, Python, Go, Swift, Kotlin) and the value is over the transport limit | As in 0.22: `svc.take: argument 2 cannot be sent: the message would be 17825803 bytes, over the limit of 16777216 bytes (16 MiB)`; `data`'s `limit` is 16777216 |
+| The far-end runtime did not declare `chunked` (Bun, Python, Go, Kotlin) and the value is over the transport limit | As in 0.22: `svc.take: argument 2 cannot be sent: the message would be 17825803 bytes, over the limit of 16777216 bytes (16 MiB)`; `data`'s `limit` is 16777216 |
 
 **Concepts to learn:** none added. Chunking is between runtimes; a plugin still sees values and calls.
 
@@ -149,7 +151,7 @@ A 20 MiB value crosses between the Rust host and the Node runtime with one call 
 ## 5. Compatibility and migration
 
 - Protocol 5 is new (0.23 introduces it), and adding a frame does not bump it; 0.22 and earlier are still refused at the handshake (`SESS-79`).
-- Capabilities are declarative: a 0.23 Rust host chunks only to a far end that declared `chunked`. The 0.23 Node runtime declares it; Bun, Python, Go, Swift and Kotlin do not, so sessions with them keep the 16 MiB behaviour and never receive a `chunk` frame.
+- Capabilities are declarative: a 0.23 Rust host chunks only to a far end that declared `chunked`. The 0.23 Node runtime and the Swift SDK declare it; Bun, Python, Go and Kotlin do not, so sessions with them keep the 16 MiB behaviour and never receive a `chunk` frame.
 - A pre-release 0.23 build that predates `chunked`: it does not declare the capability, so this side does not chunk; if it did declare it, it would also understand `chunk` (declaring means implementing), so nothing is sent that it cannot read.
 - Business code, service signatures, the plugin API and the `rutis.json` format are unchanged.
 - Migration guide: [migrating to 0.23](migration-0.23.en.md) gains a section "Cross-language calls over 16 MiB".
@@ -159,6 +161,7 @@ A 20 MiB value crosses between the Rust host and the Node runtime with one call 
 - `crates/rutis-bridge/src/session`: parsing and serializing `Chunk`, the sender's slicing, the receiver's reassembly, the `CHUNK_SIZE`/`DEFAULT_MAX_TRANSFER` constants, `SessionOptions::max_transfer` (with `from_environment` and `MAX_TRANSFER_ENV`), and `Endpoint::rust` declaring `chunked`.
 - `crates/rutis-host/src/connect/spawn.rs`: the host passes `max_transfer` to the runtime process it starts in `RUTIS_MAX_TRANSFER`.
 - `node/rutis-runtime/src/session.mjs`: `chunked` in `CAPABILITIES`, the sender's slicing, reassembly in `receive`, and the `maxTransfer` option and `RUTIS_MAX_TRANSFER` (256 MiB by default).
+- `swift/rutis/Sources/Rutis/Session/Peer.swift` (#1363): `chunked` in `runtimeCapabilities`, the sender's slicing (`chunkSize`, `chunkSliceSize`, `write`), reassembly (`acceptChunk`), `PeerOptions.maxTransfer` and `RUTIS_MAX_TRANSFER` (256 MiB by default), a send over the cap failing only its call, and a receive over it ending the session.
 - Protocol specification `docs/protocol-session.md`/`.en.md`: the §2.1 frame table, the §2.4 capability table, the §10 limits, §11 rules (`SESS-84`–`SESS-88`) and the §12 output.
 - Guarantee register `docs/guarantees.md`/`.en.md`, row `bridge/large-and-deep-values`: the promise after chunking and its verification.
 - Migration guide `docs/migration-0.23.md`/`.en.md`: a new section.
@@ -167,3 +170,4 @@ A 20 MiB value crosses between the Rust host and the Node runtime with one call 
   - Rust receiving: a scripted far end splits one frame into `chunk` frames; whole, it is dispatched once; when the channel closes midway it is never dispatched; a wrong `seq`, interleaved transfers, over the limit and `chunk` before the handshake all end the session.
   - Node receiving and sending: the same reassembly, failure and single-dispatch assertions; a far end that did not declare `chunked` still gets the old over-limit error.
   - Configuration: with a smaller Rust `max_transfer`, a frame over it fails only its call and a transfer over it ends the session naming the configured value; the same for Node's `maxTransfer`.
+  - Swift (#1363): `swift/rutis/Tests/SelfTest/ChunkedTests.swift` covers in-process 17 MiB parameters and results, out of order, interleaved, over the cap, cut off, a far end without `chunked`, and a nested `chunk`; `ChunkedInteropTests.swift` makes the same large calls to the real Node runtime (where Node 22 and its dependencies are present). A real Rust↔Swift call was verified locally by running `chunked_values` against `RutisSessionFixture`.

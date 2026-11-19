@@ -107,38 +107,39 @@ Specification: [session protocol](protocol-session.en.md) §2.5, `SESS-84`–`SE
 
 Session protocol 5 gains the `chunk` frame and the `chunked` capability: when both ends declare `chunked` in their greeting, a parameter, result or error that encodes to over the transport's per-message limit (16 MiB by default) is cut by the sender into slices of at most 8 MiB, and the receiver joins the whole frame before dispatching it. One call still runs once; a frame that does not finish before the transport ends is never dispatched. One frame may reach the session's `max_transfer`: 256 MiB by default, adjusted to the host's memory budget with `SessionOptions::max_transfer`, or set for a deployment with `RUTIS_MAX_TRANSFER`, which the host passes to the runtime processes it starts; never unlimited, never truncated silently. Over it only that call fails, with `limit` set to the configured value (268435456 by default).
 
-In 0.23 the ones declaring `chunked` are the Rust host (`rutis-bridge`) and the Node runtime. Bun, Python, Go, Swift and Kotlin do not declare it, so they behave as in 0.22: a value over 16 MiB still fails before it is sent, with `limit` 16777216.
+In 0.23 the ones declaring `chunked` are the Rust host (`rutis-bridge`), the Node runtime and the Swift SDK. Bun, Python, Go and Kotlin do not declare it, so they behave as in 0.22: a value over 16 MiB still fails before it is sent, with `limit` 16777216.
 
 | Situation | 0.22 | 0.23 |
 | --- | --- | --- |
 | Rust ↔ Node, a 17 MiB parameter | `argument 1 cannot be sent: … over the limit of 16777216 bytes (16 MiB)` | The call succeeds; the far end gets the whole value |
 | Rust ↔ Node, a 17 MiB result | Fails the same way | Succeeds; the whole value comes back |
+| Rust ↔ Swift, a 17 MiB parameter or result | Fails (16 MiB) | Succeeds; the whole value crosses both ways |
 | Rust ↔ Node, a 300 MiB value | Fails (16 MiB) | Fails (the session cap, 256 MiB by default), `limit` is the configured value |
-| Rust ↔ Bun/Python/Go/Swift/Kotlin, 17 MiB | Fails (16 MiB) | Unchanged |
+| Rust ↔ Bun/Python/Go/Kotlin, 17 MiB | Fails (16 MiB) | Unchanged |
 | The transport ends midway | — | The session ends with a transport error; the unfinished call is not run |
 
 #### What to change
 
-- Upgrade the host and every end to 0.23 together (protocol 5 already required that). The Rust host and the Node runtime gain chunking automatically; there is no required new configuration. To change the largest frame, a host uses `SessionOptions::max_transfer` and a deployment `RUTIS_MAX_TRANSFER` (the host passes it to the runtime processes it starts); the default is 256 MiB.
+- Upgrade the host and every end to 0.23 together (protocol 5 already required that). The Rust host, the Node runtime and the Swift SDK gain chunking automatically; there is no required new configuration. To change the largest frame, a host uses `SessionOptions::max_transfer` and a deployment `RUTIS_MAX_TRANSFER` (the host passes it to the runtime processes it starts); a Swift runtime reads `RUTIS_MAX_TRANSFER` too, and the default is 256 MiB.
 - Another runtime that wants values over 16 MiB must send and read `chunk` frames and declare `chunked` in its greeting; until then it must not declare it, or the far end will send `chunk` frames on the rule that declaring means implementing.
 - Business code needs no change: do not slice, page or retry a large value by hand. A value over 256 MiB is still an explicit call-level error.
 
 #### Who is affected
 
-- Plugin authors: no new concept. Between the Rust host and the Node runtime, parameters and results over 16 MiB are usable as before; to the other runtimes the 16 MiB cap stands.
+- Plugin authors: no new concept. Between the Rust host, the Node runtime and the Swift SDK, parameters and results over 16 MiB are usable as before; to the other runtimes the 16 MiB cap stands.
 - Host authors and deployers: no new status line or exit code; the WebSocket subprotocol is still `rutis.5`. Upgrade every end of a deployment together. One frame is 256 MiB by default, adjustable per session or deployment (`SessionOptions::max_transfer` / `RUTIS_MAX_TRANSFER`), never unlimited. Host code that builds `SessionOptions` literally adds `..Default::default()` (the new `max_transfer` field).
 - Runtime authors and contributors: implement the `chunk` frame (`transfer`, `seq`, `last`, base64 `data`), buffer by `transfer`, at most one unfinished transfer, dispatch only after `last`, reassemble up to the configured cap; declare `chunked` once it works.
 
 #### What developers see
 
-**When it works:** the Rust host calls the Node runtime with a parameter or result that encodes to 17 MiB; the call succeeds and the far end gets the whole value; the business writes one call. No new configuration and no new output line.
+**When it works:** the Rust host calls the Node runtime or the Swift SDK with a parameter or result that encodes to 17 MiB; the call succeeds and the far end gets the whole value; the business writes one call. No new configuration and no new output line.
 
 **When it fails (Rust side, word for word):**
 
 | Situation | Output |
 | --- | --- |
 | The value is over the session's cap (256 MiB by default, a host may raise it) | `svc.take: argument 2 cannot be sent: the message would be 300000000 bytes, over the limit of 268435456 bytes (256 MiB)`; `data` is `{"argument":2,"limit":268435456,"part":"argument"}` |
-| The far end did not declare `chunked` (Bun, Python, Go, Swift, Kotlin) and the value is over 16 MiB | `svc.take: argument 2 cannot be sent: the message would be 17825803 bytes, over the limit of 16777216 bytes (16 MiB)`; `data` is `{"argument":2,"limit":16777216,"part":"argument"}` |
+| The far end did not declare `chunked` (Bun, Python, Go, Kotlin) and the value is over 16 MiB | `svc.take: argument 2 cannot be sent: the message would be 17825803 bytes, over the limit of 16777216 bytes (16 MiB)`; `data` is `{"argument":2,"limit":16777216,"part":"argument"}` |
 | The transport ends midway | The session ends with a transport error (`peer disconnected` on a pipe); in-flight calls fail with `peer-gone` |
 | The two caps differ and the receiver's is smaller | The receiver ends the session with `chunked transfer node:3: over the limit of <n> bytes` |
 
@@ -153,4 +154,4 @@ cd node/rutis-runtime && npm test
 node tools/check-guarantees.mjs
 ```
 
-Rust↔Node: `node_carries_frames_over_the_message_limit_whole` (17 MiB parameters and results cross whole; `tally` shows every call ran once). Rust receiving: `a_chunked_call_is_dispatched_once_after_its_last_chunk`, `an_incomplete_transfer_is_never_dispatched`, `a_chunk_out_of_order_ends_the_session`, `a_second_transfer_before_the_first_ends_ends_the_session`, `a_chunk_before_the_handshake_ends_the_session`, `a_chunk_from_a_far_end_without_the_capability_ends_the_session`, `a_chunk_with_invalid_base64_ends_the_session`, `a_frame_over_the_limit_is_chunked_to_a_far_end_that_declared_it`. Node: `node/rutis-runtime/test/chunked.test.mjs`.
+Rust↔Node: `node_carries_frames_over_the_message_limit_whole` (17 MiB parameters and results cross whole; `tally` shows every call ran once). Rust receiving: `a_chunked_call_is_dispatched_once_after_its_last_chunk`, `an_incomplete_transfer_is_never_dispatched`, `a_chunk_out_of_order_ends_the_session`, `a_second_transfer_before_the_first_ends_ends_the_session`, `a_chunk_before_the_handshake_ends_the_session`, `a_chunk_from_a_far_end_without_the_capability_ends_the_session`, `a_chunk_with_invalid_base64_ends_the_session`, `a_frame_over_the_limit_is_chunked_to_a_far_end_that_declared_it`. Node: `node/rutis-runtime/test/chunked.test.mjs`. Swift: `swift run RutisSelfTest Chunked` runs `ChunkedTests` (in-process 17 MiB parameters and results, out of order, interleaved, over the cap, cut off) and `ChunkedInteropTests` (a real Swift↔Node call when Node 22 and `node/rutis-runtime/node_modules` are there; skipped otherwise); a real Rust↔Swift call was verified locally with `chunked_values` against `RutisSessionFixture` (17 MiB parameters and a result, `tally` ran once).

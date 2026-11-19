@@ -2,7 +2,7 @@
 
 [English](design-chunked-frames-2026-11-19.en.md)
 
-状态：已实现（0.23 未发布，并入会话协议 5）。日期：2026-11-19。
+状态：已实现（0.23 未发布，并入会话协议 5；Rust、Node、Swift）。日期：2026-11-19。
 议题：[#1361](https://github.com/arcships/rutis/issues/1361)，属于 0.23 beta。
 
 ## 1. 现在是什么样
@@ -38,6 +38,8 @@ svc.take: argument 2 cannot be sent: the message would be 300000000 bytes, over 
 **D6 未完成的传输在会话结束时丢弃，绝不派发。** 接收方只在 `last` 到达、重组和解析都成功后才把帧交给会话。会话在传输中途结束（承载断开、对端退出、协议错误），缓冲随会话一起丢弃；被调方法从未运行。这是 #1361 的验收项之一，也是“恰好执行一次”的另一面：片不是调用，只有完整的帧是。**不采用**：把已收到的片当作部分参数先派发——业务方会看到半截值，且无法表达“还没收完”。
 
 **D7 先落在 Rust 宿主 ↔ Node 运行时，其余五种实现不声明。** `crates/rutis-bridge/src/session`（Rust）与 `node/rutis-runtime/src/session.mjs` 实现收发；Bun、Python、Go、Swift、Kotlin 不改代码，也不声明 `chunked`，因此 Rust 不会向它们分片，行为与今天相同。它们以后实现时同样只需加帧和能力，不改业务 API。**不采用**：一次改七种实现——那会把 #1361 变成七个 PR 的串联，而验收只需要一条真实的跨语言路径。
+
+> 后续（#1363）：Swift SDK 按同一规则实现了收发并在问候里声明 `chunked`；D7 的范围由“Rust、Node”变为“Rust、Node、Swift”，其余四种（Bun、Python、Go、Kotlin）不变。见 §6。
 
 **D8 插件 API、服务签名、公开 API 不变。** 没有新的必填配置项、没有新的插件可见概念、没有改变 `Endpoint`/`Connection` 的方法签名；新增的只有协议常量（`CHUNK_SIZE`、`DEFAULT_MAX_TRANSFER`）、会话选项（`SessionOptions::max_transfer` 与 `RUTIS_MAX_TRANSFER`）、能力字符串，以及线格式里的一个 `op`。业务方继续写一次调用。
 
@@ -121,7 +123,7 @@ const bytes = await ctx.remote.node.readFile('export.bin') // 20 MiB
 | 情形 | 输出 |
 | --- | --- |
 | 值编码后超过会话上限（默认 256 MiB，宿主可调大） | `svc.take: argument 2 cannot be sent: the message would be 300000000 bytes, over the limit of 268435456 bytes (256 MiB)`；错误码 `bad-value`；`data` 是 `{"argument":2,"limit":268435456,"part":"argument"}` |
-| 对端运行时没有声明 `chunked`（Bun、Python、Go、Swift、Kotlin），值超过通道上限 | 与 0.22 相同：`svc.take: argument 2 cannot be sent: the message would be 17825803 bytes, over the limit of 16777216 bytes (16 MiB)`；`data` 的 `limit` 是 16777216 |
+| 对端运行时没有声明 `chunked`（Bun、Python、Go、Kotlin），值超过通道上限 | 与 0.22 相同：`svc.take: argument 2 cannot be sent: the message would be 17825803 bytes, over the limit of 16777216 bytes (16 MiB)`；`data` 的 `limit` 是 16777216 |
 
 **需要学习的概念：** 无新增。分片是运行时之间的事；插件看到的仍是值和调用。
 
@@ -149,7 +151,7 @@ const bytes = await ctx.remote.node.readFile('export.bin') // 20 MiB
 ## 5. 兼容性与迁移
 
 - 协议 5 是新版本（0.23 才发布），加帧不升版本；0.22 及更早仍在握手时被拒（`SESS-79`）。
-- 能力是声明式的：0.23 的 Rust 宿主只向声明 `chunked` 的对端分片。0.23 的 Node 运行时声明 `chunked`；Bun、Python、Go、Swift、Kotlin 不声明，因此与它们的会话保持 16 MiB 行为，不会收到 `chunk` 帧。
+- 能力是声明式的：0.23 的 Rust 宿主只向声明 `chunked` 的对端分片。0.23 的 Node 运行时与 Swift SDK 声明 `chunked`；Bun、Python、Go、Kotlin 不声明，因此与它们的会话保持 16 MiB 行为，不会收到 `chunk` 帧。
 - 见过 0.23 预发布构建、但那个构建没有 `chunked` 的对端：它不声明，本端不分片；它若声明了却不认识 `chunk`（不会发生，声明即实现），本端不会发它。
 - 业务代码、服务签名、插件 API、`rutis.json` 格式都不变。
 - 迁移指南：[迁移到 0.23](migration-0.23.md) 新增一节「跨语言调用超过 16 MiB」。
@@ -159,6 +161,7 @@ const bytes = await ctx.remote.node.readFile('export.bin') // 20 MiB
 - `crates/rutis-bridge/src/session`：`Chunk` 帧的解析与序列化、发送端切片、接收端重组、常量 `CHUNK_SIZE`/`DEFAULT_MAX_TRANSFER`、`SessionOptions::max_transfer`（及 `from_environment`、`MAX_TRANSFER_ENV`）、`Endpoint::rust` 声明 `chunked`。
 - `crates/rutis-host/src/connect/spawn.rs`：宿主把 `max_transfer` 放进 `RUTIS_MAX_TRANSFER` 传给启动的运行时进程。
 - `node/rutis-runtime/src/session.mjs`：`CAPABILITIES` 加 `chunked`、发送端切片、`receive` 的重组、`maxTransfer` 选项与 `RUTIS_MAX_TRANSFER`（默认 256 MiB）。
+- `swift/rutis/Sources/Rutis/Session/Peer.swift`（#1363）：`runtimeCapabilities` 加 `chunked`、发送端切片（`chunkSize`、`chunkSliceSize`、`write`）、重组（`acceptChunk`）、`PeerOptions.maxTransfer` 与 `RUTIS_MAX_TRANSFER`（默认 256 MiB）、超限只让调用失败与接收端结束会话。
 - 协议规格 `docs/protocol-session.md`/`.en.md`：§2.1 帧表、§2.4 能力表、§10 上限、§11 规则（`SESS-84`–`SESS-88`）、§12 输出。
 - 保证登记表 `docs/guarantees.md`/`.en.md` 的 `bridge/large-and-deep-values`：补上分片后的承诺与验证列。
 - 迁移指南 `docs/migration-0.23.md`/`.en.md`：新增一节。
@@ -167,3 +170,4 @@ const bytes = await ctx.remote.node.readFile('export.bin') // 20 MiB
   - Rust 接收：脚本化对端把一帧拆成 `chunk` 帧；完整时派发一次；中途关闭通道时不派发；`seq` 错、交错传输、超过上限、握手前 `chunk` 都结束会话。
   - Node 接收与发送：同样的重组、失败与单次派发断言；不声明 `chunked` 的对端仍走原来的超限错误。
   - 配置：Rust 的 `max_transfer` 调小后超过它的帧只让这次调用失败、重组超过它结束会话并说出配置值；Node 的 `maxTransfer` 同理。
+  - Swift（#1363）：`swift/rutis/Tests/SelfTest/ChunkedTests.swift` 覆盖进程内 17 MiB 参数/返回值往返、乱序、交错、超过上限、中途断开、未声明 `chunked` 与嵌套 `chunk`；`ChunkedInteropTests.swift` 对真实 Node 运行时做同样的大值调用（有 Node 22 与依赖时）。Rust↔Swift 的真实调用用 `RutisSessionFixture` 对 `chunked_values` 在本地验证。
