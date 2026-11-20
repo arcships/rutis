@@ -29,14 +29,29 @@ pub struct CheckReport {
     pub clashes: Vec<Clash>,
 }
 
-/// One link of a cycle ([`CheckReport::cycles`]): `row` waits for
-/// `service`, which `provider` provides.
+/// One link of a cycle ([`CheckReport::cycles`], [`super::WaitReason::CycleChain`],
+/// [`super::WaitReason::UnknownProvider`]): `row` waits for `service`, which
+/// `provider` provides.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CycleLink {
     pub row: String,
     pub service: String,
     pub provider: String,
+}
+
+impl CycleLink {
+    pub fn new(
+        row: impl Into<String>,
+        service: impl Into<String>,
+        provider: impl Into<String>,
+    ) -> Self {
+        Self {
+            row: row.into(),
+            service: service.into(),
+            provider: provider.into(),
+        }
+    }
 }
 
 /// A service several rows declare in one scope ([`CheckReport::clashes`]).

@@ -358,7 +358,7 @@ pub fn listening(listening: &[(String, std::net::SocketAddr)]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rutis_loader::report::WaitReason;
+    use rutis_loader::report::{CycleLink, WaitReason};
 
     /// A config error prints one line per problem, each with the row's
     /// name (config schema design §9); where an error came from stays
@@ -618,6 +618,33 @@ mod tests {
                     },
                 )],
                 "waiting for bsvc (row b waits for asvc too: they inject each other)",
+            ),
+            (
+                vec![Wait::new(
+                    "bsvc",
+                    WaitReason::CycleChain {
+                        links: vec![
+                            CycleLink::new("a", "bsvc", "b"),
+                            CycleLink::new("b", "csvc", "c"),
+                            CycleLink::new("c", "asvc", "a"),
+                        ],
+                    },
+                )],
+                "waiting for bsvc (rows a, b, c wait for each other: a waits for bsvc from b, b waits for csvc from c, c waits for asvc from a; break the cycle in their inject)",
+            ),
+            (
+                vec![Wait::new(
+                    "asvc",
+                    WaitReason::UnknownProvider {
+                        chain: vec![
+                            CycleLink::new("c", "asvc", "a"),
+                            CycleLink::new("a", "bsvc", "b"),
+                        ],
+                        missing: "storage".into(),
+                        candidates: vec![row("u")],
+                    },
+                )],
+                "waiting for asvc (c waits for asvc from a, a waits for bsvc from b, b waits for storage; nothing declares storage yet; unstarted row u may provide services once it runs; declare provides or check why u has not started)",
             ),
             (
                 vec![Wait::new(
