@@ -515,13 +515,45 @@ async fn unknown_unannounced_provider_reports_direct_and_chained_waits() {
             formatted("b", &b),
             "b: waiting for asvc (b waits for asvc from a, a waits for bsvc; \
              nothing declares bsvc yet; \
-             unstarted row b may provide services once it runs; \
-             declare provides or check why b has not started)"
+             this row has not started and may provide services once it runs; \
+             declare provides on this row or break the inject chain)"
         );
         root.shutdown().await.unwrap();
     }
 
-    // Case 2: 3-row chain (`c -> asvc -> a -> bsvc -> b -> storage`) with an
+    // Case 2: self-candidate alongside another unstarted announcing row `u`
+    // (`b` sees `unstarted rows this row, u ...`).
+    {
+        let (root, loader) = loader().await;
+        let rows = json!([
+            { "id": "u", "name": "provider", "inject": ["other"], "config": { "announces": true } },
+            { "id": "a", "name": "provider", "inject": ["bsvc"], "config": { "provides": ["asvc"] } },
+            { "id": "b", "name": "provider", "inject": ["asvc"], "config": { "announces": true } },
+        ]);
+        loader.reconcile(layer(rows), None).await.unwrap();
+        let b = waits(&loader, "b", |waits| !waits.is_empty()).await;
+        assert_eq!(
+            reasons(&b),
+            [(
+                "asvc",
+                &WaitReason::UnknownProvider {
+                    chain: vec![CycleLink::new("b", "asvc", "a")],
+                    missing: "bsvc".into(),
+                    candidates: vec!["b".into(), "u".into()],
+                }
+            )]
+        );
+        assert_eq!(
+            formatted("b", &b),
+            "b: waiting for asvc (b waits for asvc from a, a waits for bsvc; \
+             nothing declares bsvc yet; \
+             unstarted rows this row, u may provide services once they run; \
+             declare provides or check why they have not started)"
+        );
+        root.shutdown().await.unwrap();
+    }
+
+    // Case 3: 3-row chain (`c -> asvc -> a -> bsvc -> b -> storage`) with an
     // unstarted announcing row `u` (waiting on `asvc`), plus an unrelated
     // announcing row `z` — `u` ranks before `z` because `u` reaches `b`.
     {

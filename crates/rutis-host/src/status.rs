@@ -648,6 +648,28 @@ mod tests {
             ),
             (
                 vec![Wait::new(
+                    "asvc",
+                    WaitReason::UnknownProvider {
+                        chain: vec![CycleLink::new("b", "asvc", "a")],
+                        missing: "bsvc".into(),
+                        candidates: vec![row("b")],
+                    },
+                )],
+                "waiting for asvc (b waits for asvc from a, a waits for bsvc; nothing declares bsvc yet; this row has not started and may provide services once it runs; declare provides on this row or break the inject chain)",
+            ),
+            (
+                vec![Wait::new(
+                    "asvc",
+                    WaitReason::UnknownProvider {
+                        chain: vec![CycleLink::new("b", "asvc", "a")],
+                        missing: "bsvc".into(),
+                        candidates: vec![row("b"), row("u")],
+                    },
+                )],
+                "waiting for asvc (b waits for asvc from a, a waits for bsvc; nothing declares bsvc yet; unstarted rows this row, u may provide services once they run; declare provides or check why they have not started)",
+            ),
+            (
+                vec![Wait::new(
                     "mail",
                     WaitReason::ProviderDisabled { row: row("mailer") },
                 )],

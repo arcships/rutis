@@ -216,7 +216,7 @@ impl Loader {
                     })
                 })
                 .collect();
-            let mut rows: HashMap<Option<u64>, Vec<Read>> = HashMap::new();
+            let mut rows: HashMap<Option<u64>, Vec<ReadRow>> = HashMap::new();
             for scope in &scopes {
                 rows.entry(*scope)
                     .or_insert_with(|| read_rows(&state, *scope));
@@ -439,7 +439,22 @@ impl<'a> WaitGraph<'a> {
             }
             Some(name.clone())
         }));
-        known.extend(self.catalog_names.iter().cloned());
+        let waiter_provides = self
+            .fact_of(waiter)
+            .map(|fact| fact.provides.as_slice())
+            .unwrap_or_default();
+        known.extend(
+            self.catalog_names
+                .iter()
+                .filter(|name| {
+                    !waiter_provides.iter().any(|p| p == *name)
+                        && !self
+                            .binding_names
+                            .iter()
+                            .any(|(provider, b)| provider.as_deref() == Some(waiter) && b == *name)
+                })
+                .cloned(),
+        );
         known.sort_unstable();
         known.dedup();
         closest(service, &known)
@@ -877,19 +892,19 @@ fn effective_isolates(desired: &Desired, row: &Row) -> Vec<(String, String)> {
 /// resolution and raw config, whose declarations are asked after, whether
 /// it is enabled (itself and the groups around it), and its effective
 /// isolate labels.
-type Read = (
-    String,
-    EntryStatus,
-    Option<PluginId>,
-    Option<Arc<Resolved>>,
-    serde_json::Value,
-    bool,
-    Vec<(String, String)>,
-);
+struct ReadRow {
+    id: String,
+    status: EntryStatus,
+    plugin: Option<PluginId>,
+    resolved: Option<Arc<Resolved>>,
+    config: serde_json::Value,
+    wanted: bool,
+    isolates: Vec<(String, String)>,
+}
 
 /// Each plugin row (for a row inside instances, its copy in instance
 /// `scope`).
-fn read_rows(state: &State, scope: Option<u64>) -> Vec<Read> {
+fn read_rows(state: &State, scope: Option<u64>) -> Vec<ReadRow> {
     state
         .desired
         .rows
@@ -910,42 +925,54 @@ fn read_rows(state: &State, scope: Option<u64>) -> Vec<Read> {
                         .and_then(|name| state.resolved.get(name))
                         .and_then(|resolved| resolved.as_ref().ok().cloned())
                 });
-            (
-                row.id.clone(),
-                info.status,
-                info.plugin,
+            ReadRow {
+                id: row.id.clone(),
+                status: info.status,
+                plugin: info.plugin,
                 resolved,
-                row.config.clone(),
-                state.desired.wanted(row),
-                effective_isolates(&state.desired, row),
-            )
+                config: row.config.clone(),
+                wanted: state.desired.wanted(row),
+                isolates: effective_isolates(&state.desired, row),
+            }
         })
         .collect()
 }
 
 /// Each row by id, in tree order, with what it declares it provides: asked
 /// of its plugin outside the loader's lock.
-fn facts(rows: Vec<Read>) -> Vec<(String, Fact)> {
+fn facts(rows: Vec<ReadRow>) -> Vec<(String, Fact)> {
     rows.into_iter()
-        .map(|(id, status, plugin, resolved, config, wanted, isolates)| {
-            let declared = resolved
-                .and_then(|resolved| resolved.declares.as_ref().map(|declares| declares(&config)))
-                .and_then(Result::ok);
-            let (provides, announces, unknown_decl, unknown_off) = match declared {
-                Some(declared) => (declared.provides, declared.announces, false, false),
-                None => (Vec::new(), false, wanted, !wanted),
-            };
-            let fact = Fact {
-                status,
-                plugin,
-                provides,
-                announces,
-                unknown_decl,
-                unknown_off,
-                isolates,
-            };
-            (id, fact)
-        })
+        .map(
+            |ReadRow {
+                 id,
+                 status,
+                 plugin,
+                 resolved,
+                 config,
+                 wanted,
+                 isolates,
+             }| {
+                let declared = resolved
+                    .and_then(|resolved| {
+                        resolved.declares.as_ref().map(|declares| declares(&config))
+                    })
+                    .and_then(Result::ok);
+                let (provides, announces, unknown_decl, unknown_off) = match declared {
+                    Some(declared) => (declared.provides, declared.announces, false, false),
+                    None => (Vec::new(), false, wanted, !wanted),
+                };
+                let fact = Fact {
+                    status,
+                    plugin,
+                    provides,
+                    announces,
+                    unknown_decl,
+                    unknown_off,
+                    isolates,
+                };
+                (id, fact)
+            },
+        )
         .collect()
 }
 
@@ -1031,6 +1058,91 @@ mod tests {
         // Too short to guess.
         assert_eq!(closest("ll", &known), None);
         assert_eq!(distance("ab", "ba"), 1);
+    }
+
+    #[test]
+    fn closest_for_excludes_waiter_own_catalog_service_unless_another_provides_it() {
+        use std::collections::HashMap;
+
+        use rutis::host::{FiberState, Snapshot};
+
+        use super::{EntryStatus, Fact, WaitGraph};
+
+        let pending = EntryStatus::Running(Snapshot {
+            generation: 1,
+            state: FiberState::Pending,
+            error: None,
+        });
+        let make_fact = |provides: &[&str], announces: bool| Fact {
+            status: pending.clone(),
+            plugin: None,
+            provides: provides.iter().map(|s| (*s).to_owned()).collect(),
+            announces,
+            unknown_decl: false,
+            unknown_off: false,
+            isolates: Vec::new(),
+        };
+        let no_unexported = |_: &str| None;
+        let deps = HashMap::new();
+        let catalog_names = vec!["asvc".to_owned(), "llm".to_owned()];
+
+        // Waiter `a` declares `asvc` and no other row/binding provides it:
+        // catalog entry `asvc` must NOT be suggested back to `a` for `bsvc`,
+        // while unrelated catalog service `llm` IS still suggested for `lmm`.
+        let facts_only_self = vec![("a".to_owned(), make_fact(&["asvc"], false))];
+        let graph = WaitGraph {
+            facts: &facts_only_self,
+            deps: &deps,
+            binding_names: &[],
+            catalog_names: &catalog_names,
+            unexported: &no_unexported,
+        };
+        assert_eq!(graph.closest_for("a", "bsvc"), None);
+        assert_eq!(graph.closest_for("a", "lmm").as_deref(), Some("llm"));
+
+        // If another row declares `asvc`, it IS suggested.
+        let facts_with_other = vec![
+            ("a".to_owned(), make_fact(&["asvc"], false)),
+            ("other".to_owned(), make_fact(&["asvc"], false)),
+        ];
+        let graph_with_other = WaitGraph {
+            facts: &facts_with_other,
+            deps: &deps,
+            binding_names: &[],
+            catalog_names: &catalog_names,
+            unexported: &no_unexported,
+        };
+        assert_eq!(
+            graph_with_other.closest_for("a", "bsvc").as_deref(),
+            Some("asvc")
+        );
+
+        // If the host (provider == None) provides a binding for `asvc`, it IS suggested.
+        let host_binding = vec![(None, "asvc".to_owned())];
+        let graph_with_host = WaitGraph {
+            facts: &facts_only_self,
+            deps: &deps,
+            binding_names: &host_binding,
+            catalog_names: &catalog_names,
+            unexported: &no_unexported,
+        };
+        assert_eq!(
+            graph_with_host.closest_for("a", "bsvc").as_deref(),
+            Some("asvc")
+        );
+
+        // If only `a` holds a binding for `asvc` (even without declaring it in `provides`),
+        // `asvc` is still not suggested back to `a` via `catalog_names`.
+        let facts_undeclared = vec![("a".to_owned(), make_fact(&[], true))];
+        let self_binding = vec![(Some("a".to_owned()), "asvc".to_owned())];
+        let graph_self_binding = WaitGraph {
+            facts: &facts_undeclared,
+            deps: &deps,
+            binding_names: &self_binding,
+            catalog_names: &catalog_names,
+            unexported: &no_unexported,
+        };
+        assert_eq!(graph_self_binding.closest_for("a", "bsvc"), None);
     }
 
     /// guarantee: core/features.still-waiting

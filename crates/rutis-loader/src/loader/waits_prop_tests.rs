@@ -259,6 +259,30 @@ fn assert_valid_and_bounded(graph: &WaitGraph<'_>, row_id: &str, waits: &[Wait])
                 if chain.len() > 8 {
                     assert!(single.contains("more steps,"));
                 }
+                if !chain.is_empty() && candidates.iter().any(|c| c == row_id) {
+                    assert!(
+                        !single.contains(&format!("unstarted row {row_id}")),
+                        "queried row {row_id} must not be referred to in third person: {single}"
+                    );
+                    assert!(
+                        !single.contains(&format!("why {row_id} has not started")),
+                        "queried row {row_id} must not be referred to in third person: {single}"
+                    );
+                    if candidates.len() == 1 {
+                        assert!(
+                            single.contains(
+                                "; this row has not started and may provide services once it runs; \
+                                 declare provides on this row or break the inject chain"
+                            ),
+                            "expected self-only UnknownProvider phrasing: {single}"
+                        );
+                    } else {
+                        assert!(
+                            single.contains("; unstarted rows this row, "),
+                            "expected `this row` first in multi-candidate UnknownProvider phrasing: {single}"
+                        );
+                    }
+                }
             }
             _ => {}
         }
@@ -352,11 +376,10 @@ proptest! {
             unexported: &no_unexported,
         };
 
-        for i in 0..n {
-            if facts[i].1.is_pending() {
-                let id = row_name(i);
-                let waits = graph.waits_for_row(&id, graph.deps_of(&id));
-                assert_valid_and_bounded(&graph, &id, &waits);
+        for (id, fact) in &facts {
+            if fact.is_pending() {
+                let waits = graph.waits_for_row(id, graph.deps_of(id));
+                assert_valid_and_bounded(&graph, id, &waits);
                 for wait in &waits {
                     prop_assert!(
                         !matches!(wait.reason, WaitReason::Cycle { .. } | WaitReason::CycleChain { .. }),
@@ -623,21 +646,20 @@ proptest! {
 
         // Validate every Pending row against both structural invariants and
         // the independent cycle reachability oracle.
-        for i in 0..n {
-            if !facts[i].1.is_pending() {
+        for (id, fact) in &facts {
+            if !fact.is_pending() {
                 continue;
             }
-            let id = row_name(i);
-            let row_deps = graph.deps_of(&id);
-            let waits = graph.waits_for_row(&id, row_deps);
-            assert_valid_and_bounded(&graph, &id, &waits);
+            let row_deps = graph.deps_of(id);
+            let waits = graph.waits_for_row(id, row_deps);
+            assert_valid_and_bounded(&graph, id, &waits);
 
             for (dep, wait) in row_deps.iter().zip(&waits) {
                 let MissingDep::Missing(svc) = dep else {
                     continue;
                 };
-                let entry_fact = graph.fact_of(&id);
-                let sole = graph.sole_live_provider(&id, entry_fact, svc);
+                let entry_fact = graph.fact_of(id);
+                let sole = graph.sole_live_provider(id, entry_fact, svc);
                 let expected_cycle_len = match sole {
                     Some((prov, prov_fact)) if prov_fact.is_pending() => {
                         let prov_waits_rt = graph
@@ -647,7 +669,7 @@ proptest! {
                         if prov_waits_rt {
                             None
                         } else {
-                            oracle_shortest_distance(&graph, prov, &id).map(|d| d + 1)
+                            oracle_shortest_distance(&graph, prov, id).map(|d| d + 1)
                         }
                     }
                     _ => None,

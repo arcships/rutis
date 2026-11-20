@@ -103,9 +103,10 @@ Issue：[#1326](https://github.com/arcships/rutis/issues/1326)。按本稿实施
 - `WaitReason::UnknownProvider { chain, missing, candidates }`（`MAX_LINKS = 8`，候选行上限 `MAX_CANDIDATES = 3`）：
   - 候选行短语 `tail`：
     - `candidates.is_empty()`：空串
-    - `[one]`：`; unstarted row {one} may provide services once it runs; declare provides or check why {one} has not started`
-    - 2～3 个：`[a, b]` / `[a, b, c]` → `; unstarted rows {list} may provide services once they run; declare provides or check why they have not started`
-    - `> 3` 个（设 `rest = candidates.len() - 3`）：`; unstarted rows {c0}, {c1}, {c2} and {rest} more may provide services once they run; declare provides or check why they have not started`
+    - `!chain.is_empty()` 且 `candidates == [chain[0].row]`（唯一候选行就是被查询行自身，避免在自身状态行上用第三人称称呼自己）：`; this row has not started and may provide services once it runs; declare provides on this row or break the inject chain`
+    - `[one]`（非自身）：`; unstarted row {one} may provide services once it runs; declare provides or check why {one} has not started`
+    - 2～3 个：`[a, b]` / `[a, b, c]`（若 `!chain.is_empty()` 且包含 `chain[0].row`，把 `this row` 排在首位替换自身行名）→ `; unstarted rows {list} may provide services once they run; declare provides or check why they have not started`
+    - `> 3` 个（设 `rest = candidates.len() - 3`，包含 `chain[0].row` 时同样把 `this row` 排在首位）：`; unstarted rows {c0}, {c1}, {c2} and {rest} more may provide services once they run; declare provides or check why they have not started`
   - `chain.is_empty()`（直接等待）：
     `nothing declares it yet{tail}`
   - `1..=8` 跳：
@@ -181,11 +182,13 @@ rows:
 | 3 | 超长环（例如 10 行 `r0`..`r9` 成环，超过 8 跳上限） | `r0: waiting for s1 (rows r0, r1, r2, r3, r4, r5, r6, r7 and 2 more wait for each other: r0 waits for s1 from r1, r1 waits for s2 from r2, r2 waits for s3 from r3, r3 waits for s4 from r4, r4 waits for s5 from r5, r5 waits for s6 from r6, r6 waits for s7 from r7, r7 waits for s8 from r8, and 2 more steps back to r0; break the cycle in their inject)` | 无（状态） | 环上每一行 | 打破环中任意一行的 `inject` |
 | 4 | 环外引入行等环内提供者（`d -> asvc -> a`，而 `a -> b -> c -> a` 成环） | `d: waiting for asvc (row a waits too, for bsvc)` | 无（状态） | 引入行 `d`（环说明记在 `a`、`b`、`c` 各自状态行上） | 先看 `a` 的状态行，打破 `a`、`b`、`c` 的环；不要改 `d` |
 | 5 | 直接等未声明服务 `bsvc`，另有未启动行 `b`（`announces: true`）等 `asvc` | `a: waiting for bsvc (nothing declares it yet; unstarted row b may provide services once it runs; declare provides or check why b has not started)` | 无（状态） | `a` | 在 `b` 上声明 `provides`；检查 `b` 为何没启动（例如是否反过来在等 `a`） |
-| 6 | 多行等待链撞上未声明服务（`c -> asvc -> a -> bsvc -> b -> storage`，未启动行 `u` 有 `announces: true`） | `c: waiting for asvc (c waits for asvc from a, a waits for bsvc from b, b waits for storage; nothing declares storage yet; unstarted row u may provide services once it runs; declare provides or check why u has not started)` | 无（状态） | `c`（`a`、`b` 各自显示从自己起头的链） | 在 `u` 上声明 `provides`，或检查 `u` 为何未启动 / 补上提供 `storage` 的行 |
-| 7 | 多个未启动未知提供者（例如 5 行 `b`..`f`） | `a: waiting for bsvc (nothing declares it yet; unstarted rows b, c, d and 2 more may provide services once they run; declare provides or check why they have not started)` | 无（状态） | `a` | 补齐相关行的 `provides` 声明，或检查这些未启动行的等待原因 |
-| 8 | 拼错服务名（即便另有未启动的 `announces: true` 行） | `weather: waiting for lmm (nothing provides it yet; did you mean llm?)` | 无（状态） | `weather` | 把 `lmm` 改成 `llm` |
-| 9 | 普通缺服务（所有 `announces: true` 行都已 `running`，或所有行都只用声明服务） | `store: waiting for blob (nothing provides it yet)` | 无（状态） | `store` | 增加提供 `blob` 的行 |
-| 10 | 跨 `isolate` 同名服务（`a` 私有隔离 `bsvc`，`b` 在外提供 `bsvc` 且等 `asvc`） | `a: waiting for bsvc (nothing provides it yet)`；`b: waiting for asvc (row a waits too, for bsvc)` | 无（状态） | `a`、`b` | 共享同一 `isolate` 标签或在 `a` 的隔离域内提供 `bsvc` |
+| 6 | 链式等待的唯一未启动候选行正是被查询行自身（`b` 有 `announces: true`，等 `a` 的 `asvc`，而 `a` 等未声明的 `bsvc`） | `b: waiting for asvc (b waits for asvc from a, a waits for bsvc; nothing declares bsvc yet; this row has not started and may provide services once it runs; declare provides on this row or break the inject chain)` | 无（状态） | `b` | 在 `b` 上声明 `provides`，或打破 `a`、`b` 之间的 `inject` 链 |
+| 7 | 链式等待的候选行同时包含被查询行自身与其他未启动行 `u` | `b: waiting for asvc (b waits for asvc from a, a waits for bsvc; nothing declares bsvc yet; unstarted rows this row, u may provide services once they run; declare provides or check why they have not started)` | 无（状态） | `b` | 在 `b` 或 `u` 上声明 `provides`，或检查它们为何未启动 |
+| 8 | 多行等待链撞上未声明服务（`c -> asvc -> a -> bsvc -> b -> storage`，未启动行 `u` 有 `announces: true`） | `c: waiting for asvc (c waits for asvc from a, a waits for bsvc from b, b waits for storage; nothing declares storage yet; unstarted row u may provide services once it runs; declare provides or check why u has not started)` | 无（状态） | `c`（`a`、`b` 各自显示从自己起头的链） | 在 `u` 上声明 `provides`，或检查 `u` 为何未启动 / 补上提供 `storage` 的行 |
+| 9 | 多个未启动未知提供者（例如 5 行 `b`..`f`） | `a: waiting for bsvc (nothing declares it yet; unstarted rows b, c, d and 2 more may provide services once they run; declare provides or check why they have not started)` | 无（状态） | `a` | 补齐相关行的 `provides` 声明，或检查这些未启动行的等待原因 |
+| 10 | 拼错服务名（即便另有未启动的 `announces: true` 行） | `weather: waiting for lmm (nothing provides it yet; did you mean llm?)` | 无（状态） | `weather` | 把 `lmm` 改成 `llm` |
+| 11 | 普通缺服务（所有 `announces: true` 行都已 `running`，或所有行都只用声明服务） | `store: waiting for blob (nothing provides it yet)` | 无（状态） | `store` | 增加提供 `blob` 的行 |
+| 12 | 跨 `isolate` 同名服务（`a` 私有隔离 `bsvc`，`b` 在外提供 `bsvc` 且等 `asvc`） | `a: waiting for bsvc (nothing provides it yet)`；`b: waiting for asvc (row a waits too, for bsvc)` | 无（状态） | `a`、`b` | 共享同一 `isolate` 标签或在 `a` 的隔离域内提供 `bsvc` |
 
 ### 4.2 插件作者
 
@@ -208,7 +211,7 @@ export default definePlugin({
 - 如果插件漏写 `provides`、只在 `apply` 里调用 `ctx.provide('bsvc', ...)`，且恰好与 `a`（提供 `asvc`、注入 `bsvc`）互相等待，插件作者在 `rutis-host dev` 里会看到两行明确线索：
   ```text
   a: waiting for bsvc (nothing declares it yet; unstarted row b may provide services once it runs; declare provides or check why b has not started)
-  b: waiting for asvc (b waits for asvc from a, a waits for bsvc; nothing declares bsvc yet; unstarted row b may provide services once it runs; declare provides or check why b has not started)
+  b: waiting for asvc (b waits for asvc from a, a waits for bsvc; nothing declares bsvc yet; this row has not started and may provide services once it runs; declare provides on this row or break the inject chain)
   ```
 - 一旦在 `b` 中补上 `provides: { bsvc: ... }`，热重载后立刻变成明确的环诊断：
   ```text
@@ -258,7 +261,7 @@ for entry in loader.entries() {
   - 环外引入行文字不变（`row a waits too, for bsvc`）；
   - 拼错名字、普通缺服务（无其他未启动 `announces`/未知声明行时）、禁用未解析行、启动中提供者文字全部不变；
   - 发生变化的仅是原本信息不足的三类场景：3+ 行动态环（从 `row b waits too, for csvc` 升级为完整 `CycleChain` 句）、撞上未启动 `announces`/未知声明行的等待链（升级为 `UnknownProvider` 句），以及跨 `isolate` 隔离时不再误匹配不同隔离域的提供者。
-- **协议 / 配置 / 插件兼容**：会话协议版本（4）、`rutis.json` 格式（1）、插件 API（3）全部不变；旧运行时配新宿主、新运行时配旧宿主均无需改动。
+- **协议 / 配置 / 插件兼容**：会话协议版本（5）、`rutis.json` 格式（1）、插件 API（3）全部不变；旧运行时配新宿主、新运行时配旧宿主均无需改动。
 - **发布说明与文档**：落地正式 PR 时同步更新[rutis-host 指南](guide/rutis-host.md)（及[英文版](guide/rutis-host.en.md)）的「run 打印什么」等待原因表与对应版本迁移说明。
 
 ## 六、实施

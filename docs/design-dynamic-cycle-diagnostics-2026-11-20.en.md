@@ -103,9 +103,10 @@ For a missing service `T` waited on directly by row `W` (`DependencyStatus::Miss
 - `WaitReason::UnknownProvider { chain, missing, candidates }` (`MAX_LINKS = 8`, `MAX_CANDIDATES = 3`):
   - Candidate suffix `tail`:
     - `candidates.is_empty()`: empty string
-    - `[one]`: `; unstarted row {one} may provide services once it runs; declare provides or check why {one} has not started`
-    - `2..=3` rows: `; unstarted rows {list} may provide services once they run; declare provides or check why they have not started`
-    - `> 3` rows (`rest = candidates.len() - 3`): `; unstarted rows {c0}, {c1}, {c2} and {rest} more may provide services once they run; declare provides or check why they have not started`
+    - `!chain.is_empty()` and `candidates == [chain[0].row]` (the queried row itself is the sole candidate, avoiding third-person self-reference on its own line): `; this row has not started and may provide services once it runs; declare provides on this row or break the inject chain`
+    - `[one]` (not self): `; unstarted row {one} may provide services once it runs; declare provides or check why {one} has not started`
+    - `2..=3` rows (when `!chain.is_empty()` and `candidates` includes `chain[0].row`, place `this row` first in place of `chain[0].row`): `; unstarted rows {list} may provide services once they run; declare provides or check why they have not started`
+    - `> 3` rows (`rest = candidates.len() - 3`, placing `this row` first when included): `; unstarted rows {c0}, {c1}, {c2} and {rest} more may provide services once they run; declare provides or check why they have not started`
   - `chain.is_empty()` (direct wait):
     `nothing declares it yet{tail}`
   - `1..=8` hops:
@@ -181,11 +182,13 @@ rows:
 | 3 | Long cycle (e.g. 10 rows `r0`..`r9`, over the 8-hop cap) | `r0: waiting for s1 (rows r0, r1, r2, r3, r4, r5, r6, r7 and 2 more wait for each other: r0 waits for s1 from r1, r1 waits for s2 from r2, r2 waits for s3 from r3, r3 waits for s4 from r4, r4 waits for s5 from r5, r5 waits for s6 from r6, r6 waits for s7 from r7, r7 waits for s8 from r8, and 2 more steps back to r0; break the cycle in their inject)` | none (state) | every row in the cycle | break `inject` in one row of the cycle |
 | 4 | Lead-in row waiting on a cycle member (`d -> asvc -> a`, while `a -> b -> c -> a` cycles) | `d: waiting for asvc (row a waits too, for bsvc)` | none (state) | lead-in row `d` (cycle details are printed on `a`, `b`, `c`) | inspect `a`'s line and break the cycle among `a`, `b`, `c`; leave `d` alone |
 | 5 | Direct wait on undeclared `bsvc` while unstarted row `b` (`announces: true`) waits for `asvc` | `a: waiting for bsvc (nothing declares it yet; unstarted row b may provide services once it runs; declare provides or check why b has not started)` | none (state) | `a` | declare `provides` on `b`; check why `b` has not started (e.g. whether it waits on `a`) |
-| 6 | Multi-hop chain hitting undeclared service (`c -> asvc -> a -> bsvc -> b -> storage`, unstarted row `u` has `announces: true`) | `c: waiting for asvc (c waits for asvc from a, a waits for bsvc from b, b waits for storage; nothing declares storage yet; unstarted row u may provide services once it runs; declare provides or check why u has not started)` | none (state) | `c` (`a` and `b` each show the chain starting from themselves) | declare `provides` on `u`, or check why `u` has not started / add a provider for `storage` |
-| 7 | Many unstarted unknown providers (e.g. 5 rows `b`..`f`) | `a: waiting for bsvc (nothing declares it yet; unstarted rows b, c, d and 2 more may provide services once they run; declare provides or check why they have not started)` | none (state) | `a` | declare `provides` on the provider row, or check why those rows have not started |
-| 8 | Misspelt service name (even with another unstarted `announces: true` row) | `weather: waiting for lmm (nothing provides it yet; did you mean llm?)` | none (state) | `weather` | change `lmm` to `llm` |
-| 9 | Ordinary missing service (all `announces: true` rows are already `running`, or all rows only use declared services) | `store: waiting for blob (nothing provides it yet)` | none (state) | `store` | add a row that provides `blob` |
-| 10 | Cross-`isolate` same-name service (`a` isolates `bsvc: true`, `b` provides `bsvc` outside and injects `asvc`) | `a: waiting for bsvc (nothing provides it yet)`; `b: waiting for asvc (row a waits too, for bsvc)` | none (state) | `a`, `b` | share an `isolate` label or provide `bsvc` inside `a`'s isolate |
+| 6 | Chained wait where the queried row itself is the sole unstarted candidate (`b` has `announces: true`, waits for `asvc` from `a`, while `a` waits for undeclared `bsvc`) | `b: waiting for asvc (b waits for asvc from a, a waits for bsvc; nothing declares bsvc yet; this row has not started and may provide services once it runs; declare provides on this row or break the inject chain)` | none (state) | `b` | declare `provides` on `b` or break the `inject` chain between `a` and `b` |
+| 7 | Chained wait where the queried row itself and another unstarted row `u` are both candidates | `b: waiting for asvc (b waits for asvc from a, a waits for bsvc; nothing declares bsvc yet; unstarted rows this row, u may provide services once they run; declare provides or check why they have not started)` | none (state) | `b` | declare `provides` on `b` or `u`, or check why they have not started |
+| 8 | Multi-hop chain hitting undeclared service (`c -> asvc -> a -> bsvc -> b -> storage`, unstarted row `u` has `announces: true`) | `c: waiting for asvc (c waits for asvc from a, a waits for bsvc from b, b waits for storage; nothing declares storage yet; unstarted row u may provide services once it runs; declare provides or check why u has not started)` | none (state) | `c` (`a` and `b` each show the chain starting from themselves) | declare `provides` on `u`, or check why `u` has not started / add a provider for `storage` |
+| 9 | Many unstarted unknown providers (e.g. 5 rows `b`..`f`) | `a: waiting for bsvc (nothing declares it yet; unstarted rows b, c, d and 2 more may provide services once they run; declare provides or check why they have not started)` | none (state) | `a` | declare `provides` on the provider row, or check why those rows have not started |
+| 10 | Misspelt service name (even with another unstarted `announces: true` row) | `weather: waiting for lmm (nothing provides it yet; did you mean llm?)` | none (state) | `weather` | change `lmm` to `llm` |
+| 11 | Ordinary missing service (all `announces: true` rows are already `running`, or all rows only use declared services) | `store: waiting for blob (nothing provides it yet)` | none (state) | `store` | add a row that provides `blob` |
+| 12 | Cross-`isolate` same-name service (`a` isolates `bsvc: true`, `b` provides `bsvc` outside and injects `asvc`) | `a: waiting for bsvc (nothing provides it yet)`; `b: waiting for asvc (row a waits too, for bsvc)` | none (state) | `a`, `b` | share an `isolate` label or provide `bsvc` inside `a`'s isolate |
 
 ### 4.2 Plugin authors
 
@@ -208,7 +211,7 @@ export default definePlugin({
 - If a plugin omits `provides`, calls `ctx.provide('bsvc', ...)` only inside `apply`, and ends up mutually waiting with `a` (which provides `asvc` and injects `bsvc`), `rutis-host dev` prints clear clues on both rows:
   ```text
   a: waiting for bsvc (nothing declares it yet; unstarted row b may provide services once it runs; declare provides or check why b has not started)
-  b: waiting for asvc (b waits for asvc from a, a waits for bsvc; nothing declares bsvc yet; unstarted row b may provide services once it runs; declare provides or check why b has not started)
+  b: waiting for asvc (b waits for asvc from a, a waits for bsvc; nothing declares bsvc yet; this row has not started and may provide services once it runs; declare provides on this row or break the inject chain)
   ```
 - Adding `provides: { bsvc: ... }` to `b` immediately turns the reload into a proved cycle diagnostic:
   ```text
@@ -258,7 +261,7 @@ for entry in loader.entries() {
   - Lead-in rows keep the exact existing text (`row a waits too, for bsvc`);
   - Misspelt names, ordinary missing services (when no other unstarted `announces`/unknown-declaration row exists), unresolved disabled rows, and starting providers keep the exact existing text;
   - Only previously under-diagnosed cases change: 3+-row dynamic cycles upgrade from `row b waits too, for csvc` to the full `CycleChain` sentence, chains hitting unstarted `announces`/unknown-declaration rows upgrade to `UnknownProvider`, and cross-`isolate` waits no longer misattribute providers across isolated scopes.
-- **Protocol / configuration / plugin compatibility**: session protocol (4), `rutis.json` format (1), and plugin API (3) are unchanged; old runtimes with a new host and new runtimes with an old host need no changes.
+- **Protocol / configuration / plugin compatibility**: session protocol (5), `rutis.json` format (1), and plugin API (3) are unchanged; old runtimes with a new host and new runtimes with an old host need no changes.
 - **Release notes & guides**: when finalized, update the "What `run` prints" wait-reason table in [rutis-host guide](guide/rutis-host.en.md) (and [Chinese](guide/rutis-host.md)) and the target release's migration guide.
 
 ## 6. Implementation

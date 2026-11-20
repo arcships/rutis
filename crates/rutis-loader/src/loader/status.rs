@@ -544,20 +544,43 @@ fn format_cycle_chain(links: &[CycleLink]) -> String {
 }
 
 fn format_unknown_provider(chain: &[CycleLink], missing: &str, candidates: &[String]) -> String {
-    let tail = match candidates {
-        [] => String::new(),
-        [one] => format!(
-            "; unstarted row {one} may provide services once it runs; declare provides or check why {one} has not started"
-        ),
-        many if many.len() <= MAX_CANDIDATES => format!(
-            "; unstarted rows {} may provide services once they run; declare provides or check why they have not started",
-            many.join(", ")
-        ),
-        many => format!(
-            "; unstarted rows {} and {} more may provide services once they run; declare provides or check why they have not started",
-            many[..MAX_CANDIDATES].join(", "),
-            many.len() - MAX_CANDIDATES
-        ),
+    let self_row = chain.first().map(|link| link.row.as_str());
+    let tail = if let Some(me) = self_row.filter(|me| candidates.iter().any(|c| c == me)) {
+        let mut shown = vec!["this row"];
+        shown.extend(
+            candidates
+                .iter()
+                .filter(|c| c.as_str() != me)
+                .map(String::as_str),
+        );
+        match shown.as_slice() {
+            [_only_self] => "; this row has not started and may provide services once it runs; declare provides on this row or break the inject chain".to_owned(),
+            many if many.len() <= MAX_CANDIDATES => format!(
+                "; unstarted rows {} may provide services once they run; declare provides or check why they have not started",
+                many.join(", ")
+            ),
+            many => format!(
+                "; unstarted rows {} and {} more may provide services once they run; declare provides or check why they have not started",
+                many[..MAX_CANDIDATES].join(", "),
+                many.len() - MAX_CANDIDATES
+            ),
+        }
+    } else {
+        match candidates {
+            [] => String::new(),
+            [one] => format!(
+                "; unstarted row {one} may provide services once it runs; declare provides or check why {one} has not started"
+            ),
+            many if many.len() <= MAX_CANDIDATES => format!(
+                "; unstarted rows {} may provide services once they run; declare provides or check why they have not started",
+                many.join(", ")
+            ),
+            many => format!(
+                "; unstarted rows {} and {} more may provide services once they run; declare provides or check why they have not started",
+                many[..MAX_CANDIDATES].join(", "),
+                many.len() - MAX_CANDIDATES
+            ),
+        }
     };
     if chain.is_empty() {
         return format!("nothing declares it yet{tail}");
@@ -1043,6 +1066,65 @@ mod tests {
              declare provides or check why u has not started)"
         );
 
+        // Self-candidate chained UnknownProvider: queried row is the only
+        // candidate, or one of several candidates (put `this row` first).
+        let self_only = describe_waits(
+            &[Wait::new(
+                "asvc",
+                WaitReason::UnknownProvider {
+                    chain: vec![CycleLink::new("b", "asvc", "a")],
+                    missing: "bsvc".into(),
+                    candidates: vec!["b".into()],
+                },
+            )],
+            &none,
+        );
+        assert_eq!(
+            self_only,
+            "waiting for asvc (b waits for asvc from a, a waits for bsvc; \
+             nothing declares bsvc yet; \
+             this row has not started and may provide services once it runs; \
+             declare provides on this row or break the inject chain)"
+        );
+
+        let self_with_other = describe_waits(
+            &[Wait::new(
+                "asvc",
+                WaitReason::UnknownProvider {
+                    chain: vec![CycleLink::new("b", "asvc", "a")],
+                    missing: "bsvc".into(),
+                    candidates: vec!["u".into(), "b".into()],
+                },
+            )],
+            &none,
+        );
+        assert_eq!(
+            self_with_other,
+            "waiting for asvc (b waits for asvc from a, a waits for bsvc; \
+             nothing declares bsvc yet; \
+             unstarted rows this row, u may provide services once they run; \
+             declare provides or check why they have not started)"
+        );
+
+        let self_with_many = describe_waits(
+            &[Wait::new(
+                "asvc",
+                WaitReason::UnknownProvider {
+                    chain: vec![CycleLink::new("b", "asvc", "a")],
+                    missing: "bsvc".into(),
+                    candidates: ["u", "v", "w", "b", "z"].map(str::to_owned).to_vec(),
+                },
+            )],
+            &none,
+        );
+        assert_eq!(
+            self_with_many,
+            "waiting for asvc (b waits for asvc from a, a waits for bsvc; \
+             nothing declares bsvc yet; \
+             unstarted rows this row, u, v and 2 more may provide services once they run; \
+             declare provides or check why they have not started)"
+        );
+
         // Degenerate empty candidates does not panic.
         let empty_cand = describe_waits(
             &[Wait::new(
@@ -1084,6 +1166,9 @@ mod tests {
             &direct_five,
             &chained,
             &long_chain,
+            &self_only,
+            &self_with_other,
+            &self_with_many,
             &empty_cand,
         ] {
             for word in forbidden {
