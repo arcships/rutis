@@ -7,11 +7,13 @@ import contextlib
 import io
 import math
 import sys
+import threading
 import types
 import unittest
 
 import background
 
+from rutis._unhandled import current_row
 from rutis.runner import Runtime
 
 
@@ -278,6 +280,126 @@ class ManagedTimers(background.TestCase):
 
                 asyncio.run(run())
                 self.assertEqual(events, ["callback.started", "callback.exited-open-pool", "pool.close"])
+
+    def test_timer_registered_and_cancelled_from_worker_thread(self):
+        fired = []
+        cancelled_fired = []
+        row_seen = []
+        errors = []
+        interval_ticks = 0
+
+        async def run():
+            nonlocal interval_ticks
+            done = asyncio.Event()
+            interval_ready = asyncio.Event()
+            ctx_holder = {}
+
+            def apply(ctx, config):
+                ctx_holder["ctx"] = ctx
+
+            rt = self.runtime()
+            await rt.load("worker_row", module("timers_worker", apply), None, None, id="worker_row")
+            ctx = ctx_holder["ctx"]
+            row = rt.rows["worker_row"]
+
+            def worker():
+                try:
+                    def on_fire():
+                        row_seen.append(current_row.get())
+                        fired.append(threading.current_thread().ident)
+                        done.set()
+
+                    def on_tick():
+                        nonlocal interval_ticks
+                        interval_ticks += 1
+                        if interval_ticks >= 2:
+                            interval_ready.set()
+
+                    ctx.timeout(0.015, on_fire)
+                    stop_timeout = ctx.timeout(0.05, lambda: cancelled_fired.append("no"))
+                    stop_timeout()
+                    stop_timeout()  # idempotent from foreign thread
+                    ctx.interval(0.01, on_tick)
+                except BaseException as exc:  # noqa: BLE001
+                    errors.append(exc)
+
+            thread = threading.Thread(target=worker, name="timer-worker")
+            thread.start()
+            await asyncio.to_thread(thread.join)
+
+            await asyncio.wait_for(done.wait(), timeout=2.0)
+            await asyncio.wait_for(interval_ready.wait(), timeout=2.0)
+            await asyncio.sleep(0.07)
+            # Only the active interval cleanup should remain on row.steps; both
+            # the completed timeout and the cancelled timeout must have detached.
+            self.assertEqual(len(row.steps), 1)
+            await rt.unload("worker_row")
+            ticks_at_unload = interval_ticks
+            await asyncio.sleep(0.04)
+            self.assertEqual(interval_ticks, ticks_at_unload, "interval from worker thread stops on unload")
+
+            # Registering from a worker thread after unload is refused verbatim.
+            late_fired = []
+            written = io.StringIO()
+            with contextlib.redirect_stderr(written):
+                t2 = threading.Thread(
+                    target=lambda: ctx.timeout(0.005, lambda: late_fired.append("late")),
+                    name="timer-worker-late",
+                )
+                t2.start()
+                await asyncio.to_thread(t2.join)
+                await asyncio.sleep(0.03)
+            self.assertEqual(late_fired, [])
+            self.assertEqual(
+                written.getvalue(),
+                "rutis: row worker_row is not active: timer is not registered\n",
+            )
+
+        asyncio.run(run())
+        self.assertEqual(errors, [])
+        self.assertEqual(fired, [threading.current_thread().ident])
+        self.assertEqual(row_seen, ["worker_row"])
+        self.assertEqual(cancelled_fired, [])
+        self.assertGreaterEqual(interval_ticks, 2)
+
+    def test_worker_thread_timer_registration_racing_unload_is_safe(self):
+        fired_after_unload = []
+        errors = []
+        unloaded = False
+
+        async def run():
+            nonlocal unloaded
+            ctx_holder = {}
+
+            def apply(ctx, config):
+                ctx_holder["ctx"] = ctx
+
+            rt = self.runtime()
+            await rt.load("race_row", module("timers_race", apply), None, None, id="race_row")
+            ctx = ctx_holder["ctx"]
+            started = threading.Event()
+            written = io.StringIO()
+
+            def worker():
+                try:
+                    started.set()
+                    for _ in range(30):
+                        ctx.timeout(0.06, lambda: fired_after_unload.append(unloaded))
+                except BaseException as exc:  # noqa: BLE001
+                    errors.append(exc)
+
+            with contextlib.redirect_stderr(written):
+                thread = threading.Thread(target=worker, name="timer-race-worker")
+                thread.start()
+                await asyncio.to_thread(started.wait)
+                await rt.unload("race_row")
+                unloaded = True
+                await asyncio.to_thread(thread.join)
+                await asyncio.sleep(0.1)
+
+        asyncio.run(run())
+        self.assertEqual(errors, [])
+        self.assertEqual(fired_after_unload, [], "no worker-registered timer may fire after unload")
 
 
 if __name__ == "__main__":

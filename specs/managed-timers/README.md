@@ -8,12 +8,12 @@
 
 | 模型部分 | 设计 | 实现 |
 | --- | --- | --- |
-| Rust 可中止运行时：通过 `effect`（`register_effect_named`）挂入卸载栈、子 `CancellationToken`、`tokio::select!` 取消并经 `TimerExitSignal` 等待任务退出，一次性 `timeout` 结束后自行摘除 | 设计 §二 D1–D6；§三 3.2、3.4 | `crates/rutis/src/ctx.rs` `Ctx::timeout`、`Ctx::interval`、`TimerExitSignal` |
+| Rust 可中止运行时：通过 `effect`（`register_effect_named`）挂入卸载栈、子 `CancellationToken`、`tokio::select!` 取消并经 `TimerExitSignal` 等待任务退出，一次性 `timeout` 结束后立即 `claim` + `finish`（经 `FiberInner::detach_effect` 摘除） | 设计 §二 D1–D6；§三 3.2、3.4 | `crates/rutis/src/ctx.rs` `Ctx::timeout`、`Ctx::interval`、`TimerExitSignal`；`crates/rutis/src/fiber.rs` `FiberInner::detach_effect` |
 | Node 叶子不可中止 Promise 运行时：在 `toCordis` 维护 `invoking` 与 `running`，同步序言内自取消不提前移出 `steps`，卸载在更早 LIFO 清理之前 `await running` | 设计 §二 D1–D8；§三 3.2 | `node/rutis-runtime/src/leaf.mjs` `toCordis`（`ctx.timeout`、`ctx.interval`） |
 | Bun 不可中止 Promise 运行时：与 Node 叶子相同的 `invoking` / `running` 护栏，挂入 `row.steps` 逆序卸载栈，卸载移出行表后立即阻止新拍启动 | 设计 §二 D1–D7；§三 3.2 | `bun/rutis-bun/src/runner.ts` `Runtime.load`（`ctx.timeout`、`ctx.interval`） |
 | Python 可中止运行时：`asyncio.Task` 经 `self.effect(cleanup)` 挂入 `row.steps`；任务未结束前自取消不移出清理，卸载 `task.cancel()` + `await task` 并在 `done_callback` 摘除 | 设计 §二 D1–D7；§三 3.2 | `python/rutis/rutis/runner.py` `Context.timeout`、`Context.interval`、`Context._timer` |
 
-设计文档的状态是“草稿（Rust / Node 叶子 / Bun / Python 最小 PoC 已实现）”（2026-11-20）。这个模型按当前设计与四语言 PoC 代码建立；`mut-self-cancel-drops-step` 复现并钉住了评审中发现的 Node 叶子 / Bun 同步自取消提前摘除 `steps` 的竞态缺陷。
+设计文档的状态是“草稿（Rust / Node 叶子 / Bun / Python 最小 PoC 已实现）”（2026-11-20）。这个模型按当前设计与四语言 PoC 代码建立；`mut-self-cancel-drops-step` 复现并钉住了评审中发现的 Node 叶子 / Bun 同步自取消提前摘除 `steps` 的竞态缺陷，`mut-timeout-leaks-stack` 钉住了设计 D3 要求一次性 `timeout` 完成后必须从卸载栈摘除的约束。
 
 ## 模型
 
@@ -59,12 +59,13 @@ TLC 2.19（tla2tools v1.7.4），OpenJDK 17.0.18，`-workers auto`。`通过` �
 | `timers-interval-nonabortable` | 固定延迟 `interval`（`MaxTicks = 2`），不可中止 Promise 模式（Node 叶子 / Bun） | 通过 | 88 | 1 s |
 | `mut-self-cancel-drops-step` | 变异：同步自取消时仅检查 `!running` 提前移出卸载栈 | 违反 `NoUseAfterPoolClose` | 104（找到反例即停） | <1 s |
 | `mut-no-await-inflight` | 变异：卸载定时器清理不等在途 Promise 即进入 `pool.close()` | 违反 `NoUseAfterPoolClose` | 100（找到反例即停） | 1 s |
-| `mut-overlap-tick` | 变异：固定速率 `interval` 在上一拍未完成时触发第二拍 | 违反 `NoOverlappingTicks` | 83（找到反例即停） | 1 s |
-| `mut-fire-after-unload` | 变异：卸载开始后、清理执行前触发回调时不检查行活跃状态 | 违反 `NoFireAfterUnload` | 44（找到反例即停） | 1 s |
+| `mut-overlap-tick` | 变异：固定速率 `interval` 在上一拍未完成时触发第二拍 | 违反 `NoOverlappingTicks` | 86（找到反例即停） | 1 s |
+| `mut-fire-after-unload` | 变异：卸载开始后、清理执行前触发回调时不检查行活跃状态 | 违反 `NoFireAfterUnload` | 44（找到反例即停） | <1 s |
+| `mut-timeout-leaks-stack` | 变异：一次性 `timeout` 正常完成后进入 `done` 但未从卸载栈摘除（`onStack` 仍为 `TRUE`） | 违反 `CleanDetach` | 44（找到反例即停） | 1 s |
 
 ## 变异与反例
 
-四条核心安全性质都配了故意引入的变异，TLC 必须逐一捕获（`expected.txt` 中的 `violated:<名字>`）：
+四条核心安全性质（含 `CleanDetach`）都配了故意引入的变异，共 5 组，TLC 必须逐一捕获（`expected.txt` 中的 `violated:<名字>`）：
 
 | 配置 | 变异 | 违反 | 反例路径 |
 | --- | --- | --- | --- |
@@ -72,11 +73,12 @@ TLC 2.19（tla2tools v1.7.4），OpenJDK 17.0.18，`-workers auto`。`通过` �
 | `mut-no-await-inflight` | `UnloadTimerStep` 在 `in_flight_async` 时不等回调结算直接推进到 `pool` | `NoUseAfterPoolClose` | `TimerFire` → `ReturnAsync` → `StartUnload` → `UnloadTimerStep`（不等待即进 `pool`）→ `UnloadPoolStep`（`pool="closed"` 而 `inFlight=1`） |
 | `mut-overlap-tick` | 允许 `OverlapFire` 在 `in_flight_async` 时再触发一拍 | `NoOverlappingTicks` | `TimerFire` → `ReturnAsync` → `OverlapFire`（`inFlight=2`） |
 | `mut-fire-after-unload` | `TimerFire` 只检查 `~cancelled`，不检查 `rowState = "active"` | `NoFireAfterUnload` | `StartUnload`（`rowState="unloading"`，此时尚未执行 `UnloadTimerStep`）→ `TimerFire`（`firedAfterUnload=TRUE`） |
+| `mut-timeout-leaks-stack` | 一次性 `timeout` 在 `SyncComplete` / `AsyncComplete` 正常进入 `done` 时保留 `onStack = TRUE` 而不摘除 | `CleanDetach` | `TimerFire`（`invoking_sync`, `onStack=TRUE`）→ `SyncComplete`（`timerState="done"`, `onStack=TRUE`） |
 
 ## 结论
 
 - 在可中止（Rust / Python）和不可中止 Promise（Node 叶子 / Bun）两种语义模式下，修正后的托管定时器状态机均在全状态空间内满足 `NoUseAfterPoolClose`、`NoFireAfterUnload`、`NoOverlappingTicks` 与 `CleanDetach`。
-- `mut-self-cancel-drops-step` 的 7 步反例直接证实了 Node 叶子 / Bun 必须维护 `invoking` 守卫（或在回调结算前不得提前把清理移出卸载栈）；其余三条变异分别钉住了“卸载必须等待在途回调”“`interval` 必须不重叠”“触发前必须检查行活跃状态”。
+- `mut-self-cancel-drops-step` 的 7 步反例直接证实了 Node 叶子 / Bun 必须维护 `invoking` 守卫（或在回调结算前不得提前把清理移出卸载栈）；其余四条变异分别钉住了“卸载必须等待在途回调”“`interval` 必须不重叠”“触发前必须检查行活跃状态”以及“一次性 `timeout` 正常完成后必须立刻从卸载栈摘除（D3）”。
 - 模型没有证明的内容：JS Promise 永不结算时的有界超时放弃（属 #1323 卸载预算）、Tokio/操作系统底层调度器的精确线程切换点、多定时器间共享可变状态、以及尚未实现的 Go / Swift / Kotlin 代码细节。
 
 ## 怎么运行

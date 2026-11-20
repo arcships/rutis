@@ -8,12 +8,12 @@ TLC exhaustively explores all interleavings between a plugin row's managed timer
 
 | Part of the model | Design | Implementation |
 | --- | --- | --- |
-| Rust abortable runtime: registers on the unload stack via `effect` (`register_effect_named`), child `CancellationToken`, `tokio::select!` cancellation + `TimerExitSignal` wait, and self-detach after one-shot `timeout` completion | design §2 D1-D6; §3.2, §3.4 | `crates/rutis/src/ctx.rs` `Ctx::timeout`, `Ctx::interval`, `TimerExitSignal` |
+| Rust abortable runtime: registers on the unload stack via `effect` (`register_effect_named`), child `CancellationToken`, `tokio::select!` cancellation + `TimerExitSignal` wait, and immediate `claim` + `finish` self-detach (via `FiberInner::detach_effect`) after one-shot `timeout` completion | design §2 D1-D6; §3.2, §3.4 | `crates/rutis/src/ctx.rs` `Ctx::timeout`, `Ctx::interval`, `TimerExitSignal`; `crates/rutis/src/fiber.rs` `FiberInner::detach_effect` |
 | Node leaf non-abortable Promise runtime: tracks both `invoking` and `running` inside `toCordis` so synchronous self-cancel before `await` keeps cleanup on `steps`, and unload awaits `running` before earlier LIFO cleanups | design §2 D1-D8; §3.2 | `node/rutis-runtime/src/leaf.mjs` `toCordis` (`ctx.timeout`, `ctx.interval`) |
 | Bun non-abortable Promise runtime: same `invoking` / `running` guard on `row.steps` LIFO stack; removing the row on unload immediately blocks new ticks | design §2 D1-D7; §3.2 | `bun/rutis-bun/src/runner.ts` `Runtime.load` (`ctx.timeout`, `ctx.interval`) |
 | Python abortable runtime: `asyncio.Task` registered via `self.effect(cleanup)` on `row.steps`; self-cancel while task is running leaves cleanup registered; unload runs `task.cancel()` + `await task` and detaches via `done_callback` | design §2 D1-D7; §3.2 | `python/rutis/rutis/runner.py` `Context.timeout`, `Context.interval`, `Context._timer` |
 
-The design document status is "draft (minimal PoC implemented for Rust / Node leaf / Bun / Python)" (2026-11-20). This model follows the design and the four-runtime PoC; `mut-self-cancel-drops-step` reproduces and pins the real Node leaf / Bun race where a synchronous self-cancel before `await` prematurely removed the cleanup from `steps`.
+The design document status is "draft (minimal PoC implemented for Rust / Node leaf / Bun / Python)" (2026-11-20). This model follows the design and the four-runtime PoC; `mut-self-cancel-drops-step` reproduces and pins the real Node leaf / Bun race where a synchronous self-cancel before `await` prematurely removed the cleanup from `steps`, and `mut-timeout-leaks-stack` pins design D3 requiring completed one-shot `timeout` entries to detach from the unload stack.
 
 ## The model
 
@@ -49,22 +49,23 @@ The design document status is "draft (minimal PoC implemented for Rust / Node le
 
 ## Results
 
-TLC 2.19 (tla2tools v1.7.4), OpenJDK 17.0.18, `-workers auto`. "Pass" means exhaustive exploration completed with all invariants holding; mutations stop at the first counterexample. Total runtime across all 8 configs is ~6 s.
+TLC 2.19 (tla2tools v1.7.4), OpenJDK 17.0.18, `-workers auto`. "Pass" means exhaustive exploration completed with all invariants holding; mutations stop at the first counterexample. Total runtime across all 9 configs is ~6 s.
 
 | Configuration | Content | Outcome | Distinct states | Time |
 | --- | --- | --- | --- | --- |
-| `timers-timeout-abortable` | One-shot `timeout`, abortable mode (Rust / Python) | pass | 55 | <1 s |
+| `timers-timeout-abortable` | One-shot `timeout`, abortable mode (Rust / Python) | pass | 55 | 1 s |
 | `timers-interval-abortable` | Fixed-delay `interval` (`MaxTicks = 2`), abortable mode (Rust / Python) | pass | 100 | 1 s |
 | `timers-timeout-nonabortable` | One-shot `timeout`, non-abortable Promise mode (Node leaf / Bun) | pass | 49 | 1 s |
-| `timers-interval-nonabortable` | Fixed-delay `interval` (`MaxTicks = 2`), non-abortable Promise mode (Node leaf / Bun) | pass | 88 | 1 s |
+| `timers-interval-nonabortable` | Fixed-delay `interval` (`MaxTicks = 2`), non-abortable Promise mode (Node leaf / Bun) | pass | 88 | <1 s |
 | `mut-self-cancel-drops-step` | Mutation: synchronous self-cancel checks only `!running` and drops stack entry early | violates `NoUseAfterPoolClose` | 104 (stops at counterexample) | <1 s |
 | `mut-no-await-inflight` | Mutation: unload timer cleanup advances to `pool.close()` without awaiting in-flight Promise | violates `NoUseAfterPoolClose` | 100 (stops at counterexample) | 1 s |
-| `mut-overlap-tick` | Mutation: fixed-rate `interval` starts a second tick while tick 1 is still in flight | violates `NoOverlappingTicks` | 83 (stops at counterexample) | 1 s |
-| `mut-fire-after-unload` | Mutation: firing checks `~cancelled` only, ignoring `rowState = "active"` after unload begins | violates `NoFireAfterUnload` | 44 (stops at counterexample) | 1 s |
+| `mut-overlap-tick` | Mutation: fixed-rate `interval` starts a second tick while tick 1 is still in flight | violates `NoOverlappingTicks` | 86 (stops at counterexample) | 1 s |
+| `mut-fire-after-unload` | Mutation: firing checks `~cancelled` only, ignoring `rowState = "active"` after unload begins | violates `NoFireAfterUnload` | 44 (stops at counterexample) | <1 s |
+| `mut-timeout-leaks-stack` | Mutation: completed one-shot `timeout` transitions to `"done"` without detaching from the unload stack (`onStack` remains `TRUE`) | violates `CleanDetach` | 44 (stops at counterexample) | 1 s |
 
 ## Mutations and counterexamples
 
-Every core safety invariant has a deliberate mutation that TLC must catch (`violated:<name>` in `expected.txt`):
+Every core safety invariant (including `CleanDetach`) has a deliberate mutation — 5 in total — that TLC must catch (`violated:<name>` in `expected.txt`):
 
 | Configuration | Mutation | Violated | Counterexample trace |
 | --- | --- | --- | --- |
@@ -72,11 +73,12 @@ Every core safety invariant has a deliberate mutation that TLC must catch (`viol
 | `mut-no-await-inflight` | `UnloadTimerStep` advances to `"pool"` while `timerState = "in_flight_async"` | `NoUseAfterPoolClose` | `TimerFire` → `ReturnAsync` → `StartUnload` → `UnloadTimerStep` (does not await) → `UnloadPoolStep` (`pool="closed"` while `inFlight=1`) |
 | `mut-overlap-tick` | Enables `OverlapFire` while `timerState = "in_flight_async"` | `NoOverlappingTicks` | `TimerFire` → `ReturnAsync` → `OverlapFire` (`inFlight=2`) |
 | `mut-fire-after-unload` | `TimerFire` ignores `rowState = "active"` while `~cancelled` | `NoFireAfterUnload` | `StartUnload` (`rowState="unloading"`, before `UnloadTimerStep`) → `TimerFire` (`firedAfterUnload=TRUE`) |
+| `mut-timeout-leaks-stack` | One-shot `timeout` leaves `onStack = TRUE` when entering `"done"` in `SyncComplete` / `AsyncComplete` | `CleanDetach` | `TimerFire` (`invoking_sync`, `onStack=TRUE`) → `SyncComplete` (`timerState="done"`, `onStack=TRUE`) |
 
 ## Conclusion
 
 - Under both abortable (Rust / Python) and non-abortable Promise (Node leaf / Bun) modes, the fixed state machine satisfies `NoUseAfterPoolClose`, `NoFireAfterUnload`, `NoOverlappingTicks`, and `CleanDetach` across all reachable states.
-- The 7-step `mut-self-cancel-drops-step` counterexample proves why Node leaf and Bun need the `invoking` guard (never detaching cleanup from `steps` before an async callback settles); the other three mutations pin awaiting in-flight callbacks on unload, non-overlapping fixed-delay ticks, and checking row liveness on fire.
+- The 7-step `mut-self-cancel-drops-step` counterexample proves why Node leaf and Bun need the `invoking` guard (never detaching cleanup from `steps` before an async callback settles); the other four mutations pin awaiting in-flight callbacks on unload, non-overlapping fixed-delay ticks, checking row liveness on fire, and detaching completed one-shot `timeout` entries from the unload stack (D3).
 - Out of scope for this model: bounded timeout abandonment of hung JS Promises (#1323), OS/Tokio thread-level switch points, shared mutable state across multiple timers, and the not-yet-implemented Go / Swift / Kotlin codebases.
 
 ## How to run

@@ -435,17 +435,24 @@ class Context(sdk.Context):
         row = self._row
         runtime = self._runtime
         row_name = row.named or row.key
-        if runtime.rows.get(row.key) is not row or row.unloading:
-            say(f"rutis: row {row_name} is not active: timer is not registered")
-            return lambda: None
-        loop = runtime.loop or asyncio.get_running_loop()
-        cancelled = False
-        task: asyncio.Task | None = None
 
         def active() -> bool:
             return runtime.rows.get(row.key) is row and not row.unloading
 
+        if not active():
+            say(f"rutis: row {row_name} is not active: timer is not registered")
+            return lambda: None
+        loop = runtime.loop if runtime.loop is not None else asyncio.get_running_loop()
+        cancelled = False
+        cancel_requested = False
+        registered = False
+        task: asyncio.Task | None = None
+
         def remove_step() -> None:
+            nonlocal registered
+            if not registered:
+                return
+            registered = False
             try:
                 row.steps.remove(cleanup)
             except ValueError:
@@ -483,40 +490,58 @@ class Context(sdk.Context):
                     pass
             remove_step()
 
-        def cancel() -> None:
+        def do_cancel() -> None:
             nonlocal cancelled
-            if cancelled:
-                return
             cancelled = True
             if task is None or task.done():
                 remove_step()
                 return
-            if runtime._here():
-                try:
-                    current = asyncio.current_task()
-                except RuntimeError:
-                    current = None
-                if current is not task:
-                    task.cancel()
-            else:
-                loop.call_soon_threadsafe(task.cancel)
+            try:
+                current = asyncio.current_task()
+            except RuntimeError:
+                current = None
+            if current is not task:
+                task.cancel()
 
-        self.effect(cleanup)
-
-        def spawn() -> None:
-            nonlocal task
-            if cancelled or not active():
-                remove_step()
+        def cancel() -> None:
+            nonlocal cancelled, cancel_requested
+            if cancel_requested:
                 return
+            cancel_requested = True
+            cancelled = True
+            if runtime._here():
+                do_cancel()
+            elif not loop.is_closed():
+                try:
+                    loop.call_soon_threadsafe(do_cancel)
+                except RuntimeError:
+                    pass
+
+        def register_and_spawn() -> None:
+            nonlocal task, registered
+            if cancelled:
+                return
+            if not active():
+                say(f"rutis: row {row_name} is not active: timer is not registered")
+                return
+            self.effect(cleanup)
+            registered = True
             context = contextvars.copy_context()
             context.run(current_row.set, row.key)
             task = loop.create_task(run(), context=context)
             task.add_done_callback(lambda _done: remove_step())
 
         if runtime._here():
-            spawn()
+            register_and_spawn()
         else:
-            loop.call_soon_threadsafe(spawn)
+            if loop.is_closed():
+                say(f"rutis: row {row_name} is not active: timer is not registered")
+                return lambda: None
+            try:
+                loop.call_soon_threadsafe(register_and_spawn)
+            except RuntimeError:
+                say(f"rutis: row {row_name} is not active: timer is not registered")
+                return lambda: None
         return cancel
 
     def on(self, name: str, listener: Callable, *, prepend: bool = False, global_: bool = False) -> Callable[[], None]:

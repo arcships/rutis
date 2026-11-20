@@ -434,3 +434,25 @@ async fn unload_cancels_and_awaits_inflight_timer_drop_before_earlier_lifo_clean
     );
     root.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn many_sequential_timeouts_complete_and_unload_cleanly() {
+    let root = Ctx::root().unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    for _ in 0..200 {
+        let h = hits.clone();
+        let done = Arc::new(tokio::sync::Notify::new());
+        let n = done.clone();
+        root.timeout(Duration::ZERO, move || async move {
+            h.fetch_add(1, Ordering::SeqCst);
+            n.notify_one();
+            Ok(())
+        })
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), done.notified())
+            .await
+            .expect("one-shot timeout should fire");
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 200);
+    root.shutdown().await.unwrap();
+}

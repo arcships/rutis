@@ -7,3 +7,4 @@ mut-self-cancel-drops-step violated:NoUseAfterPoolClose
 mut-no-await-inflight violated:NoUseAfterPoolClose
 mut-overlap-tick violated:NoOverlappingTicks
 mut-fire-after-unload violated:NoFireAfterUnload
+mut-timeout-leaks-stack violated:CleanDetach

@@ -716,7 +716,6 @@ impl Ctx {
         let sink = self.error_sink();
         let owner = self.timer_owner();
         let weak_record = Arc::downgrade(&record);
-        let drain_handle = handle.clone();
         crate::sync::spawn(&handle, async move {
             let exit = TimerExitSignal(exited_tx);
             let mut callback = Some(f);
@@ -737,13 +736,18 @@ impl Ctx {
                     }
                 }
             }
+            cancel.cancel();
             drop(callback);
             drop(exit);
             if let Some(record) = weak_record.upgrade() {
-                let h = drain_handle.clone();
-                crate::sync::spawn(&drain_handle, async move {
-                    let _ = record.drain(&h).await;
-                });
+                // Claim and finish directly: the timer task has already exited
+                // and signalled `exit`, so detach from `fiber.effects` and
+                // `fiber.effect_index` immediately without spawning a redundant
+                // cleanup task.
+                if let Some(cleanups) = record.claim() {
+                    drop(cleanups);
+                    record.finish(None);
+                }
             }
         });
         Ok(self.record_disposer(record))
@@ -759,7 +763,7 @@ impl Ctx {
     /// are caught and sent to the host's [`ErrorSink`], and the next tick
     /// still schedules after `period`.
     #[track_caller]
-    pub fn interval<F, Fut>(&self, period: Duration, mut f: F) -> Result<Disposer, Error>
+    pub fn interval<F, Fut>(&self, period: Duration, f: F) -> Result<Disposer, Error>
     where
         F: FnMut() -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), Error>> + Send + 'static,
@@ -786,8 +790,10 @@ impl Ctx {
         let handle = self.handle().clone();
         let sink = self.error_sink();
         let owner = self.timer_owner();
+        let weak_record = Arc::downgrade(&record);
         crate::sync::spawn(&handle, async move {
-            let _exit = TimerExitSignal(exited_tx);
+            let exit = TimerExitSignal(exited_tx);
+            let mut callback = f;
             loop {
                 let due = tokio::select! {
                     biased;
@@ -800,10 +806,19 @@ impl Ctx {
                 let outcome = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => break,
-                    res = run_timer_mut(&mut f) => res,
+                    res = run_timer_mut(&mut callback) => res,
                 };
                 if let Err(error) = outcome {
                     report_timer_error(&sink, &owner, error);
+                }
+            }
+            cancel.cancel();
+            drop(callback);
+            drop(exit);
+            if let Some(record) = weak_record.upgrade() {
+                if let Some(cleanups) = record.claim() {
+                    drop(cleanups);
+                    record.finish(None);
                 }
             }
         });
@@ -1984,5 +1999,103 @@ mod tests {
             "the announcement ran without the registration's admission, so a withdrawal could \
              announce Removed first"
         );
+    }
+
+    /// Design D3 (#1325): completed one-shot `ctx.timeout`s detach from
+    /// `fiber.effects` and `fiber.effect_index` so long-lived plugins do not
+    /// accumulate dead records; early manual `Disposer::dispose()` detaches
+    /// immediately too.
+    #[tokio::test]
+    async fn completed_timeouts_detach_from_fiber_effects_and_stay_bounded() {
+        let root = Ctx::root().unwrap();
+        let fiber = root.weak_fiber().upgrade().unwrap();
+
+        // 1. 200 sequential one-shot timeouts leave 0 lingering records.
+        for _ in 0..200 {
+            let done = Arc::new(tokio::sync::Notify::new());
+            let n = done.clone();
+            root.timeout(Duration::ZERO, move || async move {
+                n.notify_one();
+                Ok(())
+            })
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), done.notified())
+                .await
+                .expect("sequential timeout should fire");
+        }
+        rutis_test_support::eventually_with(
+            || {
+                (fiber.effects.lock().unwrap().is_empty()
+                    && fiber.effect_index.lock().unwrap().is_empty())
+                .then_some(())
+            },
+            "sequential timeouts detach from fiber.effects",
+            || {
+                format!(
+                    "effects={}, index={}",
+                    fiber.effects.lock().unwrap().len(),
+                    fiber.effect_index.lock().unwrap().len()
+                )
+            },
+        )
+        .await;
+        assert!(
+            fiber.effects.lock().unwrap().capacity() <= 64,
+            "sequential timeouts should not grow effects capacity"
+        );
+
+        // 2. Concurrent burst of 200 timeouts grows and shrinks back cleanly.
+        let remaining = Arc::new(AtomicUsize::new(200));
+        let all_done = Arc::new(tokio::sync::Notify::new());
+        for _ in 0..200 {
+            let rem = remaining.clone();
+            let notify = all_done.clone();
+            root.timeout(Duration::from_millis(1), move || async move {
+                if rem.fetch_sub(1, Ordering::SeqCst) == 1 {
+                    notify.notify_one();
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), all_done.notified())
+            .await
+            .expect("burst of 200 timeouts should fire");
+        rutis_test_support::eventually_with(
+            || {
+                (fiber.effects.lock().unwrap().is_empty()
+                    && fiber.effect_index.lock().unwrap().is_empty())
+                .then_some(())
+            },
+            "concurrent burst of timeouts detaches completely",
+            || {
+                format!(
+                    "effects={}, index={}",
+                    fiber.effects.lock().unwrap().len(),
+                    fiber.effect_index.lock().unwrap().len()
+                )
+            },
+        )
+        .await;
+        assert!(
+            fiber.effects.lock().unwrap().capacity() <= 64,
+            "effects capacity should shrink back after burst, got {}",
+            fiber.effects.lock().unwrap().capacity()
+        );
+
+        // 3. Early manual cancellation detaches immediately on dispose().await.
+        let t_cancel = root
+            .timeout(Duration::from_secs(60), || async { Ok(()) })
+            .unwrap();
+        let i_cancel = root
+            .interval(Duration::from_secs(60), || async { Ok(()) })
+            .unwrap();
+        assert_eq!(fiber.effects.lock().unwrap().len(), 2);
+        t_cancel.dispose().await.unwrap();
+        i_cancel.dispose().await.unwrap();
+        assert!(fiber.effects.lock().unwrap().is_empty());
+        assert!(fiber.effect_index.lock().unwrap().is_empty());
+
+        root.shutdown().await.unwrap();
     }
 }

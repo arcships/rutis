@@ -23,13 +23,13 @@ EXTENDS Naturals, TLC
 CONSTANTS
     Kind,       \* "timeout" | "interval"
     Mode,       \* "abortable" | "nonAbortable"
-    Mutation,   \* "none" | "selfCancelDropsStep" | "noAwaitInFlight" | "overlapTick" | "fireAfterUnload"
+    Mutation,   \* "none" | "selfCancelDropsStep" | "noAwaitInFlight" | "overlapTick" | "fireAfterUnload" | "timeoutLeaksStack"
     MaxTicks    \* 1 for timeout, 2 for interval
 
 ASSUME Kind \in {"timeout", "interval"}
 ASSUME Mode \in {"abortable", "nonAbortable"}
 ASSUME Mutation \in {"none", "selfCancelDropsStep", "noAwaitInFlight",
-                     "overlapTick", "fireAfterUnload"}
+                     "overlapTick", "fireAfterUnload", "timeoutLeaksStack"}
 ASSUME MaxTicks \in Nat /\ MaxTicks >= 1
 
 VARIABLES
@@ -105,7 +105,9 @@ SyncComplete ==
     /\ inFlight' = inFlight - 1
     /\ IF Kind = "timeout" \/ cancelled \/ rowState /= "active"
        THEN /\ timerState' = "done"
-            /\ onStack' = FALSE
+            /\ onStack' = IF Mutation = "timeoutLeaksStack" /\ Kind = "timeout" /\ ~cancelled /\ rowState = "active"
+                          THEN onStack
+                          ELSE FALSE
        ELSE /\ timerState' = "idle"
             /\ UNCHANGED onStack
     /\ UNCHANGED <<rowState, unloadStage, pool, cancelled, cancelCalls, ticks,
@@ -144,7 +146,9 @@ AsyncComplete ==
     /\ IF inFlight - 1 = 0
        THEN IF Kind = "timeout" \/ cancelled \/ rowState /= "active"
             THEN /\ timerState' = "done"
-                 /\ onStack' = FALSE
+                 /\ onStack' = IF Mutation = "timeoutLeaksStack" /\ Kind = "timeout" /\ ~cancelled /\ rowState = "active"
+                               THEN onStack
+                               ELSE FALSE
             ELSE /\ timerState' = "idle"
                  /\ UNCHANGED onStack
        ELSE /\ timerState' = "in_flight_async"
