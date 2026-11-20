@@ -187,13 +187,22 @@ const rowUnloadBudget = rowUnloadTimeout === undefined
   : normalizeTimeoutMs(rowUnloadTimeout)
 // Route B: rows whose cleanup timed out in this runtime process are tainted
 // until this runtime restarts (refusing silent in-place reload while the old
-// cleanup may still be running in the background).
-const tainted = new Map() // rowName or key -> { rowName, budgetMs }
+// cleanup may still be running in the background). Keyed by scoped row
+// identity (rowName + canonical scope chain) plus exact session key, so
+// copies with the same `id` in different `instances` scopes stay isolated.
+const taintedScopes = new Map() // taintScopeKey(rowName, chain) -> { rowName, budgetMs }
+const taintedKeys = new Map() // key -> { rowName, budgetMs }
+function taintScopeKey(rowName, chain) {
+  return JSON.stringify([rowName, chain.map(({ id, group }) => [id, group])])
+}
 function markTainted(row) {
   if (!row || rowUnloadBudget === null) return
   const entry = { rowName: row.rowName, budgetMs: rowUnloadBudget }
-  tainted.set(row.rowName, entry)
-  tainted.set(row.key, entry)
+  taintedScopes.set(taintScopeKey(row.rowName, row.chain), entry)
+  taintedKeys.set(row.key, entry)
+}
+function findTaint(rowName, chain, key) {
+  return taintedScopes.get(taintScopeKey(rowName, chain)) ?? taintedKeys.get(key)
 }
 const leafUnloadOptions = context => {
   const owner = rowOf(context?.fiber)?.[1] ?? goneRowOf(context?.fiber)
@@ -227,6 +236,7 @@ async function disposeRowFiber(row) {
     ),
     new Promise(resolve => {
       timer = setTimeout(() => resolve(TIMED_OUT), rowUnloadBudget)
+      timer?.unref?.()
     }),
   ])
   clearTimeout(timer)
@@ -734,8 +744,9 @@ const fiberOf = wrapped => Object.hasOwn(wrapped, 'then') ? Object.getPrototypeO
 // scope), `inject` as extra service names gating the row. With `inject`, the
 // plugin runs inside a gate fiber (`inner`), from the row's latest config.
 async function loadRow([key, entry, config, isolate, inject, exports, place]) {
+  const chain = chainOf(place?.scope)
   const rowName = typeof place?.id === 'string' ? place.id : key
-  const taint = tainted.get(rowName) ?? tainted.get(key)
+  const taint = findTaint(rowName, chain, key)
   if (taint) {
     throw new Error(rowTaintedErrorText({ runtime: runtimeName(), row: taint.rowName, budgetMs: taint.budgetMs }))
   }
@@ -758,7 +769,7 @@ async function loadRow([key, entry, config, isolate, inject, exports, place]) {
     scopedId(name, label)
     scope = scope.isolate(name, isolated(name, label))
   }
-  const row = { key, rowName: typeof place?.id === 'string' ? place.id : key, plugin, fiber: undefined, inner: undefined, config, exports: ids, loading: true, scope, labelOf, chain: chainOf(place?.scope), abort: new AbortController() }
+  const row = { key, rowName, plugin, fiber: undefined, inner: undefined, config, exports: ids, loading: true, scope, labelOf, chain, abort: new AbortController() }
   // Its plugin's file, by which a call of process.exit names it (#688).
   row.file = typeof entry === 'string' && !registeredDefinition(entry) ? realFile(located(entry)) : undefined
   // An error the row leaves unhandled while it loads fails the load (#688):

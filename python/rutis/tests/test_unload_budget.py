@@ -265,6 +265,80 @@ class UnloadBudget(background.TestCase):
         )
         self.assertEqual(log, [])
 
+    def test_multi_instance_same_id_different_scopes_isolates_taint(self):
+        log = []
+        releases = []
+
+        def apply(ctx, config):
+            ctx.provide("forecast", Forecast(config["label"]))
+            if config["hang"]:
+                ev = asyncio.Event()
+                releases.append(ev)
+
+                async def hang():
+                    try:
+                        await ev.wait()
+                    except asyncio.CancelledError:
+                        await ev.wait()
+
+                ctx.effect(hang)
+            else:
+                ctx.effect(lambda: log.append(config["label"]))
+
+        async def run():
+            scope_a = [{"id": "tenant-a", "group": "tenants"}]
+            scope_b = [{"id": "tenant-b", "group": "tenants"}]
+            scope_c = [{"id": "tenant-c", "group": "tenants"}]
+            runtime = Runtime(row_unload_timeout=0.05)
+            runtime._control("mount", {"announce": True})
+            mod = module("budget_scoped_weather", apply)
+            await runtime.load("a1", mod, {"label": "a-v1", "hang": True}, None, {"forecast": "tenant-a"}, scope_a, id="weather")
+            await runtime.load("b1", mod, {"label": "b-v1", "hang": False}, None, {"forecast": "tenant-b"}, scope_b, id="weather")
+
+            written = io.StringIO()
+            with contextlib.redirect_stderr(written):
+                await runtime.unload("a1")
+            self.assertEqual(written.getvalue(), f"{row_unload_timeout_text('py', 'weather', 0.05)}\n")
+
+            # Reloading instance A in scope_a (same key or new key) is refused verbatim.
+            expected_taint = row_tainted_error_text("py", "weather", 0.05)
+            with self.assertRaises(RuntimeError) as same_key:
+                await runtime.load("a1", mod, {"label": "a-v2", "hang": False}, None, {"forecast": "tenant-a"}, scope_a, id="weather")
+            self.assertEqual(str(same_key.exception), expected_taint)
+            with self.assertRaises(RuntimeError) as new_key:
+                await runtime.load("a2", mod, {"label": "a-v2", "hang": False}, None, {"forecast": "tenant-a"}, scope_a, id="weather")
+            self.assertEqual(str(new_key.exception), expected_taint)
+
+            # Instance B shares id="weather" in scope_b: update and unload/reload succeed cleanly.
+            await runtime.update("b1", {"label": "b-v2", "hang": False})
+            self.assertEqual(log, ["b-v1"])
+            self.assertEqual(runtime.lookup("forecast\0tenant-b").today(), "b-v2")
+            await runtime.unload("b1")
+            await runtime.load("b2", mod, {"label": "b-v3", "hang": False}, None, {"forecast": "tenant-b"}, scope_b, id="weather")
+            self.assertEqual(runtime.lookup("forecast\0tenant-b").today(), "b-v3")
+            await runtime.unload("b2")
+            self.assertEqual(log, ["b-v1", "b-v2", "b-v3"])
+
+            # rows.update that times out also taints only its own scope and refuses the reload step.
+            await runtime.load("c1", mod, {"label": "c-v1", "hang": True}, None, {"forecast": "tenant-c"}, scope_c, id="weather")
+            update_written = io.StringIO()
+            with contextlib.redirect_stderr(update_written):
+                with self.assertRaises(RuntimeError) as upd_err:
+                    await runtime.update("c1", {"label": "c-v2", "hang": False})
+            self.assertEqual(str(upd_err.exception), expected_taint)
+            self.assertEqual(update_written.getvalue(), f"{row_unload_timeout_text('py', 'weather', 0.05)}\n")
+
+            # Instance B still loads cleanly after scope_c timed out too.
+            await runtime.load("b3", mod, {"label": "b-v4", "hang": False}, None, {"forecast": "tenant-b"}, scope_b, id="weather")
+            await runtime.unload("b3")
+            self.assertEqual(log, ["b-v1", "b-v2", "b-v3", "b-v4"])
+
+            for ev in releases:
+                ev.set()
+            await asyncio.sleep(0)
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main()

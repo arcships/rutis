@@ -98,6 +98,10 @@ function chainOf(scope: unknown): Scope[] {
   return scope.map(({ id, group }) => ({ id, group }))
 }
 
+function taintScopeKey(rowName: string, chain: Scope[]): string {
+  return JSON.stringify([rowName, chain.map(({ id, group }) => [id, group])])
+}
+
 // The methods of a service no declaration describes: its own and inherited
 // functions, up to Object's, not the constructor; a property that is not a
 // function hides an inherited function of the same name. All async.
@@ -198,8 +202,12 @@ export class Runtime {
   #deadline = shutdownDeadline()
   #rowUnloadTimeout?: number | null
   // Route B: rows whose cleanup timed out in this runtime process are tainted
-  // until this runtime restarts (refusing silent in-place reload).
-  #tainted = new Map<string, { rowName: string, budgetMs: number }>()
+  // until this runtime restarts (refusing silent in-place reload). Keyed by
+  // scoped row identity (rowName + canonical scope chain) plus exact session
+  // key, so copies with the same `id` in different `instances` scopes stay
+  // isolated.
+  #taintedScopes = new Map<string, { rowName: string, budgetMs: number }>()
+  #taintedKeys = new Map<string, { rowName: string, budgetMs: number }>()
   #project: string
   #modules = new Modules()
   #rows = new Map<string, Row>()
@@ -228,6 +236,16 @@ export class Runtime {
 
   #rowUnloadBudget(): number | null {
     return this.#rowUnloadTimeout !== undefined ? this.#rowUnloadTimeout : rowUnloadDeadline()
+  }
+
+  #markTainted(rowName: string, chain: Scope[], key: string, budgetMs: number) {
+    const entry = { rowName, budgetMs }
+    this.#taintedScopes.set(taintScopeKey(rowName, chain), entry)
+    this.#taintedKeys.set(key, entry)
+  }
+
+  #findTaint(rowName: string, chain: Scope[], key: string) {
+    return this.#taintedScopes.get(taintScopeKey(rowName, chain)) ?? this.#taintedKeys.get(key)
   }
 
   // Connected: the bus registers and dispatches through the host.
@@ -395,13 +413,14 @@ export class Runtime {
   // ── Rows ──────────────────────────────────────────────────────
 
   async load(key: string, entry: unknown, config: unknown, isolate: Array<[string, string]> | null, exports: Row['exports'] | null, scope?: unknown, id?: unknown, inject?: string[] | null) {
+    const chain = chainOf(scope)
     const shownRow = typeof id === 'string' ? id : key
-    const taint = this.#tainted.get(shownRow) ?? this.#tainted.get(key)
+    const taint = this.#findTaint(shownRow, chain, key)
     if (taint) throw new Error(rowTaintedErrorText(this.name, taint.rowName, taint.budgetMs))
     if (this.#rows.has(key)) throw new Error(`row ${key} is already loaded`)
     // Descriptors and reported lines call the row by its id (protocol §4.2).
     this.#bus.nameRow(key, id)
-    const row: Row = { key, entry, config, exports: exports ?? {}, isolate: new Map(), steps: [], chain: chainOf(scope), abort: new AbortController(), provided: [], announced: [], pending: [], inject: inject ?? null }
+    const row: Row = { key, entry, config, exports: exports ?? {}, isolate: new Map(), steps: [], chain, abort: new AbortController(), provided: [], announced: [], pending: [], inject: inject ?? null }
     for (const [name, label] of isolate ?? []) { scopedId(name, label); row.isolate.set(name, label) }
     for (const name of Object.keys(row.exports)) {
       if (name.includes('#')) throw new Error(`service name ${name} cannot be projected`)
@@ -543,9 +562,7 @@ export class Runtime {
         const TIMED_OUT = Symbol('row-unload-timeout')
         const reportTimeout = () => {
           timedOut = true
-          const entry = { rowName: shownRow, budgetMs: budget }
-          this.#tainted.set(shownRow, entry)
-          this.#tainted.set(key, entry)
+          this.#markTainted(shownRow, row.chain, key, budget)
           say(`${rowUnloadTimeoutText(this.name, shownRow, budget)}\n`)
         }
         for (const step of steps) {
@@ -576,6 +593,7 @@ export class Runtime {
             ),
             new Promise<typeof TIMED_OUT>(resolve => {
               timer = setTimeout(() => resolve(TIMED_OUT), remaining)
+              timer?.unref?.()
             }),
           ])
           if (timer !== undefined) clearTimeout(timer)

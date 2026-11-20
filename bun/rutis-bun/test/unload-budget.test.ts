@@ -205,3 +205,67 @@ export function apply(ctx) {
   })
   delete (globalThis as any).__bunErrLog
 })
+
+test('Route B: multi-instance same-id taint is scoped so a timeout in scope A does not block scope B', async () => {
+  const dir = project({
+    'instanced.ts': `
+export function apply(ctx, config) {
+  ctx.provide('forecast', { today: () => config.label })
+  if (config.hang) {
+    ctx.effect(() => new Promise(resolve => { globalThis.__bunScopedRelease = resolve }))
+  } else {
+    ctx.effect(() => { globalThis.__bunScopedLog.push(config.label) })
+  }
+}
+`,
+  })
+  ;(globalThis as any).__bunScopedLog = []
+  const scopeA = [{ id: 'tenant-a', group: 'tenants' }]
+  const scopeB = [{ id: 'tenant-b', group: 'tenants' }]
+  const runtime = new Runtime(dir, { rowUnloadTimeout: 50 })
+  runtime.dispatch('', 'mount', { announce: true })
+  try {
+    await runtime.load('a1', './instanced.ts', { label: 'a-v1', hang: true }, [['forecast', 'tenant-a']], null, scopeA, 'weather')
+    await runtime.load('b1', './instanced.ts', { label: 'b-v1', hang: false }, [['forecast', 'tenant-b']], null, scopeB, 'weather')
+
+    const stderr = await captureStderr(() => runtime.unload('a1').then(() => {}))
+    expect(stderr).toBe(`${rowUnloadTimeoutText('bun', 'weather', 50)}\n`)
+
+    // Reloading instance A in scopeA (same key or new key) fails with verbatim error.
+    const expectedTaint = rowTaintedErrorText('bun', 'weather', 50)
+    await expect(
+      runtime.load('a1', './instanced.ts', { label: 'a-v2', hang: false }, [['forecast', 'tenant-a']], null, scopeA, 'weather'),
+    ).rejects.toThrow(expectedTaint)
+    await expect(
+      runtime.load('a2', './instanced.ts', { label: 'a-v2', hang: false }, [['forecast', 'tenant-a']], null, scopeA, 'weather'),
+    ).rejects.toThrow(expectedTaint)
+
+    // Instance B has the same id ('weather') in scopeB: update and unload/reload succeed cleanly.
+    await runtime.update('b1', { label: 'b-v2', hang: false })
+    expect((globalThis as any).__bunScopedLog).toEqual(['b-v1'])
+    expect((runtime.lookup('forecast\0tenant-b') as any).today()).toBe('b-v2')
+    await runtime.unload('b1')
+    await runtime.load('b2', './instanced.ts', { label: 'b-v3', hang: false }, [['forecast', 'tenant-b']], null, scopeB, 'weather')
+    expect((runtime.lookup('forecast\0tenant-b') as any).today()).toBe('b-v3')
+    await runtime.unload('b2')
+    expect((globalThis as any).__bunScopedLog).toEqual(['b-v1', 'b-v2', 'b-v3'])
+
+    // rows.update that times out also taints only its own scope and refuses the reload step.
+    const scopeC = [{ id: 'tenant-c', group: 'tenants' }]
+    await runtime.load('c1', './instanced.ts', { label: 'c-v1', hang: true }, [['forecast', 'tenant-c']], null, scopeC, 'weather')
+    const updateStderr = await captureStderr(async () => {
+      await expect(runtime.update('c1', { label: 'c-v2', hang: false })).rejects.toThrow(expectedTaint)
+    })
+    expect(updateStderr).toBe(`${rowUnloadTimeoutText('bun', 'weather', 50)}\n`)
+    // scopeB still loads cleanly after scopeC timed out too.
+    await runtime.load('b3', './instanced.ts', { label: 'b-v4', hang: false }, [['forecast', 'tenant-b']], null, scopeB, 'weather')
+    await runtime.unload('b3')
+    expect((globalThis as any).__bunScopedLog).toEqual(['b-v1', 'b-v2', 'b-v3', 'b-v4'])
+  } finally {
+    ;(globalThis as any).__bunScopedRelease?.()
+    delete (globalThis as any).__bunScopedLog
+    delete (globalThis as any).__bunScopedRelease
+    await runtime.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

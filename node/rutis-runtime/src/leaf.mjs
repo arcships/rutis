@@ -225,6 +225,7 @@ export function toCordis(spec, rowInject = [], providerOf, unloadOptions) {
             ),
             new Promise(resolve => {
               timer = setTimeout(() => resolve(TIMED_OUT), remaining)
+              timer?.unref?.()
             }),
           ])
           clearTimeout(timer)

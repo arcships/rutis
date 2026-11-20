@@ -121,8 +121,8 @@ function inProcess(anchor, { env = {}, rowUnloadTimeout } = {}) {
   return {
     started: async () => { await opened; await new Promise(resolve => setImmediate(resolve)) },
     mount: () => ask('mount', data({ plugins: [], announce: true, scope: [] })),
-    load: (key, file, id = key, config = {}) =>
-      ask('rows.load', data([key, file, config, [], [], {}, { scope: [], id }])),
+    load: (key, file, id = key, config = {}, scope = [], isolate = []) =>
+      ask('rows.load', data([key, file, config, isolate, [], {}, { scope, id }])),
     unload: key => ask('rows.unload', data([key])),
     inspect: async () => (await ask('inspect', data(null))).value.value,
     stop: async () => {
@@ -380,6 +380,78 @@ export function apply(ctx) {
     await restarted.unload('c1')
     assert.equal(await restarted.stop(), 0)
   } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('Route B: multi-instance same-id taint is scoped so a timeout in scope A does not block scope B', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rutis-node-budget-scoped-'))
+  const file = name => join(dir, name)
+  writeFileSync(file('anchor.mjs'), 'export function apply() {}\n')
+  writeFileSync(file('instanced-weather.mjs'), `
+import { definePlugin } from '${SDK_URL}'
+export default definePlugin({
+  name: 'weather',
+  apply(ctx, config) {
+    ctx.provide('forecast', { today: () => config.label })
+    if (config.hang) {
+      ctx.effect(() => new Promise(resolve => { globalThis.__nodeScopedRelease = resolve }))
+    } else {
+      ctx.effect(() => { globalThis.__nodeScopedLog.push(config.label) })
+    }
+  },
+})
+`)
+  globalThis.__nodeScopedLog = []
+  const scopeA = [{ id: 'tenant-a', group: 'tenants' }]
+  const scopeB = [{ id: 'tenant-b', group: 'tenants' }]
+  const rt = inProcess(file('anchor.mjs'), {
+    env: { RUTIS_ROW_UNLOAD_TIMEOUT: '0.05', RUTIS_TEST_INSPECT: '1' },
+  })
+  try {
+    await rt.started()
+    await rt.mount()
+    await rt.load('a1', file('instanced-weather.mjs'), 'weather', { label: 'a-v1', hang: true }, scopeA, [['forecast', 'tenant-a']])
+    await rt.load('b1', file('instanced-weather.mjs'), 'weather', { label: 'b-v1', hang: false }, scopeB, [['forecast', 'tenant-b']])
+
+    const stderr = await captureStderr(async () => {
+      await rt.unload('a1')
+    })
+    assert.equal(
+      stderr,
+      'runtime node: cleanup of row weather did not finish within 0.05 s; skipped remaining cleanups and withdrew its services; reloading row weather in this runtime is blocked until the runtime restarts (the stuck cleanup may still be running; fix it or restart the runtime)\n',
+    )
+
+    // Reloading instance A in scopeA (same key or new key) is refused verbatim.
+    const expectedTaint = rowTaintedErrorText({ runtime: 'node', row: 'weather', budgetMs: 50 })
+    await assert.rejects(
+      rt.load('a1', file('instanced-weather.mjs'), 'weather', { label: 'a-v2', hang: false }, scopeA, [['forecast', 'tenant-a']]),
+      error => error.message === expectedTaint,
+    )
+    await assert.rejects(
+      rt.load('a2', file('instanced-weather.mjs'), 'weather', { label: 'a-v2', hang: false }, scopeA, [['forecast', 'tenant-a']]),
+      error => error.message === expectedTaint,
+    )
+
+    // Instance B has the same id ('weather') in scopeB: unloading and reloading succeeds cleanly.
+    await rt.unload('b1')
+    assert.deepEqual(globalThis.__nodeScopedLog, ['b-v1'])
+    await rt.load('b1', file('instanced-weather.mjs'), 'weather', { label: 'b-v2', hang: false }, scopeB, [['forecast', 'tenant-b']])
+    await rt.unload('b1')
+    await rt.load('b2', file('instanced-weather.mjs'), 'weather', { label: 'b-v3', hang: false }, scopeB, [['forecast', 'tenant-b']])
+    await rt.unload('b2')
+    assert.deepEqual(globalThis.__nodeScopedLog, ['b-v1', 'b-v2', 'b-v3'])
+
+    // Top-level 'weather' (empty scope []) is also distinct from scopeA and loads cleanly.
+    await rt.load('root1', file('instanced-weather.mjs'), 'weather', { label: 'root-v1', hang: false }, [], [['forecast', 'root']])
+    await rt.unload('root1')
+    assert.deepEqual(globalThis.__nodeScopedLog, ['b-v1', 'b-v2', 'b-v3', 'root-v1'])
+
+    globalThis.__nodeScopedRelease?.()
+    assert.equal(await rt.stop(), 0)
+  } finally {
+    delete globalThis.__nodeScopedLog
+    delete globalThis.__nodeScopedRelease
     rmSync(dir, { recursive: true, force: true })
   }
 })
