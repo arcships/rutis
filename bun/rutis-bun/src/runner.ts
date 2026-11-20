@@ -83,7 +83,11 @@ function formatTimeoutSeconds(ms: number): string {
 }
 
 export function rowUnloadTimeoutText(runtime: string, row: string, budgetMs: number): string {
-  return `runtime ${runtime}: cleanup of row ${row} did not finish within ${formatTimeoutSeconds(budgetMs)} s; skipped remaining cleanups and withdrew its services (the stuck cleanup may still be running; fix it or restart the runtime)`
+  return `runtime ${runtime}: cleanup of row ${row} did not finish within ${formatTimeoutSeconds(budgetMs)} s; skipped remaining cleanups and withdrew its services; reloading row ${row} in this runtime is blocked until the runtime restarts (the stuck cleanup may still be running; fix it or restart the runtime)`
+}
+
+export function rowTaintedErrorText(runtime: string, row: string, budgetMs: number): string {
+  return `row ${row} cannot be loaded in runtime ${runtime}: its previous cleanup did not finish within ${formatTimeoutSeconds(budgetMs)} s and may still be running; restart the runtime (or isolate this row in its own runtime) before loading it again`
 }
 
 interface Scope { id: string, group: string }
@@ -193,6 +197,9 @@ export class Runtime {
   #blocking = watchBlocking({ runtime: () => this.name })
   #deadline = shutdownDeadline()
   #rowUnloadTimeout?: number | null
+  // Route B: rows whose cleanup timed out in this runtime process are tainted
+  // until this runtime restarts (refusing silent in-place reload).
+  #tainted = new Map<string, { rowName: string, budgetMs: number }>()
   #project: string
   #modules = new Modules()
   #rows = new Map<string, Row>()
@@ -388,6 +395,9 @@ export class Runtime {
   // ── Rows ──────────────────────────────────────────────────────
 
   async load(key: string, entry: unknown, config: unknown, isolate: Array<[string, string]> | null, exports: Row['exports'] | null, scope?: unknown, id?: unknown, inject?: string[] | null) {
+    const shownRow = typeof id === 'string' ? id : key
+    const taint = this.#tainted.get(shownRow) ?? this.#tainted.get(key)
+    if (taint) throw new Error(rowTaintedErrorText(this.name, taint.rowName, taint.budgetMs))
     if (this.#rows.has(key)) throw new Error(`row ${key} is already loaded`)
     // Descriptors and reported lines call the row by its id (protocol §4.2).
     this.#bus.nameRow(key, id)
@@ -533,6 +543,9 @@ export class Runtime {
         const TIMED_OUT = Symbol('row-unload-timeout')
         const reportTimeout = () => {
           timedOut = true
+          const entry = { rowName: shownRow, budgetMs: budget }
+          this.#tainted.set(shownRow, entry)
+          this.#tainted.set(key, entry)
           say(`${rowUnloadTimeoutText(this.name, shownRow, budget)}\n`)
         }
         for (const step of steps) {

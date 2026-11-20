@@ -1,0 +1,7 @@
+# configuration  expected TLC outcome (see README.md)
+budget-route-b ok
+budget-route-b-cordis ok
+budget-route-a violated:NoConcurrentSameRowInSharedProcess
+budget-mut-skip-withdraw violated:NoOrphanWithdrawal
+budget-mut-continue-serial violated:SerialCleanupsWithinGen
+budget-mut-corrupt-new-gen violated:NoCrossGenCorruption

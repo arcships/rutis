@@ -6,7 +6,7 @@ import { Worker } from 'node:worker_threads'
 import { Process } from './client.mjs'
 import { toJsonSchema } from './schema.mjs'
 import { cordisConfig } from './cordis-config.mjs'
-import { isLeaf, normalizeTimeoutMs, rowUnloadDeadline, rowUnloadTimeoutText, supported, toCordis } from './leaf.mjs'
+import { isLeaf, normalizeTimeoutMs, rowTaintedErrorText, rowUnloadDeadline, rowUnloadTimeoutText, supported, toCordis } from './leaf.mjs'
 import { Bus } from './events.mjs'
 import { LEAF_FIBERS, install } from './cordis-events.mjs'
 import { rowTracking, install as handleUnhandled, failureText, kindText, realFile, reportText, stackFiles, unhandledError } from './unhandled.mjs'
@@ -185,6 +185,16 @@ const deadline = shutdownDeadline()
 const rowUnloadBudget = rowUnloadTimeout === undefined
   ? rowUnloadDeadline(env)
   : normalizeTimeoutMs(rowUnloadTimeout)
+// Route B: rows whose cleanup timed out in this runtime process are tainted
+// until this runtime restarts (refusing silent in-place reload while the old
+// cleanup may still be running in the background).
+const tainted = new Map() // rowName or key -> { rowName, budgetMs }
+function markTainted(row) {
+  if (!row || rowUnloadBudget === null) return
+  const entry = { rowName: row.rowName, budgetMs: rowUnloadBudget }
+  tainted.set(row.rowName, entry)
+  tainted.set(row.key, entry)
+}
 const leafUnloadOptions = context => {
   const owner = rowOf(context?.fiber)?.[1] ?? goneRowOf(context?.fiber)
   const target = owner ? `row ${owner.rowName}` : `plugin ${context?.fiber?.name ?? 'leaf'}`
@@ -192,6 +202,8 @@ const leafUnloadOptions = context => {
     budgetMs: rowUnloadBudget,
     runtime: runtimeName(),
     target,
+    blocksReload: Boolean(owner),
+    onTimeout: () => markTainted(owner),
     report: line => say(`${line}\n`),
   }
 }
@@ -202,8 +214,8 @@ async function disposeRowFiber(row) {
   }
   // Native Cordis fiber with opt-in row unload budget: Cordis runs all
   // disposables in one Promise.all that cannot be interrupted, so race
-  // dispose() against the budget; on timeout stop waiting, report, and let
-  // the caller's finally block finish teardown.
+  // dispose() against the budget; on timeout stop waiting, taint the row,
+  // report, and let the caller's finally block finish teardown.
   const TIMED_OUT = Symbol('row-unload-timeout')
   const disposingFiber = Promise.resolve(row.fiber.dispose())
   disposingFiber.then(() => {}, () => {})
@@ -219,7 +231,8 @@ async function disposeRowFiber(row) {
   ])
   clearTimeout(timer)
   if (winner === TIMED_OUT) {
-    say(`${rowUnloadTimeoutText({ runtime: runtimeName(), target: `row ${row.rowName}`, budgetMs: rowUnloadBudget, native: true })}\n`)
+    markTainted(row)
+    say(`${rowUnloadTimeoutText({ runtime: runtimeName(), target: `row ${row.rowName}`, budgetMs: rowUnloadBudget, native: true, blocksReload: true })}\n`)
     return
   }
   if (!winner.ok) throw winner.error
@@ -721,6 +734,11 @@ const fiberOf = wrapped => Object.hasOwn(wrapped, 'then') ? Object.getPrototypeO
 // scope), `inject` as extra service names gating the row. With `inject`, the
 // plugin runs inside a gate fiber (`inner`), from the row's latest config.
 async function loadRow([key, entry, config, isolate, inject, exports, place]) {
+  const rowName = typeof place?.id === 'string' ? place.id : key
+  const taint = tainted.get(rowName) ?? tainted.get(key)
+  if (taint) {
+    throw new Error(rowTaintedErrorText({ runtime: runtimeName(), row: taint.rowName, budgetMs: taint.budgetMs }))
+  }
   if (rows.has(key)) throw new Error(`row ${key} is already loaded`)
   const names = Object.keys(exports ?? {})
   // A name the row isolates is exported in the scope of its label.

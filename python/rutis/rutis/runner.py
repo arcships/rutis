@@ -120,8 +120,19 @@ def row_unload_timeout_text(runtime: str, row: str, seconds: float) -> str:
     single-row unload budget."""
     return (
         f"runtime {runtime}: cleanup of row {row} did not finish within {seconds:g} s; "
-        "skipped remaining cleanups and withdrew its services "
+        f"skipped remaining cleanups and withdrew its services; "
+        f"reloading row {row} in this runtime is blocked until the runtime restarts "
         "(the stuck cleanup may still be running; fix it or restart the runtime)"
+    )
+
+
+def row_tainted_error_text(runtime: str, row: str, seconds: float) -> str:
+    """Error raised when a row whose previous cleanup timed out is loaded
+    again in the same runtime process before the runtime restarts (Route B)."""
+    return (
+        f"row {row} cannot be loaded in runtime {runtime}: "
+        f"its previous cleanup did not finish within {seconds:g} s and may still be running; "
+        "restart the runtime (or isolate this row in its own runtime) before loading it again"
     )
 
 
@@ -500,6 +511,9 @@ class Runtime:
         self._row_unload_timeout = (
             _UNSET if row_unload_timeout is _UNSET else _normalize_timeout(row_unload_timeout)
         )
+        # Route B: rows whose cleanup timed out in this runtime process are
+        # tainted until this runtime restarts (refusing silent in-place reload).
+        self._tainted: dict[str, tuple[str, float]] = {}
         self.rows: dict[str, Row] = {}
         self.services: dict[str, tuple[str, Any]] = {}  # id -> (row key, object)
         self.hosts: dict[str, HostProxy] = {}  # id -> proxy
@@ -668,6 +682,10 @@ class Runtime:
         id: str | None = None,
         inject: list | None = None,
     ) -> None:
+        shown_row = id if isinstance(id, str) else key
+        taint = self._tainted.get(shown_row) or self._tainted.get(key)
+        if taint is not None:
+            raise RuntimeError(row_tainted_error_text(self._runtime_name(), taint[0], taint[1]))
         if key in self.rows:
             raise ValueError(f"row {key} is already loaded")
         if self.loop is None:
@@ -938,6 +956,8 @@ class Runtime:
                     remaining = max(0.0, deadline - loop.time())
                     if remaining <= 0.0:
                         timed_out = True
+                        self._tainted[shown_row] = (shown_row, budget)
+                        self._tainted[key] = (shown_row, budget)
                         say(row_unload_timeout_text(self._runtime_name(), shown_row, budget))
                         continue
                     task = asyncio.create_task(_settle_step(step.run))
@@ -952,6 +972,8 @@ class Runtime:
                         task.cancel()
                         task.add_done_callback(_consume_task_result)
                         timed_out = True
+                        self._tainted[shown_row] = (shown_row, budget)
+                        self._tainted[key] = (shown_row, budget)
                         say(row_unload_timeout_text(self._runtime_name(), shown_row, budget))
                     elif not task.cancelled():
                         try:

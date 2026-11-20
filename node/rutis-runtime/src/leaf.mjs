@@ -28,12 +28,20 @@ export function formatTimeoutSeconds(ms) {
   return String(Number((ms / 1000).toPrecision(12)))
 }
 
-export function rowUnloadTimeoutText({ runtime = 'node', target, budgetMs, native = false }) {
+export function rowUnloadTimeoutText({ runtime = 'node', target, budgetMs, native = false, blocksReload = false }) {
   const seconds = formatTimeoutSeconds(budgetMs)
   const action = native
     ? 'stopped waiting and finished unloading the row'
     : 'skipped remaining cleanups and withdrew its services'
-  return `runtime ${runtime}: cleanup of ${target} did not finish within ${seconds} s; ${action} (the stuck cleanup may still be running; fix it or restart the runtime)`
+  const reloadNote = blocksReload
+    ? `; reloading ${target} in this runtime is blocked until the runtime restarts`
+    : ''
+  return `runtime ${runtime}: cleanup of ${target} did not finish within ${seconds} s; ${action}${reloadNote} (the stuck cleanup may still be running; fix it or restart the runtime)`
+}
+
+export function rowTaintedErrorText({ runtime = 'node', row, budgetMs }) {
+  const seconds = formatTimeoutSeconds(budgetMs)
+  return `row ${row} cannot be loaded in runtime ${runtime}: its previous cleanup did not finish within ${seconds} s and may still be running; restart the runtime (or isolate this row in its own runtime) before loading it again`
 }
 
 function resolveUnloadOptions(unloadOptions, context, spec) {
@@ -43,7 +51,9 @@ function resolveUnloadOptions(unloadOptions, context, spec) {
       budgetMs: normalizeTimeoutMs(resolved.budgetMs),
       runtime: resolved.runtime ?? 'node',
       target: resolved.target ?? `plugin ${spec.name ?? 'leaf'}`,
+      blocksReload: Boolean(resolved.blocksReload),
       report: resolved.report ?? (line => say(`${line}\n`)),
+      onTimeout: resolved.onTimeout,
     }
   }
   const hasExplicit = unloadOptions !== null && typeof unloadOptions === 'object' && 'rowUnloadTimeout' in unloadOptions
@@ -51,7 +61,9 @@ function resolveUnloadOptions(unloadOptions, context, spec) {
     budgetMs: hasExplicit ? normalizeTimeoutMs(unloadOptions.rowUnloadTimeout) : rowUnloadDeadline(),
     runtime: unloadOptions?.runtimeName ?? 'node',
     target: unloadOptions?.rowName ? `row ${unloadOptions.rowName}` : `plugin ${spec.name ?? 'leaf'}`,
+    blocksReload: Boolean(unloadOptions?.blocksReload),
     report: unloadOptions?.report ?? (line => say(`${line}\n`)),
+    onTimeout: unloadOptions?.onTimeout,
   }
 }
 
@@ -164,7 +176,7 @@ export function toCordis(spec, rowInject = [], providerOf, unloadOptions) {
       const drain = async () => {
         draining = true
         const ordered = steps.splice(0).reverse()
-        const { budgetMs, runtime, target, report } = resolveUnloadOptions(unloadOptions, context, spec)
+        const { budgetMs, runtime, target, blocksReload, report, onTimeout } = resolveUnloadOptions(unloadOptions, context, spec)
         // Default (unset): run every step without a deadline, preserving
         // Cordis / existing unload semantics.
         if (budgetMs === null) {
@@ -182,7 +194,8 @@ export function toCordis(spec, rowInject = [], providerOf, unloadOptions) {
         const TIMED_OUT = Symbol('row-unload-timeout')
         const reportTimeout = () => {
           timedOut = true
-          report(rowUnloadTimeoutText({ runtime, target, budgetMs, native: false }))
+          onTimeout?.()
+          report(rowUnloadTimeoutText({ runtime, target, budgetMs, native: false, blocksReload }))
         }
         for (const step of ordered) {
           if (step.withdrawal) {
@@ -241,6 +254,9 @@ export function toCordis(spec, rowInject = [], providerOf, unloadOptions) {
           return read(name)
         },
         provide: (name, value) => {
+          // Refuse late provide from an unloading or timed-out cleanup before
+          // touching Cordis's store or this plugin's map (NoCrossGenCorruption).
+          if (draining) throw new Error(`plugin ${spec.name ?? 'leaf'} is not active`)
           let withdraw
           try {
             withdraw = context.provide(name, value)

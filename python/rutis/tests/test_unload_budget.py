@@ -1,5 +1,5 @@
-"""PoC tests for opt-in per-row unload cleanup budget in Python
-(docs/design-row-unload-budget-2026-11-20.md, #1323)."""
+"""PoC tests for opt-in per-row unload cleanup budget & Route B taint semantics
+in Python (docs/design-row-unload-budget-2026-11-20.md, #1323)."""
 
 import asyncio
 import contextlib
@@ -12,7 +12,8 @@ import unittest
 
 import background
 
-from rutis.runner import Runtime, row_unload_deadline, row_unload_timeout_text
+from rutis.peer import BindingError
+from rutis.runner import Runtime, row_tainted_error_text, row_unload_deadline, row_unload_timeout_text
 
 
 class Forecast:
@@ -71,37 +72,91 @@ class UnloadBudget(background.TestCase):
         self.assertEqual(log, ["delayed", "earlier"])
         self.assertEqual(stderr, "")
 
-    def test_opt_in_budget_times_out_skips_later_cleanups_and_withdraws_services(self):
+    def test_route_b_taints_row_until_restart_keeps_healthy_sibling_unaffected_and_isolates_late_actions(self):
         log = []
+        healthy_log = []
+        late_events = []
+        release = None
 
-        def apply(ctx, config):
+        def apply_weather(ctx, config):
             ctx.effect(lambda: log.append("earlier"))
-            ctx.provide("forecast", Forecast(config["label"]))
+            withdraw = ctx.provide("forecast", Forecast(config["label"]))
             if config["hang"]:
 
                 async def hang():
-                    await asyncio.Event().wait()
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        await release.wait()
+                    # Lingering old cleanup wakes up later and tries to mutate tables:
+                    # old withdraw handle must leave sibling's service untouched,
+                    # and late provide / emit / exception are safely refused / absorbed.
+                    withdraw()
+                    try:
+                        ctx.provide("forecast", Forecast("stale"))
+                    except RuntimeError as error:
+                        late_events.append(f"provide:{error}")
+                    try:
+                        ctx.emit("weather/late")
+                    except BindingError:
+                        late_events.append("emit:BindingError")
+                    raise RuntimeError("late cleanup boom")
 
                 ctx.effect(hang)
 
+        def apply_metrics(ctx, config):
+            ctx.provide("forecast", Forecast("healthy-sibling"))
+            ctx.effect(lambda: healthy_log.append("metrics-cleaned"))
+
         async def run():
+            nonlocal release
+            release = asyncio.Event()
             runtime = Runtime(row_unload_timeout=0.05)
             runtime._control("mount", {"announce": True})
-            mod = module("budget_hang", apply)
-            await runtime.load("w", mod, {"label": "v1", "hang": True}, None, id="weather")
+            weather_mod = module("budget_route_b_weather", apply_weather)
+            metrics_mod = module("budget_route_b_metrics", apply_metrics)
+            await runtime.load("w1", weather_mod, {"label": "v1", "hang": True}, None, id="weather")
             self.assertIn("forecast", runtime.services)
             written = io.StringIO()
             started = time.monotonic()
             with contextlib.redirect_stderr(written):
-                await runtime.unload("w")
+                await runtime.unload("w1")
             elapsed = time.monotonic() - started
             self.assertLess(elapsed, 1.0, "unload returned promptly after budget")
             self.assertEqual(runtime.services, {}, "provided service was withdrawn")
             self.assertEqual(runtime.rows, {}, "row left runtime table")
-            # Reloading the same row and service name succeeds cleanly.
-            await runtime.load("w", mod, {"label": "v2", "hang": False}, None, id="weather")
-            self.assertEqual(runtime.lookup("forecast").today(), "v2")
-            await runtime.unload("w")
+
+            # Route B: reloading the tainted row in this runtime (same key or fresh key) fails explicitly.
+            expected_taint = row_tainted_error_text("py", "weather", 0.05)
+            self.assertEqual(
+                expected_taint,
+                "row weather cannot be loaded in runtime py: its previous cleanup did not finish within 0.05 s "
+                "and may still be running; restart the runtime (or isolate this row in its own runtime) "
+                "before loading it again",
+            )
+            with self.assertRaises(RuntimeError) as same_key:
+                await runtime.load("w1", weather_mod, {"label": "v2", "hang": False}, None, id="weather")
+            self.assertEqual(str(same_key.exception), expected_taint)
+            with self.assertRaises(RuntimeError) as new_key:
+                await runtime.load("w2", weather_mod, {"label": "v2", "hang": False}, None, id="weather")
+            self.assertEqual(str(new_key.exception), expected_taint)
+
+            # Unrelated healthy sibling loads, takes over the withdrawn service, and is untouched by late actions.
+            await runtime.load("m1", metrics_mod, {}, None, id="metrics")
+            self.assertEqual(runtime.lookup("forecast").today(), "healthy-sibling")
+            release.set()
+            await asyncio.sleep(0.01)
+            self.assertEqual(late_events, ["provide:row weather is not active", "emit:BindingError"])
+            self.assertEqual(runtime.lookup("forecast").today(), "healthy-sibling")
+            await runtime.unload("m1")
+            self.assertEqual(healthy_log, ["metrics-cleaned"])
+
+            # Fresh runtime (after restart) clears taint and loads weather cleanly.
+            restarted = Runtime(row_unload_timeout=0.05)
+            restarted._control("mount", {"announce": True})
+            await restarted.load("w1", weather_mod, {"label": "v2", "hang": False}, None, id="weather")
+            self.assertEqual(restarted.lookup("forecast").today(), "v2")
+            await restarted.unload("w1")
             return written.getvalue()
 
         stderr = asyncio.run(run())
@@ -109,13 +164,14 @@ class UnloadBudget(background.TestCase):
         self.assertEqual(
             expected,
             "runtime py: cleanup of row weather did not finish within 0.05 s; "
-            "skipped remaining cleanups and withdrew its services "
+            "skipped remaining cleanups and withdrew its services; "
+            "reloading row weather in this runtime is blocked until the runtime restarts "
             "(the stuck cleanup may still be running; fix it or restart the runtime)\n",
         )
         self.assertEqual(stderr, expected)
-        self.assertEqual(log, ["earlier"], "earlier skipped on timeout, ran on clean reload unload")
+        self.assertEqual(log, ["earlier"], "earlier skipped on timeout, ran cleanly after runtime restart")
 
-    def test_uncooperative_coroutine_trapping_cancelled_error_still_times_out_and_withdraws(self):
+    def test_uncooperative_coroutine_via_env_var_times_out_taints_and_withdraws(self):
         # Proves we use asyncio.wait + cancel(), not asyncio.wait_for (which
         # blocks forever if a coroutine catches CancelledError and keeps waiting).
         log = []
@@ -141,7 +197,8 @@ class UnloadBudget(background.TestCase):
             try:
                 runtime = Runtime()
                 runtime._control("mount", {"announce": True})
-                await runtime.load("w", module("budget_stubborn", apply), None, None, id="weather")
+                mod = module("budget_stubborn", apply)
+                await runtime.load("w", mod, None, None, id="weather")
                 written = io.StringIO()
                 started = time.monotonic()
                 with contextlib.redirect_stderr(written):
@@ -149,6 +206,8 @@ class UnloadBudget(background.TestCase):
                 elapsed = time.monotonic() - started
                 self.assertLess(elapsed, 1.0, "uncooperative coroutine did not block unload")
                 self.assertEqual(runtime.services, {}, "provided service still withdrawn")
+                with self.assertRaisesRegex(RuntimeError, "^row weather cannot be loaded in runtime py:"):
+                    await runtime.load("w2", mod, None, None, id="weather")
                 # Let the abandoned task exit cleanly before the event loop closes.
                 release.set()
                 await asyncio.sleep(0)
@@ -163,7 +222,8 @@ class UnloadBudget(background.TestCase):
         self.assertEqual(
             stderr,
             "runtime py: cleanup of row weather did not finish within 0.05 s; "
-            "skipped remaining cleanups and withdrew its services "
+            "skipped remaining cleanups and withdrew its services; "
+            "reloading row weather in this runtime is blocked until the runtime restarts "
             "(the stuck cleanup may still be running; fix it or restart the runtime)\n",
         )
         self.assertEqual(log, [])
@@ -199,7 +259,8 @@ class UnloadBudget(background.TestCase):
         self.assertEqual(
             stderr,
             "runtime py: cleanup of row weather did not finish within 0.05 s; "
-            "skipped remaining cleanups and withdrew its services "
+            "skipped remaining cleanups and withdrew its services; "
+            "reloading row weather in this runtime is blocked until the runtime restarts "
             "(the stuck cleanup may still be running; fix it or restart the runtime)\n",
         )
         self.assertEqual(log, [])

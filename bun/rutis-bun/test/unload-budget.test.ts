@@ -1,10 +1,10 @@
-// PoC tests for opt-in per-row unload cleanup budget in Bun
-// (docs/design-row-unload-budget-2026-11-20.md, #1323).
+// PoC tests for opt-in per-row unload cleanup budget & Route B taint semantics
+// in Bun (docs/design-row-unload-budget-2026-11-20.md, #1323).
 import { expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { rowUnloadDeadline, rowUnloadTimeoutText, Runtime } from '../src/runner.ts'
+import { rowTaintedErrorText, rowUnloadDeadline, rowUnloadTimeoutText, Runtime } from '../src/runner.ts'
 
 function project(files: Record<string, string>) {
   const dir = mkdtempSync(join(tmpdir(), 'rutis-bun-budget-'))
@@ -77,44 +77,90 @@ export function apply(ctx) {
   delete (globalThis as any).__bunBudgetLog
 })
 
-test('opt-in budget times out hanging cleanup, skips later cleanups, withdraws services, and prints verbatim line', async () => {
+test('Route B: timeout withdraws services, taints row until runtime restart, keeps healthy sibling unaffected, and isolates late actions', async () => {
   const dir = project({
     'hang.ts': `
 export function apply(ctx, config) {
   ctx.effect(() => { globalThis.__bunHangLog.push('earlier') })
-  ctx.provide('forecast', { today: () => config.label })
+  const withdraw = ctx.provide('forecast', { today: () => config.label })
   if (config.hang) {
-    ctx.effect(() => new Promise(() => {}))
+    ctx.effect(() => new Promise((_resolve, reject) => {
+      globalThis.__bunRelease = () => {
+        // Old withdraw handle must not touch another row's service.
+        withdraw()
+        try { ctx.provide('forecast', { today: () => 'stale' }) } catch (e) { globalThis.__bunLate.push('provide:' + e.message) }
+        try { ctx.emit('weather/late') } catch (e) { globalThis.__bunLate.push('emit:' + e.name) }
+        reject(new Error('late cleanup failure'))
+      }
+    }))
   }
+}
+`,
+    'healthy.ts': `
+export function apply(ctx) {
+  ctx.provide('forecast', { today: () => 'healthy-sibling' })
+  ctx.effect(() => { globalThis.__bunHealthyLog.push('metrics-cleaned') })
 }
 `,
   })
   ;(globalThis as any).__bunHangLog = []
+  ;(globalThis as any).__bunHealthyLog = []
+  ;(globalThis as any).__bunLate = []
   const runtime = new Runtime(dir, { rowUnloadTimeout: 50 })
   runtime.dispatch('', 'mount', { announce: true })
   try {
-    await runtime.load('w', './hang.ts', { label: 'v1', hang: true }, null, null, [], 'weather')
+    await runtime.load('w1', './hang.ts', { label: 'v1', hang: true }, null, null, [], 'weather')
     expect((runtime.lookup('forecast') as any).today()).toBe('v1')
     const stderr = await captureStderr(async () => {
       const started = performance.now()
-      await runtime.unload('w')
+      await runtime.unload('w1')
       expect(performance.now() - started).toBeLessThan(1_000)
     })
-    const expected = `${rowUnloadTimeoutText('bun', 'weather', 50)}\n`
-    expect(expected).toBe(
-      'runtime bun: cleanup of row weather did not finish within 0.05 s; skipped remaining cleanups and withdrew its services (the stuck cleanup may still be running; fix it or restart the runtime)\n',
+    const expectedLine = `${rowUnloadTimeoutText('bun', 'weather', 50)}\n`
+    expect(expectedLine).toBe(
+      'runtime bun: cleanup of row weather did not finish within 0.05 s; skipped remaining cleanups and withdrew its services; reloading row weather in this runtime is blocked until the runtime restarts (the stuck cleanup may still be running; fix it or restart the runtime)\n',
     )
-    expect(stderr).toBe(expected)
+    expect(stderr).toBe(expectedLine)
     expect((globalThis as any).__bunHangLog).toEqual([])
     expect(() => runtime.lookup('forecast')).toThrow('not available')
-    // Reloading the same row & providing the same service succeeds cleanly.
-    await runtime.load('w', './hang.ts', { label: 'v2', hang: false }, null, null, [], 'weather')
-    expect((runtime.lookup('forecast') as any).today()).toBe('v2')
-    await runtime.unload('w')
+
+    // Route B: in-place reload of tainted row (same key or new key) fails explicitly.
+    const expectedTaint = rowTaintedErrorText('bun', 'weather', 50)
+    expect(expectedTaint).toBe(
+      'row weather cannot be loaded in runtime bun: its previous cleanup did not finish within 0.05 s and may still be running; restart the runtime (or isolate this row in its own runtime) before loading it again',
+    )
+    await expect(runtime.load('w1', './hang.ts', { label: 'v2', hang: false }, null, null, [], 'weather')).rejects.toThrow(expectedTaint)
+    await expect(runtime.load('w2', './hang.ts', { label: 'v2', hang: false }, null, null, [], 'weather')).rejects.toThrow(expectedTaint)
+
+    // Unrelated healthy row continues unaffected and takes over the withdrawn service.
+    await runtime.load('m1', './healthy.ts', {}, null, null, [], 'metrics')
+    expect((runtime.lookup('forecast') as any).today()).toBe('healthy-sibling')
+
+    // Lingering old cleanup firing late actions/rejection never corrupts metrics.
+    ;(globalThis as any).__bunRelease?.()
+    await new Promise(resolve => setImmediate(resolve))
+    expect((globalThis as any).__bunLate).toEqual(['provide:row w1 is not active', 'emit:BindingError'])
+    expect((runtime.lookup('forecast') as any).today()).toBe('healthy-sibling')
+    await runtime.unload('m1')
+    expect((globalThis as any).__bunHealthyLog).toEqual(['metrics-cleaned'])
+  } finally {
+    await runtime.dispose()
+  }
+
+  // Fresh runtime (after restart) clears taint and loads weather cleanly.
+  const restarted = new Runtime(dir, { rowUnloadTimeout: 50 })
+  restarted.dispatch('', 'mount', { announce: true })
+  try {
+    await restarted.load('w1', './hang.ts', { label: 'v2', hang: false }, null, null, [], 'weather')
+    expect((restarted.lookup('forecast') as any).today()).toBe('v2')
+    await restarted.unload('w1')
     expect((globalThis as any).__bunHangLog).toEqual(['earlier'])
   } finally {
     delete (globalThis as any).__bunHangLog
-    await runtime.dispose()
+    delete (globalThis as any).__bunHealthyLog
+    delete (globalThis as any).__bunLate
+    delete (globalThis as any).__bunRelease
+    await restarted.dispose()
     rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -126,7 +172,6 @@ export function apply(ctx) {
   ctx.effect(() => { globalThis.__bunErrLog.push('earliest') })
   ctx.provide('forecast', { today: () => 'sunny' })
   ctx.effect(() => new Promise((_, reject) => {
-    // Rejects well after the 50 ms budget to verify no unhandled rejection.
     setTimeout(() => reject(new Error('late rejection')), 120).unref?.()
   }))
   ctx.effect(() => { throw new Error('flush failed') })
@@ -149,7 +194,7 @@ export function apply(ctx) {
       })
       expect((caught as Error)?.message).toBe('flush failed')
       expect(stderr).toBe(
-        'runtime bun: cleanup of row weather did not finish within 0.05 s; skipped remaining cleanups and withdrew its services (the stuck cleanup may still be running; fix it or restart the runtime)\n',
+        'runtime bun: cleanup of row weather did not finish within 0.05 s; skipped remaining cleanups and withdrew its services; reloading row weather in this runtime is blocked until the runtime restarts (the stuck cleanup may still be running; fix it or restart the runtime)\n',
       )
       expect((globalThis as any).__bunErrLog).toEqual([])
       expect(() => runtime.lookup('forecast')).toThrow('not available')

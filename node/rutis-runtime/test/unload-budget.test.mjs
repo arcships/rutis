@@ -1,5 +1,6 @@
-// PoC tests for opt-in per-row unload cleanup budget in Node (leaf plugins and
-// native Cordis fibers; docs/design-row-unload-budget-2026-11-20.md, #1323).
+// PoC tests for opt-in per-row unload cleanup budget & Route B taint semantics
+// in Node (leaf plugins and native Cordis fibers;
+// docs/design-row-unload-budget-2026-11-20.md, #1323).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -7,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { definePlugin } from '../../rutis/src/index.mjs'
-import { rowUnloadDeadline, rowUnloadTimeoutText, supported, toCordis } from '../src/leaf.mjs'
+import { rowTaintedErrorText, rowUnloadDeadline, rowUnloadTimeoutText, supported, toCordis } from '../src/leaf.mjs'
 import { run } from '../src/runner.mjs'
 import { ENDPOINT_PROTOCOL, Session } from '../src/session.mjs'
 import { within } from './support.mjs'
@@ -102,7 +103,11 @@ function inProcess(anchor, { env = {}, rowUnloadTimeout } = {}) {
       deliver({ op: 'await', id, path: [...(reference.origin ?? [])], reference: reference.id })
       frame = await reply
     }
-    if (frame.op === 'throw') throw new Error(`call failed: ${JSON.stringify(frame.error)}`)
+    if (frame.op === 'throw') {
+      const err = new Error(frame.error?.message ?? JSON.stringify(frame.error))
+      err.remote = frame.error
+      throw err
+    }
     return frame
   }
 
@@ -162,17 +167,18 @@ test('default (unset) leaf unload waits for delayed cleanups and emits no diagno
   assert.equal(stderr, '')
 })
 
-test('standalone leaf timeout skips later cleanups, withdraws services, and prints verbatim line', async () => {
+test('standalone leaf timeout skips later cleanups, withdraws services, isolates late provide, and prints verbatim line', async () => {
   const root = new Context()
   const log = []
   let leakedCtx
+  let releaseStuck
   const spec = definePlugin({
     name: 'weather',
     apply(ctx) {
       leakedCtx = ctx
       ctx.effect(() => { log.push('earlier-should-be-skipped') })
       ctx.provide('forecast', { today: () => 'sunny' })
-      ctx.effect(() => new Promise(() => {})) // hangs forever
+      ctx.effect(() => new Promise(resolve => { releaseStuck = resolve }))
     },
   })
   const stderr = await captureStderr(async () => {
@@ -182,7 +188,7 @@ test('standalone leaf timeout skips later cleanups, withdraws services, and prin
     await plugin.dispose()
     assert.ok(performance.now() - started < 1_000, 'dispose finished promptly after budget')
   })
-  const expected = `${rowUnloadTimeoutText({ runtime: 'node', target: 'plugin weather', budgetMs: 50, native: false })}\n`
+  const expected = `${rowUnloadTimeoutText({ runtime: 'node', target: 'plugin weather', budgetMs: 50, native: false, blocksReload: false })}\n`
   assert.equal(
     expected,
     'runtime node: cleanup of plugin weather did not finish within 0.05 s; skipped remaining cleanups and withdrew its services (the stuck cleanup may still be running; fix it or restart the runtime)\n',
@@ -190,18 +196,21 @@ test('standalone leaf timeout skips later cleanups, withdraws services, and prin
   assert.equal(stderr, expected)
   assert.deepEqual(log, [], 'user cleanups after the timed-out cleanup must not run')
   assert.throws(() => leakedCtx.use('forecast'), { code: 'not-declared' }, 'provided service was withdrawn')
+  // Late provide from the lingering context is refused cleanly.
+  assert.throws(() => leakedCtx.provide('forecast', { today: () => 'stale' }), /not active/)
   // Another plugin can immediately provide the same service name without clash.
   const replacement = definePlugin({
-    name: 'weather-v2',
+    name: 'metrics',
     apply(ctx) { ctx.provide('forecast', { today: () => 'rainy' }) },
   })
-  const second = root.plugin(toCordis(supported(replacement, 'weather-v2')))
+  const second = root.plugin(toCordis(supported(replacement, 'metrics')))
   await second.await()
   assert.equal(root.get('forecast').today(), 'rainy')
+  releaseStuck?.()
   await second.dispose()
 })
 
-test('runner leaf row timeout via RUTIS_ROW_UNLOAD_TIMEOUT withdraws service and allows reload', async () => {
+test('Route B: runner leaf row timeout withdraws services, taints row until runtime restart, keeps healthy rows unaffected, and isolates late actions', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rutis-node-budget-leaf-'))
   const file = name => join(dir, name)
   writeFileSync(file('anchor.mjs'), 'export function apply() {}\n')
@@ -210,15 +219,34 @@ import { definePlugin } from '${SDK_URL}'
 export default definePlugin({
   name: 'weather',
   apply(ctx, config) {
+    globalThis.__leafBudgetCtx = ctx
     ctx.effect(() => { globalThis.__leafBudgetLog.push('earlier') })
     ctx.provide('forecast', { today: () => config.label })
     if (config.hang) {
-      ctx.effect(() => new Promise(() => {}))
+      ctx.effect(() => new Promise((resolve, reject) => {
+        globalThis.__leafRelease = () => {
+          try { ctx.provide('forecast', { today: () => 'stale' }) } catch (e) { globalThis.__leafLateErrors.push('provide:' + e.message) }
+          try { ctx.emit('weather/late') } catch (e) { globalThis.__leafLateErrors.push('emit:' + e.name) }
+          reject(new Error('late cleanup failure'))
+        }
+      }))
     }
   },
 })
 `)
+  writeFileSync(file('healthy-leaf.mjs'), `
+import { definePlugin } from '${SDK_URL}'
+export default definePlugin({
+  name: 'metrics',
+  apply(ctx) {
+    ctx.provide('forecast', { today: () => 'healthy-sibling' })
+    ctx.effect(() => { globalThis.__leafHealthyLog.push('metrics-cleaned') })
+  },
+})
+`)
   globalThis.__leafBudgetLog = []
+  globalThis.__leafHealthyLog = []
+  globalThis.__leafLateErrors = []
   const rt = inProcess(file('anchor.mjs'), {
     env: { RUTIS_ROW_UNLOAD_TIMEOUT: '0.05', RUTIS_TEST_INSPECT: '1' },
   })
@@ -233,25 +261,62 @@ export default definePlugin({
     })
     assert.equal(
       stderr,
-      'runtime node: cleanup of row weather did not finish within 0.05 s; skipped remaining cleanups and withdrew its services (the stuck cleanup may still be running; fix it or restart the runtime)\n',
+      'runtime node: cleanup of row weather did not finish within 0.05 s; skipped remaining cleanups and withdrew its services; reloading row weather in this runtime is blocked until the runtime restarts (the stuck cleanup may still be running; fix it or restart the runtime)\n',
     )
     assert.deepEqual(globalThis.__leafBudgetLog, [], 'remaining user cleanups were skipped')
     const state = await rt.inspect()
     assert.deepEqual(state.rows, [])
     assert.deepEqual(state.slots, [])
     assert.equal(state.services, 0, 'provided service withdrawn from Cordis store')
-    // Reloading the same row & service name succeeds cleanly.
-    await rt.load('r1', file('hang-leaf.mjs'), 'weather', { label: 'v2', hang: false })
-    await rt.unload('r1')
-    assert.deepEqual(globalThis.__leafBudgetLog, ['earlier'])
+
+    // Route B: reloading the tainted row in this runtime process (same key or new key) fails explicitly.
+    const expectedTaint = rowTaintedErrorText({ runtime: 'node', row: 'weather', budgetMs: 50 })
+    assert.equal(
+      expectedTaint,
+      'row weather cannot be loaded in runtime node: its previous cleanup did not finish within 0.05 s and may still be running; restart the runtime (or isolate this row in its own runtime) before loading it again',
+    )
+    await assert.rejects(
+      rt.load('r1', file('hang-leaf.mjs'), 'weather', { label: 'v2', hang: false }),
+      error => error.message === expectedTaint,
+    )
+    await assert.rejects(
+      rt.load('r2', file('hang-leaf.mjs'), 'weather', { label: 'v2', hang: false }),
+      error => error.message === expectedTaint,
+    )
+
+    // Unrelated healthy row continues unaffected and can take over the withdrawn service.
+    await rt.load('m1', file('healthy-leaf.mjs'), 'metrics', {})
+    // Trigger late actions + late rejection from the lingering cleanup: isolated, never corrupts metrics.
+    globalThis.__leafRelease?.()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(globalThis.__leafLateErrors.length, 2)
+    assert.match(globalThis.__leafLateErrors[0], /^provide:.*not active/)
+    assert.equal(globalThis.__leafLateErrors[1], 'emit:BindingError')
+    await rt.unload('m1')
+    assert.deepEqual(globalThis.__leafHealthyLog, ['metrics-cleaned'])
     assert.equal(await rt.stop(), 0)
+
+    // Restarting the runtime (fresh runtime process) clears taint and loads weather cleanly.
+    const restarted = inProcess(file('anchor.mjs'), {
+      env: { RUTIS_ROW_UNLOAD_TIMEOUT: '0.05', RUTIS_TEST_INSPECT: '1' },
+    })
+    await restarted.started()
+    await restarted.mount()
+    await restarted.load('r1', file('hang-leaf.mjs'), 'weather', { label: 'v2', hang: false })
+    await restarted.unload('r1')
+    assert.deepEqual(globalThis.__leafBudgetLog, ['earlier'])
+    assert.equal(await restarted.stop(), 0)
   } finally {
     delete globalThis.__leafBudgetLog
+    delete globalThis.__leafHealthyLog
+    delete globalThis.__leafLateErrors
+    delete globalThis.__leafBudgetCtx
+    delete globalThis.__leafRelease
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('runner native Cordis fiber timeout finishes teardown, withdraws service, and prints verbatim line', async () => {
+test('Route B: runner native Cordis fiber timeout finishes teardown, withdraws service, taints row until restart, and prints verbatim line', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rutis-node-budget-cordis-'))
   const file = name => join(dir, name)
   writeFileSync(file('anchor.mjs'), 'export function apply() {}\n')
@@ -262,6 +327,12 @@ export function apply(ctx, config) {
   if (config.hang) {
     ctx.effect(() => () => new Promise(() => {}))
   }
+}
+`)
+  writeFileSync(file('healthy-cordis.mjs'), `
+export const name = 'metrics'
+export function apply(ctx) {
+  ctx.provide('forecast', { today: () => 'healthy-cordis' })
 }
 `)
   const rt = inProcess(file('anchor.mjs'), {
@@ -279,17 +350,35 @@ export function apply(ctx, config) {
     })
     assert.equal(
       stderr,
-      'runtime node: cleanup of row weather did not finish within 0.05 s; stopped waiting and finished unloading the row (the stuck cleanup may still be running; fix it or restart the runtime)\n',
+      'runtime node: cleanup of row weather did not finish within 0.05 s; stopped waiting and finished unloading the row; reloading row weather in this runtime is blocked until the runtime restarts (the stuck cleanup may still be running; fix it or restart the runtime)\n',
     )
     const state = await rt.inspect()
     assert.deepEqual(state.rows, [])
     assert.deepEqual(state.slots, [])
     assert.equal(state.fibers, 0, 'Cordis removed fiber from registry')
     assert.equal(state.services, 0, 'Cordis withdrew provided service from store')
-    // Reloading the same row & providing the same service succeeds without clash.
-    await rt.load('c1', file('hang-cordis.mjs'), 'weather', { label: 'v2', hang: false })
-    await rt.unload('c1')
+
+    // Route B: reloading the tainted native Cordis row fails explicitly in this runtime.
+    const expectedTaint = 'row weather cannot be loaded in runtime node: its previous cleanup did not finish within 0.05 s and may still be running; restart the runtime (or isolate this row in its own runtime) before loading it again'
+    await assert.rejects(
+      rt.load('c2', file('hang-cordis.mjs'), 'weather', { label: 'v2', hang: false }),
+      error => error.message === expectedTaint,
+    )
+    // Unrelated healthy row can still load and take over the withdrawn service.
+    await rt.load('m1', file('healthy-cordis.mjs'), 'metrics', {})
+    await rt.unload('m1')
     assert.equal(await rt.stop(), 0)
+
+    // Fresh runtime (after restart) loads weather cleanly.
+    const restarted = inProcess(file('anchor.mjs'), {
+      env: { RUTIS_TEST_INSPECT: '1' },
+      rowUnloadTimeout: 50,
+    })
+    await restarted.started()
+    await restarted.mount()
+    await restarted.load('c1', file('hang-cordis.mjs'), 'weather', { label: 'v2', hang: false })
+    await restarted.unload('c1')
+    assert.equal(await restarted.stop(), 0)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
