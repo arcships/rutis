@@ -2,9 +2,9 @@
 
 [English](design-dynamic-cycle-diagnostics-2026-11-20.en.md)
 
-状态：草稿，含 PoC。日期：2026-11-20。基准：`main` `5c2e143e`（0.23.0）。
+状态：草稿，含 PoC。日期：2026-11-20（同日修订：补充语义边界与非原子快照瞬态说明，并按形式化验证设计明确属性测试验证选择）。基准：`main` `5c2e143e`（0.23.0）。
 Issue：[#1326](https://github.com/arcships/rutis/issues/1326)。按本稿实施：[#1326](https://github.com/arcships/rutis/issues/1326)（§六 拆分）。
-依据：[设计哲学](design-philosophy.md) §七、§八（依赖环诊断）；[设计稿约定](design-docs.md)；[诊断设计](design-diagnostics-2026-10-26.md) §4.5、§4.6；[出错信息](design-error-messages-2026-11-03.md) §3.3、§3.5、§4.4（#663 概念预算）。
+依据：[设计哲学](design-philosophy.md) §七、§八（依赖环诊断）；[设计稿约定](design-docs.md)；[诊断设计](design-diagnostics-2026-10-26.md) §4.5、§4.6、§5.1；[出错信息](design-error-messages-2026-11-03.md) §3.3、§3.5、§4.4（#663 概念预算）；[形式化验证重新设计](design-formal-verification-2026-11-08.md) §2.3、§3.5。
 
 范围外：
 
@@ -115,9 +115,17 @@ Issue：[#1326](https://github.com/arcships/rutis/issues/1326)。按本稿实施
 
 跨语言一致性：上述逻辑全部在 Rust 侧 `rutis-loader` 执行，Node、Bun、Python、Go、Swift、Kotlin 插件看到的 `rutis-host status` / `run` / `dev` 与 `rutis/loader` 的 `status()` JSON 输出完全一致，没有语言差异。
 
-### 3.5 明确无法静态或仅凭快照证明的动态环边界
+### 3.5 语义边界：已证明的环、未知提供者与非原子快照瞬态
 
-以下情形在理论或架构边界上**无法**从单次静态检查或 `Loader::waits` 快照中证明为环，rutis 明确不猜测成环：
+本设计严格区分三类状态，绝不混淆：
+
+1. **已证明的声明环（`Cycle` / `CycleChain`）**：仅当同作用域内沿唯一存活提供者边形成回到查询行自身的简单闭合环时报告。其依据是快照中已声明的 `provides` 与实际的 `Pending` 等待边，不含任何猜测。
+2. **未知 / 未声明提供者（`UnknownProvider`）**：仅表示“当前作用域无人声明该缺失服务，且存在尚未启动、运行后可能提供服务的行”。它是**排障线索**而非死锁证明——候选行启动后可能根本不提供该服务，也可能确实与链中某行形成动态死锁——因此文案严禁称其为环，且绝不覆盖拼写相近提示（`did you mean`）。
+3. **快速启动与重载期间的非原子快照瞬态**：与 `Loader::status()` 相同（[诊断设计](design-diagnostics-2026-10-26.md) §5.1），`Loader::waits_of` 先在短锁内读取行状态与声明，再在锁外调用 `root.diagnostics()` 读取内核诊断快照，不加全局跨锁停顿。在快速启动、热重载或行刚完成 `apply` 的毫秒级窗口内，单次快照可能短暂观察到“行 `a` 仍为 `Pending`、行 `b` 尚未转为 `Active`”的瞬态组合：
+   - 若提供者已声明且处于 `Loading`，结果落入 `ProviderStarting` / `ProviderWaiting`，不会误报成环；
+   - 若未声明提供者（`announces: true`）在 `Loading` 瞬态内被列为 `UnknownProvider` 候选，一旦它完成 `apply` 进入 `Active`，下一次观察（`follow` 轮询或再次 `status`）会自动收敛为 `running`（若提供了服务）或 `nothing provides it yet`（若未提供）。
+
+此外，以下情形在理论或架构边界上**无法**从单次静态检查或 `Loader::waits` 快照中证明为环，rutis 明确不猜测成环：
 
 1. **已运行行里的条件式或延迟 `ctx.provide`**：某行 `apply` 已结束（`Active`），只在收到请求、定时器或事件后才调用 `ctx.provide("x", ...)`。快照无法判定它将来会不会提供 `x`，只能报 `nothing provides it yet`。
 2. **未声明 `provides` 的动态提供者（`announces: true`）**：在未启动行真正跑完 `apply` 之前，rutis 不知道它到底会提供哪些服务名。因此 `a --bsvc--> b(未声明) --asvc--> a` 只能报告为 `UnknownProvider`（提示 `b` 尚未启动、可能运行后才提供服务），绝不伪证成 `Cycle` / `CycleChain`。补上 `provides` 声明后，它即成为可证明的环。
@@ -125,6 +133,19 @@ Issue：[#1326](https://github.com/arcships/rutis/issues/1326)。按本稿实施
 4. **外置运行时内部私有依赖**：同一 Node 运行时内未经服务目录共享的 Cordis 内部依赖不经过 rutis 纤维门控，`Loader::waits` 不可见。
 5. **跨节点远端未声明提供者**：断开连接或尚未上报声明的对端服务无法从本机快照拼接出对端的 `Pending` 图（本机侧仅表现为等连接行或 `nothing provides it yet`）。
 6. **调用期同步重入环**：两行都已启动、在同步方法调用中互调形成死锁，属于运行时 `SyncWaitCycle`，不属启动依赖等待图。
+
+### 3.6 验证方式选择：属性图测试而非协议 TLA+ 模型
+
+依据[形式化验证重新设计](design-formal-verification-2026-11-08.md) §2.3（按问题选择最合适的验证手段）与 §3.5（D 层：大输入空间用属性测试验证），并由 `node tools/check-model-pr.mjs` 核验确认（本设计改动的文件不涉及 `specs/` 下任何并发协议模型所对应的代码）：
+
+- `#1326` 的等待图遍历是纯只读、无副作用的快照图算法，**不新增任何并发协议状态转移、消息交错、锁序或关闭竞态**，因此不新建协议层 TLA+ 模型。
+- 对应风险在于任意有向图拓扑下的终止性、无误报、无漏报与输出有界性，属于典型的输入空间性质；因此在 `crates/rutis-loader` 中使用 `proptest` 实施**确定性随机 / 基于属性的图测试**（`crates/rutis-loader/src/loader/waits_prop_tests.rs`，覆盖数千组随机图，含 2～12 节点环、引入链、多 `isolate` 隔离、多存活提供者、`announces: true` 未知行、禁用/失败/启动中/未解析行以及随机 DAG），配合独立可达性预言机（oracle）断言：
+  1. 任意图均正常终止、图遍历与格式化绝不 panic、输出长度有界且零 §4.5 禁用词；
+  2. 任意 DAG 零 `Cycle` / `CycleChain` 误报；
+  3. 任意 2 节点唯一提供者环产出 `WaitReason::Cycle`（兼容 `loader/wait-words`）；
+  4. 任意 $N \ge 3$ 节点唯一提供者环产出以查询行起头的合法闭合 `WaitReason::CycleChain`；
+  5. 任意环外引入行保持 `WaitReason::ProviderWaiting`；
+  6. 任意未知提供者链绝不误报成环，且绝不覆盖拼写提示（`did you mean`）。
 
 ## 四、开发者看到什么
 
@@ -244,6 +265,6 @@ for entry in loader.entries() {
 
 | # | 内容（含位置） | 完成条件 |
 | --- | --- | --- |
-| D-1 等待图与新变体 | `crates/rutis-loader/src/loader/check.rs` 增加 `CycleLink::new`；`crates/rutis-loader/src/loader/waits.rs` 新增 `WaitReason::CycleChain`、`WaitReason::UnknownProvider`，扩展 `Fact`（`announces`、`unknown_decl`、`isolates`），实现同作用域 BFS 环检测（2 行保旧、3+ 行产 `CycleChain`、引入行保 `ProviderWaiting`）与未知提供者链诊断 | `cargo test -p rutis-loader --all-features` 全绿；覆盖 2 行环、3 行环、引入行、直接与链式未知提供者、正常启动等待、普通缺服务、跨 `isolate` 零误报 |
+| D-1 等待图与新变体 | `crates/rutis-loader/src/loader/check.rs` 增加 `CycleLink::new`；`crates/rutis-loader/src/loader/waits.rs` 新增 `WaitReason::CycleChain`、`WaitReason::UnknownProvider`，扩展 `Fact`（`announces`、`unknown_decl`、`isolates`），实现同作用域 BFS 环检测（2 行保旧、3+ 行产 `CycleChain`、引入行保 `ProviderWaiting`）与未知提供者链诊断；`crates/rutis-loader/src/loader/waits_prop_tests.rs` 补齐属性图测试（§3.6） | `cargo test -p rutis-loader --all-features` 与 `--no-default-features --lib` 全绿；覆盖 2 行环、3 行环、引入行、直接与链式未知提供者、正常启动等待、普通缺服务、跨 `isolate` 零误报，以及数千组随机图属性测试与独立预言机断言 |
 | D-2 格式化与逐字验收测试 | `crates/rutis-loader/src/loader/status.rs` 实现 `CycleChain` 与 `UnknownProvider` 的有界格式化（8 跳 / 3 候选上限、退化输入不 panic）；在 `crates/rutis-loader/src/loader/status.rs` 与 `crates/rutis-loader/tests/waits.rs` 补齐逐字断言，与本稿 §四 完全一致 | `cargo test -p rutis-loader -p rutis-host` 全绿，逐字输出与 §四 匹配，且不含[诊断设计](design-diagnostics-2026-10-26.md) §4.5 禁用词 |
 | D-3 指南与保证登记（后续 PR） | 更新 `docs/guide/rutis-host.md` / `.en.md` 等待原因表；按需要把长环与未知提供者诊断登记进保证表与追踪表 | 链接检查、保证检查、追踪检查全绿 |

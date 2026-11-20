@@ -144,6 +144,38 @@ impl Fact {
     }
 }
 
+/// One non-ready dependency of a Pending row, projected out of kernel
+/// diagnostics into plain names so [`WaitGraph`] operates purely on snapshot
+/// data.
+#[derive(Debug, Clone)]
+enum MissingDep {
+    /// The row's own runtime session (`service` is its name, `runtime` the
+    /// key name shown in [`WaitReason::ProviderRuntime`]).
+    OwnRuntime { service: String, runtime: String },
+    /// No binding exists for `service`.
+    Missing(String),
+    /// An inactive binding exists for `service`, owned by `provider` row
+    /// when known; `fallback` is the kernel's `DependencyStatus` string.
+    InactiveBinding {
+        service: String,
+        provider: Option<String>,
+        fallback: String,
+    },
+    /// Any other non-Ready kernel status.
+    Other { service: String, text: String },
+}
+
+impl MissingDep {
+    fn service(&self) -> &str {
+        match self {
+            MissingDep::OwnRuntime { service, .. }
+            | MissingDep::Missing(service)
+            | MissingDep::InactiveBinding { service, .. }
+            | MissingDep::Other { service, .. } => service,
+        }
+    }
+}
+
 impl Loader {
     /// What the copy `entry` (one of [`Loader::entries`]) waits for while
     /// it is `Pending`, and why each is missing: no row declares it (with
@@ -206,7 +238,7 @@ impl Loader {
             .iter()
             .map(|fiber| (fiber.id, fiber))
             .collect();
-        let missing = |plugin: PluginId| -> Vec<(TypeKey, DependencyStatus)> {
+        let deps_of = |plugin: PluginId| -> Vec<MissingDep> {
             fibers
                 .get(&plugin)
                 .map(|fiber| {
@@ -214,12 +246,63 @@ impl Loader {
                         .injects
                         .iter()
                         .filter(|inject| inject.status != DependencyStatus::Ready)
-                        .map(|inject| (inject.key.clone(), inject.status))
+                        .map(|inject| {
+                            let service = self
+                                .service_name(&inject.key)
+                                .unwrap_or_else(|| inject.key.describe());
+                            if own_runtime(&inject.key) {
+                                return MissingDep::OwnRuntime {
+                                    service,
+                                    runtime: inject.key.name().unwrap_or_default().to_owned(),
+                                };
+                            }
+                            match inject.status {
+                                DependencyStatus::Missing => MissingDep::Missing(service),
+                                DependencyStatus::ProviderInactive(_) => {
+                                    let provider = diagnostics
+                                        .bindings
+                                        .iter()
+                                        .find(|binding| binding.key == inject.key)
+                                        .and_then(|binding| {
+                                            row_of(binding.provider, &records, &fibers)
+                                        });
+                                    MissingDep::InactiveBinding {
+                                        service,
+                                        provider,
+                                        fallback: inject.status.to_string(),
+                                    }
+                                }
+                                other => MissingDep::Other {
+                                    service,
+                                    text: other.to_string(),
+                                },
+                            }
+                        })
                         .collect()
                 })
                 .unwrap_or_default()
         };
+        let binding_names: Vec<(Option<String>, String)> = diagnostics
+            .bindings
+            .iter()
+            .filter_map(|binding| {
+                let name = self.service_name(&binding.key)?;
+                let provider = row_of(binding.provider, &records, &fibers);
+                Some((provider, name))
+            })
+            .collect();
         let catalog_names: Vec<String> = self.inner.catalog.names().collect();
+        let deps_by_scope: HashMap<Option<u64>, HashMap<String, Vec<MissingDep>>> = facts
+            .iter()
+            .map(|(&scope, scope_facts)| {
+                let map = scope_facts
+                    .iter()
+                    .filter_map(|(id, fact)| fact.plugin.map(|p| (id.clone(), deps_of(p))))
+                    .collect();
+                (scope, map)
+            })
+            .collect();
+        let explain_unexported = |service: &str| unexported(&root, service);
 
         entries
             .iter()
@@ -228,88 +311,20 @@ impl Loader {
                 let Some(plugin) = entry.plugin else {
                     return Vec::new();
                 };
-                let facts = &facts[&scope];
+                let scope_facts = &facts[&scope];
+                let scope_deps = &deps_by_scope[&scope];
                 let graph = WaitGraph {
-                    root: &root,
-                    facts,
-                    bindings: &diagnostics.bindings,
-                    records: &records,
-                    fibers: &fibers,
+                    facts: scope_facts,
+                    deps: scope_deps,
+                    binding_names: &binding_names,
                     catalog_names: &catalog_names,
-                    missing: &missing,
-                    name: &|key: &TypeKey| self.service_name(key),
+                    unexported: &explain_unexported,
                 };
-                let entry_fact = graph.fact_of(&entry.id);
-                missing(plugin)
-                    .into_iter()
-                    .map(|(key, status)| {
-                        let service = self.service_name(&key).unwrap_or_else(|| key.describe());
-                        if own_runtime(&key) {
-                            return Wait {
-                                service,
-                                reason: WaitReason::OwnRuntime,
-                            };
-                        }
-                        let reason = match status {
-                            DependencyStatus::Missing => {
-                                if let Some(why) = unexported(&root, &service) {
-                                    WaitReason::Explained(why)
-                                } else if let Some((row, fact)) =
-                                    graph.declared_provider(&entry.id, entry_fact, &service)
-                                {
-                                    graph.provider(&entry.id, &service, row, fact, false)
-                                } else {
-                                    let like = graph.closest_for(&entry.id, &service);
-                                    if like.is_none() {
-                                        let candidates = graph
-                                            .unstarted_candidates(&entry.id, entry_fact, &service);
-                                        if !candidates.is_empty() {
-                                            return Wait {
-                                                service: service.clone(),
-                                                reason: WaitReason::UnknownProvider {
-                                                    chain: Vec::new(),
-                                                    missing: service,
-                                                    candidates,
-                                                },
-                                            };
-                                        }
-                                    }
-                                    // Disabled rows never resolved may
-                                    // provide it: not "no row".
-                                    if facts
-                                        .iter()
-                                        .any(|(id, fact)| *id != entry.id && fact.unknown_off)
-                                    {
-                                        WaitReason::NoEnabledProvider { like }
-                                    } else {
-                                        WaitReason::NoProvider { like }
-                                    }
-                                }
-                            }
-                            DependencyStatus::ProviderInactive(_) => {
-                                // The binding's provider, and its row.
-                                let row = diagnostics
-                                    .bindings
-                                    .iter()
-                                    .find(|binding| binding.key == key)
-                                    .and_then(|binding| {
-                                        row_of(binding.provider, &records, &fibers)
-                                    });
-                                match row
-                                    .as_deref()
-                                    .and_then(|row| graph.fact_of(row).map(|fact| (row, fact)))
-                                {
-                                    Some((row, fact)) if row != entry.id => {
-                                        graph.provider(&entry.id, &service, row, fact, true)
-                                    }
-                                    _ => WaitReason::Other(status.to_string()),
-                                }
-                            }
-                            other => WaitReason::Other(other.to_string()),
-                        };
-                        Wait { service, reason }
-                    })
-                    .collect()
+                let entry_deps = scope_deps
+                    .get(&entry.id)
+                    .cloned()
+                    .unwrap_or_else(|| deps_of(plugin));
+                graph.waits_for_row(&entry.id, &entry_deps)
             })
             .collect()
     }
@@ -323,20 +338,92 @@ impl Loader {
     }
 }
 
-/// Snapshot view of rows and diagnostics in one instance scope, used to
-/// diagnose cycles and unknown-provider chains in [`Loader::waits_of`].
+/// Pure snapshot view of rows and their missing dependencies in one instance
+/// scope, used to diagnose cycles and unknown-provider chains in
+/// [`Loader::waits_of`].
 struct WaitGraph<'a> {
-    root: &'a rutis::Ctx,
     facts: &'a [(String, Fact)],
-    bindings: &'a [rutis::host::diagnostics::BindingDiagnostics],
-    records: &'a HashMap<PluginId, String>,
-    fibers: &'a HashMap<PluginId, &'a PluginDiagnostics>,
+    deps: &'a HashMap<String, Vec<MissingDep>>,
+    binding_names: &'a [(Option<String>, String)],
     catalog_names: &'a [String],
-    missing: &'a dyn Fn(PluginId) -> Vec<(TypeKey, DependencyStatus)>,
-    name: &'a dyn Fn(&TypeKey) -> Option<String>,
+    unexported: &'a dyn Fn(&str) -> Option<String>,
 }
 
 impl<'a> WaitGraph<'a> {
+    fn waits_for_row(&self, row_id: &str, row_deps: &[MissingDep]) -> Vec<Wait> {
+        let entry_fact = self.fact_of(row_id);
+        row_deps
+            .iter()
+            .map(|dep| match dep {
+                MissingDep::OwnRuntime { service, .. } => Wait {
+                    service: service.clone(),
+                    reason: WaitReason::OwnRuntime,
+                },
+                MissingDep::Missing(service) => {
+                    let reason = if let Some(why) = (self.unexported)(service) {
+                        WaitReason::Explained(why)
+                    } else if let Some((row, fact)) =
+                        self.declared_provider(row_id, entry_fact, service)
+                    {
+                        self.provider(row_id, service, row, fact, false)
+                    } else {
+                        let like = self.closest_for(row_id, service);
+                        if like.is_none() {
+                            let candidates = self.unstarted_candidates(row_id, entry_fact, service);
+                            if !candidates.is_empty() {
+                                return Wait {
+                                    service: service.clone(),
+                                    reason: WaitReason::UnknownProvider {
+                                        chain: Vec::new(),
+                                        missing: service.clone(),
+                                        candidates,
+                                    },
+                                };
+                            }
+                        }
+                        // Disabled rows never resolved may provide it: not "no row".
+                        if self
+                            .facts
+                            .iter()
+                            .any(|(id, fact)| id != row_id && fact.unknown_off)
+                        {
+                            WaitReason::NoEnabledProvider { like }
+                        } else {
+                            WaitReason::NoProvider { like }
+                        }
+                    };
+                    Wait {
+                        service: service.clone(),
+                        reason,
+                    }
+                }
+                MissingDep::InactiveBinding {
+                    service,
+                    provider,
+                    fallback,
+                } => {
+                    let reason = match provider
+                        .as_deref()
+                        .and_then(|row| self.fact_of(row).map(|fact| (row, fact)))
+                    {
+                        Some((row, fact)) if row != row_id => {
+                            self.provider(row_id, service, row, fact, true)
+                        }
+                        _ => WaitReason::Other(fallback.clone()),
+                    };
+                    Wait {
+                        service: service.clone(),
+                        reason,
+                    }
+                }
+                MissingDep::Other { service, text } => Wait {
+                    service: service.clone(),
+                    reason: WaitReason::Other(text.clone()),
+                },
+            })
+            .collect()
+    }
+
     /// Closest known service name provided or declared by something other
     /// than `waiter` itself (so a row is never suggested its own service).
     fn closest_for(&self, waiter: &str, service: &str) -> Option<String> {
@@ -346,23 +433,27 @@ impl<'a> WaitGraph<'a> {
             .filter(|(id, _)| id != waiter)
             .flat_map(|(_, fact)| fact.provides.iter().cloned())
             .collect();
-        known.extend(self.bindings.iter().filter_map(|binding| {
-            let provider = row_of(binding.provider, self.records, self.fibers);
+        known.extend(self.binding_names.iter().filter_map(|(provider, name)| {
             if provider.as_deref() == Some(waiter) {
                 return None;
             }
-            (self.name)(&binding.key)
+            Some(name.clone())
         }));
         known.extend(self.catalog_names.iter().cloned());
         known.sort_unstable();
         known.dedup();
         closest(service, &known)
     }
+
     fn fact_of(&self, id: &str) -> Option<&'a Fact> {
         self.facts
             .iter()
             .find(|(row, _)| row == id)
             .map(|(_, fact)| fact)
+    }
+
+    fn deps_of(&self, id: &str) -> &'a [MissingDep] {
+        self.deps.get(id).map(Vec::as_slice).unwrap_or_default()
     }
 
     fn same_isolate(a: Option<&Fact>, b: &Fact, service: &str) -> bool {
@@ -448,20 +539,17 @@ impl<'a> WaitGraph<'a> {
 
     /// Outgoing missing non-runtime dependencies of `row`, sorted by
     /// service name for deterministic traversal; empty if `row` waits on
-    /// its own runtime or has no fiber.
-    fn service_waits(&self, fact: &Fact) -> Vec<(TypeKey, DependencyStatus, String)> {
-        let waits = fact.plugin.map(self.missing).unwrap_or_default();
-        if waits.iter().any(|(key, _)| own_runtime(key)) {
+    /// its own runtime.
+    fn service_waits(&self, row: &str) -> Vec<&'a MissingDep> {
+        let deps = self.deps_of(row);
+        if deps
+            .iter()
+            .any(|dep| matches!(dep, MissingDep::OwnRuntime { .. }))
+        {
             return Vec::new();
         }
-        let mut out: Vec<(TypeKey, DependencyStatus, String)> = waits
-            .into_iter()
-            .map(|(key, status)| {
-                let service = (self.name)(&key).unwrap_or_else(|| key.describe());
-                (key, status, service)
-            })
-            .collect();
-        out.sort_by(|a, b| a.2.cmp(&b.2));
+        let mut out: Vec<&'a MissingDep> = deps.iter().collect();
+        out.sort_by(|a, b| a.service().cmp(b.service()));
         out
     }
 
@@ -471,33 +559,25 @@ impl<'a> WaitGraph<'a> {
         &self,
         curr: &str,
         curr_fact: &Fact,
-        key: &TypeKey,
-        status: DependencyStatus,
-        service: &str,
+        dep: &MissingDep,
     ) -> Option<(&'a str, &'a Fact)> {
-        match status {
-            DependencyStatus::Missing => {
-                if unexported(self.root, service).is_some() {
+        match dep {
+            MissingDep::Missing(service) => {
+                if (self.unexported)(service).is_some() {
                     return None;
                 }
                 self.sole_live_provider(curr, Some(curr_fact), service)
             }
-            DependencyStatus::ProviderInactive(_) => self
-                .bindings
-                .iter()
-                .find(|binding| binding.key == *key)
-                .and_then(|binding| row_of(binding.provider, self.records, self.fibers))
+            MissingDep::InactiveBinding { provider, .. } => provider
+                .as_deref()
+                .filter(|row| *row != curr)
                 .and_then(|row| {
-                    (row != curr)
-                        .then(|| {
-                            self.facts
-                                .iter()
-                                .find(|(id, _)| *id == row)
-                                .map(|(id, fact)| (id.as_str(), fact))
-                        })
-                        .flatten()
+                    self.facts
+                        .iter()
+                        .find(|(id, _)| id == row)
+                        .map(|(id, fact)| (id.as_str(), fact))
                 }),
-            _ => None,
+            MissingDep::OwnRuntime { .. } | MissingDep::Other { .. } => None,
         }
     }
 
@@ -528,17 +608,18 @@ impl<'a> WaitGraph<'a> {
                         .map_or_else(|| "failed".to_owned(), ToString::to_string),
                 },
                 FiberState::Pending => {
-                    let waits = fact.plugin.map(self.missing).unwrap_or_default();
-                    if let Some((key, _)) = waits.iter().find(|(key, _)| own_runtime(key)) {
+                    let waits = self.deps_of(row);
+                    if let Some(runtime) = waits.iter().find_map(|dep| match dep {
+                        MissingDep::OwnRuntime { runtime, .. } => Some(runtime),
+                        _ => None,
+                    }) {
                         return WaitReason::ProviderRuntime {
                             row: row_owned,
-                            runtime: key.name().unwrap_or_default().to_owned(),
+                            runtime: runtime.clone(),
                         };
                     }
-                    let services: Vec<String> = waits
-                        .iter()
-                        .map(|(key, _)| (self.name)(key).unwrap_or_else(|| key.describe()))
-                        .collect();
+                    let services: Vec<String> =
+                        waits.iter().map(|dep| dep.service().to_owned()).collect();
                     // Only traverse for cycles / unknown-provider chains
                     // when `row` is the sole live provider of `first_service`
                     // (or holds its inactive binding), so an alternative
@@ -614,14 +695,12 @@ impl<'a> WaitGraph<'a> {
             let Some(curr_fact) = self.fact_of(curr) else {
                 continue;
             };
-            for (key, status, service) in self.service_waits(curr_fact) {
-                let Some((next, next_fact)) =
-                    self.edge_target(curr, curr_fact, &key, status, &service)
-                else {
+            for dep in self.service_waits(curr) {
+                let Some((next, next_fact)) = self.edge_target(curr, curr_fact, dep) else {
                     continue;
                 };
                 if next == start_id {
-                    let mut links = vec![CycleLink::new(curr, service, start_id)];
+                    let mut links = vec![CycleLink::new(curr, dep.service(), start_id)];
                     let mut cursor = curr;
                     while let Some((prev, svc)) = parent.get(cursor) {
                         links.push(CycleLink::new(*prev, svc.clone(), cursor));
@@ -634,7 +713,7 @@ impl<'a> WaitGraph<'a> {
                     return Some(links);
                 }
                 if next_fact.is_pending() && visited.insert(next) {
-                    parent.insert(next, (curr, service));
+                    parent.insert(next, (curr, dep.service().to_owned()));
                     queue.push_back(next);
                 }
             }
@@ -675,34 +754,34 @@ impl<'a> WaitGraph<'a> {
             let Some(curr_fact) = self.fact_of(curr) else {
                 continue;
             };
-            for (key, status, service) in self.service_waits(curr_fact) {
-                if status == DependencyStatus::Missing
-                    && unexported(self.root, &service).is_none()
-                    && !self.has_declared_provider(curr, Some(curr_fact), &service)
-                {
-                    if self.closest_for(curr, &service).is_none() {
-                        let candidates = self.unstarted_candidates(curr, Some(curr_fact), &service);
-                        if !candidates.is_empty() {
-                            let mut chain = Vec::new();
-                            let mut cursor = curr;
-                            while let Some((prev, svc)) = parent.get(cursor) {
-                                chain.push(CycleLink::new(*prev, svc.clone(), cursor));
-                                if *prev == start_id {
-                                    break;
+            for dep in self.service_waits(curr) {
+                if let MissingDep::Missing(service) = dep {
+                    if (self.unexported)(service).is_none()
+                        && !self.has_declared_provider(curr, Some(curr_fact), service)
+                    {
+                        if self.closest_for(curr, service).is_none() {
+                            let candidates =
+                                self.unstarted_candidates(curr, Some(curr_fact), service);
+                            if !candidates.is_empty() {
+                                let mut chain = Vec::new();
+                                let mut cursor = curr;
+                                while let Some((prev, svc)) = parent.get(cursor) {
+                                    chain.push(CycleLink::new(*prev, svc.clone(), cursor));
+                                    if *prev == start_id {
+                                        break;
+                                    }
+                                    cursor = *prev;
                                 }
-                                cursor = *prev;
+                                chain.reverse();
+                                return Some((chain, service.clone(), candidates));
                             }
-                            chain.reverse();
-                            return Some((chain, service, candidates));
                         }
+                        continue;
                     }
-                    continue;
                 }
-                if let Some((next, next_fact)) =
-                    self.edge_target(curr, curr_fact, &key, status, &service)
-                {
+                if let Some((next, next_fact)) = self.edge_target(curr, curr_fact, dep) {
                     if next_fact.is_pending() && visited.insert(next) {
-                        parent.insert(next, (curr, service));
+                        parent.insert(next, (curr, dep.service().to_owned()));
                         queue.push_back(next);
                     }
                 }
@@ -745,8 +824,8 @@ impl<'a> WaitGraph<'a> {
             if !fact.is_pending() {
                 continue;
             }
-            for (key, status, service) in self.service_waits(fact) {
-                if let Some((target, _)) = self.edge_target(id, fact, &key, status, &service) {
+            for dep in self.service_waits(id) {
+                if let Some((target, _)) = self.edge_target(id, fact, dep) {
                     reverse.entry(target).or_default().push(id.as_str());
                 }
             }
@@ -932,6 +1011,10 @@ fn unexported(root: &rutis::Ctx, name: &str) -> Option<String> {
 pub(crate) use rutis::config::closest;
 #[cfg(test)]
 use rutis::config::distance;
+
+#[cfg(test)]
+#[path = "waits_prop_tests.rs"]
+mod prop_tests;
 
 #[cfg(test)]
 mod tests {

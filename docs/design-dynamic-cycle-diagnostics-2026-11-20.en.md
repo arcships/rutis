@@ -2,9 +2,9 @@
 
 [中文](design-dynamic-cycle-diagnostics-2026-11-20.md)
 
-Status: draft, with PoC. Date: 2026-11-20. Base: `main` `5c2e143e` (0.23.0).
+Status: draft, with PoC. Date: 2026-11-20 (same-day revision: clarified semantic boundaries and non-atomic snapshot transients, and recorded the property-based graph verification choice per the formal verification design). Base: `main` `5c2e143e` (0.23.0).
 Issue: [#1326](https://github.com/arcships/rutis/issues/1326). Implemented by: [#1326](https://github.com/arcships/rutis/issues/1326) (split in §6).
-Based on: [design philosophy](design-philosophy.en.md) §7, §8 (dependency cycle diagnostics); [design document conventions](design-docs.en.md); [diagnostics design](design-diagnostics-2026-10-26.en.md) §4.5, §4.6; [error messages](design-error-messages-2026-11-03.en.md) §3.3, §3.5, §4.4 (#663 concept budget).
+Based on: [design philosophy](design-philosophy.en.md) §7, §8 (dependency cycle diagnostics); [design document conventions](design-docs.en.md); [diagnostics design](design-diagnostics-2026-10-26.en.md) §4.5, §4.6, §5.1; [error messages](design-error-messages-2026-11-03.en.md) §3.3, §3.5, §4.4 (#663 concept budget); [formal verification redesign](design-formal-verification-2026-11-08.en.md) §2.3, §3.5.
 
 Out of scope:
 
@@ -115,9 +115,17 @@ For a missing service `T` waited on directly by row `W` (`DependencyStatus::Miss
 
 Cross-language behaviour: all analysis and formatting happen inside `rutis-loader` in Rust, so Node, Bun, Python, Go, Swift, and Kotlin plugins see identical output in `rutis-host status`, `run`, `dev`, and `rutis/loader`'s `status()` JSON.
 
-### 3.5 Dynamic cycles that cannot be proved statically or from snapshots
+### 3.5 Semantic boundaries: proved cycles, unknown providers, and non-atomic snapshot transients
 
-The following cases **cannot** be proved to be cycles statically or from a `Loader::waits` snapshot, and rutis explicitly refuses to guess a cycle for them:
+This design maintains a strict three-way semantic boundary:
+
+1. **Proved declared cycles (`Cycle` / `CycleChain`)**: emitted only when sole-live-provider edges in the same scope form a simple closed loop returning to the queried row itself. Every edge rests on declared `provides` and observed `Pending` waits in the snapshot, with zero guessing.
+2. **Unknown / unannounced providers (`UnknownProvider`)**: states only that no row in scope currently declares the missing service while unstarted rows exist that may provide services once they run. It is a **diagnostic clue**, not a deadlock proof — a candidate row may never provide that service once started, or it may genuinely form a dynamic deadlock with a row in the chain — so its wording never claims a cycle and never overrides typo suggestions (`did you mean`).
+3. **Non-atomic snapshot transients during fast startup or reload**: like `Loader::status()` ([diagnostics design](design-diagnostics-2026-10-26.en.md) §5.1), `Loader::waits_of` reads row states and declarations under a short loader lock and then calls `root.diagnostics()` outside the lock without introducing a global stop-the-world barrier. Within a millisecond window during rapid startup, hot reload, or right as a row completes `apply`, a single snapshot may transiently observe row `a` still `Pending` while row `b` has not yet transitioned to `Active`:
+   - A declared provider in `Loading` falls into `ProviderStarting` / `ProviderWaiting` and never produces a false cycle;
+   - An unannounced (`announces: true`) provider transiently observed in `Loading` as an `UnknownProvider` candidate automatically resolves on the next look (`follow` poll or subsequent `status`) once it enters `Active`, becoming either `running` (if it provided the service) or `nothing provides it yet` (if it did not).
+
+In addition, the following cases **cannot** be proved to be cycles statically or from a `Loader::waits` snapshot, and rutis explicitly refuses to guess a cycle for them:
 
 1. **Conditional or delayed `ctx.provide` inside an `Active` row**: a row whose `apply` already finished (`Active`) may only call `ctx.provide("x", ...)` later on a timer, request, or event. A snapshot cannot know whether it will ever do so; waiting rows see `nothing provides it yet`.
 2. **Unannounced providers (`announces: true` without `provides`)**: before an unstarted row runs `apply`, rutis does not know which service names it will pass to `ctx.provide(...)`. Thus `a --bsvc--> b (undeclared) --asvc--> a` is reported as `UnknownProvider` ("may provide services once it runs"), never as `Cycle` or `CycleChain`. Declaring `provides` turns it into a proved cycle.
@@ -125,6 +133,19 @@ The following cases **cannot** be proved to be cycles statically or from a `Load
 4. **Private dependencies inside a foreign runtime**: Cordis dependencies resolved privately inside one Node runtime (not shared through `ServiceCatalog`) do not gate the row's rutis fiber and are not visible to `Loader::waits`.
 5. **Undeclared remote / peer services**: services on a disconnected peer or announced across a node link without local declarations cannot be linked to a remote Pending graph from the local snapshot alone (locally they appear as waiting on the connection row or `nothing provides it yet`).
 6. **Execution-time synchronous call cycles**: synchronous calls between already-running rows that call back into each other are reported by the bridge/runtime as `SyncWaitCycle`, not as startup `inject` cycles.
+
+### 3.6 Verification choice: property-based graph testing rather than a protocol TLA+ model
+
+Following [formal verification redesign](design-formal-verification-2026-11-08.en.md) §2.3 (pick the method that actually answers the question) and §3.5 (Layer D: property-based testing over large input spaces), and confirmed by `node tools/check-model-pr.mjs` (none of the files changed by this design are covered by any concurrent protocol model in `specs/`):
+
+- `#1326` is a pure read-only, side-effect-free snapshot graph traversal that adds **no concurrent protocol state transitions, message interleavings, lock orders, or shutdown races**; writing a protocol TLA+ model for it would answer the wrong question.
+- Its real risks lie in termination, zero false positives, soundness/completeness, and bounded output across arbitrary directed graph topologies — an input-space property. We therefore verify it with **deterministic randomized / property-based graph tests** (`proptest` in `crates/rutis-loader/src/loader/waits_prop_tests.rs`, covering thousands of generated graphs across 2..=12-node cycles, lead-in chains, multiple `isolate` scopes, multiple live providers, `announces: true` unknown rows, disabled/failed/loading/unresolved rows, and random DAGs) checked against an independent reachability oracle:
+  1. Every graph terminates cleanly with no panics in traversal or formatting, bounded output, and zero §4.5 forbidden internal words;
+  2. Every DAG produces zero `Cycle` / `CycleChain` false positives;
+  3. Every 2-node sole-provider cycle produces `WaitReason::Cycle` (backward compatible with `loader/wait-words`);
+  4. Every $N \ge 3$ sole-provider cycle produces `WaitReason::CycleChain` with a valid closed loop starting at the queried row;
+  5. Every lead-in row outside a cycle stays `WaitReason::ProviderWaiting`;
+  6. Every unknown-provider chain never claims a cycle and never overrides typo suggestions (`did you mean`).
 
 ## 4. What developers see
 
@@ -244,6 +265,6 @@ for entry in loader.entries() {
 
 | # | Scope (with paths) | Done when |
 | --- | --- | --- |
-| D-1 Wait graph & new variants | Add `CycleLink::new` in `crates/rutis-loader/src/loader/check.rs`; add `WaitReason::CycleChain` and `WaitReason::UnknownProvider` in `crates/rutis-loader/src/loader/waits.rs`, extend `Fact` (`announces`, `unknown_decl`, `isolates`), and implement scope-aware BFS cycle detection (preserving 2-row `Cycle` and lead-in `ProviderWaiting`) and unknown-provider chain detection | `cargo test -p rutis-loader --all-features` passes; tests cover 2-row cycle, 3-row cycle, lead-in into cycle, direct and chained unknown providers, normal startup wait, ordinary missing service, and cross-`isolate` non-cycle |
+| D-1 Wait graph & new variants | Add `CycleLink::new` in `crates/rutis-loader/src/loader/check.rs`; add `WaitReason::CycleChain` and `WaitReason::UnknownProvider` in `crates/rutis-loader/src/loader/waits.rs`, extend `Fact` (`announces`, `unknown_decl`, `isolates`), and implement scope-aware BFS cycle detection (preserving 2-row `Cycle` and lead-in `ProviderWaiting`) and unknown-provider chain detection; add property-based graph tests in `crates/rutis-loader/src/loader/waits_prop_tests.rs` (§3.6) | `cargo test -p rutis-loader --all-features` and `--no-default-features --lib` pass; tests cover 2-row cycle, 3-row cycle, lead-in into cycle, direct and chained unknown providers, normal startup wait, ordinary missing service, cross-`isolate` non-cycle, and thousands of randomized property-based graph cases checked against an independent oracle |
 | D-2 Formatting & verbatim acceptance tests | Implement bounded, panic-free formatting for `CycleChain` and `UnknownProvider` in `crates/rutis-loader/src/loader/status.rs` (8-hop / 3-candidate caps); add verbatim acceptance tests in `crates/rutis-loader/src/loader/status.rs` and `crates/rutis-loader/tests/waits.rs` matching §4 word for word | `cargo test -p rutis-loader -p rutis-host` passes, verbatim assertions match §4, and no forbidden words from [diagnostics design](design-diagnostics-2026-10-26.en.md) §4.5 appear |
 | D-3 Guides & guarantees register (follow-up PR) | Update the wait-reason table in `docs/guide/rutis-host.md` / `.en.md`; register long-cycle and unknown-provider diagnostics in the guarantees register and formal trace if promoted to contract guarantees | Link, guarantee, and formal-trace checks pass |
