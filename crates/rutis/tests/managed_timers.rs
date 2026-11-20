@@ -357,3 +357,80 @@ async fn timer_callback_error_and_panic_are_contained_and_reported_to_error_sink
     );
     assert!(ticks.load(Ordering::SeqCst) >= 3);
 }
+
+#[tokio::test]
+async fn unload_cancels_and_awaits_inflight_timer_drop_before_earlier_lifo_cleanup() {
+    struct PoolGuard {
+        pool_open: Arc<AtomicBool>,
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+    impl Drop for PoolGuard {
+        fn drop(&mut self) {
+            let tag = if self.pool_open.load(Ordering::SeqCst) {
+                "timer.dropped-with-open-pool"
+            } else {
+                "timer.USED-CLOSED-POOL"
+            };
+            self.events.lock().unwrap().push(tag);
+        }
+    }
+
+    struct Worker {
+        pool_open: Arc<AtomicBool>,
+        events: Arc<Mutex<Vec<&'static str>>>,
+        started: Arc<tokio::sync::Notify>,
+    }
+    impl Plugin for Worker {
+        type Deps = ();
+        async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+            let pool_open = self.pool_open.clone();
+            let events = self.events.clone();
+            ctx.effect(move || async move {
+                pool_open.store(false, Ordering::SeqCst);
+                events.lock().unwrap().push("pool.close");
+                Ok(())
+            })?;
+
+            let pool_open = self.pool_open.clone();
+            let events = self.events.clone();
+            let started = self.started.clone();
+            ctx.interval(Duration::from_millis(5), move || {
+                let pool_open = pool_open.clone();
+                let events = events.clone();
+                let started = started.clone();
+                async move {
+                    let _guard = PoolGuard { pool_open, events };
+                    started.notify_one();
+                    std::future::pending::<()>().await;
+                    Ok(())
+                }
+            })?;
+            Ok(())
+        }
+    }
+
+    let root = Ctx::root().unwrap();
+    let pool_open = Arc::new(AtomicBool::new(true));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let started = Arc::new(tokio::sync::Notify::new());
+
+    let view = root.plugin(Worker {
+        pool_open: pool_open.clone(),
+        events: events.clone(),
+        started: started.clone(),
+    });
+    (&view).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("timer callback should enter async wait");
+
+    // Unload drops the in-flight future (running PoolGuard::drop) and waits
+    // for the timer task to exit BEFORE running the earlier pool.close effect.
+    view.dispose().await.unwrap();
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec!["timer.dropped-with-open-pool", "pool.close"]
+    );
+    root.shutdown().await.unwrap();
+}

@@ -186,3 +186,61 @@ export function apply(ctx) {
   expect(stderr).toContain('rutis: timer of row heartbeat failed: Error: connection refused\n')
   expect(stderr).toContain('rutis: timer of row heartbeat failed: Error: tick one failed\n')
 }))
+
+test('async callback that synchronously self-cancels before await is still awaited before earlier LIFO cleanups', () => withRuntime({
+  'self-cancel-timeout.ts': `
+export function apply(ctx) {
+  const s = globalThis.bunSelfCancelState
+  ctx.effect(() => {
+    s.poolOpen = false
+    s.events.push('pool.close')
+  })
+  const cancel = ctx.timeout(5, async () => {
+    cancel()
+    s.events.push('callback.started')
+    s.startedResolve()
+    await s.release
+    s.events.push(s.poolOpen ? 'callback.used-open-pool' : 'callback.USED-CLOSED-POOL')
+  })
+}
+`,
+  'self-cancel-interval.ts': `
+export function apply(ctx) {
+  const s = globalThis.bunSelfCancelState
+  ctx.effect(() => {
+    s.poolOpen = false
+    s.events.push('pool.close')
+  })
+  const cancel = ctx.interval(5, async () => {
+    cancel()
+    s.events.push('callback.started')
+    s.startedResolve()
+    await s.release
+    s.events.push(s.poolOpen ? 'callback.used-open-pool' : 'callback.USED-CLOSED-POOL')
+  })
+}
+`,
+}, async runtime => {
+  for (const mode of ['timeout', 'interval'] as const) {
+    let startedResolve!: () => void
+    const started = new Promise<void>(resolve => { startedResolve = resolve })
+    let releaseResolve!: () => void
+    const release = new Promise<void>(resolve => { releaseResolve = resolve })
+    const state = (globalThis as any).bunSelfCancelState = {
+      poolOpen: true,
+      events: [] as string[],
+      startedResolve,
+      release,
+    }
+    await runtime.load(`sc-${mode}`, `./self-cancel-${mode}.ts`, {}, null, null)
+    await started
+
+    const unloading = runtime.unload(`sc-${mode}`)
+    await sleep(20)
+    expect(state.poolOpen).toBe(true)
+
+    releaseResolve()
+    await unloading
+    expect(state.events).toEqual(['callback.started', 'callback.used-open-pool', 'pool.close'])
+  }
+}))

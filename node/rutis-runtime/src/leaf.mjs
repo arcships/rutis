@@ -230,12 +230,17 @@ export function toCordis(spec, rowInject = [], providerOf) {
             return () => {}
           }
           let cancelled = false
+          let invoking = false
           let handle
           let running
           const cleanup = () => {
             cancelled = true
             if (handle !== undefined) { clearTimeout(handle); handle = undefined }
-            if (!running) removeStep(cleanup)
+            // Keep cleanup on `steps` while synchronously invoking `callback()`
+            // or awaiting its Promise so a callback that self-cancels before
+            // its first `await` is still awaited on unload before earlier LIFO
+            // cleanups (such as closing a pool) run.
+            if (!invoking && !running) removeStep(cleanup)
             return running
           }
           ctx.effect(cleanup)
@@ -243,7 +248,9 @@ export function toCordis(spec, rowInject = [], providerOf) {
             handle = undefined
             if (cancelled || !isActive()) { removeStep(cleanup); return }
             let result
+            invoking = true
             try { result = callback() } catch (error) {
+              invoking = false
               reportTimerError(error)
               removeStep(cleanup)
               return
@@ -253,7 +260,9 @@ export function toCordis(spec, rowInject = [], providerOf) {
                 running = undefined
                 removeStep(cleanup)
               })
+              invoking = false
             } else {
+              invoking = false
               removeStep(cleanup)
             }
           }, delayMs)
@@ -267,12 +276,13 @@ export function toCordis(spec, rowInject = [], providerOf) {
             return () => {}
           }
           let cancelled = false
+          let invoking = false
           let handle
           let running
           const cleanup = () => {
             cancelled = true
             if (handle !== undefined) { clearTimeout(handle); handle = undefined }
-            if (!running) removeStep(cleanup)
+            if (!invoking && !running) removeStep(cleanup)
             return running
           }
           const schedule = () => {
@@ -281,9 +291,12 @@ export function toCordis(spec, rowInject = [], providerOf) {
               handle = undefined
               if (cancelled || !isActive()) { removeStep(cleanup); return }
               let result
+              invoking = true
               try { result = callback() } catch (error) {
+                invoking = false
                 reportTimerError(error)
-                schedule()
+                if (cancelled || !isActive()) removeStep(cleanup)
+                else schedule()
                 return
               }
               if (result && typeof result.then === 'function') {
@@ -292,8 +305,11 @@ export function toCordis(spec, rowInject = [], providerOf) {
                   if (cancelled || !isActive()) removeStep(cleanup)
                   else schedule()
                 })
+                invoking = false
               } else {
-                schedule()
+                invoking = false
+                if (cancelled || !isActive()) removeStep(cleanup)
+                else schedule()
               }
             }, periodMs)
           }

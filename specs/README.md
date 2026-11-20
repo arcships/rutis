@@ -21,6 +21,7 @@
 | [`events/`](events/README.md) | 统一事件协议：登记表、分发路径、emit 队列、同步等待、link offers 与公告 epoch（[事件协议](../docs/design-events-protocol-2026-10-18.md) §4–§9；#613） |
 | [`peer-rows/`](peer-rows/README.md) | 节点托管行：行键/实例、`Host.loaded`、旧会话清理与新会话装载、迟到 `rows.ended`、`describe/schema/load/update/unload`、`link.offers` epoch、两节点代装与服务公告（远程会话 §4.2、§4.3；#640） |
 | [`call-lifecycle/`](call-lifecycle/README.md) | 调用生命周期：调用号、答复、取消与迟到答复、引用计数/参数引用/钉住目标、会话关闭与关闭后帧、出站积压、取消表规则、跨会话中继（会话协议 §5–§7；#626） |
+| [`managed-timers/`](managed-timers/README.md) | 托管定时器与卸载栈：一次性/周期非重叠调度、同步自取消与卸载竞态、可中止与不可中止 Promise 运行时的 LIFO 资源保序（[托管定时器设计](../docs/design-managed-timers-2026-11-20.md)；#1325） |
 | [`config-schema/`](config-schema/README.md) | 不是模型：配置 Schema 的共用用例表，各语言的实现逐字比较（配置 Schema 设计 §8），由各实现的测试跑 |
 
 ---
@@ -40,4 +41,5 @@ One model per directory, each with the `.tla` model, `.cfg` configurations (one 
 | [`events/`](events/README.en.md) | Unified event protocol: the registration table, dispatch paths, the emit queue, synchronous waiting, link offers and announcement epochs (events protocol §4–§9; #613) |
 | [`peer-rows/`](peer-rows/README.en.md) | Peer-hosted rows: the row key/instance, `Host.loaded`, old-session cleanup before a new session loads, late `rows.ended`, `describe/schema/load/update/unload`, `link.offers` epochs, two-node loading and service announcements (remote sessions §4.2, §4.3; #640) |
 | [`call-lifecycle/`](call-lifecycle/README.en.md) | Call lifecycle: call ids, replies, cancel and late replies, reference counts/argument references/pinned targets, session close and frames after it, outbound backlog, cancel-table rules, cross-session relay (session protocol §5–§7; #626) |
+| [`managed-timers/`](managed-timers/README.en.md) | Managed timers and unload stack: one-shot / non-overlapping interval scheduling, synchronous self-cancel vs. unload race, and LIFO resource safety under abortable and non-abortable Promise runtimes ([managed timers design](../docs/design-managed-timers-2026-11-20.en.md); #1325) |
 | [`config-schema/`](config-schema/README.en.md) | Not a model: the shared case list for config schemas, compared word for word by every implementation (config schema design §8), run by their own tests |

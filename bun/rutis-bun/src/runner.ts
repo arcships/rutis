@@ -448,12 +448,17 @@ export class Runtime {
           return () => {}
         }
         let cancelled = false
+        let invoking = false
         let handle: ReturnType<typeof setTimeout> | undefined
         let running: Promise<void> | undefined
         const cleanup = () => {
           cancelled = true
           if (handle !== undefined) { clearTimeout(handle); handle = undefined }
-          if (!running) removeStep(cleanup)
+          // Keep cleanup on `row.steps` while synchronously invoking
+          // `callback()` or awaiting its Promise so a callback that
+          // self-cancels before its first `await` is still awaited on unload
+          // before earlier LIFO cleanups (such as closing a pool) run.
+          if (!invoking && !running) removeStep(cleanup)
           return running
         }
         ctx.effect(cleanup)
@@ -461,7 +466,9 @@ export class Runtime {
           handle = undefined
           if (cancelled || !isActive()) { removeStep(cleanup); return }
           let result: unknown
+          invoking = true
           try { result = this.within(row.key, () => callback()) } catch (error) {
+            invoking = false
             reportTimerError(error)
             removeStep(cleanup)
             return
@@ -471,7 +478,9 @@ export class Runtime {
               running = undefined
               removeStep(cleanup)
             })
+            invoking = false
           } else {
+            invoking = false
             removeStep(cleanup)
           }
         }, delayMs)
@@ -485,12 +494,13 @@ export class Runtime {
           return () => {}
         }
         let cancelled = false
+        let invoking = false
         let handle: ReturnType<typeof setTimeout> | undefined
         let running: Promise<void> | undefined
         const cleanup = () => {
           cancelled = true
           if (handle !== undefined) { clearTimeout(handle); handle = undefined }
-          if (!running) removeStep(cleanup)
+          if (!invoking && !running) removeStep(cleanup)
           return running
         }
         const schedule = () => {
@@ -499,9 +509,12 @@ export class Runtime {
             handle = undefined
             if (cancelled || !isActive()) { removeStep(cleanup); return }
             let result: unknown
+            invoking = true
             try { result = this.within(row.key, () => callback()) } catch (error) {
+              invoking = false
               reportTimerError(error)
-              schedule()
+              if (cancelled || !isActive()) removeStep(cleanup)
+              else schedule()
               return
             }
             if (result && typeof (result as { then?: unknown }).then === 'function') {
@@ -510,8 +523,11 @@ export class Runtime {
                 if (cancelled || !isActive()) removeStep(cleanup)
                 else schedule()
               })
+              invoking = false
             } else {
-              schedule()
+              invoking = false
+              if (cancelled || !isActive()) removeStep(cleanup)
+              else schedule()
             }
           }, periodMs)
         }

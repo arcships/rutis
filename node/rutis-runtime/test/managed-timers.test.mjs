@@ -211,3 +211,45 @@ test('native Cordis plugins do not get leaf ctx.timeout or ctx.interval (Cordis 
   assert.equal(hasTimeout, false)
   assert.equal(hasInterval, false)
 })
+
+test('async callback that synchronously self-cancels before await is still awaited before earlier LIFO cleanups', async () => {
+  for (const mode of ['timeout', 'interval']) {
+    const root = new Context()
+    const events = []
+    let poolOpen = true
+    let startedResolve
+    const started = new Promise(resolve => { startedResolve = resolve })
+    let releaseResolve
+    const release = new Promise(resolve => { releaseResolve = resolve })
+
+    const spec = definePlugin({
+      name: `self-cancel-${mode}`,
+      apply(ctx) {
+        ctx.effect(() => {
+          poolOpen = false
+          events.push('pool.close')
+        })
+        const cancel = ctx[mode](5, async () => {
+          // Synchronously self-cancel BEFORE the first await!
+          cancel()
+          events.push('callback.started')
+          startedResolve()
+          await release
+          events.push(poolOpen ? 'callback.used-open-pool' : 'callback.USED-CLOSED-POOL')
+        })
+      },
+    })
+    const plugin = root.plugin(toCordis(supported(spec, `self-cancel-${mode}`)))
+    await plugin.await()
+    await started
+
+    // Unload while the self-cancelled async callback is still in flight.
+    const disposing = plugin.dispose()
+    await sleep(20)
+    assert.equal(poolOpen, true, `${mode}: pool must stay open while self-cancelled callback is still in flight`)
+
+    releaseResolve()
+    await disposing
+    assert.deepEqual(events, ['callback.started', 'callback.used-open-pool', 'pool.close'])
+  }
+})

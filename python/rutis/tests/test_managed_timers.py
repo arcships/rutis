@@ -233,6 +233,52 @@ class ManagedTimers(background.TestCase):
         self.assertIn("rutis: timer of row heartbeat failed: RuntimeError: connection refused\n", output)
         self.assertIn("rutis: timer of row heartbeat failed: ValueError: tick one failed\n", output)
 
+    def test_self_cancel_before_await_still_awaits_task_exit_before_earlier_lifo_cleanup(self):
+        for mode in ("timeout", "interval"):
+            with self.subTest(mode=mode):
+                events = []
+                pool_open = True
+                started = None
+                release = None
+
+                def apply(ctx, config):
+                    nonlocal pool_open
+                    cancel_holder = {}
+
+                    def close_pool():
+                        nonlocal pool_open
+                        pool_open = False
+                        events.append("pool.close")
+
+                    ctx.effect(close_pool)
+
+                    async def tick():
+                        # Synchronously self-cancel BEFORE the first await.
+                        cancel_holder["cancel"]()
+                        events.append("callback.started")
+                        started.set()
+                        try:
+                            await release.wait()
+                        finally:
+                            events.append("callback.exited-open-pool" if pool_open else "callback.USED-CLOSED-POOL")
+
+                    cancel_holder["cancel"] = getattr(ctx, mode)(0.005, tick)
+
+                async def run():
+                    nonlocal started, release
+                    started = asyncio.Event()
+                    release = asyncio.Event()
+                    rt = self.runtime()
+                    key = f"sc_{mode}"
+                    await rt.load(key, module(f"timers_{key}", apply), None, None)
+                    await asyncio.wait_for(started.wait(), timeout=2.0)
+                    # Unload cancels the in-flight task and waits for its finally
+                    # block to exit BEFORE running the earlier pool.close() effect.
+                    await rt.unload(key)
+
+                asyncio.run(run())
+                self.assertEqual(events, ["callback.started", "callback.exited-open-pool", "pool.close"])
+
 
 if __name__ == "__main__":
     unittest.main()
