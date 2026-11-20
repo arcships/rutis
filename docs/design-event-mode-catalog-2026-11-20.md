@@ -44,9 +44,9 @@ Issue：[#1324](https://github.com/arcships/rutis/issues/1324)。按本稿实施
 **D2 两处互补：内核 `EventBus` 运行时执行（主）+ `rutis-host check` 启动前检查（辅）。** 理由见 §一：只有内核 `EventBus` 能完整覆盖六种语言、编译二进制、未改动的 Cordis 插件和动态事件名；`check` 则在启动前兜住 `rutis.json` 拼写错误以及显式声明了事件期望的插件冲突。**放弃**：只在 `rutis-host check` 做源码静态扫描——对编译产物、Cordis 封装和动态名均失效。
 
 **D3 不匹配策略默认 `warn`，可按目录或按事件切到 `error`。**
-- `EventModePolicy::Warn`（默认）：分发**照常执行**（返回值语义不变，既有 Cordis 插件不会因开启目录而中断），同时把 `ErrorKind::EventModeMismatch` 报给宿主的 `ErrorSink`。
-- `EventModePolicy::Error`：在选取和调用任何监听器**之前**拒绝本次分发，直接返回 `ErrorKind::EventModeMismatch`。
-- 目录有默认策略（默认 `Warn`），每个事件条目也可单独指定策略（`expect_with` / `on_mismatch`），便于宿主逐个事件从告警收紧到严格。**放弃**：默认 `error`——一旦开启目录就会直接打断尚未改完的既有 Cordis 插件。
+- `EventModePolicy::Warn`（默认）：分发**照常执行**（返回值语义不变，既有 Cordis 插件不会因开启目录而中断），同时把 `ErrorKind::EventModeMismatch` 报给宿主的 `ErrorSink`。**`warn` 也是唯一在全部语言、全部五种方式下语义完全一致的默认策略**：在 `warn` 下，Rust、六种运行时与 Cordis 插件的调用点签名和返回行为零差异，且宿主 `ErrorSink` 统一收到完全相同的诊断行；而切到 `error` 后，`emit` 存在天然的语言接口差异（Rust `ctx.emit()` 返回 `Result<(), Error>` 可在调用点同步报错，其余语言的 `ctx.emit()` 是无返回值的发出即不管接口，无法在调用点同步抛出，见 §3.3 与 §4.1）。
+- `EventModePolicy::Error`：在选取和调用任何监听器**之前**拒绝本次分发，直接返回 `ErrorKind::EventModeMismatch`（0 个监听器执行）。
+- 目录有默认策略（默认 `Warn`），每个事件条目也可单独指定策略（`expect_with` / `on_mismatch`），便于宿主逐个事件从告警收紧到严格。**放弃**：默认 `error`——不仅会立刻打断尚未改完的既有 Cordis 插件，还会把 `emit` 在 Rust 与其他语言之间的调用点报错差异直接暴露给所有未显式选择严格模式的宿主。
 
 **D4 `warn` 按 `(发出方, 事件名, 实际方式, 期望方式)` 去重（上限 4096 项）；`error` 不去重。** 高频事件（如 `"message"`）在 `warn` 下如果不去重会刷爆 stderr；只按事件名去重又会遮盖第二个同样写错方式的插件。按四元组去重使每个出错的“发出方 + 错误方式”在目录不变期间恰好报告一次，重新调用 `set_event_mode_catalog` 时清空；记录表用 FIFO 有界集合限制在 4096 项以内，避免动态插件名导致内存增长。`error` 模式下每次违规分发都必须被拒绝，绝不去重。**放弃**：按时间窗口限流——测试不可预测，且仍会重复刷日志。
 
@@ -109,15 +109,17 @@ Issue：[#1324](https://github.com/arcships/rutis/issues/1324)。按本稿实施
    - `EventModePolicy::Error`：立即返回 `Err(report.into())`，不选表、不调过滤器、不执行任何监听器。
    - `EventModePolicy::Warn`：在去重锁内记录 `(emitter, name, actual, expected)`（上限 4096 项，超出时淘汰最早一项）；释放锁后，若为首次出现则在 `catch_unwind` 内调用 `ctx.error_sink()(Arc::new(report))`；随后照常继续选表与派发。
 
-### 3.3 跨语言行为
+### 3.3 跨语言行为与 `Error` 下 `emit` 的语义差异
 
-| 情形 | Rust | Node（含 Cordis）/ Bun / Python / Go / Swift / Kotlin |
+| 情形 | Rust | JS / Node（含 Cordis）/ Bun / Python / Go / Swift / Kotlin |
 | --- | --- | --- |
 | 命中 `warn`（全部五种方式） | 原分发照常执行；宿主 `ErrorSink` 收到一次 `EventModeMismatch` | **完全一致**：原分发照常执行（`emit`/`parallel` 仍忽略返回值）；宿主 `ErrorSink` 收到一次 `EventModeMismatch`，发出方写行名 |
-| 命中 `error`（`parallel` / `serial` / `waterfall` / `bail`） | 返回 `Err(ErrorKind::EventModeMismatch)`；不执行监听器 | **完全一致**：调用方收到 `BindingError`（`code: "event-mode-mismatch"`，`data: {event, actual, expected}`）；不执行监听器 |
-| 命中 `error`（`emit`） | `ctx.emit(...)` 返回 `Err(ErrorKind::EventModeMismatch)`；不执行监听器 | **语言差异**：六种语言的 `emit` 都是无返回值的发出即返回接口（JS 返回 `undefined`，Python 返回 `None` 等），不能在异步叶子 `emit` 里同步抛出；`rutis-bridge` 在 `SessionEvents::dispatch` 进 `run_emit` 队列**之前**调用 `EventBus::check_mode` 并返回 `BindingError`，因此**不执行任何监听器**，同时运行时在错误输出里打印该拒绝行 |
+| 命中 `error`（`serial` / `bail` / `parallel` / `waterfall`） | 调用点返回 `Err(ErrorKind::EventModeMismatch)`；0 个监听器执行 | **完全一致**：调用点直接抛出 / 返回 `BindingError(code: "event-mode-mismatch", data: {event, actual, expected})`；0 个监听器执行 |
+| 命中 `error`（`emit`） | `ctx.emit()` 的签名是 `Result<(), Error>`，调用方在调用点**同步**收到 `Err(ErrorKind::EventModeMismatch)`；0 个监听器执行 | **调用点语义不同**：`ctx.emit()` 是发出即不管（fire-and-forget）接口（JS / Node / Bun / Cordis 返回 `undefined`，Python 返回 `None`，Go / Swift / Kotlin 无返回值），宿主拒绝**无法在 `ctx.emit()` 调用点同步抛出**。`rutis-bridge` 在 `SessionEvents::dispatch` 进 `run_emit` 队列**之前**调用 `EventBus::check_mode` 并拒绝该请求，确保 **0 个监听器执行**，拒绝结果经运行时 / 宿主的拒发 `emit` 错误报告路径输出，而 `ctx.emit()` 本身仍立即返回 `undefined` / `None` |
 | 未列出事件 / 动态事件名未命中目录 | 无检查，零警告 | **完全一致**：无检查，零警告 |
 | `internal/*`（Cordis） | 不适用 | 留在 Node 进程内，不过总线，不参与目录 |
+
+正是上述 `Error` 策略下 `emit` 的跨语言调用点差异，决定了 **`warn` 是跨语言行为完全一致的默认策略**：在 `warn` 下，全部语言、全部五种方式都保留原有调用点行为并向宿主的 `ErrorSink` 报告同一条去重诊断；只有在宿主显式为某个事件（或整份目录）选择 `error` 时，才启用“拒绝派发、0 个监听器执行”，且文档如实告知开发者 `emit` 在非 Rust 语言里不会在调用点同步抛错，而 `serial` / `bail` / `parallel` / `waterfall` 都会在调用点直接抛出 `BindingError(code: "event-mode-mismatch")`。
 
 ### 3.4 `rutis.json` 与 `rutis-host check`（步骤 3）
 
@@ -174,12 +176,14 @@ if (blocked) return
 
 **出错时：**
 
+默认策略是 `warn`（所有语言、全部五种方式行为一致：原分发照常执行，宿主标准错误只报告一次诊断）。若宿主对某个事件开启了 `error`，`serial` / `bail` / `parallel` / `waterfall` 在全部语言里都会在调用点直接抛出 / 返回错误；唯独 `emit` 在 Rust 与其他语言之间有接口差异——Rust 的 `ctx.emit()` 返回 `Result<(), Error>` 会在调用点同步返回 `Err`，而 JS / Node / Bun / Python / Go / Swift / Kotlin / Cordis 的 `ctx.emit()` 是 fire-and-forget（立即返回 `undefined` / `None`），不会在调用点同步抛出，而是 0 个监听器执行并经运行时 / 宿主的拒发 `emit` 错误报告路径输出：
+
 | 触发方式 | 逐字输出（与错误码） | 记在哪一行 | 怎么改 |
 | --- | --- | --- | --- |
-| 目录为 `warn`（默认），`chat` 误用 `ctx.emit('message', msg)` 而目录期望 `bail` | 宿主标准错误打印一次：`chat: event message dispatched with emit, expected bail: use bail instead`（无错误码；`emit` 照常执行） | `chat`（发出方行） | 把 `ctx.emit('message', msg)` 改成 `ctx.bail('message', msg)` |
-| 目录为 `error`，`chat` 误用 `await ctx.parallel('message', msg)` 而目录期望 `bail` | 调用方抛 `BindingError`，`code` 为 `"event-mode-mismatch"`，`data` 为 `{"event":"message","actual":"parallel","expected":"bail"}`，消息：`chat: event message dispatched with parallel, expected bail: use bail instead` | `chat`（发出方行） | 把 `ctx.parallel('message', msg)` 改成 `ctx.bail('message', msg)` |
-| 目录为 `error`，Rust 插件 `chat` 误用 `ctx.emit(Message { ... })` 而目录期望 `bail` | `ctx.emit` 返回 `Err`，`ErrorKind::EventModeMismatch`，消息：`chat: event message dispatched with emit, expected bail: use bail instead` | `chat`（发出方插件） | 把 `ctx.emit(...)` 改成 `ctx.bail(...)` |
-| 目录为 `error`，JS/Python/Go/Swift/Kotlin 插件 `chat` 误用 `ctx.emit('message', msg)` 而目录期望 `bail` | 不调用任何监听器；运行时错误输出打印：`chat: event message dispatched with emit, expected bail: use bail instead`（`BindingError`，`code: "event-mode-mismatch"`） | `chat`（发出方行） | 把 `ctx.emit('message', msg)` 改成 `ctx.bail('message', msg)` |
+| 目录为 `warn`（默认，跨语言一致），`chat` 误用 `ctx.emit('message', msg)` 而目录期望 `bail` | 宿主标准错误打印一次：`chat: event message dispatched with emit, expected bail: use bail instead`（无错误码；`emit` 照常执行，全部语言一致） | `chat`（发出方行） | 把 `ctx.emit('message', msg)` 改成 `ctx.bail('message', msg)` |
+| 目录为 `error`，`chat` 误用 `serial` / `bail` / `parallel` / `waterfall`（例如 `await ctx.parallel('message', msg)` 而目录期望 `bail`） | 调用点直接抛 / 返回 `BindingError`，`code` 为 `"event-mode-mismatch"`，`data` 为 `{"event":"message","actual":"parallel","expected":"bail"}`，消息：`chat: event message dispatched with parallel, expected bail: use bail instead`（0 个监听器执行） | `chat`（发出方行） | 把 `ctx.parallel('message', msg)` 改成 `ctx.bail('message', msg)` |
+| 目录为 `error`，Rust 插件 `chat` 误用 `ctx.emit(Message { ... })` 而目录期望 `bail` | `ctx.emit()` 在调用点**同步**返回 `Err(ErrorKind::EventModeMismatch)`，消息：`chat: event message dispatched with emit, expected bail: use bail instead`（0 个监听器执行） | `chat`（发出方插件） | 把 `ctx.emit(...)` 改成 `ctx.bail(...)` |
+| 目录为 `error`，JS / Node / Bun / Python / Go / Swift / Kotlin / Cordis 插件 `chat` 误用 `ctx.emit('message', msg)` 而目录期望 `bail` | `ctx.emit()` 仍立即返回 `undefined` / `None`（不在调用点同步抛出）；**0 个监听器执行**；运行时 / 宿主的拒发 `emit` 错误报告路径输出：`chat: event message dispatched with emit, expected bail: use bail instead`（`BindingError`，`code: "event-mode-mismatch"`） | `chat`（发出方行） | 把 `ctx.emit('message', msg)` 改成 `ctx.bail('message', msg)` |
 
 **要懂的概念：** **+0**。对照 [#663](https://github.com/arcships/rutis/issues/663) 插件作者层 7 个概念预算（插件、服务、`inject`、配置、事件、`test` 工具、`dev` 与行），仍在 **7 / 7** 预算内；遇到报错时文字里只有开发者已经写过的行名、事件名与方式名。
 
@@ -267,7 +271,7 @@ root.set_event_mode_catalog(catalog)?;
 
 | 步骤 | 范围 | 完成条件 |
 | --- | --- | --- |
-| 1（本 PR：设计稿 + 原型） | 中英文设计稿；`crates/rutis` 实现 `EventModePolicy`、`EventModeEntry`、`EventModeCatalog`、`ErrorKind::EventModeMismatch`、`EventBus` 运行时检查与有界去重、`CtxHost::set_event_mode_catalog` / `event_mode_catalog`、`Dispatch.emitter` 字段 | `crates/rutis/tests/event_mode_catalog.rs` 逐字验证黑名单 `warn`/`error`、五种方式匹配、未列出与动态事件零误报、零监听器检出、单事件策略覆盖、非法目录校验；`cargo test -p rutis`、`cargo fmt --check` 与文档检查全绿 |
+| 1（本 PR：设计稿 + 原型 + 形式化模型） | 中英文设计稿；`crates/rutis` 实现 `EventModePolicy`、`EventModeEntry`、`EventModeCatalog`、`ErrorKind::EventModeMismatch`、`EventBus` 运行时检查与有界去重、`CtxHost::set_event_mode_catalog` / `event_mode_catalog`、`Dispatch.emitter` 字段；`specs/event-mode-catalog/` TLA+ 模型与变异配置 | `crates/rutis/tests/event_mode_catalog.rs` 逐字验证黑名单 `warn`/`error`、五种方式匹配、未列出与动态事件零误报、零监听器检出、单事件策略覆盖、非法目录校验；`specs/event-mode-catalog/run.sh` 全部配置与 `expected.txt` 一致；`cargo test -p rutis`、`cargo fmt --check` 与文档/模型检查全绿 |
 | 2（`rutis-bridge` 接通） | `SessionEvents::dispatch` 填入 `Dispatch.emitter`（行名 / 运行时名）并在 `Mode::Emit` 进队列前调用 `check_mode`；`events/errors.rs` 把 `EventModeMismatch` 编码为带 `code: "event-mode-mismatch"` 与 `data` 的 `BindingError`；更新[诊断设计](design-diagnostics-2026-10-26.md) §4.3 错误码表 | 真实 Node（含 Cordis 插件）与 Python 运行时集成测试逐字验证 §4.1 全部输出（含 `warn` 保持兼容与 `error` 拒绝），跨语言黑名单场景通过 |
 | 3（`rutis-host` 与 `rutis-loader`） | `HostConfig` 支持 `rutis.json` 顶层可选 `"events"` 与拼写建议；`Host::start_with` / `reload` 安装目录；`rutis-loader` 的 `Declared` 增加可选 `events` 字段并在 `Loader::check` 与 `rutis-host check` / `--strict` 中比对输出 | 验收测试逐字比对 §4.2 表格中每一条配置报错、冲突告警、`--strict` 退出码与运行期输出，确认 Cordis 与动态事件零误报 |
 | 4（指南与保证登记） | 更新 [rutis-host 指南](guide/rutis-host.md)、[Rust 宿主指南](guide/rust-host.md)、[Cordis 兼容边界](guide/cordis-boundaries.md)（双语），在[保证登记表](guarantees.md) 登记事件目录保证与对应测试 | `node tools/check-md-links.mjs`、`check-guarantees.mjs`、`formal-trace.mjs --check` 全部通过 |
