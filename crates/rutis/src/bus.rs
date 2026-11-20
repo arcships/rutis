@@ -92,13 +92,23 @@ struct MismatchKey {
 }
 
 #[derive(Default)]
+struct CatalogSlot {
+    epoch: u64,
+    catalog: EventModeCatalog,
+}
+
+#[derive(Default)]
 struct WarnedMismatches {
+    epoch: u64,
     seen: HashSet<MismatchKey>,
     order: VecDeque<MismatchKey>,
 }
 
 impl WarnedMismatches {
-    fn record(&mut self, key: MismatchKey) -> bool {
+    fn record(&mut self, epoch: u64, key: MismatchKey) -> bool {
+        if self.epoch != epoch {
+            return false;
+        }
         if !self.seen.insert(key.clone()) {
             return false;
         }
@@ -111,7 +121,8 @@ impl WarnedMismatches {
         true
     }
 
-    fn clear(&mut self) {
+    fn reset(&mut self, epoch: u64) {
+        self.epoch = epoch;
         self.seen.clear();
         self.order.clear();
     }
@@ -124,9 +135,12 @@ struct BusCore {
     delivered: std::sync::Condvar,
     /// `crate::sync`: a shuttle rwlock in the shuttle models (#622 item 1).
     transcoder: crate::sync::RwLock<Arc<dyn Transcoder>>,
-    /// Fast path: false when the installed mode catalog is empty.
+    /// Fast path: false when the installed mode catalog is empty. Updated only
+    /// while holding `catalog.write()`.
     has_catalog: AtomicBool,
-    catalog: RwLock<EventModeCatalog>,
+    /// Lock order: `catalog` -> `warned`. Never acquire `catalog` while holding
+    /// `warned`, and never hold either while calling `ctx.error_sink()`.
+    catalog: RwLock<CatalogSlot>,
     warned: Mutex<WarnedMismatches>,
     next_dispatch: AtomicU64,
 }
@@ -236,7 +250,7 @@ impl EventBus {
                 delivered: std::sync::Condvar::new(),
                 transcoder: crate::sync::RwLock::new(Arc::new(JsonTranscoder)),
                 has_catalog: AtomicBool::new(false),
-                catalog: RwLock::new(EventModeCatalog::new()),
+                catalog: RwLock::new(CatalogSlot::default()),
                 warned: Mutex::default(),
                 next_dispatch: AtomicU64::new(1),
             }),
@@ -269,15 +283,22 @@ impl EventBus {
     pub fn set_event_mode_catalog(&self, catalog: EventModeCatalog) -> Result<(), Error> {
         catalog.validate()?;
         let non_empty = !catalog.is_empty();
-        *self.core.catalog.write().unwrap() = catalog;
+        let mut slot = self.core.catalog.write().unwrap();
+        slot.epoch += 1;
+        let epoch = slot.epoch;
+        slot.catalog = catalog;
+        // Reset warned and update `has_catalog` while holding `catalog.write()`
+        // (fixed lock order: `catalog` -> `warned`) so concurrent swaps stay
+        // consistent and readers never see a new epoch before `warned` resets.
+        self.core.warned.lock().unwrap().reset(epoch);
         self.core.has_catalog.store(non_empty, Ordering::Release);
-        self.core.warned.lock().unwrap().clear();
+        drop(slot);
         Ok(())
     }
 
     /// A clone of the currently installed [`EventModeCatalog`].
     pub fn event_mode_catalog(&self) -> EventModeCatalog {
-        self.core.catalog.read().unwrap().clone()
+        self.core.catalog.read().unwrap().catalog.clone()
     }
 
     /// Check `name` against the installed [`EventModeCatalog`] for a dispatch
@@ -285,7 +306,7 @@ impl EventBus {
     /// `(emitter, name, actual, expected)` through `ctx.error_sink()` and
     /// returns `Ok(())`; under [`EventModePolicy::Error`], returns
     /// `Err(ErrorKind::EventModeMismatch)`.
-    pub fn check_mode(
+    pub(crate) fn check_mode(
         &self,
         ctx: &Ctx,
         name: &str,
@@ -295,9 +316,12 @@ impl EventBus {
         if !self.core.has_catalog.load(Ordering::Acquire) {
             return Ok(());
         }
-        let rule = self.core.catalog.read().unwrap().get(name);
-        let Some((expected, policy)) = rule else {
-            return Ok(());
+        let (epoch, expected, policy) = {
+            let slot = self.core.catalog.read().unwrap();
+            let Some((expected, policy)) = slot.catalog.get(name) else {
+                return Ok(());
+            };
+            (slot.epoch, expected, policy)
         };
         if expected == actual {
             return Ok(());
@@ -315,12 +339,15 @@ impl EventBus {
         match policy {
             EventModePolicy::Error => Err(report.into()),
             EventModePolicy::Warn => {
-                let fresh = self.core.warned.lock().unwrap().record(MismatchKey {
-                    emitter,
-                    name: name.to_owned(),
-                    actual,
-                    expected,
-                });
+                let fresh = self.core.warned.lock().unwrap().record(
+                    epoch,
+                    MismatchKey {
+                        emitter,
+                        name: name.to_owned(),
+                        actual,
+                        expected,
+                    },
+                );
                 if fresh {
                     let sink = ctx.error_sink();
                     let _ = catch_unwind(AssertUnwindSafe(|| sink(Arc::new(report))));
@@ -1282,6 +1309,80 @@ fn report_filter(ctx: &Ctx, name: &str, error: Error) {
         error: error.shared(),
     };
     let _ = catch_unwind(AssertUnwindSafe(|| sink(Arc::new(report))));
+}
+
+#[cfg(test)]
+mod catalog_sync_tests {
+    use super::*;
+    use std::sync::Barrier;
+
+    #[test]
+    fn concurrent_catalog_swaps_keep_has_catalog_and_epoch_in_sync() {
+        let bus = EventBus::new();
+        let non_empty = EventModeCatalog::new()
+            .with_policy(EventModePolicy::Error)
+            .expect("message", Mode::Bail);
+        let empty = EventModeCatalog::new();
+
+        for _ in 0..50 {
+            let barrier = Arc::new(Barrier::new(4));
+            std::thread::scope(|scope| {
+                for tid in 0..4 {
+                    let bus = bus.clone();
+                    let barrier = barrier.clone();
+                    let non_empty = non_empty.clone();
+                    let empty = empty.clone();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        for iter in 0..200 {
+                            let catalog = if (tid + iter) % 2 == 0 {
+                                non_empty.clone()
+                            } else {
+                                empty.clone()
+                            };
+                            bus.set_event_mode_catalog(catalog).unwrap();
+                        }
+                    });
+                }
+            });
+
+            let slot = bus.core.catalog.read().unwrap();
+            let warned = bus.core.warned.lock().unwrap();
+            assert_eq!(
+                bus.core.has_catalog.load(Ordering::Acquire),
+                !slot.catalog.is_empty(),
+                "has_catalog drifted from installed catalog"
+            );
+            assert_eq!(
+                warned.epoch, slot.epoch,
+                "warned epoch drifted from catalog epoch"
+            );
+        }
+    }
+
+    #[test]
+    fn stale_epoch_warning_does_not_pollute_newer_epoch() {
+        let mut warned = WarnedMismatches::default();
+        warned.reset(2);
+        let key = MismatchKey {
+            emitter: "chat".into(),
+            name: "message".into(),
+            actual: Mode::Emit,
+            expected: Mode::Bail,
+        };
+        assert!(
+            !warned.record(1, key.clone()),
+            "stale epoch must be ignored"
+        );
+        assert!(
+            warned.record(2, key.clone()),
+            "current epoch must still record once"
+        );
+        assert!(
+            !warned.record(2, key),
+            "same epoch duplicate must be suppressed"
+        );
+    }
 }
 
 #[cfg(test)]

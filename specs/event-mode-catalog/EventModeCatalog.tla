@@ -2,8 +2,9 @@
 (***************************************************************************)
 (* Optional event mode catalog and runtime bus enforcement (#1324):        *)
 (* concurrent dispatchers (user emit/bail/serial and framework `rutis/*`), *)
-(* host catalog swaps (valid and invalid), Warn deduplication epochs, and  *)
-(* two-phase listener close admission / drain.                             *)
+(* host catalog swaps (valid and invalid), atomic `has_catalog` / epoch /  *)
+(* Warn deduplication synchronization, and two-phase listener close        *)
+(* admission / drain.                                                      *)
 (*                                                                         *)
 (* Design: docs/design-event-mode-catalog-2026-11-20.md §2 (D1-D9) and     *)
 (* §3 (rules 3.1-3.5). Implementation: crates/rutis/src/bus.rs             *)
@@ -16,6 +17,10 @@
 (*   invokes 0 listeners and leaves 0 in-flight calls.                     *)
 (* - AtomicCatalogValidation: invalid catalog updates ("", `rutis/*`,      *)
 (*   `internal/*`) never overwrite or clear the prior valid catalog/epoch. *)
+(* - CatalogFlagInSync: `has_catalog` stays synchronized with whether a    *)
+(*   catalog is installed (`(catalogMode # "none") <=> hasCatalog`),       *)
+(*   `warned` tracks the active catalog epoch, and no epoch warning is     *)
+(*   lost or emitted twice.                                                *)
 (* - WarnPreservesDelivery: under Warn policy, mismatched dispatches still *)
 (*   invoke every eligible live listener identically to an empty catalog,  *)
 (*   and warn at most once per (emitter, event, actual, expected) per      *)
@@ -64,18 +69,24 @@ ASSUME Mutation \in {
     "checkAfterStart",
     "clearOnInvalid",
     "blockFramework",
-    "warnDropsDelivery"
+    "warnDropsDelivery",
+    "nonAtomicSwap"
 }
 ASSUME MaxEpoch \in Nat /\ MaxEpoch >= 1
 ASSUME MaxDispatches \in Nat /\ MaxDispatches >= 1
 
 VARIABLES
-    \* Catalog state (bus.rs: has_catalog, catalog, warned)
+    \* Catalog state (bus.rs: has_catalog, catalog{epoch, catalog}, warned{epoch, seen})
     catalogMode,         \* "none" | "bail" (expected mode for "msg")
     catalogPolicy,       \* "warn" | "error"
+    hasCatalog,          \* BOOLEAN fast-path flag (`BusCore::has_catalog`)
     epoch,               \* 0..MaxEpoch, incremented on each valid swap
-    warned,              \* subset of WarnKeys already warned in current epoch
+    warned,              \* subset of WarnKeys already warned in warnedEpoch
+    warnedEpoch,         \* 0..MaxEpoch, epoch that `warned` belongs to
     epochWarnCount,      \* [WarnKeys -> Nat]: warnings emitted in current epoch
+    swapPhase,           \* "idle" | "wroteCatalog" | "storedFlag" (nonAtomicSwap only)
+    swapNonEmpty,        \* BOOLEAN pending has_catalog store (nonAtomicSwap only)
+    swapEpoch,           \* 0..MaxEpoch pending warned reset epoch (nonAtomicSwap only)
     invalidTried,        \* whether SetInvalidCatalog has been exercised in current epoch
 
     \* Ghost: last successfully validated catalog configuration and epoch
@@ -84,11 +95,12 @@ VARIABLES
     lastValidEpoch,
 
     \* Per-dispatcher state
-    dState,              \* [Dispatchers -> "idle" | "checking" | "delivering" | "done" | "rejected"]
+    dState,              \* [Dispatchers -> "idle" | "checking" | "recordingWarn" | "delivering" | "done" | "rejected"]
     dEvent,              \* [Dispatchers -> {"msg", "other", "rutis/row"}]
     dMode,               \* [Dispatchers -> {"emit", "serial", "bail"}]
     dFw,                 \* [Dispatchers -> BOOLEAN]
     dCount,              \* [Dispatchers -> 0..MaxDispatches]
+    dSnapEpoch,          \* [Dispatchers -> 0..MaxEpoch]: epoch read under catalog.read()
     dRemaining,          \* [Dispatchers -> SUBSET Listeners]
     dInvoked,            \* [Dispatchers -> SUBSET Listeners]
     dSkippedClosed,      \* [Dispatchers -> SUBSET Listeners]
@@ -102,19 +114,29 @@ VARIABLES
     cleaned,             \* SUBSET Listeners (cleanup completed)
     admittedAfterCommit  \* [Dispatchers -> [Listeners -> BOOLEAN]]
 
-vars == <<
-    catalogMode, catalogPolicy, epoch, warned, epochWarnCount, invalidTried,
-    lastValidMode, lastValidPolicy, lastValidEpoch,
-    dState, dEvent, dMode, dFw, dCount, dRemaining, dInvoked, dSkippedClosed, dResult,
-    inFlight, marked, closeCommitted, closing, cleaned, admittedAfterCommit
+catalogVars == <<
+    catalogMode, catalogPolicy, hasCatalog, epoch, warned, warnedEpoch,
+    epochWarnCount, swapPhase, swapNonEmpty, swapEpoch, invalidTried
 >>
+ghostVars == <<lastValidMode, lastValidPolicy, lastValidEpoch>>
+dispVars == <<
+    dState, dEvent, dMode, dFw, dCount, dSnapEpoch,
+    dRemaining, dInvoked, dSkippedClosed, dResult
+>>
+closeVars == <<inFlight, marked, closeCommitted, closing, cleaned, admittedAfterCommit>>
+vars == <<catalogVars, ghostVars, dispVars, closeVars>>
 
 Init ==
     /\ catalogMode = "none"
     /\ catalogPolicy = "warn"
+    /\ hasCatalog = FALSE
     /\ epoch = 0
     /\ warned = {}
+    /\ warnedEpoch = 0
     /\ epochWarnCount = [k \in WarnKeys |-> 0]
+    /\ swapPhase = "idle"
+    /\ swapNonEmpty = FALSE
+    /\ swapEpoch = 0
     /\ invalidTried = FALSE
     /\ lastValidMode = "none"
     /\ lastValidPolicy = "warn"
@@ -124,6 +146,7 @@ Init ==
     /\ dMode = [d \in Dispatchers |-> "emit"]
     /\ dFw = [d \in Dispatchers |-> FALSE]
     /\ dCount = [d \in Dispatchers |-> 0]
+    /\ dSnapEpoch = [d \in Dispatchers |-> 0]
     /\ dRemaining = [d \in Dispatchers |-> {}]
     /\ dInvoked = [d \in Dispatchers |-> {}]
     /\ dSkippedClosed = [d \in Dispatchers |-> {}]
@@ -139,24 +162,87 @@ Init ==
 (* Host catalog updates (bus.rs: set_event_mode_catalog, catalog.rs)       *)
 (***************************************************************************)
 
-\* Install a valid catalog (or clear with "none"), advancing epoch and
-\* resetting the Warn deduplication set.
+\* Healthy atomic swap: under `catalog.write()`, increment `epoch`, install
+\* the validated catalog, reset `warned` to the new epoch (lock order
+\* `catalog -> warned`), and store `has_catalog = !catalog.is_empty()`.
 SetValidCatalog(cfg) ==
+    /\ Mutation # "nonAtomicSwap"
+    /\ cfg \in CatalogConfigs
+    /\ epoch < MaxEpoch
+    /\ (cfg[1] # catalogMode \/ cfg[2] # catalogPolicy)
+    /\ catalogMode' = cfg[1]
+    /\ catalogPolicy' = cfg[2]
+    /\ hasCatalog' = (cfg[1] # "none")
+    /\ epoch' = epoch + 1
+    /\ warned' = {}
+    /\ warnedEpoch' = epoch + 1
+    /\ epochWarnCount' = [k \in WarnKeys |-> 0]
+    /\ invalidTried' = FALSE
+    /\ lastValidMode' = cfg[1]
+    /\ lastValidPolicy' = cfg[2]
+    /\ lastValidEpoch' = epoch + 1
+    /\ UNCHANGED <<swapPhase, swapNonEmpty, swapEpoch, dispVars, closeVars>>
+
+\* Mutation "nonAtomicSwap": release `catalog.write()` between updating
+\* `catalogMode`, storing `has_catalog`, and clearing `warned`, letting a
+\* second swap or `CheckCatalog` / `RecordWarn` interleave between steps.
+NonAtomicWriteCatalog(cfg) ==
+    /\ Mutation = "nonAtomicSwap"
+    /\ swapPhase = "idle"
     /\ cfg \in CatalogConfigs
     /\ epoch < MaxEpoch
     /\ (cfg[1] # catalogMode \/ cfg[2] # catalogPolicy)
     /\ catalogMode' = cfg[1]
     /\ catalogPolicy' = cfg[2]
     /\ epoch' = epoch + 1
+    /\ epochWarnCount' = [k \in WarnKeys |-> 0]
+    /\ swapPhase' = "wroteCatalog"
+    /\ swapNonEmpty' = (cfg[1] # "none")
+    /\ swapEpoch' = epoch + 1
+    /\ invalidTried' = FALSE
+    /\ lastValidMode' = cfg[1]
+    /\ lastValidPolicy' = cfg[2]
+    /\ lastValidEpoch' = epoch + 1
+    /\ UNCHANGED <<hasCatalog, warned, warnedEpoch, dispVars, closeVars>>
+
+NonAtomicInterleaveSwap(cfg) ==
+    /\ Mutation = "nonAtomicSwap"
+    /\ swapPhase # "idle"
+    /\ cfg \in CatalogConfigs
+    /\ epoch < MaxEpoch
+    /\ (cfg[1] # catalogMode \/ cfg[2] # catalogPolicy)
+    /\ catalogMode' = cfg[1]
+    /\ catalogPolicy' = cfg[2]
+    /\ hasCatalog' = (cfg[1] # "none")
+    /\ epoch' = epoch + 1
     /\ warned' = {}
+    /\ warnedEpoch' = epoch + 1
     /\ epochWarnCount' = [k \in WarnKeys |-> 0]
     /\ invalidTried' = FALSE
     /\ lastValidMode' = cfg[1]
     /\ lastValidPolicy' = cfg[2]
     /\ lastValidEpoch' = epoch + 1
-    /\ UNCHANGED <<dState, dEvent, dMode, dFw, dCount, dRemaining, dInvoked,
-                   dSkippedClosed, dResult, inFlight, marked, closeCommitted,
-                   closing, cleaned, admittedAfterCommit>>
+    /\ UNCHANGED <<swapPhase, swapNonEmpty, swapEpoch, dispVars, closeVars>>
+
+NonAtomicStoreFlag ==
+    /\ Mutation = "nonAtomicSwap"
+    /\ swapPhase = "wroteCatalog"
+    /\ hasCatalog' = swapNonEmpty
+    /\ swapPhase' = "storedFlag"
+    /\ UNCHANGED <<catalogMode, catalogPolicy, epoch, warned, warnedEpoch,
+                   epochWarnCount, swapNonEmpty, swapEpoch, invalidTried,
+                   ghostVars, dispVars, closeVars>>
+
+NonAtomicClearWarned ==
+    /\ Mutation = "nonAtomicSwap"
+    /\ swapPhase = "storedFlag"
+    /\ warned' = {}
+    /\ warnedEpoch' = swapEpoch
+    /\ swapPhase' = "idle"
+    /\ swapNonEmpty' = FALSE
+    /\ swapEpoch' = 0
+    /\ UNCHANGED <<catalogMode, catalogPolicy, hasCatalog, epoch,
+                   epochWarnCount, invalidTried, ghostVars, dispVars, closeVars>>
 
 \* Attempt to install a catalog containing an invalid key ("", "rutis/*", or
 \* "internal/*"). Correct code validates before mutating, leaving the prior
@@ -167,13 +253,12 @@ SetInvalidCatalog ==
     /\ IF Mutation = "clearOnInvalid" /\ catalogMode # "none"
        THEN /\ catalogMode' = "none"
             /\ catalogPolicy' = "warn"
+            /\ hasCatalog' = FALSE
             /\ warned' = {}
             /\ epochWarnCount' = [k \in WarnKeys |-> 0]
-       ELSE UNCHANGED <<catalogMode, catalogPolicy, warned, epochWarnCount>>
-    /\ UNCHANGED <<epoch, lastValidMode, lastValidPolicy, lastValidEpoch,
-                   dState, dEvent, dMode, dFw, dCount, dRemaining, dInvoked,
-                   dSkippedClosed, dResult, inFlight, marked, closeCommitted,
-                   closing, cleaned, admittedAfterCommit>>
+       ELSE UNCHANGED <<catalogMode, catalogPolicy, hasCatalog, warned, epochWarnCount>>
+    /\ UNCHANGED <<epoch, warnedEpoch, swapPhase, swapNonEmpty, swapEpoch,
+                   ghostVars, dispVars, closeVars>>
 
 (***************************************************************************)
 (* Concurrent dispatchers (bus.rs: snapshot_with, check_mode, start)       *)
@@ -189,14 +274,12 @@ BeginDispatch(d, job) ==
     /\ dMode' = [dMode EXCEPT ![d] = job[2]]
     /\ dFw' = [dFw EXCEPT ![d] = job[3]]
     /\ dCount' = [dCount EXCEPT ![d] = @ + 1]
+    /\ dSnapEpoch' = [dSnapEpoch EXCEPT ![d] = 0]
     /\ dRemaining' = [dRemaining EXCEPT ![d] = Listeners]
     /\ dInvoked' = [dInvoked EXCEPT ![d] = {}]
     /\ dSkippedClosed' = [dSkippedClosed EXCEPT ![d] = {}]
     /\ dResult' = [dResult EXCEPT ![d] = "none"]
-    /\ UNCHANGED <<catalogMode, catalogPolicy, epoch, warned, epochWarnCount,
-                   invalidTried, lastValidMode, lastValidPolicy, lastValidEpoch,
-                   inFlight, marked, closeCommitted, closing, cleaned,
-                   admittedAfterCommit>>
+    /\ UNCHANGED <<catalogVars, ghostVars, closeVars>>
 
 \* Mutation "checkAfterStart": mistakenly starts a listener BEFORE running
 \* `check_mode`, allowing partial execution before an Error-policy rejection.
@@ -212,50 +295,65 @@ StartBeforeCheck(d, l) ==
     /\ inFlight' = inFlight \cup {<<d, l>>}
     /\ admittedAfterCommit' =
          [admittedAfterCommit EXCEPT ![d][l] = @ \/ (l \in closeCommitted)]
-    /\ UNCHANGED <<catalogMode, catalogPolicy, epoch, warned, epochWarnCount,
-                   invalidTried, lastValidMode, lastValidPolicy, lastValidEpoch,
-                   dState, dEvent, dMode, dFw, dCount, dSkippedClosed, dResult,
-                   marked, closeCommitted, closing, cleaned>>
+    /\ UNCHANGED <<catalogVars, ghostVars,
+                   dState, dEvent, dMode, dFw, dCount, dSnapEpoch,
+                   dSkippedClosed, dResult, marked, closeCommitted, closing, cleaned>>
 
-\* Mode catalog preflight (`EventBus::check_mode` inside `snapshot_with`).
+\* Mode catalog preflight (`EventBus::check_mode` fast path + `catalog.read()`).
+\* For Warn mismatches, releases `catalog.read()` carrying `dSnapEpoch[d]` and
+\* enters `"recordingWarn"` so concurrent catalog swaps can interleave before
+\* `warned.lock()` is acquired in `RecordWarn`.
 CheckCatalog(d) ==
     /\ d \in Dispatchers
     /\ dState[d] = "checking"
-    /\ LET fwBlocked == (dFw[d] /\ Mutation = "blockFramework" /\ catalogMode # "none" /\ catalogPolicy = "error")
-           userMismatch == (~dFw[d] /\ dEvent[d] = "msg" /\ catalogMode # "none" /\ dMode[d] # catalogMode)
+    /\ LET activeMode == IF hasCatalog THEN catalogMode ELSE "none"
+           fwBlocked == (dFw[d] /\ Mutation = "blockFramework" /\ activeMode # "none" /\ catalogPolicy = "error")
+           userMismatch == (~dFw[d] /\ dEvent[d] = "msg" /\ activeMode # "none" /\ dMode[d] # activeMode)
        IN IF fwBlocked
           THEN /\ dState' = [dState EXCEPT ![d] = "rejected"]
                /\ dResult' = [dResult EXCEPT ![d] = "error"]
                /\ dRemaining' = [dRemaining EXCEPT ![d] = {}]
-               /\ UNCHANGED <<warned, epochWarnCount>>
+               /\ UNCHANGED dSnapEpoch
           ELSE IF userMismatch /\ catalogPolicy = "error"
           THEN /\ dState' = [dState EXCEPT ![d] = "rejected"]
                /\ dResult' = [dResult EXCEPT ![d] = "error"]
                /\ dRemaining' = [dRemaining EXCEPT ![d] = {}]
-               /\ UNCHANGED <<warned, epochWarnCount>>
+               /\ UNCHANGED dSnapEpoch
           ELSE IF userMismatch /\ catalogPolicy = "warn"
-          THEN LET k == <<d, dMode[d]>>
-                   fresh == k \notin warned
-               IN /\ warned' = warned \cup {k}
-                  /\ epochWarnCount' =
-                       IF fresh
-                       THEN [epochWarnCount EXCEPT ![k] = @ + 1]
-                       ELSE epochWarnCount
-                  /\ IF Mutation = "warnDropsDelivery"
-                     THEN /\ dState' = [dState EXCEPT ![d] = "done"]
-                          /\ dResult' = [dResult EXCEPT ![d] = "dropped"]
-                          /\ dRemaining' = [dRemaining EXCEPT ![d] = {}]
-                     ELSE /\ dState' = [dState EXCEPT ![d] = "delivering"]
-                          /\ dResult' = [dResult EXCEPT ![d] = "warned"]
-                          /\ UNCHANGED dRemaining
+          THEN /\ dState' = [dState EXCEPT ![d] = "recordingWarn"]
+               /\ dSnapEpoch' = [dSnapEpoch EXCEPT ![d] = epoch]
+               /\ UNCHANGED <<dResult, dRemaining>>
           ELSE /\ dState' = [dState EXCEPT ![d] = "delivering"]
                /\ dResult' = [dResult EXCEPT ![d] = "ok"]
-               /\ UNCHANGED <<warned, epochWarnCount, dRemaining>>
-    /\ UNCHANGED <<catalogMode, catalogPolicy, epoch, invalidTried,
-                   lastValidMode, lastValidPolicy, lastValidEpoch,
-                   dEvent, dMode, dFw, dCount, dInvoked, dSkippedClosed,
-                   inFlight, marked, closeCommitted, closing, cleaned,
-                   admittedAfterCommit>>
+               /\ UNCHANGED <<dSnapEpoch, dRemaining>>
+    /\ UNCHANGED <<catalogVars, ghostVars,
+                   dEvent, dMode, dFw, dCount, dInvoked, dSkippedClosed, closeVars>>
+
+\* Acquire `warned.lock()` after releasing `catalog.read()`: records `(d, mode)`
+\* only if `warnedEpoch = dSnapEpoch[d]` (ignoring stale pre-swap checks so
+\* they never pollute a newer epoch's deduplication table).
+RecordWarn(d) ==
+    /\ d \in Dispatchers
+    /\ dState[d] = "recordingWarn"
+    /\ LET k == <<d, dMode[d]>>
+           sameEpoch == (Mutation = "nonAtomicSwap") \/ (warnedEpoch = dSnapEpoch[d])
+           fresh == sameEpoch /\ (k \notin warned)
+       IN /\ warned' = IF fresh THEN warned \cup {k} ELSE warned
+          /\ epochWarnCount' =
+               IF fresh
+               THEN [epochWarnCount EXCEPT ![k] = @ + 1]
+               ELSE epochWarnCount
+          /\ dSnapEpoch' = [dSnapEpoch EXCEPT ![d] = 0]
+          /\ IF Mutation = "warnDropsDelivery"
+             THEN /\ dState' = [dState EXCEPT ![d] = "done"]
+                  /\ dResult' = [dResult EXCEPT ![d] = "dropped"]
+                  /\ dRemaining' = [dRemaining EXCEPT ![d] = {}]
+             ELSE /\ dState' = [dState EXCEPT ![d] = "delivering"]
+                  /\ dResult' = [dResult EXCEPT ![d] = "warned"]
+                  /\ UNCHANGED dRemaining
+    /\ UNCHANGED <<catalogMode, catalogPolicy, hasCatalog, epoch, warnedEpoch,
+                   swapPhase, swapNonEmpty, swapEpoch, invalidTried, ghostVars,
+                   dEvent, dMode, dFw, dCount, dInvoked, dSkippedClosed, closeVars>>
 
 \* Deliver to one listener, checking two-phase close admission (`Entry::live`).
 AdmitListener(d, l) ==
@@ -273,9 +371,8 @@ AdmitListener(d, l) ==
                   /\ UNCHANGED dSkippedClosed
              ELSE /\ dSkippedClosed' = [dSkippedClosed EXCEPT ![d] = @ \cup {l}]
                   /\ UNCHANGED <<dInvoked, inFlight, admittedAfterCommit>>
-    /\ UNCHANGED <<catalogMode, catalogPolicy, epoch, warned, epochWarnCount,
-                   invalidTried, lastValidMode, lastValidPolicy, lastValidEpoch,
-                   dState, dEvent, dMode, dFw, dCount, dResult,
+    /\ UNCHANGED <<catalogVars, ghostVars,
+                   dState, dEvent, dMode, dFw, dCount, dSnapEpoch, dResult,
                    marked, closeCommitted, closing, cleaned>>
 
 FinishDelivery(d) ==
@@ -283,20 +380,15 @@ FinishDelivery(d) ==
     /\ dState[d] = "delivering"
     /\ dRemaining[d] = {}
     /\ dState' = [dState EXCEPT ![d] = "done"]
-    /\ UNCHANGED <<catalogMode, catalogPolicy, epoch, warned, epochWarnCount,
-                   invalidTried, lastValidMode, lastValidPolicy, lastValidEpoch,
-                   dEvent, dMode, dFw, dCount, dRemaining, dInvoked,
-                   dSkippedClosed, dResult, inFlight, marked, closeCommitted,
-                   closing, cleaned, admittedAfterCommit>>
+    /\ UNCHANGED <<catalogVars, ghostVars,
+                   dEvent, dMode, dFw, dCount, dSnapEpoch, dRemaining,
+                   dInvoked, dSkippedClosed, dResult, closeVars>>
 
 CompleteCall(d, l) ==
     /\ <<d, l>> \in inFlight
     /\ inFlight' = inFlight \ {<<d, l>>}
-    /\ UNCHANGED <<catalogMode, catalogPolicy, epoch, warned, epochWarnCount,
-                   invalidTried, lastValidMode, lastValidPolicy, lastValidEpoch,
-                   dState, dEvent, dMode, dFw, dCount, dRemaining, dInvoked,
-                   dSkippedClosed, dResult, marked, closeCommitted, closing,
-                   cleaned, admittedAfterCommit>>
+    /\ UNCHANGED <<catalogVars, ghostVars, dispVars,
+                   marked, closeCommitted, closing, cleaned, admittedAfterCommit>>
 
 \* Once a dispatch finished (or was rejected) and its calls drained, the
 \* dispatcher may begin another dispatch (up to MaxDispatches) to exercise
@@ -307,13 +399,12 @@ ResetDispatcher(d) ==
     /\ dCount[d] < MaxDispatches
     /\ ~(\E l \in Listeners : <<d, l>> \in inFlight)
     /\ dState' = [dState EXCEPT ![d] = "idle"]
+    /\ dSnapEpoch' = [dSnapEpoch EXCEPT ![d] = 0]
     /\ dInvoked' = [dInvoked EXCEPT ![d] = {}]
     /\ dSkippedClosed' = [dSkippedClosed EXCEPT ![d] = {}]
     /\ dResult' = [dResult EXCEPT ![d] = "none"]
-    /\ UNCHANGED <<catalogMode, catalogPolicy, epoch, warned, epochWarnCount,
-                   invalidTried, lastValidMode, lastValidPolicy, lastValidEpoch,
-                   dEvent, dMode, dFw, dCount, dRemaining, inFlight,
-                   marked, closeCommitted, closing, cleaned, admittedAfterCommit>>
+    /\ UNCHANGED <<catalogVars, ghostVars,
+                   dEvent, dMode, dFw, dCount, dRemaining, closeVars>>
 
 (***************************************************************************)
 (* Two-phase close admission & drain on Closable listener (fiber.rs)       *)
@@ -323,45 +414,42 @@ CloseMark ==
     /\ Closable \notin marked
     /\ marked' = marked \cup {Closable}
     /\ closeCommitted' = closeCommitted \cup {Closable}
-    /\ UNCHANGED <<catalogMode, catalogPolicy, epoch, warned, epochWarnCount,
-                   invalidTried, lastValidMode, lastValidPolicy, lastValidEpoch,
-                   dState, dEvent, dMode, dFw, dCount, dRemaining, dInvoked,
-                   dSkippedClosed, dResult, inFlight, closing, cleaned,
-                   admittedAfterCommit>>
+    /\ UNCHANGED <<catalogVars, ghostVars, dispVars,
+                   inFlight, closing, cleaned, admittedAfterCommit>>
 
 ClosePublish ==
     /\ Closable \in marked
     /\ Closable \notin closing
     /\ closing' = closing \cup {Closable}
-    /\ UNCHANGED <<catalogMode, catalogPolicy, epoch, warned, epochWarnCount,
-                   invalidTried, lastValidMode, lastValidPolicy, lastValidEpoch,
-                   dState, dEvent, dMode, dFw, dCount, dRemaining, dInvoked,
-                   dSkippedClosed, dResult, inFlight, marked, closeCommitted,
-                   cleaned, admittedAfterCommit>>
+    /\ UNCHANGED <<catalogVars, ghostVars, dispVars,
+                   inFlight, marked, closeCommitted, cleaned, admittedAfterCommit>>
 
 CloseCleanup ==
     /\ Closable \in closing
     /\ Closable \notin cleaned
     /\ ~(\E d \in Dispatchers : <<d, Closable>> \in inFlight)
     /\ cleaned' = cleaned \cup {Closable}
-    /\ UNCHANGED <<catalogMode, catalogPolicy, epoch, warned, epochWarnCount,
-                   invalidTried, lastValidMode, lastValidPolicy, lastValidEpoch,
-                   dState, dEvent, dMode, dFw, dCount, dRemaining, dInvoked,
-                   dSkippedClosed, dResult, inFlight, marked, closeCommitted,
-                   closing, admittedAfterCommit>>
+    /\ UNCHANGED <<catalogVars, ghostVars, dispVars,
+                   inFlight, marked, closeCommitted, closing, admittedAfterCommit>>
 
 CompleteSome == \E d \in Dispatchers, l \in Listeners : CompleteCall(d, l)
 ProgressDispatch == \E d \in Dispatchers :
     \/ CheckCatalog(d)
+    \/ RecordWarn(d)
     \/ (\E l \in Listeners : AdmitListener(d, l))
     \/ FinishDelivery(d)
 
 Next ==
     \/ \E cfg \in CatalogConfigs : SetValidCatalog(cfg)
+    \/ \E cfg \in CatalogConfigs : NonAtomicWriteCatalog(cfg)
+    \/ \E cfg \in CatalogConfigs : NonAtomicInterleaveSwap(cfg)
+    \/ NonAtomicStoreFlag
+    \/ NonAtomicClearWarned
     \/ SetInvalidCatalog
     \/ \E d \in Dispatchers, job \in Jobs : BeginDispatch(d, job)
     \/ \E d \in Dispatchers, l \in Listeners : StartBeforeCheck(d, l)
     \/ \E d \in Dispatchers : CheckCatalog(d)
+    \/ \E d \in Dispatchers : RecordWarn(d)
     \/ \E d \in Dispatchers, l \in Listeners : AdmitListener(d, l)
     \/ \E d \in Dispatchers : FinishDelivery(d)
     \/ CompleteSome
@@ -379,8 +467,15 @@ Spec == Init /\ [][Next]_vars /\ WF_vars(CompleteSome) /\ WF_vars(ProgressDispat
 TypeOK ==
     /\ catalogMode \in {"none", "bail"}
     /\ catalogPolicy \in {"warn", "error"}
+    /\ hasCatalog \in BOOLEAN
     /\ epoch \in 0..MaxEpoch
+    /\ warnedEpoch \in 0..MaxEpoch
+    /\ swapPhase \in {"idle", "wroteCatalog", "storedFlag"}
+    /\ swapNonEmpty \in BOOLEAN
+    /\ swapEpoch \in 0..MaxEpoch
     /\ warned \subseteq WarnKeys
+    /\ dState \in [Dispatchers -> {"idle", "checking", "recordingWarn", "delivering", "done", "rejected"}]
+    /\ dSnapEpoch \in [Dispatchers -> 0..MaxEpoch]
     /\ inFlight \subseteq (Dispatchers \X Listeners)
     /\ marked \subseteq Listeners
     /\ closeCommitted \subseteq Listeners
@@ -401,6 +496,17 @@ AtomicCatalogValidation ==
     /\ catalogMode = lastValidMode
     /\ catalogPolicy = lastValidPolicy
     /\ epoch = lastValidEpoch
+
+\* Fast-path `hasCatalog` stays synchronized with whether a catalog is
+\* installed, `warned` stays bound to the current epoch, and no epoch warning
+\* is lost (warned without emitting) or emitted twice in the same epoch.
+CatalogFlagInSync ==
+    /\ ((catalogMode # "none") <=> hasCatalog)
+    /\ (warnedEpoch = epoch)
+    /\ \A k \in WarnKeys :
+         IF k \in warned
+         THEN epochWarnCount[k] = 1
+         ELSE epochWarnCount[k] = 0
 
 \* Under Warn policy, mismatched dispatches still invoke every eligible live
 \* listener identically to an empty catalog, and warn at most once per

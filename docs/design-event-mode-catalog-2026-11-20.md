@@ -87,7 +87,7 @@ Issue：[#1324](https://github.com/arcships/rutis/issues/1324)。按本稿实施
      - 以 `"rutis/"` 开头 → `"events.<name>: rutis/* events are owned by the host and cannot be configured here"`
      - 以 `"internal/"` 开头 → `"events.<name>: internal/* events stay inside their runtime and cannot be configured here"`
      任一项不合法即返回 `Err(ErrorKind::Validation { issues })`，**不改动当前目录与去重状态**。
-  2. 校验通过后替换目录、更新 `has_catalog` 原子标志（`!catalog.is_empty()`），并清空 `Warn` 去重记录表。传入空的 `EventModeCatalog::new()` 即关闭检查。
+  2. 校验通过后，在持有 `catalog` 写锁期间依次递增单调 `epoch`、替换目录、在 `warned` 锁内清空去重记录表并将去重表同步到新 `epoch`（固定加锁顺序 `catalog -> warned`），再更新 `has_catalog` 原子标志（`!catalog.is_empty()`），最后释放写锁。传入空的 `EventModeCatalog::new()` 即关闭检查。
 
 ### 3.2 运行时总线检查顺序（`EventBus`）
 
@@ -95,11 +95,11 @@ Issue：[#1324](https://github.com/arcships/rutis/issues/1324)。按本稿实施
 
 1. 既有前置检查先跑：`bail` / 同步 `waterfall` 先执行 `ctx.registration_preflight()`；随后 `ensure_bus(ctx)`；再检查 `!opts.framework && name.starts_with("rutis/")` 返回 `ReservedEvent`。
 2. 若 `opts.framework` 为真或 `has_catalog` 为假，跳过目录检查。
-3. 在读锁内精确查找 `catalog.get(name)` 后立刻释放读锁。未命中或 `expected == actual` 时继续正常派发。
+3. 在读锁内精确查找 `catalog.get(name)` 并读取当前 `epoch`，随后立刻释放读锁。未命中或 `expected == actual` 时继续正常派发。
 4. 命中且 `expected != actual` 时，确定发出方显示名 `emitter`：
    - 优先使用 `Dispatch.emitter`（`rutis-bridge` 填入发出行的行名，或无行时填运行时名）；
    - 否则若 `ctx.row()` 为 `Some(row)`，取 `row`；
-   - 否则若为根 fiber，取 `"host"`；
+   - 否则若为根 fiber，取 `"the host"`；
    - 否则取插件名 `ctx.plugin_name()`（不出现 `<root>`、内部 id 或内部插件名，遵守[诊断设计](design-diagnostics-2026-10-26.md) §4.5）。
 5. 构造 `ErrorKind::EventModeMismatch { name, actual, expected, emitter }`，显示文字固定为：
    ```text
@@ -107,7 +107,7 @@ Issue：[#1324](https://github.com/arcships/rutis/issues/1324)。按本稿实施
    ```
 6. 按生效策略执行：
    - `EventModePolicy::Error`：立即返回 `Err(report.into())`，不选表、不调过滤器、不执行任何监听器。
-   - `EventModePolicy::Warn`：在去重锁内记录 `(emitter, name, actual, expected)`（上限 4096 项，超出时淘汰最早一项）；释放锁后，若为首次出现则在 `catch_unwind` 内调用 `ctx.error_sink()(Arc::new(report))`；随后照常继续选表与派发。
+   - `EventModePolicy::Warn`：在去重锁内核对 `warned.epoch == epoch`（若期间已切换到新目录 `epoch`，直接忽略旧 `epoch` 记录，绝不污染新 `epoch` 去重表或造成重复告警），并记录 `(emitter, name, actual, expected)`（上限 4096 项，超出时淘汰最早一项）；释放锁后，若为首次出现则在 `catch_unwind` 内调用 `ctx.error_sink()(Arc::new(report))`；随后照常继续选表与派发。
 
 ### 3.3 跨语言行为与 `Error` 下 `emit` 的语义差异
 
@@ -254,7 +254,7 @@ root.set_event_mode_catalog(catalog)?;
 | 触发方式 | 逐字输出（与错误种类） | 记在哪里 | 怎么改 |
 | --- | --- | --- | --- |
 | 向 `set_event_mode_catalog` 传入空事件名、`rutis/*` 或 `internal/*` | `Err(ErrorKind::Validation { issues })`，`issues` 逐字为：`events: event name cannot be empty`、`events.rutis/row: rutis/* events are owned by the host and cannot be configured here`、`events.internal/dispatch: internal/* events stay inside their runtime and cannot be configured here`（原目录保持不变） | 宿主调用点 | 去掉非法键后重试 |
-| 根上下文 `root` 用错方式派发 `"message"` | 默认 `ErrorSink` / `Err` 显示：`host: event message dispatched with emit, expected bail: use bail instead`（`ErrorKind::EventModeMismatch`） | `host` | 改为使用 `root.bail(...)` |
+| 根上下文 `root` 用错方式派发 `"message"` | 默认 `ErrorSink` / `Err` 显示：`the host: event message dispatched with emit, expected bail: use bail instead`（`ErrorKind::EventModeMismatch`） | `the host` | 改为使用 `root.bail(...)` |
 | 子插件 `chat` 用错方式派发 `"message"` | 默认 `ErrorSink` / `Err` 显示：`chat: event message dispatched with emit, expected bail: use bail instead`（`ErrorKind::EventModeMismatch`） | `chat` | 改为使用 `ctx.bail(...)` |
 
 **要懂的概念：** **+1（可选，仅限 `rutis::host`）**——`EventModeCatalog`（含 `EventModePolicy`）与 `ErrorKind::EventModeMismatch`。插件侧的 `rutis::*` 根模块零新增概念。
@@ -271,7 +271,7 @@ root.set_event_mode_catalog(catalog)?;
 
 | 步骤 | 范围 | 完成条件 |
 | --- | --- | --- |
-| 1（本 PR：设计稿 + 原型 + 形式化模型） | 中英文设计稿；`crates/rutis` 实现 `EventModePolicy`、`EventModeEntry`、`EventModeCatalog`、`ErrorKind::EventModeMismatch`、`EventBus` 运行时检查与有界去重、`CtxHost::set_event_mode_catalog` / `event_mode_catalog`、`Dispatch.emitter` 字段；`specs/event-mode-catalog/` TLA+ 模型与变异配置 | `crates/rutis/tests/event_mode_catalog.rs` 逐字验证黑名单 `warn`/`error`、五种方式匹配、未列出与动态事件零误报、零监听器检出、单事件策略覆盖、非法目录校验；`specs/event-mode-catalog/run.sh` 全部配置与 `expected.txt` 一致；`cargo test -p rutis`、`cargo fmt --check` 与文档/模型检查全绿 |
-| 2（`rutis-bridge` 接通） | `SessionEvents::dispatch` 填入 `Dispatch.emitter`（行名 / 运行时名）并在 `Mode::Emit` 进队列前调用 `check_mode`；`events/errors.rs` 把 `EventModeMismatch` 编码为带 `code: "event-mode-mismatch"` 与 `data` 的 `BindingError`；更新[诊断设计](design-diagnostics-2026-10-26.md) §4.3 错误码表 | 真实 Node（含 Cordis 插件）与 Python 运行时集成测试逐字验证 §4.1 全部输出（含 `warn` 保持兼容与 `error` 拒绝），跨语言黑名单场景通过 |
+| 1（本 PR：设计稿 + 原型 + 形式化模型） | 中英文设计稿；`crates/rutis` 实现 `EventModePolicy`、`EventModeEntry`、`EventModeCatalog`、`ErrorKind::EventModeMismatch`（其中 `wire_name()` 在步骤 1 已映射到 `BindingError`）、`EventBus` 内部 `pub(crate)` 运行时检查与按 `epoch` 同步的有界去重、`CtxHost::set_event_mode_catalog` / `event_mode_catalog`、`Dispatch.emitter` 字段；`specs/event-mode-catalog/` TLA+ 模型与变异配置 | `crates/rutis/tests/event_mode_catalog.rs` 逐字验证黑名单 `warn`/`error`、五种方式匹配、未列出与动态事件零误报、零监听器检出、单事件策略覆盖、非法目录校验与并发目录切换一致性；`specs/event-mode-catalog/run.sh` 全部配置与 `expected.txt` 一致；`cargo test -p rutis`、`tools/public-api.sh`、`cargo fmt --check` 与文档/模型检查全绿 |
+| 2（`rutis-bridge` 接通） | `SessionEvents::dispatch` 填入 `Dispatch.emitter`（行名 / 运行时名）并在 `Mode::Emit` 进队列前完成目录检查；`events/errors.rs` 承接步骤 1 的 `wire_name() -> "BindingError"`，为 `EventModeMismatch` 补齐 `code: "event-mode-mismatch"` 与 `data`（`{"event", "actual", "expected"}`）线缆编码；更新[诊断设计](design-diagnostics-2026-10-26.md) §4.3 错误码表 | 真实 Node（含 Cordis 插件）与 Python 运行时集成测试逐字验证 §4.1 全部输出（含 `warn` 保持兼容与 `error` 拒绝），跨语言黑名单场景通过 |
 | 3（`rutis-host` 与 `rutis-loader`） | `HostConfig` 支持 `rutis.json` 顶层可选 `"events"` 与拼写建议；`Host::start_with` / `reload` 安装目录；`rutis-loader` 的 `Declared` 增加可选 `events` 字段并在 `Loader::check` 与 `rutis-host check` / `--strict` 中比对输出 | 验收测试逐字比对 §4.2 表格中每一条配置报错、冲突告警、`--strict` 退出码与运行期输出，确认 Cordis 与动态事件零误报 |
 | 4（指南与保证登记） | 更新 [rutis-host 指南](guide/rutis-host.md)、[Rust 宿主指南](guide/rust-host.md)、[Cordis 兼容边界](guide/cordis-boundaries.md)（双语），在[保证登记表](guarantees.md) 登记事件目录保证与对应测试 | `node tools/check-md-links.mjs`、`check-guarantees.mjs`、`formal-trace.mjs --check` 全部通过 |

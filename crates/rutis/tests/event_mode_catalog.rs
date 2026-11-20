@@ -172,7 +172,7 @@ async fn blacklist_warn_reports_verbatim_and_keeps_emit_behavior() {
     rutis_test_support::until(|| calls.load(Ordering::SeqCst) == 2, "second emit ran").await;
     assert_eq!(errors.lock().unwrap().len(), 1);
 
-    // Another emitter (`host` root) still gets its own warning.
+    // Another emitter (`the host` root) still gets its own warning.
     root.emit(Message {
         user: "mallory".into(),
         text: "from host".into(),
@@ -183,7 +183,7 @@ async fn blacklist_warn_reports_verbatim_and_keeps_emit_behavior() {
         sink_texts(&errors),
         [
             "chat: event message dispatched with emit, expected bail: use bail instead",
-            "host: event message dispatched with emit, expected bail: use bail instead",
+            "the host: event message dispatched with emit, expected bail: use bail instead",
         ]
     );
 
@@ -433,7 +433,7 @@ async fn unlisted_and_dynamic_events_have_zero_false_positives() {
         .unwrap_err();
     assert_eq!(
         err.to_string(),
-        "host: event message dispatched with emit, expected bail: use bail instead"
+        "the host: event message dispatched with emit, expected bail: use bail instead"
     );
 
     root.shutdown().await.unwrap();
@@ -458,7 +458,7 @@ async fn per_event_policy_and_catalog_replacement() {
     .unwrap();
     assert_eq!(
         sink_texts(&errors),
-        ["host: event message dispatched with emit, expected serial: use serial instead"]
+        ["the host: event message dispatched with emit, expected serial: use serial instead"]
     );
 
     let err = root
@@ -469,7 +469,7 @@ async fn per_event_policy_and_catalog_replacement() {
         .unwrap_err();
     assert_eq!(
         err.to_string(),
-        "host: event http/request dispatched with parallel, expected waterfall: use waterfall instead"
+        "the host: event http/request dispatched with parallel, expected waterfall: use waterfall instead"
     );
 
     // Re-installing the catalog resets warning deduplication.
@@ -598,7 +598,7 @@ async fn mismatch_is_caught_with_zero_listeners() {
     .unwrap();
     assert_eq!(
         sink_texts(&errors),
-        ["host: event message dispatched with emit, expected serial: use serial instead"]
+        ["the host: event message dispatched with emit, expected serial: use serial instead"]
     );
 
     root.set_event_mode_catalog(
@@ -615,7 +615,136 @@ async fn mismatch_is_caught_with_zero_listeners() {
         .unwrap_err();
     assert_eq!(
         err.to_string(),
-        "host: event message dispatched with emit, expected serial: use serial instead"
+        "the host: event message dispatched with emit, expected serial: use serial instead"
+    );
+
+    root.shutdown().await.unwrap();
+}
+
+/// Multi-threaded concurrency stress test: concurrent `set_event_mode_catalog`
+/// calls (alternating strict non-empty and empty catalogs) racing with
+/// concurrent `emit` dispatches must never leave the fast-path flag out of sync
+/// with `event_mode_catalog().is_empty()`, and a subsequent fresh `Warn` epoch
+/// must deduplicate cleanly without double or lost warnings.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_catalog_swaps_and_emits_stay_consistent() {
+    use std::sync::Barrier;
+
+    let (root, errors) = root_with_sink();
+    let strict = EventModeCatalog::new()
+        .with_policy(EventModePolicy::Error)
+        .expect("message", Mode::Bail);
+    let warn = EventModeCatalog::new()
+        .with_policy(EventModePolicy::Warn)
+        .expect("message", Mode::Bail);
+    let empty = EventModeCatalog::new();
+
+    for round in 0..25 {
+        let barrier = Arc::new(Barrier::new(6));
+        std::thread::scope(|scope| {
+            // 3 writer threads rapidly alternating strict / empty (and warn on
+            // odd rounds) catalogs.
+            for tid in 0..3 {
+                let root = root.clone();
+                let barrier = barrier.clone();
+                let strict = strict.clone();
+                let warn = warn.clone();
+                let empty = empty.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    for step in 0..100 {
+                        let catalog = if round % 2 == 0 {
+                            if (tid + step) % 2 == 0 {
+                                strict.clone()
+                            } else {
+                                empty.clone()
+                            }
+                        } else if (tid + step) % 3 == 0 {
+                            warn.clone()
+                        } else if (tid + step) % 3 == 1 {
+                            strict.clone()
+                        } else {
+                            empty.clone()
+                        };
+                        root.set_event_mode_catalog(catalog).unwrap();
+                    }
+                });
+            }
+
+            // 3 emitter threads concurrently dispatching mismatched `emit`s.
+            for _ in 0..3 {
+                let root = root.clone();
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..100 {
+                        let res = root.emit(Message {
+                            user: "mallory".into(),
+                            text: "race".into(),
+                        });
+                        if let Err(err) = res {
+                            assert!(matches!(
+                                err.kind(),
+                                Some(ErrorKind::EventModeMismatch {
+                                    name,
+                                    actual: Mode::Emit,
+                                    expected: Mode::Bail,
+                                    emitter,
+                                }) if name == "message" && emitter == "the host"
+                            ));
+                        }
+                    }
+                });
+            }
+        });
+
+        // Once writers are quiescent, `has_catalog` MUST agree with
+        // `event_mode_catalog().is_empty()`: if the strict catalog won, a
+        // mismatched emit must be rejected; if empty won, it must succeed.
+        let installed = root.event_mode_catalog();
+        let probe = root.emit(Message {
+            user: "mallory".into(),
+            text: "probe".into(),
+        });
+        if installed.is_empty() {
+            assert!(probe.is_ok(), "empty catalog must allow emit");
+        } else if installed.policy() == EventModePolicy::Error {
+            assert!(
+                matches!(
+                    probe.unwrap_err().kind(),
+                    Some(ErrorKind::EventModeMismatch { .. })
+                ),
+                "strict catalog must reject emit (has_catalog out of sync!)"
+            );
+        } else {
+            assert!(probe.is_ok(), "warn catalog must allow emit");
+        }
+    }
+
+    // Install a fresh `Warn` catalog and hammer it concurrently from multiple
+    // threads: the mismatch must be reported exactly once in this epoch.
+    errors.lock().unwrap().clear();
+    root.set_event_mode_catalog(warn).unwrap();
+    let barrier = Arc::new(Barrier::new(4));
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            let root = root.clone();
+            let barrier = barrier.clone();
+            scope.spawn(move || {
+                barrier.wait();
+                for _ in 0..50 {
+                    root.emit(Message {
+                        user: "mallory".into(),
+                        text: "warn-dedup".into(),
+                    })
+                    .unwrap();
+                }
+            });
+        }
+    });
+    assert_eq!(
+        sink_texts(&errors),
+        ["the host: event message dispatched with emit, expected bail: use bail instead"]
     );
 
     root.shutdown().await.unwrap();

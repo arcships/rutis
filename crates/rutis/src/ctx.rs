@@ -253,15 +253,15 @@ impl Ctx {
     }
 
     /// How diagnostics name this context when it emits an event: its marked
-    /// row name, `"host"` for the root fiber, or its plugin name.
+    /// row name, `"the host"` for the root fiber, or its plugin name.
     pub(crate) fn emitter_label(&self) -> String {
         if let Some(row) = self.row() {
             return row;
         }
         match self.0.fiber.upgrade() {
-            Some(fiber) if fiber.is_root => "host".to_owned(),
+            Some(fiber) if fiber.is_root => "the host".to_owned(),
             Some(fiber) if !fiber.name.is_empty() => fiber.name.clone(),
-            _ => "host".to_owned(),
+            _ => "the host".to_owned(),
         }
     }
 

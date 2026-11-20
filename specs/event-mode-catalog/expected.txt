@@ -5,3 +5,4 @@ mut-check-after-start violated:NoPartialExecOnError
 mut-clear-on-invalid violated:AtomicCatalogValidation
 mut-block-framework violated:FrameworkNeverBlocked
 mut-warn-drops-delivery violated:WarnPreservesDelivery
+mut-nonatomic-swap violated:CatalogFlagInSync

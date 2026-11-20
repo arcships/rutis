@@ -87,7 +87,7 @@ This design therefore enforces an **optional Event Mode Catalog** at **two compl
      - prefix `"rutis/"` -> `"events.<name>: rutis/* events are owned by the host and cannot be configured here"`
      - prefix `"internal/"` -> `"events.<name>: internal/* events stay inside their runtime and cannot be configured here"`
      If any issue is found, returns `Err(ErrorKind::Validation { issues })` **without modifying the existing catalog or deduplication state**.
-  2. Otherwise replaces the catalog, updates the `has_catalog` atomic flag (`!catalog.is_empty()`), and clears the `Warn` deduplication set. Installing an empty `EventModeCatalog::new()` disables checking.
+  2. Otherwise, while holding the `catalog` write lock, increments a monotonic `epoch`, replaces the catalog, clears the `Warn` deduplication set and binds it to the new `epoch` (fixed lock order `catalog -> warned`), updates the `has_catalog` atomic flag (`!catalog.is_empty()`), and drops the write lock. Installing an empty `EventModeCatalog::new()` disables checking.
 
 ### 3.2 Runtime bus check order (`EventBus`)
 
@@ -95,11 +95,11 @@ On every non-framework dispatch (`emit_erased`, `parallel_erased`, `serial_erase
 
 1. Existing preflight checks run first: `bail` and synchronous `waterfall` run `ctx.registration_preflight()`; then `ensure_bus(ctx)`; then `!opts.framework && name.starts_with("rutis/")` returns `ReservedEvent`.
 2. If `opts.framework` is true or `has_catalog` is false, skip the catalog check.
-3. Look up `catalog.get(name)` under a short read lock and drop the lock immediately. If absent or `expected == actual`, proceed normally.
+3. Look up `catalog.get(name)` together with the current `epoch` under a short read lock and drop the lock immediately. If absent or `expected == actual`, proceed normally.
 4. Otherwise resolve `emitter`:
    - `Dispatch.emitter` if set (`rutis-bridge` passes the emitting row id, or runtime name when there is no row);
    - else `ctx.row()` if `Some(row)`;
-   - else `"host"` when `ctx` belongs to the root fiber;
+   - else `"the host"` when `ctx` belongs to the root fiber;
    - else `ctx.plugin_name()` (never emitting `<root>`, internal ids, or internal plugin names, per [diagnostics design](design-diagnostics-2026-10-26.en.md) §4.5).
 5. Build `ErrorKind::EventModeMismatch { name, actual, expected, emitter }`, whose `Display` text is fixed verbatim as:
    ```text
@@ -107,7 +107,7 @@ On every non-framework dispatch (`emit_erased`, `parallel_erased`, `serial_erase
    ```
 6. Apply the effective policy:
    - `EventModePolicy::Error`: return `Err(report.into())` immediately; no listener is selected, no filter runs, no listener executes.
-   - `EventModePolicy::Warn`: record `(emitter, name, actual, expected)` in the bounded deduplication set (cap 4096, FIFO eviction); drop the lock; if newly inserted, call `ctx.error_sink()(Arc::new(report))` inside `catch_unwind`; then continue normal selection and dispatch.
+   - `EventModePolicy::Warn`: under the deduplication lock, check `warned.epoch == epoch` (ignoring any stale pre-swap check so it can neither pollute the newer epoch's deduplication table nor trigger a duplicate warning) and record `(emitter, name, actual, expected)` in the bounded set (cap 4096, FIFO eviction); drop the lock; if newly inserted, call `ctx.error_sink()(Arc::new(report))` inside `catch_unwind`; then continue normal selection and dispatch.
 
 ### 3.3 Cross-language behaviour and the `emit` semantic difference under `Error`
 
@@ -254,7 +254,7 @@ A custom `ErrorSink` or dispatch error handler can match `ErrorKind::EventModeMi
 | Trigger | Output word for word (and error kind) | Recorded on | How to fix |
 | --- | --- | --- | --- |
 | Passing empty name, `rutis/*`, or `internal/*` to `set_event_mode_catalog` | `Err(ErrorKind::Validation { issues })` with exact issues: `events: event name cannot be empty`, `events.rutis/row: rutis/* events are owned by the host and cannot be configured here`, `events.internal/dispatch: internal/* events stay inside their runtime and cannot be configured here` (previous catalog remains active) | Host call site | Remove invalid keys and retry |
-| Root `Ctx` dispatches `"message"` with wrong mode | Default `ErrorSink` / `Err` display: `host: event message dispatched with emit, expected bail: use bail instead` (`ErrorKind::EventModeMismatch`) | `host` | Use `root.bail(...)` |
+| Root `Ctx` dispatches `"message"` with wrong mode | Default `ErrorSink` / `Err` display: `the host: event message dispatched with emit, expected bail: use bail instead` (`ErrorKind::EventModeMismatch`) | `the host` | Use `root.bail(...)` |
 | Child plugin `chat` dispatches `"message"` with wrong mode | Default `ErrorSink` / `Err` display: `chat: event message dispatched with emit, expected bail: use bail instead` (`ErrorKind::EventModeMismatch`) | `chat` | Use `ctx.bail(...)` |
 
 **Concepts to learn:** **+1 (optional, `rutis::host` only)** — `EventModeCatalog` (with `EventModePolicy`) and `ErrorKind::EventModeMismatch`. The plugin-facing crate root `rutis::*` adds zero concepts.
@@ -271,7 +271,7 @@ A custom `ErrorSink` or dispatch error handler can match `ErrorKind::EventModeMi
 
 | Step | Scope | Done when |
 | --- | --- | --- |
-| 1 (this PR: design + PoC + formal model) | Bilingual design docs; `crates/rutis` implementation of `EventModePolicy`, `EventModeEntry`, `EventModeCatalog`, `ErrorKind::EventModeMismatch`, `EventBus` runtime check and bounded deduplication, `CtxHost::set_event_mode_catalog` / `event_mode_catalog`, and `Dispatch.emitter`; `specs/event-mode-catalog/` TLA+ model and mutation configs | `crates/rutis/tests/event_mode_catalog.rs` asserts verbatim output for the blacklist `warn`/`error` cases, all five matching modes, zero false positives on unlisted and dynamic events, zero-listener detection, per-event policy override, and invalid catalog rejection; `specs/event-mode-catalog/run.sh` matches `expected.txt`; `cargo test -p rutis`, `cargo fmt --check`, and doc/model checks pass |
-| 2 (`rutis-bridge` wiring) | Populate `Dispatch.emitter` (row id / runtime name) in `SessionEvents::dispatch` and call `check_mode` before queuing `Mode::Emit`; encode `EventModeMismatch` in `events/errors.rs` as `BindingError` with `code: "event-mode-mismatch"` and `data`; add the code row to [diagnostics design](design-diagnostics-2026-10-26.en.md) §4.3 | Real Node (including Cordis plugins) and Python integration tests verify every §4.1 output verbatim, including `warn` compatibility and `error` rejection on the blacklist scenario |
+| 1 (this PR: design + PoC + formal model) | Bilingual design docs; `crates/rutis` implementation of `EventModePolicy`, `EventModeEntry`, `EventModeCatalog`, `ErrorKind::EventModeMismatch` (whose `wire_name()` already maps to `"BindingError"` in step 1), internal `pub(crate)` `EventBus` runtime check and epoch-synchronized bounded deduplication, `CtxHost::set_event_mode_catalog` / `event_mode_catalog`, and `Dispatch.emitter`; `specs/event-mode-catalog/` TLA+ model and mutation configs | `crates/rutis/tests/event_mode_catalog.rs` asserts verbatim output for the blacklist `warn`/`error` cases, all five matching modes, zero false positives on unlisted and dynamic events, zero-listener detection, per-event policy override, invalid catalog rejection, and concurrent catalog-swap consistency; `specs/event-mode-catalog/run.sh` matches `expected.txt`; `cargo test -p rutis`, `tools/public-api.sh`, `cargo fmt --check`, and doc/model checks pass |
+| 2 (`rutis-bridge` wiring) | Populate `Dispatch.emitter` (row id / runtime name) in `SessionEvents::dispatch` and run the mode check before queuing `Mode::Emit`; build on step 1's `wire_name() -> "BindingError"` in `events/errors.rs` to wire `code: "event-mode-mismatch"` and `data` (`{"event", "actual", "expected"}`) on `EventModeMismatch`; add the code row to [diagnostics design](design-diagnostics-2026-10-26.en.md) §4.3 | Real Node (including Cordis plugins) and Python integration tests verify every §4.1 output verbatim, including `warn` compatibility and `error` rejection on the blacklist scenario |
 | 3 (`rutis-host` and `rutis-loader`) | Add optional top-level `"events"` to `HostConfig` with typo suggestions; install catalog in `Host::start_with` / `Host::reload`; add optional `Declared.events` in `rutis-loader` and report conflicts in `Loader::check` and `rutis-host check` / `--strict` | Acceptance tests match every §4.2 config error, conflict warning, `--strict` exit code, and runtime line verbatim, confirming zero false positives for Cordis and dynamic events |
 | 4 (Guides and guarantees) | Update [rutis-host guide](guide/rutis-host.en.md), [Rust host guide](guide/rust-host.en.md), and [Cordis boundaries](guide/cordis-boundaries.en.md) (both languages); register guarantees in [guarantees](guarantees.en.md) | `node tools/check-md-links.mjs`, `check-guarantees.mjs`, and `formal-trace.mjs --check` all pass |
