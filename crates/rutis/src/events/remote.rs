@@ -230,6 +230,9 @@ pub struct Dispatch {
     pub terminal: Option<RawTerminal>,
     /// Reported to remote entries by [`RemoteCall::origin`].
     pub origin: Option<u64>,
+    /// Optional emitter label (the emitting row or runtime name) for mode
+    /// mismatch diagnostics when dispatching on behalf of another runtime.
+    pub emitter: Option<String>,
     /// Only rutis's own framework events (`rutis/*`) set it.
     pub framework: bool,
 }
@@ -243,6 +246,7 @@ impl Dispatch {
             filter: None,
             terminal: None,
             origin: None,
+            emitter: None,
             framework: false,
         }
     }

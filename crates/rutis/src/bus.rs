@@ -7,10 +7,10 @@ pub(crate) mod run;
 pub(crate) mod table;
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use run::{
@@ -22,6 +22,7 @@ use table::{Body, DispatchFlight, Entry, Selected, Table};
 
 use crate::ctx::Ctx;
 use crate::error::{Error, ErrorKind};
+use crate::events::catalog::{EventModeCatalog, EventModePolicy};
 use crate::events::{
     Dispatch, EntryCall, Event, EventOptions, JsonTranscoder, ListenerInfo, ListenerKind, Mode,
     Payload, PayloadRef, RemoteEntry, RemoteListener, TableChange, TableEntry, Transcoder, Value,
@@ -77,6 +78,45 @@ struct BusState {
     next_emit: u64,
 }
 
+/// Maximum distinct `(emitter, event, actual, expected)` mismatch warnings
+/// remembered while a catalog stays unchanged, preventing unbounded growth
+/// under dynamically named plugins.
+const MAX_WARNED_MISMATCHES: usize = 4096;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct MismatchKey {
+    emitter: String,
+    name: String,
+    actual: Mode,
+    expected: Mode,
+}
+
+#[derive(Default)]
+struct WarnedMismatches {
+    seen: HashSet<MismatchKey>,
+    order: VecDeque<MismatchKey>,
+}
+
+impl WarnedMismatches {
+    fn record(&mut self, key: MismatchKey) -> bool {
+        if !self.seen.insert(key.clone()) {
+            return false;
+        }
+        self.order.push_back(key);
+        if self.order.len() > MAX_WARNED_MISMATCHES {
+            if let Some(oldest) = self.order.pop_front() {
+                self.seen.remove(&oldest);
+            }
+        }
+        true
+    }
+
+    fn clear(&mut self) {
+        self.seen.clear();
+        self.order.clear();
+    }
+}
+
 struct BusCore {
     state: Mutex<BusState>,
     /// Taken while `state` is held, never the other way round.
@@ -84,6 +124,10 @@ struct BusCore {
     delivered: std::sync::Condvar,
     /// `crate::sync`: a shuttle rwlock in the shuttle models (#622 item 1).
     transcoder: crate::sync::RwLock<Arc<dyn Transcoder>>,
+    /// Fast path: false when the installed mode catalog is empty.
+    has_catalog: AtomicBool,
+    catalog: RwLock<EventModeCatalog>,
+    warned: Mutex<WarnedMismatches>,
     next_dispatch: AtomicU64,
 }
 
@@ -159,6 +203,7 @@ impl Drop for TailCleanup {
 pub(crate) struct Opts {
     pub filter: Option<FilterSpec>,
     pub origin: Option<u64>,
+    pub emitter: Option<String>,
     pub framework: bool,
 }
 
@@ -190,6 +235,9 @@ impl EventBus {
                 notices: Mutex::default(),
                 delivered: std::sync::Condvar::new(),
                 transcoder: crate::sync::RwLock::new(Arc::new(JsonTranscoder)),
+                has_catalog: AtomicBool::new(false),
+                catalog: RwLock::new(EventModeCatalog::new()),
+                warned: Mutex::default(),
                 next_dispatch: AtomicU64::new(1),
             }),
         }
@@ -214,6 +262,72 @@ impl EventBus {
     /// Replace the transcoder (the default is [`JsonTranscoder`]).
     pub fn set_transcoder(&self, transcoder: Arc<dyn Transcoder>) {
         *self.core.transcoder.write().unwrap() = transcoder;
+    }
+
+    /// Install an optional [`EventModeCatalog`], replacing any previous
+    /// catalog and clearing remembered `Warn` deduplication keys.
+    pub fn set_event_mode_catalog(&self, catalog: EventModeCatalog) -> Result<(), Error> {
+        catalog.validate()?;
+        let non_empty = !catalog.is_empty();
+        *self.core.catalog.write().unwrap() = catalog;
+        self.core.has_catalog.store(non_empty, Ordering::Release);
+        self.core.warned.lock().unwrap().clear();
+        Ok(())
+    }
+
+    /// A clone of the currently installed [`EventModeCatalog`].
+    pub fn event_mode_catalog(&self) -> EventModeCatalog {
+        self.core.catalog.read().unwrap().clone()
+    }
+
+    /// Check `name` against the installed [`EventModeCatalog`] for a dispatch
+    /// using `actual`. Under [`EventModePolicy::Warn`], reports once per
+    /// `(emitter, name, actual, expected)` through `ctx.error_sink()` and
+    /// returns `Ok(())`; under [`EventModePolicy::Error`], returns
+    /// `Err(ErrorKind::EventModeMismatch)`.
+    pub fn check_mode(
+        &self,
+        ctx: &Ctx,
+        name: &str,
+        actual: Mode,
+        emitter: Option<&str>,
+    ) -> Result<(), Error> {
+        if !self.core.has_catalog.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let rule = self.core.catalog.read().unwrap().get(name);
+        let Some((expected, policy)) = rule else {
+            return Ok(());
+        };
+        if expected == actual {
+            return Ok(());
+        }
+        let emitter = match emitter {
+            Some(label) => label.to_owned(),
+            None => ctx.emitter_label(),
+        };
+        let report = ErrorKind::EventModeMismatch {
+            name: name.to_owned(),
+            actual,
+            expected,
+            emitter: emitter.clone(),
+        };
+        match policy {
+            EventModePolicy::Error => Err(report.into()),
+            EventModePolicy::Warn => {
+                let fresh = self.core.warned.lock().unwrap().record(MismatchKey {
+                    emitter,
+                    name: name.to_owned(),
+                    actual,
+                    expected,
+                });
+                if fresh {
+                    let sink = ctx.error_sink();
+                    let _ = catch_unwind(AssertUnwindSafe(|| sink(Arc::new(report))));
+                }
+                Ok(())
+            }
+        }
     }
 
     // ── registration ─────────────────────────────────────────────
@@ -504,15 +618,16 @@ impl EventBus {
 
     // ── dispatch ─────────────────────────────────────────────────
 
-    /// §5.1 step 1, after the reserved-name check.
+    /// §5.1 step 1, after the reserved-name and mode-catalog checks.
     fn snapshot(
         &self,
         ctx: &Ctx,
         name: &str,
+        mode: Mode,
         event: &(dyn std::any::Any + Send + Sync),
         opts: &mut Opts,
     ) -> Result<Vec<Arc<Entry>>, Error> {
-        self.snapshot_with(ctx, name, event, opts, |table| table.select(name))
+        self.snapshot_with(ctx, name, mode, event, opts, |table| table.select(name))
     }
 
     /// [`snapshot`](Self::snapshot), selecting with `select`.
@@ -521,6 +636,7 @@ impl EventBus {
         &self,
         ctx: &Ctx,
         name: &str,
+        mode: Mode,
         event: &(dyn std::any::Any + Send + Sync),
         opts: &mut Opts,
         select: impl FnOnce(&mut Table) -> T,
@@ -531,6 +647,9 @@ impl EventBus {
                 name: name.to_owned(),
             }
             .into());
+        }
+        if !opts.framework {
+            self.check_mode(ctx, name, mode, opts.emitter.as_deref())?;
         }
         let mut state = self.core.state.lock().unwrap();
         let entries = select(&mut state.table);
@@ -632,9 +751,14 @@ impl EventBus {
             // registered since it was built are added to it (#980). A copy
             // per emit made a mass shutdown hold one copy per queued status
             // change, each as long as the listeners.
-            let shared = self.snapshot_with(ctx, &name, &**payload.arc(), &mut opts, |table| {
-                table.shared(&name)
-            })?;
+            let shared = self.snapshot_with(
+                ctx,
+                &name,
+                Mode::Emit,
+                &**payload.arc(),
+                &mut opts,
+                |table| table.shared(&name),
+            )?;
             match shared {
                 Some(entries) => entries,
                 None => {
@@ -643,7 +767,7 @@ impl EventBus {
                 }
             }
         } else {
-            let mut entries = self.snapshot(ctx, &name, &**payload.arc(), &mut opts)?;
+            let mut entries = self.snapshot(ctx, &name, Mode::Emit, &**payload.arc(), &mut opts)?;
             match opts.filter.take() {
                 Some(FilterSpec::Each(keep)) => match filter_each(entries, &*keep) {
                     Ok(kept) => entries = kept,
@@ -779,7 +903,7 @@ impl EventBus {
     ) -> BoxFuture<'a, Result<(), Error>> {
         let bus = self.clone();
         Box::pin(async move {
-            let entries = bus.snapshot(ctx, &name, &**payload.arc(), &mut opts)?;
+            let entries = bus.snapshot(ctx, &name, Mode::Parallel, &**payload.arc(), &mut opts)?;
             let entries = filter_any(&name, entries, opts.filter.take()).await?;
             if entries.is_empty() {
                 return Ok(());
@@ -806,7 +930,7 @@ impl EventBus {
     ) -> BoxFuture<'a, Result<Option<Value>, Error>> {
         let bus = self.clone();
         Box::pin(async move {
-            let entries = bus.snapshot(ctx, &name, &**payload.arc(), &mut opts)?;
+            let entries = bus.snapshot(ctx, &name, Mode::Serial, &**payload.arc(), &mut opts)?;
             let entries = filter_any(&name, entries, opts.filter.take()).await?;
             let inv = Inv {
                 bus: &bus,
@@ -831,7 +955,13 @@ impl EventBus {
     ) -> BoxFuture<'a, Result<Option<Value>, Error>> {
         let bus = self.clone();
         Box::pin(async move {
-            let entries = bus.snapshot(ctx, &name, payload.as_ref().as_any(), &mut opts)?;
+            let entries = bus.snapshot(
+                ctx,
+                &name,
+                Mode::Waterfall,
+                payload.as_ref().as_any(),
+                &mut opts,
+            )?;
             let entries = filter_any(&name, entries, opts.filter.take()).await?;
             let dispatch = bus.dispatch_id();
             if entries.is_empty() {
@@ -868,7 +998,7 @@ impl EventBus {
         mut opts: Opts,
     ) -> Result<Option<Value>, Error> {
         ctx.registration_preflight()?;
-        let entries = self.snapshot(ctx, &name, event.as_any(), &mut opts)?;
+        let entries = self.snapshot(ctx, &name, Mode::Bail, event.as_any(), &mut opts)?;
         let entries = filter_sync(&name, entries, opts.filter.take())?;
         let inv = Inv {
             bus: self,
@@ -893,7 +1023,7 @@ impl EventBus {
         mut opts: Opts,
     ) -> Result<Option<Value>, Error> {
         ctx.registration_preflight()?;
-        let entries = self.snapshot(ctx, &name, event.as_any(), &mut opts)?;
+        let entries = self.snapshot(ctx, &name, Mode::Waterfall, event.as_any(), &mut opts)?;
         let entries = filter_sync(&name, entries, opts.filter.take())?;
         let inv = Inv {
             bus: self,
@@ -935,6 +1065,7 @@ impl EventBus {
         Opts {
             filter: d.filter.take().map(FilterSpec::Batch),
             origin: d.origin,
+            emitter: d.emitter.take(),
             framework: d.framework,
         }
     }

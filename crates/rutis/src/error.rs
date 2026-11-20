@@ -170,6 +170,18 @@ pub enum ErrorKind {
     /// A plugin emitted a `rutis/*` event.
     #[error("rutis/* events are emitted by rutis only: {name}")]
     ReservedEvent { name: String },
+    /// An event listed in the host's
+    /// [`EventModeCatalog`](crate::host::EventModeCatalog) was dispatched with
+    /// a [`Mode`](crate::events::Mode) other than the expected one.
+    #[error(
+        "{emitter}: event {name} dispatched with {actual}, expected {expected}: use {expected} instead"
+    )]
+    EventModeMismatch {
+        name: String,
+        actual: crate::Mode,
+        expected: crate::Mode,
+        emitter: String,
+    },
     /// An `emit` listener failed; reported to the error sink, never to the
     /// emitter (protocol spec §5.6).
     #[error("listener of {name} in {listener} failed: {error}")]
@@ -288,6 +300,7 @@ impl ErrorKind {
             ErrorKind::AsyncListener { .. } => Some("AsyncListener"),
             ErrorKind::WaterfallNext { .. } => Some("WaterfallNext"),
             ErrorKind::ReservedEvent { .. } => Some("ReservedEvent"),
+            ErrorKind::EventModeMismatch { .. } => Some("BindingError"),
             ErrorKind::EventNeedsName { .. } => Some("BindingError"),
             _ => None,
         }

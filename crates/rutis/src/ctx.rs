@@ -252,6 +252,19 @@ impl Ctx {
             .unwrap_or_default()
     }
 
+    /// How diagnostics name this context when it emits an event: its marked
+    /// row name, `"host"` for the root fiber, or its plugin name.
+    pub(crate) fn emitter_label(&self) -> String {
+        if let Some(row) = self.row() {
+            return row;
+        }
+        match self.0.fiber.upgrade() {
+            Some(fiber) if fiber.is_root => "host".to_owned(),
+            Some(fiber) if !fiber.name.is_empty() => fiber.name.clone(),
+            _ => "host".to_owned(),
+        }
+    }
+
     /// The scope for `key`: walks up the parent contexts and takes the nearest
     /// isolate of that key.
     pub(crate) fn scope_for(&self, key: &TypeKey) -> Option<ScopeId> {
@@ -1554,6 +1567,14 @@ impl crate::host::CtxHost for Ctx {
 
     fn subscriptions(&self) -> Vec<crate::bus::EventSubscription> {
         self.events().subscriptions()
+    }
+
+    fn set_event_mode_catalog(&self, catalog: crate::host::EventModeCatalog) -> Result<(), Error> {
+        self.events().set_event_mode_catalog(catalog)
+    }
+
+    fn event_mode_catalog(&self) -> crate::host::EventModeCatalog {
+        self.events().event_mode_catalog()
     }
 }
 
