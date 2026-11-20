@@ -111,6 +111,36 @@ export function scopedId(name: string, label?: string | null): string {
 export const handleOf = (id: string, generation: number) =>
   generation === 1 ? id : `${id}${id.includes('\0') ? '\0' : '#'}${generation}`
 
+const MAX_TIMER_MS = 2_147_483_647
+
+const formatTimerValue = (value: unknown) =>
+  typeof value === 'number' ? String(value) : typeof value === 'string' ? JSON.stringify(value) : String(value)
+
+function checkTimeoutDelay(delay: unknown): asserts delay is number {
+  if (typeof delay !== 'number' || !Number.isFinite(delay) || delay < 0) {
+    throw new RangeError(`timeout delay must be a non-negative finite number of milliseconds, got ${formatTimerValue(delay)}`)
+  }
+  if (delay > MAX_TIMER_MS) {
+    throw new RangeError(`timeout delay must be at most ${MAX_TIMER_MS} ms, got ${delay}`)
+  }
+}
+
+function checkIntervalPeriod(period: unknown): asserts period is number {
+  if (typeof period !== 'number' || !Number.isFinite(period) || period <= 0) {
+    throw new RangeError(`interval period must be a positive finite number of milliseconds, got ${formatTimerValue(period)}`)
+  }
+  if (period > MAX_TIMER_MS) {
+    throw new RangeError(`interval period must be at most ${MAX_TIMER_MS} ms, got ${period}`)
+  }
+}
+
+function timerErrorText(error: unknown): string {
+  if (error instanceof Error || (error && typeof error === 'object' && typeof (error as any).message === 'string')) {
+    return `${(error as any).name || 'Error'}: ${(error as any).message}`
+  }
+  return String(error)
+}
+
 interface Row {
   key: string
   /// A module, or a plugin definition this runtime handed over.
@@ -376,6 +406,15 @@ export class Runtime {
     const uses = new Set([...plugin.inject, ...(inject ?? [])])
     const mayUse = (name: string) => plugin.usesAny || uses.has(name) || row.provided.includes(idIn(row, name))
     const mayGet = (name: string) => mayUse(name) || plugin.optional.includes(name)
+    const rowName = this.#bus.rowId(row.key) ?? row.key
+    const isActive = () => this.#rows.get(row.key) === row
+    const removeStep = (step: () => unknown) => {
+      const index = row.steps.indexOf(step)
+      if (index >= 0) row.steps.splice(index, 1)
+    }
+    const reportTimerError = (error: unknown) => {
+      say(`rutis: timer of row ${rowName} failed: ${timerErrorText(error)}\n`)
+    }
     const ctx = {
       use: (name: string) => {
         // Not injected by it or its row (an optional one is read with
@@ -394,11 +433,91 @@ export class Runtime {
         if (typeof cleanup !== 'function') throw new TypeError('effect needs a cleanup function')
         // As Rust's InactiveEffect: once the row is unloading, the stack it
         // would join is the one the unload took, so it would never run.
-        if (this.#rows.get(row.key) !== row) {
-          process.stderr.write(`rutis: row ${this.#bus.rowId(row.key) ?? row.key} is not active: cleanup is not registered\n`)
+        if (!isActive()) {
+          process.stderr.write(`rutis: row ${rowName} is not active: cleanup is not registered\n`)
           return
         }
         row.steps.push(cleanup)
+      },
+      // Managed timers built on `effect` (#1325).
+      timeout: (delayMs: number, callback: () => unknown): (() => void) => {
+        if (typeof callback !== 'function') throw new TypeError('timeout needs a callback function')
+        checkTimeoutDelay(delayMs)
+        if (!isActive()) {
+          say(`rutis: row ${rowName} is not active: timer is not registered\n`)
+          return () => {}
+        }
+        let cancelled = false
+        let handle: ReturnType<typeof setTimeout> | undefined
+        let running: Promise<void> | undefined
+        const cleanup = () => {
+          cancelled = true
+          if (handle !== undefined) { clearTimeout(handle); handle = undefined }
+          if (!running) removeStep(cleanup)
+          return running
+        }
+        ctx.effect(cleanup)
+        handle = setTimeout(() => {
+          handle = undefined
+          if (cancelled || !isActive()) { removeStep(cleanup); return }
+          let result: unknown
+          try { result = this.within(row.key, () => callback()) } catch (error) {
+            reportTimerError(error)
+            removeStep(cleanup)
+            return
+          }
+          if (result && typeof (result as { then?: unknown }).then === 'function') {
+            running = Promise.resolve(result).then(() => {}, reportTimerError).finally(() => {
+              running = undefined
+              removeStep(cleanup)
+            })
+          } else {
+            removeStep(cleanup)
+          }
+        }, delayMs)
+        return () => { cleanup() }
+      },
+      interval: (periodMs: number, callback: () => unknown): (() => void) => {
+        if (typeof callback !== 'function') throw new TypeError('interval needs a callback function')
+        checkIntervalPeriod(periodMs)
+        if (!isActive()) {
+          say(`rutis: row ${rowName} is not active: timer is not registered\n`)
+          return () => {}
+        }
+        let cancelled = false
+        let handle: ReturnType<typeof setTimeout> | undefined
+        let running: Promise<void> | undefined
+        const cleanup = () => {
+          cancelled = true
+          if (handle !== undefined) { clearTimeout(handle); handle = undefined }
+          if (!running) removeStep(cleanup)
+          return running
+        }
+        const schedule = () => {
+          if (cancelled || !isActive()) { removeStep(cleanup); return }
+          handle = setTimeout(() => {
+            handle = undefined
+            if (cancelled || !isActive()) { removeStep(cleanup); return }
+            let result: unknown
+            try { result = this.within(row.key, () => callback()) } catch (error) {
+              reportTimerError(error)
+              schedule()
+              return
+            }
+            if (result && typeof (result as { then?: unknown }).then === 'function') {
+              running = Promise.resolve(result).then(() => {}, reportTimerError).finally(() => {
+                running = undefined
+                if (cancelled || !isActive()) removeStep(cleanup)
+                else schedule()
+              })
+            } else {
+              schedule()
+            }
+          }, periodMs)
+        }
+        ctx.effect(cleanup)
+        schedule()
+        return () => { cleanup() }
       },
       // Aborted when the row unloads, while its listeners are waited for.
       get signal() { return row.abort.signal },
