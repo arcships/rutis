@@ -66,12 +66,40 @@ function shutdownDeadline(): number {
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 10_000
 }
 
+// Optional per-row unload cleanup budget: RUTIS_ROW_UNLOAD_TIMEOUT seconds
+// (positive finite number, matching RUTIS_SHUTDOWN_TIMEOUT), unset (unlimited)
+// by default so unload semantics do not change unless opted in.
+export function rowUnloadDeadline(env: Record<string, string | undefined> = process.env): number | null {
+  const seconds = Number(env.RUTIS_ROW_UNLOAD_TIMEOUT)
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : null
+}
+
+function normalizeTimeoutMs(ms: number | null | undefined): number | null {
+  return typeof ms === 'number' && Number.isFinite(ms) && ms > 0 ? ms : null
+}
+
+function formatTimeoutSeconds(ms: number): string {
+  return String(Number((ms / 1000).toPrecision(12)))
+}
+
+export function rowUnloadTimeoutText(runtime: string, row: string, budgetMs: number): string {
+  return `runtime ${runtime}: cleanup of row ${row} did not finish within ${formatTimeoutSeconds(budgetMs)} s; skipped remaining cleanups and withdrew its services; reloading row ${row} in this runtime is blocked until the runtime restarts (the stuck cleanup may still be running; fix it or restart the runtime)`
+}
+
+export function rowTaintedErrorText(runtime: string, row: string, budgetMs: number): string {
+  return `row ${row} cannot be loaded in runtime ${runtime}: its previous cleanup did not finish within ${formatTimeoutSeconds(budgetMs)} s and may still be running; restart the runtime (or isolate this row in its own runtime) before loading it again`
+}
+
 interface Scope { id: string, group: string }
 // A scope chain as rows.load gives it: [{ id, group }], the root [].
 function chainOf(scope: unknown): Scope[] {
   if (scope === undefined || scope === null) return []
   if (!Array.isArray(scope) || scope.some(item => typeof item?.id !== 'string' || typeof item?.group !== 'string')) throw new TypeError('a scope is a list of { id, group }')
   return scope.map(({ id, group }) => ({ id, group }))
+}
+
+function taintScopeKey(rowName: string, chain: Scope[]): string {
+  return JSON.stringify([rowName, chain.map(({ id, group }) => [id, group])])
 }
 
 // The methods of a service no declaration describes: its own and inherited
@@ -111,6 +139,11 @@ export function scopedId(name: string, label?: string | null): string {
 export const handleOf = (id: string, generation: number) =>
   generation === 1 ? id : `${id}${id.includes('\0') ? '\0' : '#'}${generation}`
 
+interface UnloadStep {
+  run: () => unknown
+  withdrawal: boolean
+}
+
 interface Row {
   key: string
   /// A module, or a plugin definition this runtime handed over.
@@ -121,7 +154,7 @@ interface Row {
   // The unload stack: cleanups and the withdrawals of the services the row
   // provides, in the order they were registered, run in reverse when the
   // row unloads (as Rust's effects: a withdrawal is an effect too).
-  steps: Array<() => unknown>
+  steps: UnloadStep[]
   // Its scope chain, and the signal its unload aborts.
   chain: Scope[]
   abort: AbortController
@@ -167,6 +200,14 @@ export class Runtime {
   // A row's method holding this thread for 5 s is said (#678).
   #blocking = watchBlocking({ runtime: () => this.name })
   #deadline = shutdownDeadline()
+  #rowUnloadTimeout?: number | null
+  // Route B: rows whose cleanup timed out in this runtime process are tainted
+  // until this runtime restarts (refusing silent in-place reload). Keyed by
+  // scoped row identity (rowName + canonical scope chain) plus exact session
+  // key, so copies with the same `id` in different `instances` scopes stay
+  // isolated.
+  #taintedScopes = new Map<string, { rowName: string, budgetMs: number }>()
+  #taintedKeys = new Map<string, { rowName: string, budgetMs: number }>()
   #project: string
   #modules = new Modules()
   #rows = new Map<string, Row>()
@@ -180,14 +221,31 @@ export class Runtime {
   #generations = new Map<string, number>()
   #version = 0
 
-  constructor(project: string) {
+  constructor(project: string, options?: { rowUnloadTimeout?: number | null }) {
     this.#project = project
+    if (options && 'rowUnloadTimeout' in options) {
+      this.#rowUnloadTimeout = normalizeTimeoutMs(options.rowUnloadTimeout)
+    }
     if (this.#store) {
       prefixOutput(() => {
         const key = this.running()
         return key === undefined ? this.name : this.#bus.rowId(key) ?? key
       })
     }
+  }
+
+  #rowUnloadBudget(): number | null {
+    return this.#rowUnloadTimeout !== undefined ? this.#rowUnloadTimeout : rowUnloadDeadline()
+  }
+
+  #markTainted(rowName: string, chain: Scope[], key: string, budgetMs: number) {
+    const entry = { rowName, budgetMs }
+    this.#taintedScopes.set(taintScopeKey(rowName, chain), entry)
+    this.#taintedKeys.set(key, entry)
+  }
+
+  #findTaint(rowName: string, chain: Scope[], key: string) {
+    return this.#taintedScopes.get(taintScopeKey(rowName, chain)) ?? this.#taintedKeys.get(key)
   }
 
   // Connected: the bus registers and dispatches through the host.
@@ -267,7 +325,7 @@ export class Runtime {
     // The withdrawal is an entry of the unload stack, as an effect is: a
     // cleanup registered after this one runs before it and still reads the
     // service; one registered before runs after it and does not.
-    row.steps.push(withdraw)
+    row.steps.push({ run: withdraw, withdrawal: true })
     return withdraw
   }
 
@@ -355,10 +413,14 @@ export class Runtime {
   // ── Rows ──────────────────────────────────────────────────────
 
   async load(key: string, entry: unknown, config: unknown, isolate: Array<[string, string]> | null, exports: Row['exports'] | null, scope?: unknown, id?: unknown, inject?: string[] | null) {
+    const chain = chainOf(scope)
+    const shownRow = typeof id === 'string' ? id : key
+    const taint = this.#findTaint(shownRow, chain, key)
+    if (taint) throw new Error(rowTaintedErrorText(this.name, taint.rowName, taint.budgetMs))
     if (this.#rows.has(key)) throw new Error(`row ${key} is already loaded`)
     // Descriptors and reported lines call the row by its id (protocol §4.2).
     this.#bus.nameRow(key, id)
-    const row: Row = { key, entry, config, exports: exports ?? {}, isolate: new Map(), steps: [], chain: chainOf(scope), abort: new AbortController(), provided: [], announced: [], pending: [], inject: inject ?? null }
+    const row: Row = { key, entry, config, exports: exports ?? {}, isolate: new Map(), steps: [], chain, abort: new AbortController(), provided: [], announced: [], pending: [], inject: inject ?? null }
     for (const [name, label] of isolate ?? []) { scopedId(name, label); row.isolate.set(name, label) }
     for (const name of Object.keys(row.exports)) {
       if (name.includes('#')) throw new Error(`service name ${name} cannot be projected`)
@@ -398,7 +460,7 @@ export class Runtime {
           process.stderr.write(`rutis: row ${this.#bus.rowId(row.key) ?? row.key} is not active: cleanup is not registered\n`)
           return
         }
-        row.steps.push(cleanup)
+        row.steps.push({ run: cleanup, withdrawal: false })
       },
       // Aborted when the row unloads, while its listeners are waited for.
       get signal() { return row.abort.signal },
@@ -434,7 +496,7 @@ export class Runtime {
       const cleanup = await this.within(key, () => plugin.apply(ctx, config))
       if (cleanup !== undefined && cleanup !== null) {
         if (typeof cleanup !== 'function') throw new TypeError('apply must return a cleanup function or nothing')
-        row.steps.push(cleanup as () => unknown)
+        row.steps.push({ run: cleanup as () => unknown, withdrawal: false })
       }
       for (const name of Object.keys(row.exports)) this.#refresh(idIn(row, name))
       // rutis has published the announced services (or refused one, which
@@ -486,9 +548,61 @@ export class Runtime {
     await this.#bus.settle(key, this.#deadline)
     this.#bus.forgetRow(key)
     const errors: unknown[] = []
+    const steps = row.steps.splice(0).reverse()
+    const budget = this.#rowUnloadBudget()
+    const shownRow = typeof rowId === 'string' ? rowId : key
     try {
-      for (const step of row.steps.splice(0).reverse()) {
-        try { await this.within(key, step) } catch (error) { errors.push(error) }
+      if (budget === null) {
+        for (const step of steps) {
+          try { await this.within(key, step.run) } catch (error) { errors.push(error) }
+        }
+      } else {
+        const endAt = performance.now() + budget
+        let timedOut = false
+        const TIMED_OUT = Symbol('row-unload-timeout')
+        const reportTimeout = () => {
+          timedOut = true
+          this.#markTainted(shownRow, row.chain, key, budget)
+          say(`${rowUnloadTimeoutText(this.name, shownRow, budget)}\n`)
+        }
+        for (const step of steps) {
+          if (step.withdrawal) {
+            try { await this.within(key, step.run) } catch (error) { errors.push(error) }
+            continue
+          }
+          if (timedOut) continue
+          const remaining = Math.max(0, endAt - performance.now())
+          if (remaining === 0) {
+            reportTimeout()
+            continue
+          }
+          let pending: Promise<unknown>
+          try {
+            pending = Promise.resolve(this.within(key, step.run))
+          } catch (error) {
+            errors.push(error)
+            continue
+          }
+          // Prevent unhandled rejections if a timed-out cleanup rejects later.
+          pending.then(() => {}, () => {})
+          let timer: ReturnType<typeof setTimeout> | undefined
+          const winner = await Promise.race([
+            pending.then(
+              () => ({ ok: true as const }),
+              error => ({ ok: false as const, error }),
+            ),
+            new Promise<typeof TIMED_OUT>(resolve => {
+              timer = setTimeout(() => resolve(TIMED_OUT), remaining)
+              timer?.unref?.()
+            }),
+          ])
+          if (timer !== undefined) clearTimeout(timer)
+          if (winner === TIMED_OUT) {
+            reportTimeout()
+            continue
+          }
+          if (!winner.ok) errors.push(winner.error)
+        }
       }
     } finally {
       // Its cleanups may emit, or register listeners: both stop here.

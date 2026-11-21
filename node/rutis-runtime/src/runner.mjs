@@ -6,9 +6,9 @@ import { Worker } from 'node:worker_threads'
 import { Process } from './client.mjs'
 import { toJsonSchema } from './schema.mjs'
 import { cordisConfig } from './cordis-config.mjs'
-import { isLeaf, supported, toCordis } from './leaf.mjs'
+import { isLeaf, normalizeTimeoutMs, rowTaintedErrorText, rowUnloadDeadline, rowUnloadTimeoutText, supported, toCordis } from './leaf.mjs'
 import { Bus } from './events.mjs'
-import { install } from './cordis-events.mjs'
+import { LEAF_FIBERS, install } from './cordis-events.mjs'
 import { rowTracking, install as handleUnhandled, failureText, kindText, realFile, reportText, stackFiles, unhandledError } from './unhandled.mjs'
 import { cannotLoad, encodeError, entryGone, fileShown, noMethod, notDefinePlugin, serviceName, unavailable } from './errors.mjs'
 import { prefixOutput, say, watchBlocking } from './output.mjs'
@@ -39,6 +39,7 @@ export async function run({
   exit = code => process.exit(code),
   handlers = true,
   watchdog = true,
+  rowUnloadTimeout = undefined,
 } = {}) {
 // `<channel> --id <endpoint> [--peer <endpoint>] <first plugin or anchor>`.
 // The session greets as `--id`, expecting `--peer` as the controller when
@@ -179,6 +180,73 @@ if (tracking.traced && typeof Fiber?.prototype?._execute === 'function') {
 }
 // How long an unloading row's listeners are waited for (§7.1).
 const deadline = shutdownDeadline()
+// Optional single-row unload cleanup budget: RUTIS_ROW_UNLOAD_TIMEOUT seconds
+// (or explicit `rowUnloadTimeout` in ms), unset (unlimited) by default.
+const rowUnloadBudget = rowUnloadTimeout === undefined
+  ? rowUnloadDeadline(env)
+  : normalizeTimeoutMs(rowUnloadTimeout)
+// Route B: rows whose cleanup timed out in this runtime process are tainted
+// until this runtime restarts (refusing silent in-place reload while the old
+// cleanup may still be running in the background). Keyed by scoped row
+// identity (rowName + canonical scope chain) plus exact session key, so
+// copies with the same `id` in different `instances` scopes stay isolated.
+const taintedScopes = new Map() // taintScopeKey(rowName, chain) -> { rowName, budgetMs }
+const taintedKeys = new Map() // key -> { rowName, budgetMs }
+function taintScopeKey(rowName, chain) {
+  return JSON.stringify([rowName, chain.map(({ id, group }) => [id, group])])
+}
+function markTainted(row) {
+  if (!row || rowUnloadBudget === null) return
+  const entry = { rowName: row.rowName, budgetMs: rowUnloadBudget }
+  taintedScopes.set(taintScopeKey(row.rowName, row.chain), entry)
+  taintedKeys.set(row.key, entry)
+}
+function findTaint(rowName, chain, key) {
+  return taintedScopes.get(taintScopeKey(rowName, chain)) ?? taintedKeys.get(key)
+}
+const leafUnloadOptions = context => {
+  const owner = rowOf(context?.fiber)?.[1] ?? goneRowOf(context?.fiber)
+  const target = owner ? `row ${owner.rowName}` : `plugin ${context?.fiber?.name ?? 'leaf'}`
+  return {
+    budgetMs: rowUnloadBudget,
+    runtime: runtimeName(),
+    target,
+    blocksReload: Boolean(owner),
+    onTimeout: () => markTainted(owner),
+    report: line => say(`${line}\n`),
+  }
+}
+async function disposeRowFiber(row) {
+  if (rowUnloadBudget === null || LEAF_FIBERS.has(row.inner)) {
+    await row.fiber.dispose()
+    return
+  }
+  // Native Cordis fiber with opt-in row unload budget: Cordis runs all
+  // disposables in one Promise.all that cannot be interrupted, so race
+  // dispose() against the budget; on timeout stop waiting, taint the row,
+  // report, and let the caller's finally block finish teardown.
+  const TIMED_OUT = Symbol('row-unload-timeout')
+  const disposingFiber = Promise.resolve(row.fiber.dispose())
+  disposingFiber.then(() => {}, () => {})
+  let timer
+  const winner = await Promise.race([
+    disposingFiber.then(
+      () => ({ ok: true }),
+      error => ({ ok: false, error }),
+    ),
+    new Promise(resolve => {
+      timer = setTimeout(() => resolve(TIMED_OUT), rowUnloadBudget)
+      timer?.unref?.()
+    }),
+  ])
+  clearTimeout(timer)
+  if (winner === TIMED_OUT) {
+    markTainted(row)
+    say(`${rowUnloadTimeoutText({ runtime: runtimeName(), target: `row ${row.rowName}`, budgetMs: rowUnloadBudget, native: true, blocksReload: true })}\n`)
+    return
+  }
+  if (!winner.ok) throw winner.error
+}
 // Test support, not part of the protocol: with RUTIS_TEST_INSPECT set, the
 // control method `inspect` reports what this runner holds (rows, host
 // proxies, export slots, object handles, Cordis plugins, fibers and
@@ -485,7 +553,7 @@ function dispose() {
       row.abort.abort(new DOMException('the row is unloading', 'AbortError'))
       await bus.settle(key, deadline)
       try {
-        await row.fiber.dispose()
+        await disposeRowFiber(row)
       } finally {
         row.unloaded = true
         bus.withdraw(key)
@@ -526,7 +594,7 @@ async function pluginOf(entry, rowInject = []) {
   if (registered) return definedPlugin(registered, rowInject)
   entry = located(entry)
   const declared = await declaredOf(entry, described)
-  return isLeaf(declared) ? toCordis(declared, rowInject, providerOf) : declared
+  return isLeaf(declared) ? toCordis(declared, rowInject, providerOf, leafUnloadOptions) : declared
 }
 
 // A plugin definition this runtime handed over, back as a row's entry (a
@@ -543,7 +611,7 @@ function definedPlugin(value, rowInject = []) {
     const key = rowInject.join('\0')
     let wrapped = wrappings.get(key)
     if (!wrapped) {
-      wrapped = toCordis(supported(value, value.name ?? 'plugin definition'), rowInject, providerOf)
+      wrapped = toCordis(supported(value, value.name ?? 'plugin definition'), rowInject, providerOf, leafUnloadOptions)
       wrappings.set(key, wrapped)
     }
     return wrapped
@@ -676,6 +744,12 @@ const fiberOf = wrapped => Object.hasOwn(wrapped, 'then') ? Object.getPrototypeO
 // scope), `inject` as extra service names gating the row. With `inject`, the
 // plugin runs inside a gate fiber (`inner`), from the row's latest config.
 async function loadRow([key, entry, config, isolate, inject, exports, place]) {
+  const chain = chainOf(place?.scope)
+  const rowName = typeof place?.id === 'string' ? place.id : key
+  const taint = findTaint(rowName, chain, key)
+  if (taint) {
+    throw new Error(rowTaintedErrorText({ runtime: runtimeName(), row: taint.rowName, budgetMs: taint.budgetMs }))
+  }
   if (rows.has(key)) throw new Error(`row ${key} is already loaded`)
   const names = Object.keys(exports ?? {})
   // A name the row isolates is exported in the scope of its label.
@@ -695,7 +769,7 @@ async function loadRow([key, entry, config, isolate, inject, exports, place]) {
     scopedId(name, label)
     scope = scope.isolate(name, isolated(name, label))
   }
-  const row = { key, plugin, fiber: undefined, inner: undefined, config, exports: ids, loading: true, scope, labelOf, chain: chainOf(place?.scope), abort: new AbortController() }
+  const row = { key, rowName, plugin, fiber: undefined, inner: undefined, config, exports: ids, loading: true, scope, labelOf, chain, abort: new AbortController() }
   // Its plugin's file, by which a call of process.exit names it (#688).
   row.file = typeof entry === 'string' && !registeredDefinition(entry) ? realFile(located(entry)) : undefined
   // An error the row leaves unhandled while it loads fails the load (#688):
@@ -793,7 +867,7 @@ async function unloadRow(key) {
   row.abort.abort(new DOMException('the row is unloading', 'AbortError'))
   await bus.settle(key, deadline)
   try {
-    await row.fiber.dispose()
+    await disposeRowFiber(row)
   } finally {
     // Its cleanups may emit, or register listeners: both stop here (§7.1 5).
     row.unloaded = true

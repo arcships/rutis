@@ -1,0 +1,10 @@
+# configuration  expected TLC outcome (see README.md)
+budget-route-b ok
+budget-route-b-cordis ok
+budget-route-a violated:NoConcurrentSameRowInSharedProcess
+budget-mut-skip-withdraw violated:NoOrphanWithdrawal
+budget-mut-continue-serial violated:SerialCleanupsWithinGen
+budget-mut-missing-active-guard violated:ServiceOwnerValid
+budget-mut-withdraw-by-name violated:ActiveServiceIntact
+budget-mut-error-corrupts-live violated:NoSpuriousRowFailure
+budget-mut-taint-by-bare-name violated:HealthyInstanceNotBlocked
