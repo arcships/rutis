@@ -16,6 +16,7 @@ pub use crate::effect::Effect;
 pub use crate::error::{
     default_sink, ErrorKind, ErrorSink, NextMisuse, ServiceReadError, ServiceReadFailure,
 };
+pub use crate::events::catalog::{EventModeCatalog, EventModeEntry, EventModePolicy};
 pub use crate::events::kinds::ListenerKind;
 pub use crate::fiber::{
     shutdown_deadline, DisposeWaitError, FiberState, FiberStatusChanged, FiberView, PluginId,
@@ -225,4 +226,15 @@ pub trait CtxHost: sealed::Sealed {
     /// The current registrations of the root's event bus, in registration
     /// order.
     fn subscriptions(&self) -> Vec<EventSubscription>;
+
+    /// Install an optional [`EventModeCatalog`] on the root's event bus,
+    /// replacing any previous catalog and resetting warning deduplication.
+    ///
+    /// Returns [`ErrorKind::Validation`] if any entry uses an empty name, a
+    /// `rutis/*` prefix, or an `internal/*` prefix, leaving the existing
+    /// catalog unchanged.
+    fn set_event_mode_catalog(&self, catalog: EventModeCatalog) -> Result<(), Error>;
+
+    /// The [`EventModeCatalog`] currently installed on the root's event bus.
+    fn event_mode_catalog(&self) -> EventModeCatalog;
 }

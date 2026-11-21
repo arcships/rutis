@@ -1,0 +1,8 @@
+# configuration  expected TLC outcome (see README.md)
+catalog-healthy ok
+catalog-drain ok
+mut-check-after-start violated:NoPartialExecOnError
+mut-clear-on-invalid violated:AtomicCatalogValidation
+mut-block-framework violated:FrameworkNeverBlocked
+mut-warn-drops-delivery violated:WarnPreservesDelivery
+mut-nonatomic-swap violated:CatalogFlagInSync

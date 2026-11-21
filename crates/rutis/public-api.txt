@@ -518,6 +518,11 @@ pub rutis::host::ErrorKind::AsyncListener::listener: alloc::string::String
 pub rutis::host::ErrorKind::AsyncListener::mode: rutis::events::Mode
 pub rutis::host::ErrorKind::AsyncListener::name: alloc::string::String
 pub rutis::host::ErrorKind::Closed
+pub rutis::host::ErrorKind::EventModeMismatch
+pub rutis::host::ErrorKind::EventModeMismatch::actual: rutis::events::Mode
+pub rutis::host::ErrorKind::EventModeMismatch::emitter: alloc::string::String
+pub rutis::host::ErrorKind::EventModeMismatch::expected: rutis::events::Mode
+pub rutis::host::ErrorKind::EventModeMismatch::name: alloc::string::String
 pub rutis::host::ErrorKind::EventNeedsName
 pub rutis::host::ErrorKind::EventNeedsName::event: alloc::string::String
 pub rutis::host::ErrorKind::EventValue
@@ -591,6 +596,33 @@ impl core::marker::Unpin for rutis::host::ErrorKind
 impl core::marker::UnsafeUnpin for rutis::host::ErrorKind
 impl !core::panic::unwind_safe::RefUnwindSafe for rutis::host::ErrorKind
 impl !core::panic::unwind_safe::UnwindSafe for rutis::host::ErrorKind
+pub enum rutis::host::EventModePolicy
+pub rutis::host::EventModePolicy::Error
+pub rutis::host::EventModePolicy::Warn
+impl core::clone::Clone for rutis::host::EventModePolicy
+pub fn rutis::host::EventModePolicy::clone(&self) -> Self
+impl core::cmp::Eq for rutis::host::EventModePolicy
+impl core::cmp::PartialEq for rutis::host::EventModePolicy
+pub fn rutis::host::EventModePolicy::eq(&self, &Self) -> bool
+impl core::default::Default for rutis::host::EventModePolicy
+pub fn rutis::host::EventModePolicy::default() -> Self
+impl core::fmt::Debug for rutis::host::EventModePolicy
+pub fn rutis::host::EventModePolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rutis::host::EventModePolicy
+pub fn rutis::host::EventModePolicy::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rutis::host::EventModePolicy
+impl core::marker::StructuralPartialEq for rutis::host::EventModePolicy
+impl serde_core::ser::Serialize for rutis::host::EventModePolicy
+pub fn rutis::host::EventModePolicy::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rutis::host::EventModePolicy
+pub fn rutis::host::EventModePolicy::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rutis::host::EventModePolicy
+impl core::marker::Send for rutis::host::EventModePolicy
+impl core::marker::Sync for rutis::host::EventModePolicy
+impl core::marker::Unpin for rutis::host::EventModePolicy
+impl core::marker::UnsafeUnpin for rutis::host::EventModePolicy
+impl core::panic::unwind_safe::RefUnwindSafe for rutis::host::EventModePolicy
+impl core::panic::unwind_safe::UnwindSafe for rutis::host::EventModePolicy
 pub enum rutis::host::FiberState
 pub rutis::host::FiberState::Active
 pub rutis::host::FiberState::Disposed
@@ -708,6 +740,54 @@ impl core::marker::Unpin for rutis::host::CallError
 impl core::marker::UnsafeUnpin for rutis::host::CallError
 impl !core::panic::unwind_safe::RefUnwindSafe for rutis::host::CallError
 impl !core::panic::unwind_safe::UnwindSafe for rutis::host::CallError
+pub struct rutis::host::EventModeCatalog
+impl rutis::host::EventModeCatalog
+pub fn rutis::host::EventModeCatalog::entry(&self, &str) -> core::option::Option<rutis::host::EventModeEntry>
+pub fn rutis::host::EventModeCatalog::expect(self, impl core::convert::Into<alloc::rcs::arc::Arc<str>>, rutis::events::Mode) -> Self
+pub fn rutis::host::EventModeCatalog::expect_with(self, impl core::convert::Into<alloc::rcs::arc::Arc<str>>, rutis::events::Mode, rutis::host::EventModePolicy) -> Self
+pub fn rutis::host::EventModeCatalog::get(&self, &str) -> core::option::Option<(rutis::events::Mode, rutis::host::EventModePolicy)>
+pub fn rutis::host::EventModeCatalog::is_empty(&self) -> bool
+pub fn rutis::host::EventModeCatalog::iter(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, rutis::host::EventModeEntry)>
+pub fn rutis::host::EventModeCatalog::len(&self) -> usize
+pub fn rutis::host::EventModeCatalog::new() -> Self
+pub fn rutis::host::EventModeCatalog::policy(&self) -> rutis::host::EventModePolicy
+pub fn rutis::host::EventModeCatalog::with_policy(self, rutis::host::EventModePolicy) -> Self
+impl core::clone::Clone for rutis::host::EventModeCatalog
+pub fn rutis::host::EventModeCatalog::clone(&self) -> Self
+impl core::cmp::Eq for rutis::host::EventModeCatalog
+impl core::cmp::PartialEq for rutis::host::EventModeCatalog
+pub fn rutis::host::EventModeCatalog::eq(&self, &Self) -> bool
+impl core::default::Default for rutis::host::EventModeCatalog
+pub fn rutis::host::EventModeCatalog::default() -> Self
+impl core::fmt::Debug for rutis::host::EventModeCatalog
+pub fn rutis::host::EventModeCatalog::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rutis::host::EventModeCatalog
+impl core::marker::Freeze for rutis::host::EventModeCatalog
+impl core::marker::Send for rutis::host::EventModeCatalog
+impl core::marker::Sync for rutis::host::EventModeCatalog
+impl core::marker::Unpin for rutis::host::EventModeCatalog
+impl core::marker::UnsafeUnpin for rutis::host::EventModeCatalog
+impl core::panic::unwind_safe::RefUnwindSafe for rutis::host::EventModeCatalog
+impl core::panic::unwind_safe::UnwindSafe for rutis::host::EventModeCatalog
+pub struct rutis::host::EventModeEntry
+pub rutis::host::EventModeEntry::mode: rutis::events::Mode
+pub rutis::host::EventModeEntry::policy: core::option::Option<rutis::host::EventModePolicy>
+impl core::clone::Clone for rutis::host::EventModeEntry
+pub fn rutis::host::EventModeEntry::clone(&self) -> Self
+impl core::cmp::Eq for rutis::host::EventModeEntry
+impl core::cmp::PartialEq for rutis::host::EventModeEntry
+pub fn rutis::host::EventModeEntry::eq(&self, &Self) -> bool
+impl core::fmt::Debug for rutis::host::EventModeEntry
+pub fn rutis::host::EventModeEntry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rutis::host::EventModeEntry
+impl core::marker::StructuralPartialEq for rutis::host::EventModeEntry
+impl core::marker::Freeze for rutis::host::EventModeEntry
+impl core::marker::Send for rutis::host::EventModeEntry
+impl core::marker::Sync for rutis::host::EventModeEntry
+impl core::marker::Unpin for rutis::host::EventModeEntry
+impl core::marker::UnsafeUnpin for rutis::host::EventModeEntry
+impl core::panic::unwind_safe::RefUnwindSafe for rutis::host::EventModeEntry
+impl core::panic::unwind_safe::UnwindSafe for rutis::host::EventModeEntry
 #[non_exhaustive] pub struct rutis::host::EventSubscription
 pub rutis::host::EventSubscription::calls: u64
 pub rutis::host::EventSubscription::global: bool
@@ -952,6 +1032,7 @@ pub fn rutis::host::CtxHost::cancellation_token(&self) -> tokio_util::sync::canc
 pub fn rutis::host::CtxHost::diagnostics(&self) -> rutis::host::diagnostics::RuntimeDiagnostics
 pub fn rutis::host::CtxHost::dispose_self(&self) -> core::result::Result<(), rutis::Error>
 pub fn rutis::host::CtxHost::error_sink(&self) -> rutis::host::ErrorSink
+pub fn rutis::host::CtxHost::event_mode_catalog(&self) -> rutis::host::EventModeCatalog
 pub fn rutis::host::CtxHost::get_at<T: ?core::marker::Sized + core::marker::Send + core::marker::Sync + 'static>(&self, &rutis::host::Key<T>) -> core::option::Option<alloc::rcs::arc::Arc<T>>
 pub fn rutis::host::CtxHost::handle(&self) -> &tokio::runtime::handle::Handle
 pub fn rutis::host::CtxHost::instance(&self) -> rutis::host::InstanceId
@@ -971,6 +1052,7 @@ pub fn rutis::host::CtxHost::root_with(tokio::runtime::handle::Handle) -> rutis:
 pub fn rutis::host::CtxHost::root_with_sink(tokio::runtime::handle::Handle, rutis::host::ErrorSink) -> rutis::Ctx where Self: core::marker::Sized
 pub fn rutis::host::CtxHost::row(&self) -> core::option::Option<alloc::string::String>
 pub fn rutis::host::CtxHost::scope(&self) -> alloc::vec::Vec<rutis::events::Scope>
+pub fn rutis::host::CtxHost::set_event_mode_catalog(&self, rutis::host::EventModeCatalog) -> core::result::Result<(), rutis::Error>
 pub fn rutis::host::CtxHost::shutdown(&self) -> rutis::host::BoxFuture<'static, core::result::Result<(), alloc::rcs::arc::Arc<rutis::host::ErrorKind>>>
 pub fn rutis::host::CtxHost::shutdown_with_timeout(&self, core::time::Duration) -> rutis::host::BoxFuture<'static, core::result::Result<(), rutis::host::DisposeWaitError>>
 pub fn rutis::host::CtxHost::subscriptions(&self) -> alloc::vec::Vec<rutis::host::EventSubscription>
@@ -980,6 +1062,7 @@ pub fn rutis::Ctx::cancellation_token(&self) -> tokio_util::sync::cancellation_t
 pub fn rutis::Ctx::diagnostics(&self) -> rutis::host::diagnostics::RuntimeDiagnostics
 pub fn rutis::Ctx::dispose_self(&self) -> core::result::Result<(), rutis::Error>
 pub fn rutis::Ctx::error_sink(&self) -> rutis::host::ErrorSink
+pub fn rutis::Ctx::event_mode_catalog(&self) -> rutis::host::EventModeCatalog
 pub fn rutis::Ctx::get_at<T: ?core::marker::Sized + core::marker::Send + core::marker::Sync + 'static>(&self, &rutis::host::Key<T>) -> core::option::Option<alloc::rcs::arc::Arc<T>>
 pub fn rutis::Ctx::handle(&self) -> &tokio::runtime::handle::Handle
 pub fn rutis::Ctx::instance(&self) -> rutis::host::InstanceId
@@ -999,6 +1082,7 @@ pub fn rutis::Ctx::root_with(tokio::runtime::handle::Handle) -> rutis::Ctx
 pub fn rutis::Ctx::root_with_sink(tokio::runtime::handle::Handle, rutis::host::ErrorSink) -> rutis::Ctx
 pub fn rutis::Ctx::row(&self) -> core::option::Option<alloc::string::String>
 pub fn rutis::Ctx::scope(&self) -> alloc::vec::Vec<rutis::events::Scope>
+pub fn rutis::Ctx::set_event_mode_catalog(&self, rutis::host::EventModeCatalog) -> core::result::Result<(), rutis::Error>
 pub fn rutis::Ctx::shutdown(&self) -> rutis::host::BoxFuture<'static, core::result::Result<(), alloc::rcs::arc::Arc<rutis::host::ErrorKind>>>
 pub fn rutis::Ctx::shutdown_with_timeout(&self, core::time::Duration) -> rutis::host::BoxFuture<'static, core::result::Result<(), rutis::host::DisposeWaitError>>
 pub fn rutis::Ctx::subscriptions(&self) -> alloc::vec::Vec<rutis::host::EventSubscription>
@@ -1122,6 +1206,7 @@ pub fn rutis::Ctx::cancellation_token(&self) -> tokio_util::sync::cancellation_t
 pub fn rutis::Ctx::diagnostics(&self) -> rutis::host::diagnostics::RuntimeDiagnostics
 pub fn rutis::Ctx::dispose_self(&self) -> core::result::Result<(), rutis::Error>
 pub fn rutis::Ctx::error_sink(&self) -> rutis::host::ErrorSink
+pub fn rutis::Ctx::event_mode_catalog(&self) -> rutis::host::EventModeCatalog
 pub fn rutis::Ctx::get_at<T: ?core::marker::Sized + core::marker::Send + core::marker::Sync + 'static>(&self, &rutis::host::Key<T>) -> core::option::Option<alloc::rcs::arc::Arc<T>>
 pub fn rutis::Ctx::handle(&self) -> &tokio::runtime::handle::Handle
 pub fn rutis::Ctx::instance(&self) -> rutis::host::InstanceId
@@ -1141,6 +1226,7 @@ pub fn rutis::Ctx::root_with(tokio::runtime::handle::Handle) -> rutis::Ctx
 pub fn rutis::Ctx::root_with_sink(tokio::runtime::handle::Handle, rutis::host::ErrorSink) -> rutis::Ctx
 pub fn rutis::Ctx::row(&self) -> core::option::Option<alloc::string::String>
 pub fn rutis::Ctx::scope(&self) -> alloc::vec::Vec<rutis::events::Scope>
+pub fn rutis::Ctx::set_event_mode_catalog(&self, rutis::host::EventModeCatalog) -> core::result::Result<(), rutis::Error>
 pub fn rutis::Ctx::shutdown(&self) -> rutis::host::BoxFuture<'static, core::result::Result<(), alloc::rcs::arc::Arc<rutis::host::ErrorKind>>>
 pub fn rutis::Ctx::shutdown_with_timeout(&self, core::time::Duration) -> rutis::host::BoxFuture<'static, core::result::Result<(), rutis::host::DisposeWaitError>>
 pub fn rutis::Ctx::subscriptions(&self) -> alloc::vec::Vec<rutis::host::EventSubscription>

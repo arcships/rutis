@@ -24,6 +24,7 @@ use crate::BoxFuture;
 
 mod api;
 mod args;
+pub(crate) mod catalog;
 pub(crate) mod kinds;
 pub(crate) mod remote;
 pub(crate) mod wire;
