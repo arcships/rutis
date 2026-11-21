@@ -10,8 +10,9 @@ use std::time::Duration;
 use rutis::host::{CtxHost, ErrorKind, ErrorSink, FiberState};
 use rutis::{Ctx, Error};
 use rutis_bridge::session::{host_key, HostDispatch, Reply, Value as RpcValue};
-use rutis_loader::report::{EntryInfo, EntryStatus, Wait, WaitReason};
+use rutis_loader::report::{CycleLink, EntryInfo, EntryStatus, Wait, WaitReason};
 use rutis_loader::resolve::Declared;
+use rutis_loader::status::describe_waits;
 use rutis_loader::{Builtins, Layer, Loader, LoaderOptions, LoaderPlugin, Patch};
 use rutis_test_support::{Guard, HANG_GUARD};
 use serde_json::{json, Value};
@@ -78,6 +79,7 @@ async fn loader_in(root: Ctx) -> (Ctx, Loader) {
         Arc::new(|config: &Value| {
             Ok(Declared {
                 provides: names(config, "provides"),
+                announces: config["announces"] == true,
                 ..Declared::default()
             })
         }),
@@ -340,4 +342,442 @@ async fn a_disabled_row_not_resolved_is_not_taken_for_no_provider() {
         [("mail", &WaitReason::NoEnabledProvider { like: None })]
     );
     root.shutdown().await.unwrap();
+}
+
+fn formatted(id: &str, waits: &[Wait]) -> String {
+    format!("{id}: {}", describe_waits(waits, &|_| None))
+}
+
+/// 2-row cycle keeps the exact existing `WaitReason::Cycle` variant and
+/// verbatim `loader/wait-words` wording.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_row_cycle_keeps_existing_reason_and_wording() {
+    let (root, loader) = loader().await;
+    let rows = json!([
+        { "id": "a", "name": "provider", "inject": ["bsvc"], "config": { "provides": ["asvc"] } },
+        { "id": "b", "name": "provider", "inject": ["asvc"], "config": { "provides": ["bsvc"] } },
+    ]);
+    loader.reconcile(layer(rows), None).await.unwrap();
+    let a = waits(&loader, "a", |waits| !waits.is_empty()).await;
+    let b = waits(&loader, "b", |waits| !waits.is_empty()).await;
+    assert_eq!(
+        reasons(&a),
+        [(
+            "bsvc",
+            &WaitReason::Cycle {
+                row: "b".into(),
+                service: "asvc".into(),
+            }
+        )]
+    );
+    assert_eq!(
+        formatted("a", &a),
+        "a: waiting for bsvc (row b waits for asvc too: they inject each other)"
+    );
+    assert_eq!(
+        formatted("b", &b),
+        "b: waiting for asvc (row a waits for bsvc too: they inject each other)"
+    );
+    root.shutdown().await.unwrap();
+}
+
+/// 3-row cycle (`a -> b -> c -> a`): each row on the cycle reports
+/// `WaitReason::CycleChain` starting from itself, with the exact verbatim
+/// wording from the design doc's "What developers see".
+#[tokio::test(flavor = "multi_thread")]
+async fn three_row_cycle_reports_cycle_chain_with_exact_wording() {
+    let (root, loader) = loader().await;
+    let rows = json!([
+        { "id": "a", "name": "provider", "inject": ["bsvc"], "config": { "provides": ["asvc"] } },
+        { "id": "b", "name": "provider", "inject": ["csvc"], "config": { "provides": ["bsvc"] } },
+        { "id": "c", "name": "provider", "inject": ["asvc"], "config": { "provides": ["csvc"] } },
+    ]);
+    loader.reconcile(layer(rows), None).await.unwrap();
+    let a = waits(&loader, "a", |waits| !waits.is_empty()).await;
+    let b = waits(&loader, "b", |waits| !waits.is_empty()).await;
+    let c = waits(&loader, "c", |waits| !waits.is_empty()).await;
+    assert_eq!(
+        reasons(&a),
+        [(
+            "bsvc",
+            &WaitReason::CycleChain {
+                links: vec![
+                    CycleLink::new("a", "bsvc", "b"),
+                    CycleLink::new("b", "csvc", "c"),
+                    CycleLink::new("c", "asvc", "a"),
+                ],
+            }
+        )]
+    );
+    assert_eq!(
+        formatted("a", &a),
+        "a: waiting for bsvc (rows a, b, c wait for each other: \
+         a waits for bsvc from b, b waits for csvc from c, c waits for asvc from a; \
+         break the cycle in their inject)"
+    );
+    assert_eq!(
+        formatted("b", &b),
+        "b: waiting for csvc (rows b, c, a wait for each other: \
+         b waits for csvc from c, c waits for asvc from a, a waits for bsvc from b; \
+         break the cycle in their inject)"
+    );
+    assert_eq!(
+        formatted("c", &c),
+        "c: waiting for asvc (rows c, a, b wait for each other: \
+         c waits for asvc from a, a waits for bsvc from b, b waits for csvc from c; \
+         break the cycle in their inject)"
+    );
+    root.shutdown().await.unwrap();
+}
+
+/// Lead-in row waiting on a provider that itself is part of a downstream
+/// 3-row cycle: traversal terminates without looping, the lead-in row is
+/// NOT accused of being in the cycle (`ProviderWaiting`), while the cycle
+/// members each report `CycleChain`.
+#[tokio::test(flavor = "multi_thread")]
+async fn lead_in_row_waiting_on_a_downstream_cycle_stays_provider_waiting() {
+    let (root, loader) = loader().await;
+    let rows = json!([
+        { "id": "a", "name": "provider", "inject": ["bsvc"], "config": { "provides": ["asvc"] } },
+        { "id": "b", "name": "provider", "inject": ["csvc"], "config": { "provides": ["bsvc"] } },
+        { "id": "c", "name": "provider", "inject": ["asvc"], "config": { "provides": ["csvc"] } },
+        { "id": "d", "name": "provider", "inject": ["asvc"] },
+    ]);
+    loader.reconcile(layer(rows), None).await.unwrap();
+    let d = waits(&loader, "d", |waits| !waits.is_empty()).await;
+    let a = waits(&loader, "a", |waits| !waits.is_empty()).await;
+    assert_eq!(
+        reasons(&d),
+        [(
+            "asvc",
+            &WaitReason::ProviderWaiting {
+                row: "a".into(),
+                services: vec!["bsvc".into()],
+            }
+        )]
+    );
+    assert_eq!(
+        formatted("d", &d),
+        "d: waiting for asvc (row a waits too, for bsvc)"
+    );
+    assert!(
+        matches!(a.as_slice(), [Wait { reason: WaitReason::CycleChain { links }, .. }] if links.len() == 3),
+        "{a:?}"
+    );
+    root.shutdown().await.unwrap();
+}
+
+/// Direct wait and multi-hop wait chain hitting an unknown / unannounced
+/// provider (a Pending row with `announces: true`): never misreported as a
+/// proved cycle, and names the wait chain and unstarted candidate row.
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_unannounced_provider_reports_direct_and_chained_waits() {
+    // Case 1: dynamic deadlock candidate (`a` provides `asvc` and waits for
+    // undeclared `bsvc`; `b` injects `asvc` and has `announces: true`).
+    {
+        let (root, loader) = loader().await;
+        let rows = json!([
+            { "id": "a", "name": "provider", "inject": ["bsvc"], "config": { "provides": ["asvc"] } },
+            { "id": "b", "name": "provider", "inject": ["asvc"], "config": { "announces": true } },
+        ]);
+        loader.reconcile(layer(rows), None).await.unwrap();
+        let a = waits(&loader, "a", |waits| !waits.is_empty()).await;
+        let b = waits(&loader, "b", |waits| !waits.is_empty()).await;
+        assert_eq!(
+            reasons(&a),
+            [(
+                "bsvc",
+                &WaitReason::UnknownProvider {
+                    chain: vec![],
+                    missing: "bsvc".into(),
+                    candidates: vec!["b".into()],
+                }
+            )]
+        );
+        assert_eq!(
+            formatted("a", &a),
+            "a: waiting for bsvc (nothing declares it yet; \
+             unstarted row b may provide services once it runs; \
+             declare provides or check why b has not started)"
+        );
+        assert_eq!(
+            reasons(&b),
+            [(
+                "asvc",
+                &WaitReason::UnknownProvider {
+                    chain: vec![CycleLink::new("b", "asvc", "a")],
+                    missing: "bsvc".into(),
+                    candidates: vec!["b".into()],
+                }
+            )]
+        );
+        assert_eq!(
+            formatted("b", &b),
+            "b: waiting for asvc (b waits for asvc from a, a waits for bsvc; \
+             nothing declares bsvc yet; \
+             this row has not started and may provide services once it runs; \
+             declare provides on this row or break the inject chain)"
+        );
+        root.shutdown().await.unwrap();
+    }
+
+    // Case 2: self-candidate alongside another unstarted announcing row `u`
+    // (`b` sees `unstarted rows this row, u ...`).
+    {
+        let (root, loader) = loader().await;
+        let rows = json!([
+            { "id": "u", "name": "provider", "inject": ["other"], "config": { "announces": true } },
+            { "id": "a", "name": "provider", "inject": ["bsvc"], "config": { "provides": ["asvc"] } },
+            { "id": "b", "name": "provider", "inject": ["asvc"], "config": { "announces": true } },
+        ]);
+        loader.reconcile(layer(rows), None).await.unwrap();
+        let b = waits(&loader, "b", |waits| !waits.is_empty()).await;
+        assert_eq!(
+            reasons(&b),
+            [(
+                "asvc",
+                &WaitReason::UnknownProvider {
+                    chain: vec![CycleLink::new("b", "asvc", "a")],
+                    missing: "bsvc".into(),
+                    candidates: vec!["b".into(), "u".into()],
+                }
+            )]
+        );
+        assert_eq!(
+            formatted("b", &b),
+            "b: waiting for asvc (b waits for asvc from a, a waits for bsvc; \
+             nothing declares bsvc yet; \
+             unstarted rows this row, u may provide services once they run; \
+             declare provides or check why they have not started)"
+        );
+        root.shutdown().await.unwrap();
+    }
+
+    // Case 3: 3-row chain (`c -> asvc -> a -> bsvc -> b -> storage`) with an
+    // unstarted announcing row `u` (waiting on `asvc`), plus an unrelated
+    // announcing row `z` — `u` ranks before `z` because `u` reaches `b`.
+    {
+        let (root, loader) = loader().await;
+        let rows = json!([
+            { "id": "z", "name": "provider", "inject": ["other"], "config": { "announces": true } },
+            { "id": "c", "name": "provider", "inject": ["asvc"] },
+            { "id": "a", "name": "provider", "inject": ["bsvc"], "config": { "provides": ["asvc"] } },
+            { "id": "b", "name": "provider", "inject": ["storage"], "config": { "provides": ["bsvc"] } },
+            { "id": "u", "name": "provider", "inject": ["asvc"], "config": { "announces": true } },
+        ]);
+        loader.reconcile(layer(rows), None).await.unwrap();
+        let c = waits(&loader, "c", |waits| !waits.is_empty()).await;
+        assert_eq!(
+            reasons(&c),
+            [(
+                "asvc",
+                &WaitReason::UnknownProvider {
+                    chain: vec![
+                        CycleLink::new("c", "asvc", "a"),
+                        CycleLink::new("a", "bsvc", "b"),
+                    ],
+                    missing: "storage".into(),
+                    candidates: vec!["u".into(), "z".into()],
+                }
+            )]
+        );
+        assert_eq!(
+            formatted("c", &c),
+            "c: waiting for asvc (c waits for asvc from a, a waits for bsvc from b, b waits for storage; \
+             nothing declares storage yet; \
+             unstarted rows u, z may provide services once they run; \
+             declare provides or check why they have not started)"
+        );
+        root.shutdown().await.unwrap();
+    }
+}
+
+/// Plugin that stays in `FiberState::Loading` until `gate` is notified.
+struct SlowProvider {
+    provides: Vec<String>,
+    started: Arc<tokio::sync::Notify>,
+    gate: Arc<tokio::sync::Notify>,
+}
+
+impl rutis::Plugin for SlowProvider {
+    type Deps = ();
+
+    fn name(&self) -> &str {
+        "slow"
+    }
+
+    async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+        self.started.notify_waiters();
+        self.gate.notified().await;
+        for name in &self.provides {
+            ctx.provide_at(host_key(name), Arc::new(Nothing) as Arc<dyn HostDispatch>)?;
+        }
+        Ok(())
+    }
+}
+
+/// Ordinary non-cycle waits produce zero false cycles and zero false
+/// `UnknownProvider` reports:
+/// - normal startup chain where the downstream provider is `Loading`,
+/// - ordinary missing service when an `announces: true` row is already `Active`,
+/// - misspelt name (`did you mean`) even when another Pending row has `announces: true`,
+/// - cross-`isolate` rows declaring each other's names in different scopes.
+#[tokio::test(flavor = "multi_thread")]
+async fn ordinary_waits_and_cross_isolate_rows_produce_no_false_positives() {
+    // 1. Normal startup wait (`a -> bsvc -> b -> csvc -> c`, with `c` Loading).
+    {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let root = Ctx::root().unwrap();
+        let mut builtins = Builtins::new();
+        builtins.register("provider", |config: &Value| {
+            Ok(Provider {
+                provides: names(config, "provides"),
+                fail: config["fail"] == true,
+            })
+        });
+        builtins.declare(
+            "provider",
+            Arc::new(|config: &Value| {
+                Ok(Declared {
+                    provides: names(config, "provides"),
+                    announces: config["announces"] == true,
+                    ..Declared::default()
+                })
+            }),
+        );
+        {
+            let started = started.clone();
+            let gate = gate.clone();
+            builtins.register("slow", move |config: &Value| {
+                Ok(SlowProvider {
+                    provides: names(config, "provides"),
+                    started: started.clone(),
+                    gate: gate.clone(),
+                })
+            });
+        }
+        builtins.declare(
+            "slow",
+            Arc::new(|config: &Value| {
+                Ok(Declared {
+                    provides: names(config, "provides"),
+                    announces: true,
+                    ..Declared::default()
+                })
+            }),
+        );
+        let plugin = LoaderPlugin::new(builtins, LoaderOptions::default());
+        let loader = plugin.handle();
+        root.plugin(plugin).await.unwrap();
+
+        let rows = json!([
+            { "id": "c", "name": "slow", "config": { "provides": ["csvc"] } },
+            { "id": "b", "name": "provider", "inject": ["csvc"], "config": { "provides": ["bsvc"], "announces": true } },
+            { "id": "a", "name": "provider", "inject": ["bsvc"], "config": { "provides": ["asvc"], "announces": true } },
+        ]);
+        let loader_bg = loader.clone();
+        let reconciling = tokio::spawn(async move { loader_bg.reconcile(layer(rows), None).await });
+        started.notified().await;
+        let b = waits(&loader, "b", |waits| {
+            waits
+                .iter()
+                .any(|w| matches!(w.reason, WaitReason::ProviderStarting { .. }))
+        })
+        .await;
+        let a = waits(&loader, "a", |waits| !waits.is_empty()).await;
+        assert_eq!(
+            formatted("b", &b),
+            "b: waiting for csvc (row c is starting)"
+        );
+        assert_eq!(
+            reasons(&a),
+            [(
+                "bsvc",
+                &WaitReason::ProviderWaiting {
+                    row: "b".into(),
+                    services: vec!["csvc".into()],
+                }
+            )]
+        );
+        assert_eq!(
+            formatted("a", &a),
+            "a: waiting for bsvc (row b waits too, for csvc)"
+        );
+        gate.notify_waiters();
+        reconciling.await.unwrap().unwrap();
+        root.shutdown().await.unwrap();
+    }
+
+    // 2. Ordinary missing service when an `announces: true` row is already Active,
+    //    plus a misspelt service name even alongside an unstarted announcing row.
+    {
+        let (root, loader) = loader().await;
+        let rows = json!([
+            { "id": "llm", "name": "provider", "config": { "provides": ["llm"], "announces": true } },
+            { "id": "store", "name": "provider", "inject": ["blob"], "config": { "announces": true } },
+            { "id": "weather", "name": "provider", "inject": ["lmm"] },
+        ]);
+        loader.reconcile(layer(rows), None).await.unwrap();
+        let store = waits(&loader, "store", |waits| !waits.is_empty()).await;
+        let weather = waits(&loader, "weather", |waits| !waits.is_empty()).await;
+        assert_eq!(
+            reasons(&store),
+            [("blob", &WaitReason::NoProvider { like: None })]
+        );
+        assert_eq!(
+            formatted("store", &store),
+            "store: waiting for blob (nothing provides it yet)"
+        );
+        assert_eq!(
+            reasons(&weather),
+            [(
+                "lmm",
+                &WaitReason::NoProvider {
+                    like: Some("llm".into()),
+                }
+            )]
+        );
+        assert_eq!(
+            formatted("weather", &weather),
+            "weather: waiting for lmm (nothing provides it yet; did you mean llm?)"
+        );
+        root.shutdown().await.unwrap();
+    }
+
+    // 3. Cross-isolate rows: `a` isolates `bsvc` privately, so `b` (outside
+    //    that isolate) cannot provide `bsvc` to `a` — must NOT report a cycle.
+    {
+        let (root, loader) = loader().await;
+        let rows = json!([
+            { "id": "a", "name": "provider", "inject": ["bsvc"], "isolate": { "bsvc": true }, "config": { "provides": ["asvc"] } },
+            { "id": "b", "name": "provider", "inject": ["asvc"], "config": { "provides": ["bsvc"] } },
+        ]);
+        loader.reconcile(layer(rows), None).await.unwrap();
+        let a = waits(&loader, "a", |waits| !waits.is_empty()).await;
+        let b = waits(&loader, "b", |waits| !waits.is_empty()).await;
+        assert_eq!(
+            reasons(&a),
+            [("bsvc", &WaitReason::NoProvider { like: None })]
+        );
+        assert_eq!(
+            formatted("a", &a),
+            "a: waiting for bsvc (nothing provides it yet)"
+        );
+        assert_eq!(
+            reasons(&b),
+            [(
+                "asvc",
+                &WaitReason::ProviderWaiting {
+                    row: "a".into(),
+                    services: vec!["bsvc".into()],
+                }
+            )]
+        );
+        assert_eq!(
+            formatted("b", &b),
+            "b: waiting for asvc (row a waits too, for bsvc)"
+        );
+        root.shutdown().await.unwrap();
+    }
 }

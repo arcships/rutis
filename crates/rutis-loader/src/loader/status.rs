@@ -10,7 +10,7 @@ use rutis::host::diagnostics::PluginDiagnostics;
 use rutis::host::{CtxHost, FiberState, PluginId, Snapshot};
 
 use super::waits::{key_name, own_runtime, row_of};
-use super::{EntryInfo, EntryStatus, Loader, Wait, WaitReason};
+use super::{CycleLink, EntryInfo, EntryStatus, Loader, Wait, WaitReason};
 
 /// A snapshot of the loader's rows, the services, the runtimes and the
 /// calls in progress ([`Loader::status`]). Its parts are read one after
@@ -486,6 +486,12 @@ fn why(reason: &WaitReason, runtime: &RuntimeLookup<'_>) -> String {
         WaitReason::Cycle { row, service } => {
             format!("row {row} waits for {service} too: they inject each other")
         }
+        WaitReason::CycleChain { links } => format_cycle_chain(links),
+        WaitReason::UnknownProvider {
+            chain,
+            missing,
+            candidates,
+        } => format_unknown_provider(chain, missing, candidates),
         WaitReason::ProviderWaiting { row, services } => {
             format!("row {row} waits too, for {}", services.join(", "))
         }
@@ -494,6 +500,105 @@ fn why(reason: &WaitReason, runtime: &RuntimeLookup<'_>) -> String {
         WaitReason::Other(said) => first(said),
         _ => "not there yet".into(),
     }
+}
+
+/// Maximum number of wait hops shown verbatim in a status line before
+/// summarizing the remainder (bounded diagnostic output).
+const MAX_WAIT_LINKS: usize = 8;
+
+/// Maximum number of candidate unstarted rows named verbatim before
+/// summarizing the remainder (`and N more`).
+const MAX_CANDIDATES: usize = 3;
+
+fn format_link(link: &CycleLink) -> String {
+    format!(
+        "{} waits for {} from {}",
+        link.row, link.service, link.provider
+    )
+}
+
+fn format_cycle_chain(links: &[CycleLink]) -> String {
+    if links.is_empty() {
+        return "they inject each other; break the cycle in their inject".into();
+    }
+    if links.len() <= MAX_WAIT_LINKS {
+        let rows: Vec<&str> = links.iter().map(|link| link.row.as_str()).collect();
+        let hops: Vec<String> = links.iter().map(format_link).collect();
+        format!(
+            "rows {} wait for each other: {}; break the cycle in their inject",
+            rows.join(", "),
+            hops.join(", ")
+        )
+    } else {
+        let shown = &links[..MAX_WAIT_LINKS];
+        let rest = links.len() - MAX_WAIT_LINKS;
+        let rows: Vec<&str> = shown.iter().map(|link| link.row.as_str()).collect();
+        let hops: Vec<String> = shown.iter().map(format_link).collect();
+        format!(
+            "rows {} and {rest} more wait for each other: {}, and {rest} more steps back to {}; break the cycle in their inject",
+            rows.join(", "),
+            hops.join(", "),
+            links[0].row
+        )
+    }
+}
+
+fn format_unknown_provider(chain: &[CycleLink], missing: &str, candidates: &[String]) -> String {
+    let self_row = chain.first().map(|link| link.row.as_str());
+    let tail = if let Some(me) = self_row.filter(|me| candidates.iter().any(|c| c == me)) {
+        let mut shown = vec!["this row"];
+        shown.extend(
+            candidates
+                .iter()
+                .filter(|c| c.as_str() != me)
+                .map(String::as_str),
+        );
+        match shown.as_slice() {
+            [_only_self] => "; this row has not started and may provide services once it runs; declare provides on this row or break the inject chain".to_owned(),
+            many if many.len() <= MAX_CANDIDATES => format!(
+                "; unstarted rows {} may provide services once they run; declare provides or check why they have not started",
+                many.join(", ")
+            ),
+            many => format!(
+                "; unstarted rows {} and {} more may provide services once they run; declare provides or check why they have not started",
+                many[..MAX_CANDIDATES].join(", "),
+                many.len() - MAX_CANDIDATES
+            ),
+        }
+    } else {
+        match candidates {
+            [] => String::new(),
+            [one] => format!(
+                "; unstarted row {one} may provide services once it runs; declare provides or check why {one} has not started"
+            ),
+            many if many.len() <= MAX_CANDIDATES => format!(
+                "; unstarted rows {} may provide services once they run; declare provides or check why they have not started",
+                many.join(", ")
+            ),
+            many => format!(
+                "; unstarted rows {} and {} more may provide services once they run; declare provides or check why they have not started",
+                many[..MAX_CANDIDATES].join(", "),
+                many.len() - MAX_CANDIDATES
+            ),
+        }
+    };
+    if chain.is_empty() {
+        return format!("nothing declares it yet{tail}");
+    }
+    let last_row = &chain[chain.len() - 1].provider;
+    let chain_text = if chain.len() <= MAX_WAIT_LINKS {
+        let hops: Vec<String> = chain.iter().map(format_link).collect();
+        format!("{}, {last_row} waits for {missing}", hops.join(", "))
+    } else {
+        let head_len = MAX_WAIT_LINKS - 1;
+        let rest = chain.len() - head_len;
+        let hops: Vec<String> = chain[..head_len].iter().map(format_link).collect();
+        format!(
+            "{}, and {rest} more steps, {last_row} waits for {missing}",
+            hops.join(", ")
+        )
+    };
+    format!("{chain_text}; nothing declares {missing} yet{tail}")
 }
 
 /// How a runtime ended, from why it is down: what its plugin and its
@@ -784,5 +889,294 @@ mod tests {
         assert_eq!(elapsed(Duration::from_millis(850)), "850ms");
         assert_eq!(elapsed(Duration::from_secs(42)), "42s");
         assert_eq!(elapsed(Duration::from_secs(185)), "3m05s");
+    }
+
+    #[test]
+    fn cycle_chain_and_unknown_provider_format_verbatim_and_bounded() {
+        let none = |_: &str| None;
+
+        // 2-row cycle remains verbatim.
+        let two = describe_waits(
+            &[Wait::new(
+                "bsvc",
+                WaitReason::Cycle {
+                    row: "b".into(),
+                    service: "asvc".into(),
+                },
+            )],
+            &none,
+        );
+        assert_eq!(
+            two,
+            "waiting for bsvc (row b waits for asvc too: they inject each other)"
+        );
+
+        // 3-row cycle.
+        let three = describe_waits(
+            &[Wait::new(
+                "bsvc",
+                WaitReason::CycleChain {
+                    links: vec![
+                        CycleLink::new("a", "bsvc", "b"),
+                        CycleLink::new("b", "csvc", "c"),
+                        CycleLink::new("c", "asvc", "a"),
+                    ],
+                },
+            )],
+            &none,
+        );
+        assert_eq!(
+            three,
+            "waiting for bsvc (rows a, b, c wait for each other: \
+             a waits for bsvc from b, b waits for csvc from c, c waits for asvc from a; \
+             break the cycle in their inject)"
+        );
+
+        // 10-row cycle is bounded to 8 shown links.
+        let ten_links: Vec<CycleLink> = (0..10)
+            .map(|i| {
+                CycleLink::new(
+                    format!("r{i}"),
+                    format!("s{}", (i + 1) % 10),
+                    format!("r{}", (i + 1) % 10),
+                )
+            })
+            .collect();
+        let ten = describe_waits(
+            &[Wait::new("s1", WaitReason::CycleChain { links: ten_links })],
+            &none,
+        );
+        assert_eq!(
+            ten,
+            "waiting for s1 (rows r0, r1, r2, r3, r4, r5, r6, r7 and 2 more wait for each other: \
+             r0 waits for s1 from r1, r1 waits for s2 from r2, r2 waits for s3 from r3, \
+             r3 waits for s4 from r4, r4 waits for s5 from r5, r5 waits for s6 from r6, \
+             r6 waits for s7 from r7, r7 waits for s8 from r8, \
+             and 2 more steps back to r0; break the cycle in their inject)"
+        );
+
+        // Degenerate empty CycleChain does not panic.
+        let empty_cycle = describe_waits(
+            &[Wait::new("bsvc", WaitReason::CycleChain { links: vec![] })],
+            &none,
+        );
+        assert_eq!(
+            empty_cycle,
+            "waiting for bsvc (they inject each other; break the cycle in their inject)"
+        );
+
+        // Direct UnknownProvider: 1 candidate, 2 candidates, 5 candidates (bounded to 3).
+        let direct_one = describe_waits(
+            &[Wait::new(
+                "bsvc",
+                WaitReason::UnknownProvider {
+                    chain: vec![],
+                    missing: "bsvc".into(),
+                    candidates: vec!["b".into()],
+                },
+            )],
+            &none,
+        );
+        assert_eq!(
+            direct_one,
+            "waiting for bsvc (nothing declares it yet; unstarted row b may provide services once it runs; declare provides or check why b has not started)"
+        );
+
+        let direct_two = describe_waits(
+            &[Wait::new(
+                "bsvc",
+                WaitReason::UnknownProvider {
+                    chain: vec![],
+                    missing: "bsvc".into(),
+                    candidates: vec!["b".into(), "c".into()],
+                },
+            )],
+            &none,
+        );
+        assert_eq!(
+            direct_two,
+            "waiting for bsvc (nothing declares it yet; unstarted rows b, c may provide services once they run; declare provides or check why they have not started)"
+        );
+
+        let direct_five = describe_waits(
+            &[Wait::new(
+                "bsvc",
+                WaitReason::UnknownProvider {
+                    chain: vec![],
+                    missing: "bsvc".into(),
+                    candidates: ["b", "c", "d", "e", "f"].map(str::to_owned).to_vec(),
+                },
+            )],
+            &none,
+        );
+        assert_eq!(
+            direct_five,
+            "waiting for bsvc (nothing declares it yet; unstarted rows b, c, d and 2 more may provide services once they run; declare provides or check why they have not started)"
+        );
+
+        // Chained UnknownProvider (3-row chain) and long chain (> 8 hops, bounded).
+        let chained = describe_waits(
+            &[Wait::new(
+                "asvc",
+                WaitReason::UnknownProvider {
+                    chain: vec![
+                        CycleLink::new("c", "asvc", "a"),
+                        CycleLink::new("a", "bsvc", "b"),
+                    ],
+                    missing: "storage".into(),
+                    candidates: vec!["u".into()],
+                },
+            )],
+            &none,
+        );
+        assert_eq!(
+            chained,
+            "waiting for asvc (c waits for asvc from a, a waits for bsvc from b, b waits for storage; \
+             nothing declares storage yet; unstarted row u may provide services once it runs; \
+             declare provides or check why u has not started)"
+        );
+
+        let long_chain_links: Vec<CycleLink> = (0..10)
+            .map(|i| {
+                CycleLink::new(
+                    format!("r{i}"),
+                    format!("s{}", i + 1),
+                    format!("r{}", i + 1),
+                )
+            })
+            .collect();
+        let long_chain = describe_waits(
+            &[Wait::new(
+                "s1",
+                WaitReason::UnknownProvider {
+                    chain: long_chain_links,
+                    missing: "storage".into(),
+                    candidates: vec!["u".into()],
+                },
+            )],
+            &none,
+        );
+        assert_eq!(
+            long_chain,
+            "waiting for s1 (r0 waits for s1 from r1, r1 waits for s2 from r2, \
+             r2 waits for s3 from r3, r3 waits for s4 from r4, r4 waits for s5 from r5, \
+             r5 waits for s6 from r6, r6 waits for s7 from r7, and 3 more steps, \
+             r10 waits for storage; nothing declares storage yet; \
+             unstarted row u may provide services once it runs; \
+             declare provides or check why u has not started)"
+        );
+
+        // Self-candidate chained UnknownProvider: queried row is the only
+        // candidate, or one of several candidates (put `this row` first).
+        let self_only = describe_waits(
+            &[Wait::new(
+                "asvc",
+                WaitReason::UnknownProvider {
+                    chain: vec![CycleLink::new("b", "asvc", "a")],
+                    missing: "bsvc".into(),
+                    candidates: vec!["b".into()],
+                },
+            )],
+            &none,
+        );
+        assert_eq!(
+            self_only,
+            "waiting for asvc (b waits for asvc from a, a waits for bsvc; \
+             nothing declares bsvc yet; \
+             this row has not started and may provide services once it runs; \
+             declare provides on this row or break the inject chain)"
+        );
+
+        let self_with_other = describe_waits(
+            &[Wait::new(
+                "asvc",
+                WaitReason::UnknownProvider {
+                    chain: vec![CycleLink::new("b", "asvc", "a")],
+                    missing: "bsvc".into(),
+                    candidates: vec!["u".into(), "b".into()],
+                },
+            )],
+            &none,
+        );
+        assert_eq!(
+            self_with_other,
+            "waiting for asvc (b waits for asvc from a, a waits for bsvc; \
+             nothing declares bsvc yet; \
+             unstarted rows this row, u may provide services once they run; \
+             declare provides or check why they have not started)"
+        );
+
+        let self_with_many = describe_waits(
+            &[Wait::new(
+                "asvc",
+                WaitReason::UnknownProvider {
+                    chain: vec![CycleLink::new("b", "asvc", "a")],
+                    missing: "bsvc".into(),
+                    candidates: ["u", "v", "w", "b", "z"].map(str::to_owned).to_vec(),
+                },
+            )],
+            &none,
+        );
+        assert_eq!(
+            self_with_many,
+            "waiting for asvc (b waits for asvc from a, a waits for bsvc; \
+             nothing declares bsvc yet; \
+             unstarted rows this row, u, v and 2 more may provide services once they run; \
+             declare provides or check why they have not started)"
+        );
+
+        // Degenerate empty candidates does not panic.
+        let empty_cand = describe_waits(
+            &[Wait::new(
+                "storage",
+                WaitReason::UnknownProvider {
+                    chain: vec![],
+                    missing: "storage".into(),
+                    candidates: vec![],
+                },
+            )],
+            &none,
+        );
+        assert_eq!(empty_cand, "waiting for storage (nothing declares it yet)");
+
+        // No forbidden internal rutis vocabulary appears in any formatted line.
+        let forbidden = [
+            "rutis",
+            "Cordis",
+            "Rust",
+            "binding",
+            "session",
+            "PluginId",
+            "fiber",
+            "Pending",
+            "Loading",
+            "Unresolved",
+            "announces",
+            "CycleChain",
+            "CycleLink",
+            "UnknownProvider",
+        ];
+        for line in [
+            &two,
+            &three,
+            &ten,
+            &empty_cycle,
+            &direct_one,
+            &direct_two,
+            &direct_five,
+            &chained,
+            &long_chain,
+            &self_only,
+            &self_with_other,
+            &self_with_many,
+            &empty_cand,
+        ] {
+            for word in forbidden {
+                assert!(
+                    !line.contains(word),
+                    "forbidden internal word {word:?} in {line:?}"
+                );
+            }
+        }
     }
 }
