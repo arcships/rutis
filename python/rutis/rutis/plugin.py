@@ -66,6 +66,17 @@ class Context:
         """Run `cleanup` (sync or async) when the plugin unloads."""
         raise NotImplementedError
 
+    def timeout(self, delay: float, callback: Callable[[], Any]) -> Callable[[], None]:
+        """Run `callback` (sync or async) once after `delay` seconds, unless
+        cancelled by the returned function or by the plugin unloading."""
+        raise NotImplementedError
+
+    def interval(self, period: float, callback: Callable[[], Any]) -> Callable[[], None]:
+        """Run `callback` (sync or async) repeatedly, waiting `period` seconds
+        after each run finishes before starting the next (non-overlapping),
+        until cancelled by the returned function or by the plugin unloading."""
+        raise NotImplementedError
+
     def on(self, name: str, listener: Callable, *, prepend: bool = False, global_: bool = False) -> Callable[[], None]:
         """Listen to the event `name` until the returned function is called
         or the plugin unloads; wherever the event is emitted (another

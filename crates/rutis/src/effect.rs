@@ -149,28 +149,7 @@ impl EffectRecord {
         // 级卸载)才寄存错误并自摘;drain_effects 整表收走的记录由其
         // join 直接收集,不重复寄存。锁内判定与 mem::take 互斥,无竞态。
         if let Some(owner) = self.owner.as_ref().and_then(Weak::upgrade) {
-            let mut effects = owner.effects.lock().unwrap();
-            let present = effects.iter().any(|r| Arc::ptr_eq(r, self));
-            if present {
-                effects.retain(|r| !Arc::ptr_eq(r, self));
-                if effects.capacity() > 64 && effects.len() * 4 < effects.capacity() {
-                    effects.shrink_to_fit();
-                }
-                if let Some(e) = &err {
-                    // Keep the effects lock until the error is queued.
-                    // drain_effects takes the whole effects list under
-                    // this lock, then consumes drained_errors: it must
-                    // see either this record or its queued error.
-                    owner.drained_errors.lock().unwrap().push(e.clone());
-                }
-            }
-            drop(effects);
-            let weak = Arc::downgrade(self);
-            let mut index = owner.effect_index.lock().unwrap();
-            index.retain(|entry| !Weak::ptr_eq(entry, &weak) && entry.strong_count() > 0);
-            if index.capacity() > 64 && index.len() * 4 < index.capacity() {
-                index.shrink_to_fit();
-            }
+            owner.detach_effect(self, err.as_ref());
         }
         self.notify.notify_waiters();
     }

@@ -15,6 +15,10 @@ export interface Context extends advanced.Emitter {
   provide(name: string, value: unknown): () => unknown
   /** Run `cleanup` when the plugin unloads. */
   effect(cleanup: () => unknown): void
+  /** Run `callback` (sync or async) once after `delayMs` milliseconds, unless cancelled by the returned function or by the plugin unloading. */
+  timeout(delayMs: number, callback: () => unknown): () => void
+  /** Run `callback` (sync or async) repeatedly, waiting `periodMs` milliseconds after each run finishes before starting the next (non-overlapping), until cancelled by the returned function or by the plugin unloading. */
+  interval(periodMs: number, callback: () => unknown): () => void
   /** Aborted when the plugin unloads; its running listeners are then waited for (up to the host's shutdown deadline) before the cleanups run. */
   readonly signal: AbortSignal
   /** Listen to `name` on the host's logical bus: every event of that name, from any process or language (a scope is a descriptor). Registered with the host by itself; unregistered when the plugin unloads or the returned function is called. `rutis/*` (the host's framework events) can be listened to; `internal/*` cannot. */

@@ -6,6 +6,8 @@ class Context(object)()
     def get(self, name: str) -> Any | None
     def provide(self, name: str, value: Any) -> Callable[[], None]
     def effect(self, cleanup: Callable) -> None
+    def timeout(self, delay: float, callback: Callable[[], Any]) -> Callable[[], None]
+    def interval(self, period: float, callback: Callable[[], Any]) -> Callable[[], None]
     def on(self, name: str, listener: Callable, *, prepend: bool = False, global_: bool = False) -> Callable[[], None]
     def emit(self, name: str, *args: Any) -> None
     def parallel(self, name: str, *args: Any) -> Awaitable[None]

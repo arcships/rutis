@@ -10,6 +10,36 @@
 import { KEEP, LEAF_FIBERS, LEAF_NAME } from './cordis-events.mjs'
 import { refuseReserved } from './events.mjs'
 import { UNDECLARED, notDeclared, notDeclaredOptional, unavailable } from './errors.mjs'
+import { say } from './output.mjs'
+
+const MAX_TIMER_MS = 2_147_483_647
+
+const formatTimerValue = value => typeof value === 'number' ? String(value) : typeof value === 'string' ? JSON.stringify(value) : String(value)
+
+function checkTimeoutDelay(delay) {
+  if (typeof delay !== 'number' || !Number.isFinite(delay) || delay < 0) {
+    throw new RangeError(`timeout delay must be a non-negative finite number of milliseconds, got ${formatTimerValue(delay)}`)
+  }
+  if (delay > MAX_TIMER_MS) {
+    throw new RangeError(`timeout delay must be at most ${MAX_TIMER_MS} ms, got ${delay}`)
+  }
+}
+
+function checkIntervalPeriod(period) {
+  if (typeof period !== 'number' || !Number.isFinite(period) || period <= 0) {
+    throw new RangeError(`interval period must be a positive finite number of milliseconds, got ${formatTimerValue(period)}`)
+  }
+  if (period > MAX_TIMER_MS) {
+    throw new RangeError(`interval period must be at most ${MAX_TIMER_MS} ms, got ${period}`)
+  }
+}
+
+function timerErrorText(error) {
+  if (error instanceof Error || (error && typeof error === 'object' && typeof error.message === 'string')) {
+    return `${error.name || 'Error'}: ${error.message}`
+  }
+  return String(error)
+}
 
 // The plugin API this runtime runs: a plugin written against a newer one
 // is refused, naming both. 3: the unified events of rutis 0.13 (#464).
@@ -128,6 +158,18 @@ export function toCordis(spec, rowInject = [], providerOf) {
       // Registered first, drained last: an effect of the fiber, run among the
       // disposals Cordis starts together.
       context.effect(() => drain)
+      const pluginName = spec.name ?? 'leaf'
+      const isActive = () => {
+        if (draining) return false
+        try { return !context.signal?.aborted } catch { return true }
+      }
+      const removeStep = step => {
+        const index = steps.indexOf(step)
+        if (index >= 0) steps.splice(index, 1)
+      }
+      const reportTimerError = error => {
+        say(`rutis: timer of plugin ${pluginName} failed: ${timerErrorText(error)}\n`)
+      }
       const ctx = {
         use(name) {
           // One neither the plugin nor its row injects (an optional one is
@@ -173,10 +215,107 @@ export function toCordis(spec, rowInject = [], providerOf) {
           // As Rust's InactiveEffect: once the stack is being drained, what
           // is registered now would never run.
           if (draining) {
-            process.stderr.write(`rutis: plugin ${spec.name ?? 'leaf'} is not active: cleanup is not registered\n`)
+            process.stderr.write(`rutis: plugin ${pluginName} is not active: cleanup is not registered\n`)
             return
           }
           steps.push(cleanup)
+        },
+        // Managed timers built on `effect` (#1325): leaf-only so native
+        // Cordis plugins (and @cordisjs/plugin-timer) are never shadowed.
+        timeout: (delayMs, callback) => {
+          if (typeof callback !== 'function') throw new TypeError('timeout needs a callback function')
+          checkTimeoutDelay(delayMs)
+          if (!isActive()) {
+            say(`rutis: plugin ${pluginName} is not active: timer is not registered\n`)
+            return () => {}
+          }
+          let cancelled = false
+          let invoking = false
+          let handle
+          let running
+          const cleanup = () => {
+            cancelled = true
+            if (handle !== undefined) { clearTimeout(handle); handle = undefined }
+            // Keep cleanup on `steps` while synchronously invoking `callback()`
+            // or awaiting its Promise so a callback that self-cancels before
+            // its first `await` is still awaited on unload before earlier LIFO
+            // cleanups (such as closing a pool) run.
+            if (!invoking && !running) removeStep(cleanup)
+            return running
+          }
+          ctx.effect(cleanup)
+          handle = setTimeout(() => {
+            handle = undefined
+            if (cancelled || !isActive()) { removeStep(cleanup); return }
+            let result
+            invoking = true
+            try { result = callback() } catch (error) {
+              invoking = false
+              reportTimerError(error)
+              removeStep(cleanup)
+              return
+            }
+            if (result && typeof result.then === 'function') {
+              running = Promise.resolve(result).then(() => {}, reportTimerError).finally(() => {
+                running = undefined
+                removeStep(cleanup)
+              })
+              invoking = false
+            } else {
+              invoking = false
+              removeStep(cleanup)
+            }
+          }, delayMs)
+          return () => { cleanup() }
+        },
+        interval: (periodMs, callback) => {
+          if (typeof callback !== 'function') throw new TypeError('interval needs a callback function')
+          checkIntervalPeriod(periodMs)
+          if (!isActive()) {
+            say(`rutis: plugin ${pluginName} is not active: timer is not registered\n`)
+            return () => {}
+          }
+          let cancelled = false
+          let invoking = false
+          let handle
+          let running
+          const cleanup = () => {
+            cancelled = true
+            if (handle !== undefined) { clearTimeout(handle); handle = undefined }
+            if (!invoking && !running) removeStep(cleanup)
+            return running
+          }
+          const schedule = () => {
+            if (cancelled || !isActive()) { removeStep(cleanup); return }
+            handle = setTimeout(() => {
+              handle = undefined
+              if (cancelled || !isActive()) { removeStep(cleanup); return }
+              let result
+              invoking = true
+              try { result = callback() } catch (error) {
+                invoking = false
+                reportTimerError(error)
+                if (cancelled || !isActive()) removeStep(cleanup)
+                else schedule()
+                return
+              }
+              if (result && typeof result.then === 'function') {
+                running = Promise.resolve(result).then(() => {}, reportTimerError).finally(() => {
+                  running = undefined
+                  if (cancelled || !isActive()) removeStep(cleanup)
+                  else schedule()
+                })
+                invoking = false
+              } else {
+                invoking = false
+                if (cancelled || !isActive()) removeStep(cleanup)
+                else schedule()
+              }
+            }, periodMs)
+          }
+          ctx.effect(cleanup)
+          schedule()
+          return () => { cleanup() }
         },
         // The listener leaves with the plugin, or when the returned function
         // is called. `prepend` and `global` as Cordis's. Descriptors name the

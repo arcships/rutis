@@ -41,10 +41,12 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextvars
 import importlib
 import importlib.metadata
 import importlib.util
 import inspect
+import math
 import os
 import sys
 import threading
@@ -416,6 +418,131 @@ class Context(sdk.Context):
             say(f"rutis: row {self._row.named or self._row.key} is not active: cleanup is not registered")
             return
         self._row.steps.append(cleanup)
+
+    def timeout(self, delay: float, callback: Callable[[], Any]) -> Callable[[], None]:
+        if not callable(callback):
+            raise TypeError("timeout needs a callable callback")
+        seconds = _check_timer_seconds("timeout delay", delay, positive=False)
+        return self._timer(seconds, callback, repeat=False)
+
+    def interval(self, period: float, callback: Callable[[], Any]) -> Callable[[], None]:
+        if not callable(callback):
+            raise TypeError("interval needs a callable callback")
+        seconds = _check_timer_seconds("interval period", period, positive=True)
+        return self._timer(seconds, callback, repeat=True)
+
+    def _timer(self, delay: float, callback: Callable[[], Any], *, repeat: bool) -> Callable[[], None]:
+        row = self._row
+        runtime = self._runtime
+        row_name = row.named or row.key
+
+        def active() -> bool:
+            return runtime.rows.get(row.key) is row and not row.unloading
+
+        if not active():
+            say(f"rutis: row {row_name} is not active: timer is not registered")
+            return lambda: None
+        loop = runtime.loop if runtime.loop is not None else asyncio.get_running_loop()
+        cancelled = False
+        cancel_requested = False
+        registered = False
+        task: asyncio.Task | None = None
+
+        def remove_step() -> None:
+            nonlocal registered
+            if not registered:
+                return
+            registered = False
+            try:
+                row.steps.remove(cleanup)
+            except ValueError:
+                pass
+
+        async def invoke() -> None:
+            try:
+                current_row.set(row.key)
+                await _settle(callback())
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - contained and reported
+                say(f"rutis: timer of row {row_name} failed: {type(error).__name__}: {error}")
+
+        async def run() -> None:
+            try:
+                while not cancelled and active():
+                    await asyncio.sleep(delay)
+                    if cancelled or not active():
+                        break
+                    await invoke()
+                    if not repeat:
+                        break
+            except asyncio.CancelledError:
+                pass
+
+        async def cleanup() -> None:
+            nonlocal cancelled
+            cancelled = True
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            remove_step()
+
+        def do_cancel() -> None:
+            nonlocal cancelled
+            cancelled = True
+            if task is None or task.done():
+                remove_step()
+                return
+            try:
+                current = asyncio.current_task()
+            except RuntimeError:
+                current = None
+            if current is not task:
+                task.cancel()
+
+        def cancel() -> None:
+            nonlocal cancelled, cancel_requested
+            if cancel_requested:
+                return
+            cancel_requested = True
+            cancelled = True
+            if runtime._here():
+                do_cancel()
+            elif not loop.is_closed():
+                try:
+                    loop.call_soon_threadsafe(do_cancel)
+                except RuntimeError:
+                    pass
+
+        def register_and_spawn() -> None:
+            nonlocal task, registered
+            if cancelled:
+                return
+            if not active():
+                say(f"rutis: row {row_name} is not active: timer is not registered")
+                return
+            self.effect(cleanup)
+            registered = True
+            context = contextvars.copy_context()
+            context.run(current_row.set, row.key)
+            task = loop.create_task(run(), context=context)
+            task.add_done_callback(lambda _done: remove_step())
+
+        if runtime._here():
+            register_and_spawn()
+        else:
+            if loop.is_closed():
+                say(f"rutis: row {row_name} is not active: timer is not registered")
+                return lambda: None
+            try:
+                loop.call_soon_threadsafe(register_and_spawn)
+            except RuntimeError:
+                say(f"rutis: row {row_name} is not active: timer is not registered")
+                return lambda: None
+        return cancel
 
     def on(self, name: str, listener: Callable, *, prepend: bool = False, global_: bool = False) -> Callable[[], None]:
         if self._runtime.rows.get(self._row.key) is not self._row or self._row.unloading:
@@ -1597,6 +1724,15 @@ async def _settle(value: Any) -> Any:
     while inspect.isawaitable(value) or isinstance(value, RemoteFuture):
         value = await value
     return value
+
+
+def _check_timer_seconds(label: str, value: Any, *, positive: bool) -> float:
+    need = "a positive finite number of seconds" if positive else "a non-negative finite number of seconds"
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError(f"{label} must be {need}, got {value!r}")
+    if (positive and value <= 0) or (not positive and value < 0):
+        raise ValueError(f"{label} must be {need}, got {value!r}")
+    return float(value)
 
 
 def _selector(keep: Callable, peer: Peer) -> Callable:
