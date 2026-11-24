@@ -5,6 +5,14 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+// The budget timers are unref'd (they must not pin a real runtime's exit), so
+// between a test's own awaits the loop may hold no handle at all: Node 22's
+// runner then ends the file before the next test starts ("Promise resolution
+// is still pending but the event loop has already resolved"). One ref'd
+// interval keeps the loop alive for the file; each test still waits for what
+// it waits for.
+const keepalive = setInterval(() => {}, 1_000)
+test.after(() => clearInterval(keepalive))
 import { Context } from '@deepseek-ai/cordis'
 import { definePlugin } from '../../rutis/src/index.mjs'
 import { rowUnloadDeadline, rowUnloadTimeoutText, supported, toCordis } from '../src/leaf.mjs'
