@@ -1,10 +1,10 @@
-// PoC tests for opt-in per-row unload cleanup budget & Route B taint semantics
-// in Bun (docs/design-row-unload-budget-2026-11-20.md, #1323).
+// PoC tests for the opt-in per-row unload cleanup budget in Bun
+// (docs/design-row-unload-budget-2026-11-20.md, #1323).
 import { expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { rowTaintedErrorText, rowUnloadDeadline, rowUnloadTimeoutText, Runtime } from '../src/runner.ts'
+import { rowUnloadDeadline, rowUnloadTimeoutText, Runtime } from '../src/runner.ts'
 
 function project(files: Record<string, string>) {
   const dir = mkdtempSync(join(tmpdir(), 'rutis-bun-budget-'))
@@ -77,7 +77,7 @@ export function apply(ctx) {
   delete (globalThis as any).__bunBudgetLog
 })
 
-test('Route B: timeout withdraws services, taints row until runtime restart, keeps healthy sibling unaffected, and isolates late actions', async () => {
+test('timeout withdraws services, keeps healthy sibling unaffected, and isolates late actions', async () => {
   const dir = project({
     'hang.ts': `
 export function apply(ctx, config) {
@@ -118,19 +118,15 @@ export function apply(ctx) {
     })
     const expectedLine = `${rowUnloadTimeoutText('bun', 'weather', 50)}\n`
     expect(expectedLine).toBe(
-      'runtime bun: cleanup of row weather did not finish within 0.05 s; skipped remaining cleanups and withdrew its services; reloading row weather in this runtime is blocked until the runtime restarts (the stuck cleanup may still be running; fix it or restart the runtime)\n',
+      'runtime bun: cleanup of row weather did not finish within 0.05 s; skipped remaining cleanups and withdrew its services (the stuck cleanup may still be running; fix it, or isolate this row in its own runtime)\n',
     )
     expect(stderr).toBe(expectedLine)
     expect((globalThis as any).__bunHangLog).toEqual([])
     expect(() => runtime.lookup('forecast')).toThrow('not available')
 
-    // Route B: in-place reload of tainted row (same key or new key) fails explicitly.
-    const expectedTaint = rowTaintedErrorText('bun', 'weather', 50)
-    expect(expectedTaint).toBe(
-      'row weather cannot be loaded in runtime bun: its previous cleanup did not finish within 0.05 s and may still be running; restart the runtime (or isolate this row in its own runtime) before loading it again',
-    )
-    await expect(runtime.load('w1', './hang.ts', { label: 'v2', hang: false }, null, null, [], 'weather')).rejects.toThrow(expectedTaint)
-    await expect(runtime.load('w2', './hang.ts', { label: 'v2', hang: false }, null, null, [], 'weather')).rejects.toThrow(expectedTaint)
+    // The row loads again at once (plugins are trusted with their own
+    // remnant), and an unrelated healthy row takes over the withdrawn service.
+    await runtime.load('w2', './hang.ts', { label: 'v2', hang: false }, [['forecast', 'v2']], null, [], 'weather')
 
     // Unrelated healthy row continues unaffected and takes over the withdrawn service.
     await runtime.load('m1', './healthy.ts', {}, null, null, [], 'metrics')
@@ -143,24 +139,14 @@ export function apply(ctx) {
     expect((runtime.lookup('forecast') as any).today()).toBe('healthy-sibling')
     await runtime.unload('m1')
     expect((globalThis as any).__bunHealthyLog).toEqual(['metrics-cleaned'])
-  } finally {
-    await runtime.dispose()
-  }
-
-  // Fresh runtime (after restart) clears taint and loads weather cleanly.
-  const restarted = new Runtime(dir, { rowUnloadTimeout: 50 })
-  restarted.dispatch('', 'mount', { announce: true })
-  try {
-    await restarted.load('w1', './hang.ts', { label: 'v2', hang: false }, null, null, [], 'weather')
-    expect((restarted.lookup('forecast') as any).today()).toBe('v2')
-    await restarted.unload('w1')
+    await runtime.unload('w2')
     expect((globalThis as any).__bunHangLog).toEqual(['earlier'])
   } finally {
+    await runtime.dispose()
     delete (globalThis as any).__bunHangLog
     delete (globalThis as any).__bunHealthyLog
     delete (globalThis as any).__bunLate
     delete (globalThis as any).__bunRelease
-    await restarted.dispose()
     rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -194,7 +180,7 @@ export function apply(ctx) {
       })
       expect((caught as Error)?.message).toBe('flush failed')
       expect(stderr).toBe(
-        'runtime bun: cleanup of row weather did not finish within 0.05 s; skipped remaining cleanups and withdrew its services; reloading row weather in this runtime is blocked until the runtime restarts (the stuck cleanup may still be running; fix it or restart the runtime)\n',
+        'runtime bun: cleanup of row weather did not finish within 0.05 s; skipped remaining cleanups and withdrew its services (the stuck cleanup may still be running; fix it, or isolate this row in its own runtime)\n',
       )
       expect((globalThis as any).__bunErrLog).toEqual([])
       expect(() => runtime.lookup('forecast')).toThrow('not available')
@@ -206,7 +192,7 @@ export function apply(ctx) {
   delete (globalThis as any).__bunErrLog
 })
 
-test('Route B: multi-instance same-id taint is scoped so a timeout in scope A does not block scope B', async () => {
+test('a timeout in one instances scope does not affect a same-id row in another scope', async () => {
   const dir = project({
     'instanced.ts': `
 export function apply(ctx, config) {
@@ -231,36 +217,31 @@ export function apply(ctx, config) {
     const stderr = await captureStderr(() => runtime.unload('a1').then(() => {}))
     expect(stderr).toBe(`${rowUnloadTimeoutText('bun', 'weather', 50)}\n`)
 
-    // Reloading instance A in scopeA (same key or new key) fails with verbatim error.
-    const expectedTaint = rowTaintedErrorText('bun', 'weather', 50)
-    await expect(
-      runtime.load('a1', './instanced.ts', { label: 'a-v2', hang: false }, [['forecast', 'tenant-a']], null, scopeA, 'weather'),
-    ).rejects.toThrow(expectedTaint)
-    await expect(
-      runtime.load('a2', './instanced.ts', { label: 'a-v2', hang: false }, [['forecast', 'tenant-a']], null, scopeA, 'weather'),
-    ).rejects.toThrow(expectedTaint)
+    // Instance A loads again at once in its own scope.
+    await runtime.load('a2', './instanced.ts', { label: 'a-v2', hang: false }, [['forecast', 'tenant-a']], null, scopeA, 'weather')
+    await runtime.unload('a2')
 
     // Instance B has the same id ('weather') in scopeB: update and unload/reload succeed cleanly.
     await runtime.update('b1', { label: 'b-v2', hang: false })
-    expect((globalThis as any).__bunScopedLog).toEqual(['b-v1'])
+    expect((globalThis as any).__bunScopedLog).toEqual(['a-v2', 'b-v1'])
     expect((runtime.lookup('forecast\0tenant-b') as any).today()).toBe('b-v2')
     await runtime.unload('b1')
     await runtime.load('b2', './instanced.ts', { label: 'b-v3', hang: false }, [['forecast', 'tenant-b']], null, scopeB, 'weather')
     expect((runtime.lookup('forecast\0tenant-b') as any).today()).toBe('b-v3')
     await runtime.unload('b2')
-    expect((globalThis as any).__bunScopedLog).toEqual(['b-v1', 'b-v2', 'b-v3'])
+    expect((globalThis as any).__bunScopedLog).toEqual(['a-v2', 'b-v1', 'b-v2', 'b-v3'])
 
-    // rows.update that times out also taints only its own scope and refuses the reload step.
+    // A rows.update whose cleanup times out reloads all the same.
     const scopeC = [{ id: 'tenant-c', group: 'tenants' }]
     await runtime.load('c1', './instanced.ts', { label: 'c-v1', hang: true }, [['forecast', 'tenant-c']], null, scopeC, 'weather')
     const updateStderr = await captureStderr(async () => {
-      await expect(runtime.update('c1', { label: 'c-v2', hang: false })).rejects.toThrow(expectedTaint)
+      await runtime.update('c1', { label: 'c-v2', hang: false })
     })
     expect(updateStderr).toBe(`${rowUnloadTimeoutText('bun', 'weather', 50)}\n`)
     // scopeB still loads cleanly after scopeC timed out too.
     await runtime.load('b3', './instanced.ts', { label: 'b-v4', hang: false }, [['forecast', 'tenant-b']], null, scopeB, 'weather')
     await runtime.unload('b3')
-    expect((globalThis as any).__bunScopedLog).toEqual(['b-v1', 'b-v2', 'b-v3', 'b-v4'])
+    expect((globalThis as any).__bunScopedLog).toEqual(['a-v2', 'b-v1', 'b-v2', 'b-v3', 'b-v4'])
   } finally {
     ;(globalThis as any).__bunScopedRelease?.()
     delete (globalThis as any).__bunScopedLog

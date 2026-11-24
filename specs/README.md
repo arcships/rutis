@@ -21,7 +21,6 @@
 | [`events/`](events/README.md) | 统一事件协议：登记表、分发路径、emit 队列、同步等待、link offers 与公告 epoch（[事件协议](../docs/design-events-protocol-2026-10-18.md) §4–§9；#613） |
 | [`peer-rows/`](peer-rows/README.md) | 节点托管行：行键/实例、`Host.loaded`、旧会话清理与新会话装载、迟到 `rows.ended`、`describe/schema/load/update/unload`、`link.offers` epoch、两节点代装与服务公告（远程会话 §4.2、§4.3；#640） |
 | [`call-lifecycle/`](call-lifecycle/README.md) | 调用生命周期：调用号、答复、取消与迟到答复、引用计数/参数引用/钉住目标、会话关闭与关闭后帧、出站积压、取消表规则、跨会话中继（会话协议 §5–§7；#626） |
-| [`row-unload-budget/`](row-unload-budget/README.md) | 单行卸载预算与污染状态（路线 B）：用户清理超时与 D8 撤回不变量、串行清理保护、残余旧清理隔离、同进程拒绝静默重载直到运行时重启（[单行卸载预算设计](../docs/design-row-unload-budget-2026-11-20.md)；#1323） |
 | [`config-schema/`](config-schema/README.md) | 不是模型：配置 Schema 的共用用例表，各语言的实现逐字比较（配置 Schema 设计 §8），由各实现的测试跑 |
 
 ---
@@ -41,5 +40,4 @@ One model per directory, each with the `.tla` model, `.cfg` configurations (one 
 | [`events/`](events/README.en.md) | Unified event protocol: the registration table, dispatch paths, the emit queue, synchronous waiting, link offers and announcement epochs (events protocol §4–§9; #613) |
 | [`peer-rows/`](peer-rows/README.en.md) | Peer-hosted rows: the row key/instance, `Host.loaded`, old-session cleanup before a new session loads, late `rows.ended`, `describe/schema/load/update/unload`, `link.offers` epochs, two-node loading and service announcements (remote sessions §4.2, §4.3; #640) |
 | [`call-lifecycle/`](call-lifecycle/README.en.md) | Call lifecycle: call ids, replies, cancel and late replies, reference counts/argument references/pinned targets, session close and frames after it, outbound backlog, cancel-table rules, cross-session relay (session protocol §5–§7; #626) |
-| [`row-unload-budget/`](row-unload-budget/README.en.md) | Per-row unload cleanup budget and Route B taint state: user-cleanup timeouts with D8 withdrawal preservation, intra-generation serial order, lingering-cleanup isolation, and refusing silent in-place reload until runtime restart ([row unload budget design](../docs/design-row-unload-budget-2026-11-20.en.md); #1323) |
 | [`config-schema/`](config-schema/README.en.md) | Not a model: the shared case list for config schemas, compared word for word by every implementation (config schema design §8), run by their own tests |

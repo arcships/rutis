@@ -1,5 +1,5 @@
-"""PoC tests for opt-in per-row unload cleanup budget & Route B taint semantics
-in Python (docs/design-row-unload-budget-2026-11-20.md, #1323)."""
+"""PoC tests for the opt-in per-row unload cleanup budget in Python
+(docs/design-row-unload-budget-2026-11-20.md, #1323)."""
 
 import asyncio
 import contextlib
@@ -13,7 +13,7 @@ import unittest
 import background
 
 from rutis.peer import BindingError
-from rutis.runner import Runtime, row_tainted_error_text, row_unload_deadline, row_unload_timeout_text
+from rutis.runner import Runtime, row_unload_deadline, row_unload_timeout_text
 
 
 class Forecast:
@@ -72,7 +72,7 @@ class UnloadBudget(background.TestCase):
         self.assertEqual(log, ["delayed", "earlier"])
         self.assertEqual(stderr, "")
 
-    def test_route_b_taints_row_until_restart_keeps_healthy_sibling_unaffected_and_isolates_late_actions(self):
+    def test_timeout_withdraws_services_keeps_healthy_sibling_unaffected_and_isolates_late_actions(self):
         log = []
         healthy_log = []
         late_events = []
@@ -113,8 +113,8 @@ class UnloadBudget(background.TestCase):
             release = asyncio.Event()
             runtime = Runtime(row_unload_timeout=0.05)
             runtime._control("mount", {"announce": True})
-            weather_mod = module("budget_route_b_weather", apply_weather)
-            metrics_mod = module("budget_route_b_metrics", apply_metrics)
+            weather_mod = module("budget_timeout_weather", apply_weather)
+            metrics_mod = module("budget_timeout_metrics", apply_metrics)
             await runtime.load("w1", weather_mod, {"label": "v1", "hang": True}, None, id="weather")
             self.assertIn("forecast", runtime.services)
             written = io.StringIO()
@@ -126,20 +126,9 @@ class UnloadBudget(background.TestCase):
             self.assertEqual(runtime.services, {}, "provided service was withdrawn")
             self.assertEqual(runtime.rows, {}, "row left runtime table")
 
-            # Route B: reloading the tainted row in this runtime (same key or fresh key) fails explicitly.
-            expected_taint = row_tainted_error_text("py", "weather", 0.05)
-            self.assertEqual(
-                expected_taint,
-                "row weather cannot be loaded in runtime py: its previous cleanup did not finish within 0.05 s "
-                "and may still be running; restart the runtime (or isolate this row in its own runtime) "
-                "before loading it again",
-            )
-            with self.assertRaises(RuntimeError) as same_key:
-                await runtime.load("w1", weather_mod, {"label": "v2", "hang": False}, None, id="weather")
-            self.assertEqual(str(same_key.exception), expected_taint)
-            with self.assertRaises(RuntimeError) as new_key:
-                await runtime.load("w2", weather_mod, {"label": "v2", "hang": False}, None, id="weather")
-            self.assertEqual(str(new_key.exception), expected_taint)
+            # The row loads again at once (plugins are trusted with their own
+            # remnant), and an unrelated healthy row takes over the withdrawn service.
+            await runtime.load("w2", weather_mod, {"label": "v2", "hang": False}, None, {"forecast": "v2"}, id="weather")
 
             # Unrelated healthy sibling loads, takes over the withdrawn service, and is untouched by late actions.
             await runtime.load("m1", metrics_mod, {}, None, id="metrics")
@@ -151,12 +140,7 @@ class UnloadBudget(background.TestCase):
             await runtime.unload("m1")
             self.assertEqual(healthy_log, ["metrics-cleaned"])
 
-            # Fresh runtime (after restart) clears taint and loads weather cleanly.
-            restarted = Runtime(row_unload_timeout=0.05)
-            restarted._control("mount", {"announce": True})
-            await restarted.load("w1", weather_mod, {"label": "v2", "hang": False}, None, id="weather")
-            self.assertEqual(restarted.lookup("forecast").today(), "v2")
-            await restarted.unload("w1")
+            await runtime.unload("w2")
             return written.getvalue()
 
         stderr = asyncio.run(run())
@@ -164,14 +148,13 @@ class UnloadBudget(background.TestCase):
         self.assertEqual(
             expected,
             "runtime py: cleanup of row weather did not finish within 0.05 s; "
-            "skipped remaining cleanups and withdrew its services; "
-            "reloading row weather in this runtime is blocked until the runtime restarts "
-            "(the stuck cleanup may still be running; fix it or restart the runtime)\n",
+            "skipped remaining cleanups and withdrew its services "
+            "(the stuck cleanup may still be running; fix it, or isolate this row in its own runtime)\n",
         )
         self.assertEqual(stderr, expected)
-        self.assertEqual(log, ["earlier"], "earlier skipped on timeout, ran cleanly after runtime restart")
+        self.assertEqual(log, ["earlier"], "earlier skipped on timeout, ran in the reloaded generation")
 
-    def test_uncooperative_coroutine_via_env_var_times_out_taints_and_withdraws(self):
+    def test_uncooperative_coroutine_via_env_var_times_out_and_withdraws(self):
         # Proves we use asyncio.wait + cancel(), not asyncio.wait_for (which
         # blocks forever if a coroutine catches CancelledError and keeps waiting).
         log = []
@@ -206,8 +189,8 @@ class UnloadBudget(background.TestCase):
                 elapsed = time.monotonic() - started
                 self.assertLess(elapsed, 1.0, "uncooperative coroutine did not block unload")
                 self.assertEqual(runtime.services, {}, "provided service still withdrawn")
-                with self.assertRaisesRegex(RuntimeError, "^row weather cannot be loaded in runtime py:"):
-                    await runtime.load("w2", mod, None, None, id="weather")
+                await runtime.load("w2", mod, None, None, id="weather")
+                await runtime.unload("w2")
                 # Let the abandoned task exit cleanly before the event loop closes.
                 release.set()
                 await asyncio.sleep(0)
@@ -222,9 +205,8 @@ class UnloadBudget(background.TestCase):
         self.assertEqual(
             stderr,
             "runtime py: cleanup of row weather did not finish within 0.05 s; "
-            "skipped remaining cleanups and withdrew its services; "
-            "reloading row weather in this runtime is blocked until the runtime restarts "
-            "(the stuck cleanup may still be running; fix it or restart the runtime)\n",
+            "skipped remaining cleanups and withdrew its services "
+            "(the stuck cleanup may still be running; fix it, or isolate this row in its own runtime)\n",
         )
         self.assertEqual(log, [])
 
@@ -259,13 +241,12 @@ class UnloadBudget(background.TestCase):
         self.assertEqual(
             stderr,
             "runtime py: cleanup of row weather did not finish within 0.05 s; "
-            "skipped remaining cleanups and withdrew its services; "
-            "reloading row weather in this runtime is blocked until the runtime restarts "
-            "(the stuck cleanup may still be running; fix it or restart the runtime)\n",
+            "skipped remaining cleanups and withdrew its services "
+            "(the stuck cleanup may still be running; fix it, or isolate this row in its own runtime)\n",
         )
         self.assertEqual(log, [])
 
-    def test_multi_instance_same_id_different_scopes_isolates_taint(self):
+    def test_multi_instance_same_id_different_scopes_are_unaffected_by_each_other(self):
         log = []
         releases = []
 
@@ -300,38 +281,31 @@ class UnloadBudget(background.TestCase):
                 await runtime.unload("a1")
             self.assertEqual(written.getvalue(), f"{row_unload_timeout_text('py', 'weather', 0.05)}\n")
 
-            # Reloading instance A in scope_a (same key or new key) is refused verbatim.
-            expected_taint = row_tainted_error_text("py", "weather", 0.05)
-            with self.assertRaises(RuntimeError) as same_key:
-                await runtime.load("a1", mod, {"label": "a-v2", "hang": False}, None, {"forecast": "tenant-a"}, scope_a, id="weather")
-            self.assertEqual(str(same_key.exception), expected_taint)
-            with self.assertRaises(RuntimeError) as new_key:
-                await runtime.load("a2", mod, {"label": "a-v2", "hang": False}, None, {"forecast": "tenant-a"}, scope_a, id="weather")
-            self.assertEqual(str(new_key.exception), expected_taint)
+            # Instance A loads again at once in its own scope.
+            await runtime.load("a2", mod, {"label": "a-v2", "hang": False}, None, {"forecast": "tenant-a"}, scope_a, id="weather")
+            await runtime.unload("a2")
 
             # Instance B shares id="weather" in scope_b: update and unload/reload succeed cleanly.
             await runtime.update("b1", {"label": "b-v2", "hang": False})
-            self.assertEqual(log, ["b-v1"])
+            self.assertEqual(log, ["a-v2", "b-v1"])
             self.assertEqual(runtime.lookup("forecast\0tenant-b").today(), "b-v2")
             await runtime.unload("b1")
             await runtime.load("b2", mod, {"label": "b-v3", "hang": False}, None, {"forecast": "tenant-b"}, scope_b, id="weather")
             self.assertEqual(runtime.lookup("forecast\0tenant-b").today(), "b-v3")
             await runtime.unload("b2")
-            self.assertEqual(log, ["b-v1", "b-v2", "b-v3"])
+            self.assertEqual(log, ["a-v2", "b-v1", "b-v2", "b-v3"])
 
-            # rows.update that times out also taints only its own scope and refuses the reload step.
+            # A rows.update whose cleanup times out reloads all the same.
             await runtime.load("c1", mod, {"label": "c-v1", "hang": True}, None, {"forecast": "tenant-c"}, scope_c, id="weather")
             update_written = io.StringIO()
             with contextlib.redirect_stderr(update_written):
-                with self.assertRaises(RuntimeError) as upd_err:
-                    await runtime.update("c1", {"label": "c-v2", "hang": False})
-            self.assertEqual(str(upd_err.exception), expected_taint)
+                await runtime.update("c1", {"label": "c-v2", "hang": False})
             self.assertEqual(update_written.getvalue(), f"{row_unload_timeout_text('py', 'weather', 0.05)}\n")
 
             # Instance B still loads cleanly after scope_c timed out too.
             await runtime.load("b3", mod, {"label": "b-v4", "hang": False}, None, {"forecast": "tenant-b"}, scope_b, id="weather")
             await runtime.unload("b3")
-            self.assertEqual(log, ["b-v1", "b-v2", "b-v3", "b-v4"])
+            self.assertEqual(log, ["a-v2", "b-v1", "b-v2", "b-v3", "b-v4"])
 
             for ev in releases:
                 ev.set()

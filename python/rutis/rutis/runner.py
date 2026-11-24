@@ -117,29 +117,16 @@ def row_unload_deadline(env=None) -> float | None:
 
 def row_unload_timeout_text(runtime: str, row: str, seconds: float) -> str:
     """Diagnostic line emitted when a row's user cleanup exceeds its
-    single-row unload budget."""
+    single-row unload budget. The stuck cleanup keeps running in the
+    background (Python cannot stop a coroutine that swallows CancelledError);
+    the row is unloaded all the same, and reloading it here runs the new
+    generation beside that remnant. That risk is the plugin's to take (plugins
+    are trusted, not sandboxed): the runtime says what happened and no more."""
     return (
         f"runtime {runtime}: cleanup of row {row} did not finish within {seconds:g} s; "
-        f"skipped remaining cleanups and withdrew its services; "
-        f"reloading row {row} in this runtime is blocked until the runtime restarts "
-        "(the stuck cleanup may still be running; fix it or restart the runtime)"
+        f"skipped remaining cleanups and withdrew its services "
+        "(the stuck cleanup may still be running; fix it, or isolate this row in its own runtime)"
     )
-
-
-def row_tainted_error_text(runtime: str, row: str, seconds: float) -> str:
-    """Error raised when a row whose previous cleanup timed out is loaded
-    again in the same runtime process before the runtime restarts (Route B)."""
-    return (
-        f"row {row} cannot be loaded in runtime {runtime}: "
-        f"its previous cleanup did not finish within {seconds:g} s and may still be running; "
-        "restart the runtime (or isolate this row in its own runtime) before loading it again"
-    )
-
-
-def _taint_scope_key(row_name: str, scope: list[dict[str, str]]) -> tuple[str, tuple[tuple[str, str], ...]]:
-    """Canonical scoped row identity for Route B tainting: distinguishes copies
-    that share the same `id` across different `instances` scope chains."""
-    return (row_name, tuple((item["id"], item["group"]) for item in scope))
 
 
 def _consume_task_result(task: asyncio.Future) -> None:
@@ -517,13 +504,6 @@ class Runtime:
         self._row_unload_timeout = (
             _UNSET if row_unload_timeout is _UNSET else _normalize_timeout(row_unload_timeout)
         )
-        # Route B: rows whose cleanup timed out in this runtime process are
-        # tainted until this runtime restarts (refusing silent in-place reload).
-        # Keyed by scoped row identity (row name + canonical scope chain) plus
-        # exact session key so copies sharing the same `id` across different
-        # `instances` scopes stay isolated.
-        self._tainted_scopes: dict[tuple[str, tuple[tuple[str, str], ...]], tuple[str, float]] = {}
-        self._tainted_keys: dict[str, tuple[str, float]] = {}
         self.rows: dict[str, Row] = {}
         self.services: dict[str, tuple[str, Any]] = {}  # id -> (row key, object)
         self.hosts: dict[str, HostProxy] = {}  # id -> proxy
@@ -694,9 +674,6 @@ class Runtime:
     ) -> None:
         chain = check_scope(scope)
         shown_row = id if isinstance(id, str) else key
-        taint = self._find_taint(shown_row, chain, key)
-        if taint is not None:
-            raise RuntimeError(row_tainted_error_text(self._runtime_name(), taint[0], taint[1]))
         if key in self.rows:
             raise ValueError(f"row {key} is already loaded")
         if self.loop is None:
@@ -902,14 +879,6 @@ class Runtime:
             return self._row_unload_timeout
         return row_unload_deadline()
 
-    def _mark_tainted(self, row_name: str, scope: list[dict[str, str]], key: str, budget: float) -> None:
-        entry = (row_name, budget)
-        self._tainted_scopes[_taint_scope_key(row_name, scope)] = entry
-        self._tainted_keys[key] = entry
-
-    def _find_taint(self, row_name: str, scope: list[dict[str, str]], key: str) -> tuple[str, float] | None:
-        return self._tainted_scopes.get(_taint_scope_key(row_name, scope)) or self._tainted_keys.get(key)
-
     async def unload(self, key: str, *, announced: bool = False) -> None:
         row = self.rows.get(key)
         if row is None or row.unloading:
@@ -975,7 +944,6 @@ class Runtime:
                     remaining = max(0.0, deadline - loop.time())
                     if remaining <= 0.0:
                         timed_out = True
-                        self._mark_tainted(shown_row, row.scope, key, budget)
                         say(row_unload_timeout_text(self._runtime_name(), shown_row, budget))
                         continue
                     task = asyncio.create_task(_settle_step(step.run))
@@ -990,7 +958,6 @@ class Runtime:
                         task.cancel()
                         task.add_done_callback(_consume_task_result)
                         timed_out = True
-                        self._mark_tainted(shown_row, row.scope, key, budget)
                         say(row_unload_timeout_text(self._runtime_name(), shown_row, budget))
                     elif not task.cancelled():
                         try:

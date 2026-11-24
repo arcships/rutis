@@ -6,7 +6,7 @@ import { Worker } from 'node:worker_threads'
 import { Process } from './client.mjs'
 import { toJsonSchema } from './schema.mjs'
 import { cordisConfig } from './cordis-config.mjs'
-import { isLeaf, normalizeTimeoutMs, rowTaintedErrorText, rowUnloadDeadline, rowUnloadTimeoutText, supported, toCordis } from './leaf.mjs'
+import { isLeaf, normalizeTimeoutMs, rowUnloadDeadline, rowUnloadTimeoutText, supported, toCordis } from './leaf.mjs'
 import { Bus } from './events.mjs'
 import { LEAF_FIBERS, install } from './cordis-events.mjs'
 import { rowTracking, install as handleUnhandled, failureText, kindText, realFile, reportText, stackFiles, unhandledError } from './unhandled.mjs'
@@ -185,25 +185,6 @@ const deadline = shutdownDeadline()
 const rowUnloadBudget = rowUnloadTimeout === undefined
   ? rowUnloadDeadline(env)
   : normalizeTimeoutMs(rowUnloadTimeout)
-// Route B: rows whose cleanup timed out in this runtime process are tainted
-// until this runtime restarts (refusing silent in-place reload while the old
-// cleanup may still be running in the background). Keyed by scoped row
-// identity (rowName + canonical scope chain) plus exact session key, so
-// copies with the same `id` in different `instances` scopes stay isolated.
-const taintedScopes = new Map() // taintScopeKey(rowName, chain) -> { rowName, budgetMs }
-const taintedKeys = new Map() // key -> { rowName, budgetMs }
-function taintScopeKey(rowName, chain) {
-  return JSON.stringify([rowName, chain.map(({ id, group }) => [id, group])])
-}
-function markTainted(row) {
-  if (!row || rowUnloadBudget === null) return
-  const entry = { rowName: row.rowName, budgetMs: rowUnloadBudget }
-  taintedScopes.set(taintScopeKey(row.rowName, row.chain), entry)
-  taintedKeys.set(row.key, entry)
-}
-function findTaint(rowName, chain, key) {
-  return taintedScopes.get(taintScopeKey(rowName, chain)) ?? taintedKeys.get(key)
-}
 const leafUnloadOptions = context => {
   const owner = rowOf(context?.fiber)?.[1] ?? goneRowOf(context?.fiber)
   const target = owner ? `row ${owner.rowName}` : `plugin ${context?.fiber?.name ?? 'leaf'}`
@@ -211,11 +192,13 @@ const leafUnloadOptions = context => {
     budgetMs: rowUnloadBudget,
     runtime: runtimeName(),
     target,
-    blocksReload: Boolean(owner),
-    onTimeout: () => markTainted(owner),
     report: line => say(`${line}\n`),
   }
 }
+// The stuck cleanup keeps running in the background (JavaScript cannot stop
+// it); the row is unloaded all the same. That risk is the plugin's to take
+// (plugins are trusted, not sandboxed): the runtime says what happened and no
+// more, and a reload of the row is not refused.
 async function disposeRowFiber(row) {
   if (rowUnloadBudget === null || LEAF_FIBERS.has(row.inner)) {
     await row.fiber.dispose()
@@ -223,8 +206,8 @@ async function disposeRowFiber(row) {
   }
   // Native Cordis fiber with opt-in row unload budget: Cordis runs all
   // disposables in one Promise.all that cannot be interrupted, so race
-  // dispose() against the budget; on timeout stop waiting, taint the row,
-  // report, and let the caller's finally block finish teardown.
+  // dispose() against the budget; on timeout stop waiting, report, and let
+  // the caller's finally block finish teardown.
   const TIMED_OUT = Symbol('row-unload-timeout')
   const disposingFiber = Promise.resolve(row.fiber.dispose())
   disposingFiber.then(() => {}, () => {})
@@ -241,8 +224,7 @@ async function disposeRowFiber(row) {
   ])
   clearTimeout(timer)
   if (winner === TIMED_OUT) {
-    markTainted(row)
-    say(`${rowUnloadTimeoutText({ runtime: runtimeName(), target: `row ${row.rowName}`, budgetMs: rowUnloadBudget, native: true, blocksReload: true })}\n`)
+    say(`${rowUnloadTimeoutText({ runtime: runtimeName(), target: `row ${row.rowName}`, budgetMs: rowUnloadBudget, native: true })}\n`)
     return
   }
   if (!winner.ok) throw winner.error
@@ -746,10 +728,6 @@ const fiberOf = wrapped => Object.hasOwn(wrapped, 'then') ? Object.getPrototypeO
 async function loadRow([key, entry, config, isolate, inject, exports, place]) {
   const chain = chainOf(place?.scope)
   const rowName = typeof place?.id === 'string' ? place.id : key
-  const taint = findTaint(rowName, chain, key)
-  if (taint) {
-    throw new Error(rowTaintedErrorText({ runtime: runtimeName(), row: taint.rowName, budgetMs: taint.budgetMs }))
-  }
   if (rows.has(key)) throw new Error(`row ${key} is already loaded`)
   const names = Object.keys(exports ?? {})
   // A name the row isolates is exported in the scope of its label.

@@ -1,6 +1,5 @@
-// PoC tests for opt-in per-row unload cleanup budget & Route B taint semantics
-// in Node (leaf plugins and native Cordis fibers;
-// docs/design-row-unload-budget-2026-11-20.md, #1323).
+// PoC tests for the opt-in per-row unload cleanup budget in Node (leaf plugins
+// and native Cordis fibers; docs/design-row-unload-budget-2026-11-20.md, #1323).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -8,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { definePlugin } from '../../rutis/src/index.mjs'
-import { rowTaintedErrorText, rowUnloadDeadline, rowUnloadTimeoutText, supported, toCordis } from '../src/leaf.mjs'
+import { rowUnloadDeadline, rowUnloadTimeoutText, supported, toCordis } from '../src/leaf.mjs'
 import { run } from '../src/runner.mjs'
 import { ENDPOINT_PROTOCOL, Session } from '../src/session.mjs'
 import { within } from './support.mjs'
@@ -188,10 +187,10 @@ test('standalone leaf timeout skips later cleanups, withdraws services, isolates
     await plugin.dispose()
     assert.ok(performance.now() - started < 1_000, 'dispose finished promptly after budget')
   })
-  const expected = `${rowUnloadTimeoutText({ runtime: 'node', target: 'plugin weather', budgetMs: 50, native: false, blocksReload: false })}\n`
+  const expected = `${rowUnloadTimeoutText({ runtime: 'node', target: 'plugin weather', budgetMs: 50, native: false })}\n`
   assert.equal(
     expected,
-    'runtime node: cleanup of plugin weather did not finish within 0.05 s; skipped remaining cleanups and withdrew its services (the stuck cleanup may still be running; fix it or restart the runtime)\n',
+    'runtime node: cleanup of plugin weather did not finish within 0.05 s; skipped remaining cleanups and withdrew its services (the stuck cleanup may still be running; fix it, or isolate this row in its own runtime)\n',
   )
   assert.equal(stderr, expected)
   assert.deepEqual(log, [], 'user cleanups after the timed-out cleanup must not run')
@@ -210,7 +209,7 @@ test('standalone leaf timeout skips later cleanups, withdraws services, isolates
   await second.dispose()
 })
 
-test('Route B: runner leaf row timeout withdraws services, taints row until runtime restart, keeps healthy rows unaffected, and isolates late actions', async () => {
+test('runner leaf row timeout withdraws services, keeps healthy rows unaffected, isolates late actions, and lets the row reload', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rutis-node-budget-leaf-'))
   const file = name => join(dir, name)
   writeFileSync(file('anchor.mjs'), 'export function apply() {}\n')
@@ -261,7 +260,7 @@ export default definePlugin({
     })
     assert.equal(
       stderr,
-      'runtime node: cleanup of row weather did not finish within 0.05 s; skipped remaining cleanups and withdrew its services; reloading row weather in this runtime is blocked until the runtime restarts (the stuck cleanup may still be running; fix it or restart the runtime)\n',
+      'runtime node: cleanup of row weather did not finish within 0.05 s; skipped remaining cleanups and withdrew its services (the stuck cleanup may still be running; fix it, or isolate this row in its own runtime)\n',
     )
     assert.deepEqual(globalThis.__leafBudgetLog, [], 'remaining user cleanups were skipped')
     const state = await rt.inspect()
@@ -269,20 +268,9 @@ export default definePlugin({
     assert.deepEqual(state.slots, [])
     assert.equal(state.services, 0, 'provided service withdrawn from Cordis store')
 
-    // Route B: reloading the tainted row in this runtime process (same key or new key) fails explicitly.
-    const expectedTaint = rowTaintedErrorText({ runtime: 'node', row: 'weather', budgetMs: 50 })
-    assert.equal(
-      expectedTaint,
-      'row weather cannot be loaded in runtime node: its previous cleanup did not finish within 0.05 s and may still be running; restart the runtime (or isolate this row in its own runtime) before loading it again',
-    )
-    await assert.rejects(
-      rt.load('r1', file('hang-leaf.mjs'), 'weather', { label: 'v2', hang: false }),
-      error => error.message === expectedTaint,
-    )
-    await assert.rejects(
-      rt.load('r2', file('hang-leaf.mjs'), 'weather', { label: 'v2', hang: false }),
-      error => error.message === expectedTaint,
-    )
+    // The row loads again at once: plugins are trusted with their own remnant
+    // (they are not sandboxed), and the runtime only says what happened.
+    await rt.load('r2', file('hang-leaf.mjs'), 'weather', { label: 'v2', hang: false }, [], [['forecast', 'v2']])
 
     // Unrelated healthy row continues unaffected and can take over the withdrawn service.
     await rt.load('m1', file('healthy-leaf.mjs'), 'metrics', {})
@@ -294,18 +282,9 @@ export default definePlugin({
     assert.equal(globalThis.__leafLateErrors[1], 'emit:BindingError')
     await rt.unload('m1')
     assert.deepEqual(globalThis.__leafHealthyLog, ['metrics-cleaned'])
+    await rt.unload('r2')
+    assert.deepEqual(globalThis.__leafBudgetLog, ['earlier'], 'the reloaded generation cleaned up')
     assert.equal(await rt.stop(), 0)
-
-    // Restarting the runtime (fresh runtime process) clears taint and loads weather cleanly.
-    const restarted = inProcess(file('anchor.mjs'), {
-      env: { RUTIS_ROW_UNLOAD_TIMEOUT: '0.05', RUTIS_TEST_INSPECT: '1' },
-    })
-    await restarted.started()
-    await restarted.mount()
-    await restarted.load('r1', file('hang-leaf.mjs'), 'weather', { label: 'v2', hang: false })
-    await restarted.unload('r1')
-    assert.deepEqual(globalThis.__leafBudgetLog, ['earlier'])
-    assert.equal(await restarted.stop(), 0)
   } finally {
     delete globalThis.__leafBudgetLog
     delete globalThis.__leafHealthyLog
@@ -316,7 +295,7 @@ export default definePlugin({
   }
 })
 
-test('Route B: runner native Cordis fiber timeout finishes teardown, withdraws service, taints row until restart, and prints verbatim line', async () => {
+test('runner native Cordis fiber timeout finishes teardown, withdraws service, and prints verbatim line', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rutis-node-budget-cordis-'))
   const file = name => join(dir, name)
   writeFileSync(file('anchor.mjs'), 'export function apply() {}\n')
@@ -350,7 +329,7 @@ export function apply(ctx) {
     })
     assert.equal(
       stderr,
-      'runtime node: cleanup of row weather did not finish within 0.05 s; stopped waiting and finished unloading the row; reloading row weather in this runtime is blocked until the runtime restarts (the stuck cleanup may still be running; fix it or restart the runtime)\n',
+      'runtime node: cleanup of row weather did not finish within 0.05 s; stopped waiting and finished unloading the row (the stuck cleanup may still be running; fix it, or isolate this row in its own runtime)\n',
     )
     const state = await rt.inspect()
     assert.deepEqual(state.rows, [])
@@ -358,33 +337,20 @@ export function apply(ctx) {
     assert.equal(state.fibers, 0, 'Cordis removed fiber from registry')
     assert.equal(state.services, 0, 'Cordis withdrew provided service from store')
 
-    // Route B: reloading the tainted native Cordis row fails explicitly in this runtime.
-    const expectedTaint = 'row weather cannot be loaded in runtime node: its previous cleanup did not finish within 0.05 s and may still be running; restart the runtime (or isolate this row in its own runtime) before loading it again'
-    await assert.rejects(
-      rt.load('c2', file('hang-cordis.mjs'), 'weather', { label: 'v2', hang: false }),
-      error => error.message === expectedTaint,
-    )
+    // The row loads again at once (plugins are trusted with their own
+    // remnant), and an unrelated healthy row takes over the withdrawn service.
+    await rt.load('c2', file('hang-cordis.mjs'), 'weather', { label: 'v2', hang: false }, [], [['forecast', 'v2']])
     // Unrelated healthy row can still load and take over the withdrawn service.
     await rt.load('m1', file('healthy-cordis.mjs'), 'metrics', {})
     await rt.unload('m1')
+    await rt.unload('c2')
     assert.equal(await rt.stop(), 0)
-
-    // Fresh runtime (after restart) loads weather cleanly.
-    const restarted = inProcess(file('anchor.mjs'), {
-      env: { RUTIS_TEST_INSPECT: '1' },
-      rowUnloadTimeout: 50,
-    })
-    await restarted.started()
-    await restarted.mount()
-    await restarted.load('c1', file('hang-cordis.mjs'), 'weather', { label: 'v2', hang: false })
-    await restarted.unload('c1')
-    assert.equal(await restarted.stop(), 0)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('Route B: multi-instance same-id taint is scoped so a timeout in scope A does not block scope B', async () => {
+test('a timeout in one instances scope does not affect a same-id row in another scope', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rutis-node-budget-scoped-'))
   const file = name => join(dir, name)
   writeFileSync(file('anchor.mjs'), 'export function apply() {}\n')
@@ -419,19 +385,11 @@ export default definePlugin({
     })
     assert.equal(
       stderr,
-      'runtime node: cleanup of row weather did not finish within 0.05 s; skipped remaining cleanups and withdrew its services; reloading row weather in this runtime is blocked until the runtime restarts (the stuck cleanup may still be running; fix it or restart the runtime)\n',
+      'runtime node: cleanup of row weather did not finish within 0.05 s; skipped remaining cleanups and withdrew its services (the stuck cleanup may still be running; fix it, or isolate this row in its own runtime)\n',
     )
 
-    // Reloading instance A in scopeA (same key or new key) is refused verbatim.
-    const expectedTaint = rowTaintedErrorText({ runtime: 'node', row: 'weather', budgetMs: 50 })
-    await assert.rejects(
-      rt.load('a1', file('instanced-weather.mjs'), 'weather', { label: 'a-v2', hang: false }, scopeA, [['forecast', 'tenant-a']]),
-      error => error.message === expectedTaint,
-    )
-    await assert.rejects(
-      rt.load('a2', file('instanced-weather.mjs'), 'weather', { label: 'a-v2', hang: false }, scopeA, [['forecast', 'tenant-a']]),
-      error => error.message === expectedTaint,
-    )
+    // Instance A loads again at once in its own scope.
+    await rt.load('a2', file('instanced-weather.mjs'), 'weather', { label: 'a-v2', hang: false }, scopeA, [['forecast', 'tenant-a']])
 
     // Instance B has the same id ('weather') in scopeB: unloading and reloading succeeds cleanly.
     await rt.unload('b1')

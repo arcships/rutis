@@ -28,20 +28,16 @@ export function formatTimeoutSeconds(ms) {
   return String(Number((ms / 1000).toPrecision(12)))
 }
 
-export function rowUnloadTimeoutText({ runtime = 'node', target, budgetMs, native = false, blocksReload = false }) {
+// The stuck cleanup keeps running in the background (JavaScript cannot stop
+// it); the row is unloaded all the same, and reloading it here runs the new
+// generation beside that remnant. That risk is the plugin's to take (plugins
+// are trusted, not sandboxed): the runtime says what happened and no more.
+export function rowUnloadTimeoutText({ runtime = 'node', target, budgetMs, native = false }) {
   const seconds = formatTimeoutSeconds(budgetMs)
   const action = native
     ? 'stopped waiting and finished unloading the row'
     : 'skipped remaining cleanups and withdrew its services'
-  const reloadNote = blocksReload
-    ? `; reloading ${target} in this runtime is blocked until the runtime restarts`
-    : ''
-  return `runtime ${runtime}: cleanup of ${target} did not finish within ${seconds} s; ${action}${reloadNote} (the stuck cleanup may still be running; fix it or restart the runtime)`
-}
-
-export function rowTaintedErrorText({ runtime = 'node', row, budgetMs }) {
-  const seconds = formatTimeoutSeconds(budgetMs)
-  return `row ${row} cannot be loaded in runtime ${runtime}: its previous cleanup did not finish within ${seconds} s and may still be running; restart the runtime (or isolate this row in its own runtime) before loading it again`
+  return `runtime ${runtime}: cleanup of ${target} did not finish within ${seconds} s; ${action} (the stuck cleanup may still be running; fix it, or isolate this row in its own runtime)`
 }
 
 function resolveUnloadOptions(unloadOptions, context, spec) {
@@ -51,9 +47,7 @@ function resolveUnloadOptions(unloadOptions, context, spec) {
       budgetMs: normalizeTimeoutMs(resolved.budgetMs),
       runtime: resolved.runtime ?? 'node',
       target: resolved.target ?? `plugin ${spec.name ?? 'leaf'}`,
-      blocksReload: Boolean(resolved.blocksReload),
       report: resolved.report ?? (line => say(`${line}\n`)),
-      onTimeout: resolved.onTimeout,
     }
   }
   const hasExplicit = unloadOptions !== null && typeof unloadOptions === 'object' && 'rowUnloadTimeout' in unloadOptions
@@ -61,9 +55,7 @@ function resolveUnloadOptions(unloadOptions, context, spec) {
     budgetMs: hasExplicit ? normalizeTimeoutMs(unloadOptions.rowUnloadTimeout) : rowUnloadDeadline(),
     runtime: unloadOptions?.runtimeName ?? 'node',
     target: unloadOptions?.rowName ? `row ${unloadOptions.rowName}` : `plugin ${spec.name ?? 'leaf'}`,
-    blocksReload: Boolean(unloadOptions?.blocksReload),
     report: unloadOptions?.report ?? (line => say(`${line}\n`)),
-    onTimeout: unloadOptions?.onTimeout,
   }
 }
 
@@ -176,7 +168,7 @@ export function toCordis(spec, rowInject = [], providerOf, unloadOptions) {
       const drain = async () => {
         draining = true
         const ordered = steps.splice(0).reverse()
-        const { budgetMs, runtime, target, blocksReload, report, onTimeout } = resolveUnloadOptions(unloadOptions, context, spec)
+        const { budgetMs, runtime, target, report } = resolveUnloadOptions(unloadOptions, context, spec)
         // Default (unset): run every step without a deadline, preserving
         // Cordis / existing unload semantics.
         if (budgetMs === null) {
@@ -194,8 +186,7 @@ export function toCordis(spec, rowInject = [], providerOf, unloadOptions) {
         const TIMED_OUT = Symbol('row-unload-timeout')
         const reportTimeout = () => {
           timedOut = true
-          onTimeout?.()
-          report(rowUnloadTimeoutText({ runtime, target, budgetMs, native: false, blocksReload }))
+          report(rowUnloadTimeoutText({ runtime, target, budgetMs, native: false }))
         }
         for (const step of ordered) {
           if (step.withdrawal) {

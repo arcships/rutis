@@ -82,12 +82,12 @@ function formatTimeoutSeconds(ms: number): string {
   return String(Number((ms / 1000).toPrecision(12)))
 }
 
+// The stuck cleanup keeps running in the background (JavaScript cannot stop
+// it); the row is unloaded all the same, and reloading it here runs the new
+// generation beside that remnant. That risk is the plugin's to take (plugins
+// are trusted, not sandboxed): the runtime says what happened and no more.
 export function rowUnloadTimeoutText(runtime: string, row: string, budgetMs: number): string {
-  return `runtime ${runtime}: cleanup of row ${row} did not finish within ${formatTimeoutSeconds(budgetMs)} s; skipped remaining cleanups and withdrew its services; reloading row ${row} in this runtime is blocked until the runtime restarts (the stuck cleanup may still be running; fix it or restart the runtime)`
-}
-
-export function rowTaintedErrorText(runtime: string, row: string, budgetMs: number): string {
-  return `row ${row} cannot be loaded in runtime ${runtime}: its previous cleanup did not finish within ${formatTimeoutSeconds(budgetMs)} s and may still be running; restart the runtime (or isolate this row in its own runtime) before loading it again`
+  return `runtime ${runtime}: cleanup of row ${row} did not finish within ${formatTimeoutSeconds(budgetMs)} s; skipped remaining cleanups and withdrew its services (the stuck cleanup may still be running; fix it, or isolate this row in its own runtime)`
 }
 
 interface Scope { id: string, group: string }
@@ -96,10 +96,6 @@ function chainOf(scope: unknown): Scope[] {
   if (scope === undefined || scope === null) return []
   if (!Array.isArray(scope) || scope.some(item => typeof item?.id !== 'string' || typeof item?.group !== 'string')) throw new TypeError('a scope is a list of { id, group }')
   return scope.map(({ id, group }) => ({ id, group }))
-}
-
-function taintScopeKey(rowName: string, chain: Scope[]): string {
-  return JSON.stringify([rowName, chain.map(({ id, group }) => [id, group])])
 }
 
 // The methods of a service no declaration describes: its own and inherited
@@ -201,13 +197,6 @@ export class Runtime {
   #blocking = watchBlocking({ runtime: () => this.name })
   #deadline = shutdownDeadline()
   #rowUnloadTimeout?: number | null
-  // Route B: rows whose cleanup timed out in this runtime process are tainted
-  // until this runtime restarts (refusing silent in-place reload). Keyed by
-  // scoped row identity (rowName + canonical scope chain) plus exact session
-  // key, so copies with the same `id` in different `instances` scopes stay
-  // isolated.
-  #taintedScopes = new Map<string, { rowName: string, budgetMs: number }>()
-  #taintedKeys = new Map<string, { rowName: string, budgetMs: number }>()
   #project: string
   #modules = new Modules()
   #rows = new Map<string, Row>()
@@ -236,16 +225,6 @@ export class Runtime {
 
   #rowUnloadBudget(): number | null {
     return this.#rowUnloadTimeout !== undefined ? this.#rowUnloadTimeout : rowUnloadDeadline()
-  }
-
-  #markTainted(rowName: string, chain: Scope[], key: string, budgetMs: number) {
-    const entry = { rowName, budgetMs }
-    this.#taintedScopes.set(taintScopeKey(rowName, chain), entry)
-    this.#taintedKeys.set(key, entry)
-  }
-
-  #findTaint(rowName: string, chain: Scope[], key: string) {
-    return this.#taintedScopes.get(taintScopeKey(rowName, chain)) ?? this.#taintedKeys.get(key)
   }
 
   // Connected: the bus registers and dispatches through the host.
@@ -415,8 +394,6 @@ export class Runtime {
   async load(key: string, entry: unknown, config: unknown, isolate: Array<[string, string]> | null, exports: Row['exports'] | null, scope?: unknown, id?: unknown, inject?: string[] | null) {
     const chain = chainOf(scope)
     const shownRow = typeof id === 'string' ? id : key
-    const taint = this.#findTaint(shownRow, chain, key)
-    if (taint) throw new Error(rowTaintedErrorText(this.name, taint.rowName, taint.budgetMs))
     if (this.#rows.has(key)) throw new Error(`row ${key} is already loaded`)
     // Descriptors and reported lines call the row by its id (protocol §4.2).
     this.#bus.nameRow(key, id)
@@ -562,7 +539,6 @@ export class Runtime {
         const TIMED_OUT = Symbol('row-unload-timeout')
         const reportTimeout = () => {
           timedOut = true
-          this.#markTainted(shownRow, row.chain, key, budget)
           say(`${rowUnloadTimeoutText(this.name, shownRow, budget)}\n`)
         }
         for (const step of steps) {
