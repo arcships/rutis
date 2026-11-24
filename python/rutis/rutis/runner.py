@@ -673,7 +673,6 @@ class Runtime:
         inject: list | None = None,
     ) -> None:
         chain = check_scope(scope)
-        shown_row = id if isinstance(id, str) else key
         if key in self.rows:
             raise ValueError(f"row {key} is already loaded")
         if self.loop is None:

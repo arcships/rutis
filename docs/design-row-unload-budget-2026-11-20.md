@@ -22,12 +22,12 @@ Issue：[#1323](https://github.com/arcships/rutis/issues/1323)。相关：[设�
 3. `--shutdown-timeout` / `RUTIS_SHUTDOWN_TIMEOUT`（默认 10 秒）只在**整个宿主停止或会话断开**时生效，并且 Node / Bun / Python 到点后是直接退出整个运行时进程（退出码 1），而不是只解除卡住的那一行；
 4. 单行卸载卡住时运行时没有任何诊断输出（[卸载顺序](design-unload-order-2026-11-01.md) §三 与 §六 记下了这一缺口，[Cordis 兼容边界](guide/cordis-boundaries.md) §8 也明确区分了调用超时与宿主关闭截止时间）。
 
-### 1.2 超时引入的真实语义状态：`stale_cleanup_running`
+### 1.2 超时引入的真实语义状态
 
 在共享运行时进程（多行共用一个 Node / Bun / Python 进程）里，**“清理超时返回”与“正常卸载完成”不是同一个语义状态**：
 
 - **正常卸载完成**：旧代次的所有用户清理已真正退出，进程内没有任何该行旧代次代码在执行。此时再次装载该行的新代次，天然保证**同一共享进程内同一行不会有两个代次并发运行**。
-- **超时返回（`stale_cleanup_running`）**：JavaScript 无法强杀未落定的 Promise，Python 也无法强杀吞掉 `asyncio.CancelledError` 或阻塞在外部调用中的协程；
+- **超时返回**：JavaScript 无法强杀未落定的 Promise，Python 也无法强杀吞掉 `asyncio.CancelledError` 或阻塞在外部调用中的协程；
   - 在**叶子卸载栈**（Node 叶子、Bun、Python）里，运行时停止等待卡住的那条清理并跳过余下用户清理，但**卡住的那一条清理仍在后台存活**；
   - 在 **Node 原生 Cordis fiber** 里，Cordis 4.0.4 的 `_unload()` 用 `Promise.all` 并发启动了全部处置且无法打断，因此**可能有多条处置仍在后台存活**。
 
@@ -64,7 +64,7 @@ Issue：[#1323](https://github.com/arcships/rutis/issues/1323)。相关：[设�
 | D3 | **超时后停止等待当前清理、跳过余下用户清理、但必须跑完余下全部框架撤回**：当某条用户清理耗尽剩余预算（或下一条用户清理开始前剩余预算已为 0）时：(1) 停止等待该清理（Python 经 `asyncio.wait` + `task.cancel()` 发出取消，不使用会在协程吞掉 `CancelledError` 时卡死的 `asyncio.wait_for`；JS / Python 都挂上结果/拒绝回收回调以防延迟抛错触发未处理拒绝）；(2) **不再执行**栈上余下的任何用户清理；(3) **照常执行**栈上余下的每一条框架撤回，并走完 `finally` 收尾 | 在卡住的清理仍在后台执行的条件下，不可能同时宣称“解除卡死”又宣称“保持严格逆序串行”：继续执行更早登记的用户清理会与尚未退出的后登记清理竞态并破坏 LIFO 契约。框架撤回则相反，必须执行以保持表一致。放弃“超时后继续跑后续用户清理”与“整栈放弃” |
 | D4 | **超时后只观测报告，不拦截重载**：超时后 (1) 跑完余下框架撤回与 `finally`；(2) 向 stderr 输出一行逐字诊断（不含内部词）；(3) `rows.unload` 返回 `null`；(4) 之后同进程 `rows.load` / `rows.update` 照常允许，旧清理仍在后台运行的风险由插件作者承担，需要隔离则用独立运行时实例 | 对齐「插件可信、不做沙箱」（[远程插件](design-remote-plugins-2026-10-03.md) §7）与「平台只看，不替业务做决定」（[诊断设计](design-diagnostics-2026-10-26.md) §二），不引入状态机。放弃拒绝重载的做法（超时标记状态机、作用域键、`rows.load` 入口检查）：它在运行时里替插件作者做了「能不能重载」的业务决定，且其成本（两张登记表、装载入口检查、外加一套形式化模型）与一个 opt-in 功能不相称 |
 | D5 | **隔离残余后台清理的晚到动作，如实说明同步阻塞边界**：JS / Python 无法强杀卡住的 Promise、拒绝 `CancelledError` 的协程或同步阻塞代码，但运行时保证残余旧清理对共享表的任何晚到动作都不能破坏其他健康行或后续状态：(1) 晚到 `ctx.provide` 被活跃/排干守卫拒绝（Node `leaf.mjs` 补齐 `if (draining)` 守卫，Bun / Python 已有活跃行守卫）；(2) 晚到 `ctx.effect` / `ctx.on` / `ctx.emit` 被拒；(3) 持有旧 `withdraw()` 句柄晚到调用时按登记身份比对，绝不误撤兄弟行的新服务；(4) 残余清理的晚到异常 / 拒绝被回收回调吸收且不通过行表误归责给健康行。以上四条由单测钉住。超时定时器调用 `timer?.unref?.()`（正常完成后仍 `clearTimeout`），不额外钉住事件循环退出。同步死循环占住唯一事件循环线程时异步定时器无法抢占，仍由 5 秒阻塞提示（[诊断设计](design-diagnostics-2026-10-26.md) §6.4）和 `RUTIS_SHUTDOWN_TIMEOUT` 看门狗兜底 | 诚实面对语言边界，同时用硬守卫把跨行/跨代的破坏逐一堵死。放弃“单行超时直接 `SIGKILL` 整个共享运行时进程”：不该无差别杀死同进程里的健康行 |
-| D6 | **Node 原生 Cordis 插件单独处理，不给 `_unload` 打补丁**：开启单行预算时，`runner.mjs` 通过 `LEAF_FIBERS.has(row.inner)` 区分叶子插件与原生 Cordis 插件。叶子插件由 `leaf.mjs` 的 `drain()` 自己计时、通过 `onTimeout` 通知 `runner.mjs`、并保证跑完余下撤回（`runner.mjs` 不另挂同毫秒外层定时器，避免外层抢先触发）；原生 Cordis 插件由 `runner.mjs` 在 `unloadRow` 与 `dispose` 里将 `row.fiber.dispose()` 与预算竞态，超时后停止等待、吞掉延迟拒绝、打印原生插件逐字诊断行，并照常走完 `finally`（`row.unloaded = true`、`bus.withdraw(key)`、`bus.forgetRow(key)`）与 `provideWaitingLater()`。Cordis 4.0.4 的内部 `Promise.all` 无法打断，但其 `dispose()` 在进入 `_unload()` 前已把 fiber 移出 `ctx.registry`，`ctx.provide` 的 disposer 也在首微任务从 `ctx.reflect.store` 删掉了服务，因此服务、导出器、监听器与 `waitingHosts` 仍能干净收尾 | 遵守[Cordis 兼容边界](guide/cordis-boundaries.md) §7“运行时不给 `_unload` 打补丁”的约束。原生 Cordis 的 `rows.update` 走 `fiber.update`（合并卸载与重新 `apply`），为免误伤慢速 `apply` 暂保持原样，仅 `rows.unload` 与 `dispose` 受预算约束 |
+| D6 | **Node 原生 Cordis 插件单独处理，不给 `_unload` 打补丁**：开启单行预算时，`runner.mjs` 通过 `LEAF_FIBERS.has(row.inner)` 区分叶子插件与原生 Cordis 插件。叶子插件由 `leaf.mjs` 的 `drain()` 自己计时：超时后直接经 `unloadOptions.report`（默认 `say()`）向 stderr 输出诊断行，并保证跑完余下撤回（`runner.mjs` 对叶子行只是 `await row.fiber.dispose()`，不参与计时也不接收通知，不另挂同毫秒外层定时器，避免外层抢先触发）；原生 Cordis 插件由 `runner.mjs` 在 `unloadRow` 与 `dispose` 里将 `row.fiber.dispose()` 与预算竞态，超时后停止等待、吞掉延迟拒绝、打印原生插件逐字诊断行，并照常走完 `finally`（`row.unloaded = true`、`bus.withdraw(key)`、`bus.forgetRow(key)`）与 `provideWaitingLater()`。Cordis 4.0.4 的内部 `Promise.all` 无法打断，但其 `dispose()` 在进入 `_unload()` 前已把 fiber 移出 `ctx.registry`，`ctx.provide` 的 disposer 也在首微任务从 `ctx.reflect.store` 删掉了服务，因此服务、导出器、监听器与 `waitingHosts` 仍能干净收尾 | 遵守[Cordis 兼容边界](guide/cordis-boundaries.md) §7“运行时不给 `_unload` 打补丁”的约束。原生 Cordis 的 `rows.update` 走 `fiber.update`（合并卸载与重新 `apply`），为免误伤慢速 `apply` 暂保持原样，仅 `rows.unload` 与 `dispose` 受预算约束 |
 | D7 | **Go / Swift / Kotlin 纳入跨语言规划，不塞进本 PoC**：本稿及 PoC 先落 Node / Bun / Python 三家；Go、Swift、Kotlin 当前单行 `rows.unload` 同样无预算，留在 §六 后续步骤，统一使用 `RUTIS_ROW_UNLOAD_TIMEOUT`、相同的超时语义与诊断措辞 | 控制 PoC 范围，优先补齐完全没有任何清理预算的三家运行时，并保证六家长期收敛 |
 
 ## 三、规则
@@ -81,7 +81,7 @@ Issue：[#1323](https://github.com/arcships/rutis/issues/1323)。相关：[设�
 | `"0"` / `"-1"` / `"NaN"` / `"Infinity"` / `"abc"` | `null` | `None` | 关闭（不限时；`0` 可显式关闭继承来的环境变量） |
 
 2. **显式选项优先级**：
-   - Node：`run({ ..., rowUnloadTimeout })` 传入毫秒数；未传（`undefined`）时读取 `env.RUTIS_ROW_UNLOAD_TIMEOUT`；显式传入 `null`、`<= 0` 或非有限数时强制关闭。独立调用 `toCordis(spec, rowInject, providerOf, unloadOptions)` 时，`unloadOptions.rowUnloadTimeout` 遵循同样规则（未传 `unloadOptions` 时读取 `process.env.RUTIS_ROW_UNLOAD_TIMEOUT`）。
+   - Node：`run({ ..., rowUnloadTimeout })` 传入毫秒数；未传（`undefined`）时读取 `env.RUTIS_ROW_UNLOAD_TIMEOUT`；显式传入 `null`、`<= 0` 或非有限数时强制关闭。独立调用 `toCordis(spec, rowInject, providerOf, unloadOptions)` 时，`unloadOptions` 可以是对象 `{ rowUnloadTimeout, runtimeName, rowName, report }`，`rowUnloadTimeout` 遵循同样规则（未传 `unloadOptions` 时读取 `process.env.RUTIS_ROW_UNLOAD_TIMEOUT`）；也可以是函数 `unloadOptions(context)`，按行返回 `{ budgetMs, runtime, target, report }`（毫秒；`budgetMs` 无效或缺省即不限时，不读环境变量；`runtime` / `target` / `report` 缺省回落到 `node` / `plugin <name>` / `say()`），`runner.mjs` 传入的 `leafUnloadOptions` 就是这一形态：运行时按行名拼 `target`、用自己的 `say`。
    - Bun：`new Runtime(project, { rowUnloadTimeout })` 传入毫秒数；未提供 `rowUnloadTimeout` 键时读取 `process.env.RUTIS_ROW_UNLOAD_TIMEOUT`；显式传入 `null`、`<= 0` 或非有限数时强制关闭。
    - Python：`Runtime(row_unload_timeout=...)` 传入秒数；未传时读取 `os.environ.get("RUTIS_ROW_UNLOAD_TIMEOUT")`；显式传入 `None`、`<= 0` 或非有限数（以及 `bool`）时强制关闭。
 
@@ -112,10 +112,14 @@ Issue：[#1323](https://github.com/arcships/rutis/issues/1323)。相关：[设�
        - **Node 叶子 / Bun**：`Promise.race` 竞态清理 Promise 与 `setTimeout(remaining)`；清理先落定时立刻 `clearTimeout`；定时器先触发时置 `timedOut = true`，打印诊断行一次，并对原 Promise 保留空拒绝处理器。
        - **Python**：将步骤包进 `asyncio.create_task` 后用 `asyncio.wait({task}, timeout=remaining)`（**禁止**用 `asyncio.wait_for`）；超时时调用 `task.cancel()` 并挂上 `_consume_task_result` 回调，置 `timedOut = true`，打印诊断行一次。整段栈循环包在 `try / finally` 中，即使 `unload` 自身被外部取消，`finally` 仍把栈中尚未跑到的全部 `withdrawal` 跑完。
 3. **Node 原生 Cordis fiber**：
-   - `runner.mjs` 在 `unloadRow` 与 `dispose` 里检查 `LEAF_FIBERS.has(row.inner)`：为真时由 `leaf.mjs` 的 `drain()` 计时并通过 `onTimeout` 通知 `runner.mjs`；为假时在 `runner.mjs` 里将 `row.fiber.dispose()` 与 `setTimeout(budgetMs)` 竞态，超时后清除定时器、吞掉后续拒绝、打印原生 Cordis 诊断行一次，并照常走完 `finally` 与 `provideWaitingLater()`。
+   - `runner.mjs` 在 `unloadRow` 与 `dispose` 里检查 `LEAF_FIBERS.has(row.inner)`：为真时直接 `await row.fiber.dispose()`，由 `leaf.mjs` 的 `drain()` 自己计时，超时后经 `unloadOptions.report`（默认 `say()`）输出叶子诊断行并跑完余下撤回，`runner.mjs` 不参与计时也不接收通知；为假时在 `runner.mjs` 里将 `row.fiber.dispose()` 与 `setTimeout(budgetMs)` 竞态，超时后清除定时器、吞掉后续拒绝、打印原生 Cordis 诊断行一次，并照常走完 `finally` 与 `provideWaitingLater()`。
 4. **超时后不记录任何状态**：运行时不维护任何“哪些行不许重载”的表，`rows.load` / `rows.update` 不做入口检查；同一行在同进程再次装载照常进行。残余清理对共享表的晚到动作仍被守卫拒绝（见下）。
 5. **残余清理晚到动作隔离**：
-   - Node `leaf.mjs` 的 `ctx.provide` 检查 `if (draining) throw new Error(...)`；Bun / Python 的 `provide`、`on`、`effect` 检查行活跃状态；三家 `emit` 等事件分发检查 `unloaded` / 行不在 `rows`；三家 `withdraw()` 句柄按登记对象身份比对。
+   - 晚到 `ctx.provide`：三端都抛 `row <row> is not active`（Node 叶子写 `plugin <plugin>`；Node `leaf.mjs` 检查 `if (draining)`，Bun / Python 检查行仍在 `rows` 且未在卸载）。
+   - 晚到 `ctx.on`：Bun / Python 抛 `row <row> is not active`；Node 叶子没有自己的守卫，由 Cordis 在已处置的 Context 上登记 effect 时抛 `cannot create effect on inactive context`（三端都是拒绝、不登记）。
+   - 晚到 `ctx.effect`：三端都**不抛错**，向 stderr 写一行 `rutis: row <row> is not active: cleanup is not registered`（Node 叶子写 `plugin`）后静默返回，该清理不登记（登记了也永远不会被跑）。
+   - 晚到 `ctx.emit`：走总线分发时按行是否仍在 `rows`（Node 另含 `unloaded` 集合）判为已卸载，抛 `BindingError`（`row <row> is not loaded in this runtime`）。
+   - 三家 `withdraw()` 句柄按登记对象身份比对，不误撤兄弟行同名的服务。
 6. **秒数格式化**：不带多余尾零，Node / Bun 用 `String(Number((budgetMs / 1000).toPrecision(12)))`，Python 用 `f"{budget:g}"`（例如 `5`、`0.25`、`0.05`）。
 7. **逐字输出格式**（严格遵守[诊断设计](design-diagnostics-2026-10-26.md) §4.5，不出现内部词）：
    - **超时诊断行（经 `say(...)` 写入不带行前缀的 stderr）**：
@@ -278,3 +282,13 @@ RUTIS_ROW_UNLOAD_TIMEOUT=5
 | 1. 本稿与 PoC（[#1323](https://github.com/arcships/rutis/issues/1323)，当前分支） | 双语设计稿 `docs/design-row-unload-budget-2026-11-20.{md,en.md}`；Node（`leaf.mjs` / `runner.mjs`）、Bun（`runner.ts`）、Python（`runner.py`）的单行卸载预算 PoC 与单测 | 三家单测证明默认不变、超时逐字输出、跳过后续清理、撤回服务、多实例同 id 不同 scope 互不影响、健康兄弟行不受影响、残余动作隔离、超时后可重载；全部链接/约束检查通过 |
 | 2. 宿主可观察超时与指南整合（后续 issue） | 宿主侧显式观察单行卸载超时结果（含仅移除不重载时的状态呈现）；是否重载、何时重启运行时由宿主与运维按自己的策略决定；更新 `docs/guide/rutis-host.{md,en.md}`、`docs/guide/cordis-boundaries.{md,en.md}` §7–§8、`docs/design-events-protocol-2026-10-18.{md,en.md}` §7.1；可选 `--row-unload-timeout` 参数；`crates/rutis-loader` 端到端测试；晋升稳定后登记 `docs/guarantees.md` | 端到端测试锁定三家运行时的逐字诊断与超时后照常重载，指南双语同步 |
 | 3. Go / Swift / Kotlin 对齐（后续 issue） | Go（`go/rutis/internal/runtime/runtime.go`）、Swift（`swift/rutis/Sources/Rutis/API/Runtime.swift`）、Kotlin（`kotlin/rutis/.../internal/Runtime.kt`）的 `rows.unload` 统一支持 `RUTIS_ROW_UNLOAD_TIMEOUT`、遵守 D8 撤回不变量与相同的超时语义，并采用相同诊断措辞 | 六种语言在单行卸载预算上的环境变量、D8 撤回不变量、超时语义与逐字输出完全一致 |
+
+## 七、级别、风险与验证
+
+1. **级别**（对照 §3）：D2「框架撤回必须跑完」与 D3「超时后跳过余下用户清理」属于**契约行为**（Q3.2）——写进本稿、由三端测试锁定、登记进保证表（§9.4）是后续步骤；D4「超时后只观测报告」属于**契约行为**；「残余清理晚到动作被隔离」（D5）属于**契约行为**；「同步阻塞无法被预算抢占、由阻塞提示和 `RUTIS_SHUTDOWN_TIMEOUT` 兜底」属于**明确不保证**（Q3.4），原因是语言边界——单线程事件循环上的同步代码无法被异步定时器抢占；「预算到期时卡住的清理仍在后台运行」同样属于**明确不保证**。默认不设限（§五兼容一节）属于**契约行为**。
+2. **风险评估**（对照 §4，按影响分高中低）：
+   - 高：无。D8 撤回不变量由三端测试锁定，不跑完撤回的变异在上一版已被单测钉住。
+   - 中：超时后旧清理与新一代同进程并发，争抢端口 / 连接池 / 文件锁——可发现（插件自身报错）、可绕过（把该行隔离到独立运行时），所以是「中」不是「高」。
+   - 低：诊断行只进 stderr，宿主侧 `rutis-host status` 看不到（§六 阶段 2 补）。
+3. **组件类型**（对照 §6）：本稿改的是**语言运行时**（Q6.8）的卸载路径与**插件 SDK**（Q6.7）的 `ctx.effect` / `ctx.provide` 守卫。Q6.8 要求的「运行时行为跨语言一致」由三端同一套逐字输出和同一条测试矩阵满足；Q6.7 要求的「SDK 行为有文档和测试」由 §四 和三端 unload-budget 测试满足。
+4. **模型检查**：按 Q11.2.2，本稿是单进程内的顺序逻辑（卸载栈逆序排干 + 一个 wall-clock 预算），不使用设计模型检查；对执行顺序敏感的部分（撤回在超时后仍按栈位置跑完）由三端单测锁定。上一版曾有 `specs/row-unload-budget/` TLA+ 模型，验证的是已放弃的污染状态机，随该决策一并删除。

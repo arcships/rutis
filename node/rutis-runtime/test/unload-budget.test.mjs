@@ -234,6 +234,7 @@ export default definePlugin({
         globalThis.__leafRelease = () => {
           try { ctx.provide('forecast', { today: () => 'stale' }) } catch (e) { globalThis.__leafLateErrors.push('provide:' + e.message) }
           try { ctx.emit('weather/late') } catch (e) { globalThis.__leafLateErrors.push('emit:' + e.name) }
+          try { ctx.on('weather/late', () => {}) } catch (e) { globalThis.__leafLateErrors.push('on:' + e.message) }
           reject(new Error('late cleanup failure'))
         }
       }))
@@ -285,9 +286,11 @@ export default definePlugin({
     // Trigger late actions + late rejection from the lingering cleanup: isolated, never corrupts metrics.
     globalThis.__leafRelease?.()
     await new Promise(resolve => setImmediate(resolve))
-    assert.equal(globalThis.__leafLateErrors.length, 2)
+    assert.equal(globalThis.__leafLateErrors.length, 3)
     assert.match(globalThis.__leafLateErrors[0], /^provide:.*not active/)
     assert.equal(globalThis.__leafLateErrors[1], 'emit:BindingError')
+    // Cordis's own words for a listener on a disposed Context.
+    assert.match(globalThis.__leafLateErrors[2], /^on:.*inactive context/)
     await rt.unload('m1')
     assert.deepEqual(globalThis.__leafHealthyLog, ['metrics-cleaned'])
     await rt.unload('r2')

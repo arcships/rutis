@@ -100,6 +100,10 @@ class UnloadBudget(background.TestCase):
                         ctx.emit("weather/late")
                     except BindingError:
                         late_events.append("emit:BindingError")
+                    try:
+                        ctx.on("weather/late", lambda: None)
+                    except RuntimeError as error:
+                        late_events.append(f"on:{error}")
                     raise RuntimeError("late cleanup boom")
 
                 ctx.effect(hang)
@@ -135,7 +139,7 @@ class UnloadBudget(background.TestCase):
             self.assertEqual(runtime.lookup("forecast").today(), "healthy-sibling")
             release.set()
             await asyncio.sleep(0.01)
-            self.assertEqual(late_events, ["provide:row weather is not active", "emit:BindingError"])
+            self.assertEqual(late_events, ["provide:row weather is not active", "emit:BindingError", "on:row weather is not active"])
             self.assertEqual(runtime.lookup("forecast").today(), "healthy-sibling")
             await runtime.unload("m1")
             self.assertEqual(healthy_log, ["metrics-cleaned"])

@@ -90,6 +90,7 @@ export function apply(ctx, config) {
         withdraw()
         try { ctx.provide('forecast', { today: () => 'stale' }) } catch (e) { globalThis.__bunLate.push('provide:' + e.message) }
         try { ctx.emit('weather/late') } catch (e) { globalThis.__bunLate.push('emit:' + e.name) }
+        try { ctx.on('weather/late', () => {}) } catch (e) { globalThis.__bunLate.push('on:' + e.message) }
         reject(new Error('late cleanup failure'))
       }
     }))
@@ -135,7 +136,7 @@ export function apply(ctx) {
     // Lingering old cleanup firing late actions/rejection never corrupts metrics.
     ;(globalThis as any).__bunRelease?.()
     await new Promise(resolve => setImmediate(resolve))
-    expect((globalThis as any).__bunLate).toEqual(['provide:row w1 is not active', 'emit:BindingError'])
+    expect((globalThis as any).__bunLate).toEqual(['provide:row w1 is not active', 'emit:BindingError', 'on:row w1 is not active'])
     expect((runtime.lookup('forecast') as any).today()).toBe('healthy-sibling')
     await runtime.unload('m1')
     expect((globalThis as any).__bunHealthyLog).toEqual(['metrics-cleaned'])
