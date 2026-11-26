@@ -1408,6 +1408,8 @@ async 方法的调用方放弃等待（例如超时）时，调用被取消：�
 
 要让 rutis 经一条自己的连接（中继、蓝牙、别的传输）使用对面的插件，写一个连接插件：拿到一条能收发二进制消息的连接，交给服务 `rutis/sessions`。对面可以是语言运行时、自己装插件的应用，或另一个 rutis。
 
+[连接插件开发指南](https://github.com/arcships/rutis-network/blob/3518e333b862d9120c0966a4f26105fc2923ec70/docs/guide/link-plugins.md)介绍准入、分帧、背压和连接清理，并提供经过测试的 TCP bridge 和 Rust 监听示例。
+
 ```ts
 type Close = { kind: 'done' } | { kind: 'replaced' } | { kind: 'rejected'; reason: string }
 interface Far  { send(message: Uint8Array): void; close(why: Close): void }
