@@ -170,6 +170,8 @@ A Cordis application joins rutis by running its plugins in the Node runtime (`<p
 
 Write your own way of connecting (a relay, Bluetooth, another transport) as a connection plugin: take a connection that carries binary messages and hand it over as a session. In Rust, hand over a `Channel`: `ctx.plugin(rutis_bridge::Session::new(channel))` (see [Rust host: nodes](rust-host.en.md#nodes)); in other languages, call `open` of the service `rutis/sessions` (see [Plugin API: your own connection](plugin-api.en.md#your-own-connection-rutissessionsopen)). The far end's plugins are named `<far id>:<plugin>` here; to have the far end run a plugin, write a row `<connection row>:<plugin>`.
 
+The [connection plugin guide](https://github.com/arcships/rutis-network/blob/3518e333b862d9120c0966a4f26105fc2923ec70/docs/guide/link-plugins.en.md) covers admission, framing, backpressure and connection teardown, with tested TCP and Rust listener examples.
+
 ## Security
 
 **Giving out a token allows the other side to run, on this node, any plugin this node can resolve.** Who may connect is decided by the connection row's token; a connected node is trusted, and the platform adds no permissions of its own.

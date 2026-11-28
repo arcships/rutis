@@ -1408,6 +1408,8 @@ When the caller abandons an async call (for example, on timeout), the call is ca
 
 To let rutis use the plugins at the other end of a connection of your own (a relay, Bluetooth, another transport), write a connection plugin: take a connection that carries binary messages and hand it to the service `rutis/sessions`. The far end can be a language runtime, an app that installs its own plugins, or another rutis.
 
+The [connection plugin guide](https://github.com/arcships/rutis-network/blob/3518e333b862d9120c0966a4f26105fc2923ec70/docs/guide/link-plugins.en.md) covers admission, framing, backpressure and connection teardown, with tested TCP and Rust listener examples.
+
 ```ts
 type Close = { kind: 'done' } | { kind: 'replaced' } | { kind: 'rejected'; reason: string }
 interface Far  { send(message: Uint8Array): void; close(why: Close): void }
