@@ -82,6 +82,8 @@ INSPECT = bool(os.environ.get("RUTIS_TEST_INSPECT"))
 
 
 DEADLINE = "RUTIS_SHUTDOWN_TIMEOUT"
+ROW_UNLOAD_DEADLINE = "RUTIS_ROW_UNLOAD_TIMEOUT"
+_UNSET = object()
 
 
 def shutdown_deadline() -> float:
@@ -93,6 +95,61 @@ def shutdown_deadline() -> float:
     except ValueError:
         return 10.0
     return seconds if 0 < seconds < float("inf") else 10.0
+
+
+def _normalize_timeout(seconds: Any) -> float | None:
+    if seconds is None or isinstance(seconds, bool):
+        return None
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return None
+    return value if 0 < value < float("inf") else None
+
+
+def row_unload_deadline(env=None) -> float | None:
+    """Optional single-row unload cleanup budget in seconds:
+    RUTIS_ROW_UNLOAD_TIMEOUT (positive finite float, matching
+    RUTIS_SHUTDOWN_TIMEOUT), None (unlimited) by default."""
+    source = os.environ if env is None else env
+    return _normalize_timeout(source.get(ROW_UNLOAD_DEADLINE, ""))
+
+
+def row_unload_timeout_text(runtime: str, row: str, seconds: float) -> str:
+    """Diagnostic line emitted when a row's user cleanup exceeds its
+    single-row unload budget. The stuck cleanup keeps running in the
+    background (Python cannot stop a coroutine that swallows CancelledError);
+    the row is unloaded all the same, and reloading it here runs the new
+    generation beside that remnant. That risk is the plugin's to take (plugins
+    are trusted, not sandboxed): the runtime says what happened and no more."""
+    return (
+        f"runtime {runtime}: cleanup of row {row} did not finish within {seconds:g} s; "
+        f"skipped remaining cleanups and withdrew its services "
+        "(the stuck cleanup may still be running; fix it, or isolate this row in its own runtime)"
+    )
+
+
+def _consume_task_result(task: asyncio.Future) -> None:
+    """Retrieve any late cancellation or exception from an abandoned cleanup
+    task so Python never logs 'Task exception was never retrieved'."""
+    if not task.cancelled():
+        try:
+            task.exception()
+        except BaseException:  # noqa: BLE001
+            pass
+
+
+async def _settle_step(step: Callable[[], Any]) -> Any:
+    return await _settle(step())
+
+
+@dataclass(slots=True)
+class _Step:
+    """One entry on a row's unload stack: a user cleanup or a framework
+    service withdrawal (which the single-row budget never skips)."""
+
+    run: Callable[[], Any]
+    withdrawal: bool = False
 
 
 def undeclared_use(name: str, like: str | None = None) -> str:
@@ -415,7 +472,7 @@ class Context(sdk.Context):
         if self._runtime.rows.get(self._row.key) is not self._row or self._row.unloading:
             say(f"rutis: row {self._row.named or self._row.key} is not active: cleanup is not registered")
             return
-        self._row.steps.append(cleanup)
+        self._row.steps.append(_Step(cleanup, withdrawal=False))
 
     def on(self, name: str, listener: Callable, *, prepend: bool = False, global_: bool = False) -> Callable[[], None]:
         if self._runtime.rows.get(self._row.key) is not self._row or self._row.unloading:
@@ -442,8 +499,11 @@ class Context(sdk.Context):
 
 
 class Runtime:
-    def __init__(self) -> None:
+    def __init__(self, *, row_unload_timeout: Any = _UNSET) -> None:
         self.peer: Peer | None = None
+        self._row_unload_timeout = (
+            _UNSET if row_unload_timeout is _UNSET else _normalize_timeout(row_unload_timeout)
+        )
         self.rows: dict[str, Row] = {}
         self.services: dict[str, tuple[str, Any]] = {}  # id -> (row key, object)
         self.hosts: dict[str, HostProxy] = {}  # id -> proxy
@@ -516,7 +576,7 @@ class Runtime:
         # The withdrawal is an entry of the unload stack, as an effect is: a
         # cleanup registered after this one runs before it and still reads
         # the service; one registered before runs after it and does not.
-        row.steps.append(withdraw)
+        row.steps.append(_Step(withdraw, withdrawal=True))
         return withdraw
 
     def _refresh(self, id: str) -> None:
@@ -612,6 +672,7 @@ class Runtime:
         id: str | None = None,
         inject: list | None = None,
     ) -> None:
+        chain = check_scope(scope)
         if key in self.rows:
             raise ValueError(f"row {key} is already loaded")
         if self.loop is None:
@@ -620,7 +681,7 @@ class Runtime:
         # Descriptors and reported lines call the row by its id (§4.2).
         self.bus.row_ids[key] = id if isinstance(id, str) else key
         exports = exports or {}
-        row = Row(key, module, config, exports, dict(isolate or {}), check_scope(scope))
+        row = Row(key, module, config, exports, dict(isolate or {}), chain)
         row.named = self.bus.row_ids[key]
         for name, label in row.isolate.items():
             scoped_id(name, label)
@@ -676,7 +737,7 @@ class Runtime:
         if cleanup is not None:
             if not callable(cleanup):
                 raise TypeError("apply must return a cleanup function or None")
-            row.steps.append(cleanup)
+            row.steps.append(_Step(cleanup, withdrawal=False))
         for name in exports:
             self._refresh(row.id(name))
         # rutis has published the announced services (or refused one,
@@ -812,6 +873,11 @@ class Runtime:
             return self.bus.row_id(found.pop())
         return None
 
+    def _row_unload_budget(self) -> float | None:
+        if self._row_unload_timeout is not _UNSET:
+            return self._row_unload_timeout
+        return row_unload_deadline()
+
     async def unload(self, key: str, *, announced: bool = False) -> None:
         row = self.rows.get(key)
         if row is None or row.unloading:
@@ -849,13 +915,63 @@ class Runtime:
         errors = []
         steps = row.steps[::-1]
         row.steps.clear()
+        budget = self._row_unload_budget()
+        shown_row = row.named or row.key
+        next_index = 0
         try:
-            for step in steps:
-                try:
-                    await _settle(step())
-                except Exception as error:  # noqa: BLE001 - run every step
-                    errors.append(error)
+            if budget is None:
+                for step in steps:
+                    next_index += 1
+                    try:
+                        await _settle(step.run())
+                    except Exception as error:  # noqa: BLE001 - run every step
+                        errors.append(error)
+            else:
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + budget
+                timed_out = False
+                for step in steps:
+                    next_index += 1
+                    if step.withdrawal:
+                        try:
+                            await _settle(step.run())
+                        except Exception as error:  # noqa: BLE001 - run every withdrawal
+                            errors.append(error)
+                        continue
+                    if timed_out:
+                        continue
+                    remaining = max(0.0, deadline - loop.time())
+                    if remaining <= 0.0:
+                        timed_out = True
+                        say(row_unload_timeout_text(self._runtime_name(), shown_row, budget))
+                        continue
+                    task = asyncio.create_task(_settle_step(step.run))
+                    try:
+                        _done, pending = await asyncio.wait({task}, timeout=remaining)
+                    except BaseException:
+                        if not task.done():
+                            task.cancel()
+                        task.add_done_callback(_consume_task_result)
+                        raise
+                    if pending:
+                        task.cancel()
+                        task.add_done_callback(_consume_task_result)
+                        timed_out = True
+                        say(row_unload_timeout_text(self._runtime_name(), shown_row, budget))
+                    elif not task.cancelled():
+                        try:
+                            task.result()
+                        except Exception as error:  # noqa: BLE001 - run every step
+                            errors.append(error)
         finally:
+            # D8 invariant: even on external cancellation, every remaining
+            # framework withdrawal still runs before the row leaves `rows`.
+            for step in steps[next_index:]:
+                if step.withdrawal:
+                    try:
+                        step.run()
+                    except Exception as error:  # noqa: BLE001
+                        errors.append(error)
             # Its cleanups may emit, or register listeners: both stop here.
             self.rows.pop(key, None)
             self.bus.withdraw_row(key)

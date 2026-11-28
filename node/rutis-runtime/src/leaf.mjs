@@ -10,6 +10,54 @@
 import { KEEP, LEAF_FIBERS, LEAF_NAME } from './cordis-events.mjs'
 import { refuseReserved } from './events.mjs'
 import { UNDECLARED, notDeclared, notDeclaredOptional, unavailable } from './errors.mjs'
+import { say } from './output.mjs'
+
+// Optional per-row unload cleanup budget: RUTIS_ROW_UNLOAD_TIMEOUT seconds
+// (positive finite number, matching RUTIS_SHUTDOWN_TIMEOUT), unset (unlimited)
+// by default so Cordis / existing unload semantics do not change unless opted in.
+export function rowUnloadDeadline(env = process.env) {
+  const seconds = Number(env?.RUTIS_ROW_UNLOAD_TIMEOUT)
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : null
+}
+
+export function normalizeTimeoutMs(ms) {
+  return typeof ms === 'number' && Number.isFinite(ms) && ms > 0 ? ms : null
+}
+
+export function formatTimeoutSeconds(ms) {
+  return String(Number((ms / 1000).toPrecision(12)))
+}
+
+// The stuck cleanup keeps running in the background (JavaScript cannot stop
+// it); the row is unloaded all the same, and reloading it here runs the new
+// generation beside that remnant. That risk is the plugin's to take (plugins
+// are trusted, not sandboxed): the runtime says what happened and no more.
+export function rowUnloadTimeoutText({ runtime = 'node', target, budgetMs, native = false }) {
+  const seconds = formatTimeoutSeconds(budgetMs)
+  const action = native
+    ? 'stopped waiting and finished unloading the row'
+    : 'skipped remaining cleanups and withdrew its services'
+  return `runtime ${runtime}: cleanup of ${target} did not finish within ${seconds} s; ${action} (the stuck cleanup may still be running; fix it, or isolate this row in its own runtime)`
+}
+
+function resolveUnloadOptions(unloadOptions, context, spec) {
+  if (typeof unloadOptions === 'function') {
+    const resolved = unloadOptions(context) ?? {}
+    return {
+      budgetMs: normalizeTimeoutMs(resolved.budgetMs),
+      runtime: resolved.runtime ?? 'node',
+      target: resolved.target ?? `plugin ${spec.name ?? 'leaf'}`,
+      report: resolved.report ?? (line => say(`${line}\n`)),
+    }
+  }
+  const hasExplicit = unloadOptions !== null && typeof unloadOptions === 'object' && 'rowUnloadTimeout' in unloadOptions
+  return {
+    budgetMs: hasExplicit ? normalizeTimeoutMs(unloadOptions.rowUnloadTimeout) : rowUnloadDeadline(),
+    runtime: unloadOptions?.runtimeName ?? 'node',
+    target: unloadOptions?.rowName ? `row ${unloadOptions.rowName}` : `plugin ${spec.name ?? 'leaf'}`,
+    report: unloadOptions?.report ?? (line => say(`${line}\n`)),
+  }
+}
 
 // The plugin API this runtime runs: a plugin written against a newer one
 // is refused, naming both. 3: the unified events of rutis 0.13 (#464).
@@ -87,7 +135,7 @@ export const USES_ANY = Symbol('rutis.uses-any')
 // `rowInject`: the names its row's own `inject` adds.
 // `providerOf(context, name)`: who already provides `name` there (a row's
 // name, or `the host`), to say so when the plugin provides it too.
-export function toCordis(spec, rowInject = [], providerOf) {
+export function toCordis(spec, rowInject = [], providerOf, unloadOptions) {
   // What the plugin may `use`: its `inject` and its row's `inject` (as
   // Rust's `require` reads only the injects); the test driver, anything.
   // It may `get` its `optional` too.
@@ -119,10 +167,64 @@ export function toCordis(spec, rowInject = [], providerOf) {
       let draining = false
       const drain = async () => {
         draining = true
-        // One at a time, latest first; a failing step goes where Cordis sends
-        // a failing disposal (its logger), and the rest still run.
-        for (const step of steps.splice(0).reverse()) {
-          try { await step() } catch (error) { context.logger.error(error) }
+        const ordered = steps.splice(0).reverse()
+        const { budgetMs, runtime, target, report } = resolveUnloadOptions(unloadOptions, context, spec)
+        // Default (unset): run every step without a deadline, preserving
+        // Cordis / existing unload semantics.
+        if (budgetMs === null) {
+          // One at a time, latest first; a failing step goes where Cordis sends
+          // a failing disposal (its logger), and the rest still run.
+          for (const step of ordered) {
+            try { await step.run() } catch (error) { context.logger.error(error) }
+          }
+          return
+        }
+        // Opt-in single-row budget: caps user cleanups only; framework
+        // withdrawals always run even after a timeout (D8 invariant).
+        const endAt = performance.now() + budgetMs
+        let timedOut = false
+        const TIMED_OUT = Symbol('row-unload-timeout')
+        const reportTimeout = () => {
+          timedOut = true
+          report(rowUnloadTimeoutText({ runtime, target, budgetMs, native: false }))
+        }
+        for (const step of ordered) {
+          if (step.withdrawal) {
+            try { await step.run() } catch (error) { context.logger.error(error) }
+            continue
+          }
+          if (timedOut) continue
+          const remaining = Math.max(0, endAt - performance.now())
+          if (remaining === 0) {
+            reportTimeout()
+            continue
+          }
+          let pending
+          try {
+            pending = Promise.resolve(step.run())
+          } catch (error) {
+            context.logger.error(error)
+            continue
+          }
+          // Prevent unhandled rejections if a timed-out cleanup rejects later.
+          pending.then(() => {}, () => {})
+          let timer
+          const winner = await Promise.race([
+            pending.then(
+              () => ({ ok: true }),
+              error => ({ ok: false, error }),
+            ),
+            new Promise(resolve => {
+              timer = setTimeout(() => resolve(TIMED_OUT), remaining)
+              timer?.unref?.()
+            }),
+          ])
+          clearTimeout(timer)
+          if (winner === TIMED_OUT) {
+            reportTimeout()
+            continue
+          }
+          if (!winner.ok) context.logger.error(winner.error)
         }
       }
       // Registered first, drained last: an effect of the fiber, run among the
@@ -144,6 +246,9 @@ export function toCordis(spec, rowInject = [], providerOf) {
           return read(name)
         },
         provide: (name, value) => {
+          // Refuse late provide from an unloading or timed-out cleanup before
+          // touching Cordis's store or this plugin's map (NoCrossGenCorruption).
+          if (draining) throw new Error(`plugin ${spec.name ?? 'leaf'} is not active`)
           let withdraw
           try {
             withdraw = context.provide(name, value)
@@ -166,7 +271,7 @@ export function toCordis(spec, rowInject = [], providerOf) {
           // The withdrawal is an entry of the unload stack, as a cleanup is:
           // one registered after this provide runs before it and still reads
           // the service; one registered before runs after it and does not.
-          steps.push(remove)
+          steps.push({ run: remove, withdrawal: true })
           return () => remove()
         },
         effect: cleanup => {
@@ -176,7 +281,7 @@ export function toCordis(spec, rowInject = [], providerOf) {
             process.stderr.write(`rutis: plugin ${spec.name ?? 'leaf'} is not active: cleanup is not registered\n`)
             return
           }
-          steps.push(cleanup)
+          steps.push({ run: cleanup, withdrawal: false })
         },
         // The listener leaves with the plugin, or when the returned function
         // is called. `prepend` and `global` as Cordis's. Descriptors name the
@@ -199,7 +304,7 @@ export function toCordis(spec, rowInject = [], providerOf) {
       const cleanup = await spec.apply(ctx, config)
       if (cleanup !== undefined && cleanup !== null) {
         if (typeof cleanup !== 'function') throw new TypeError('apply must return a cleanup function or nothing')
-        steps.push(cleanup)
+        steps.push({ run: cleanup, withdrawal: false })
       }
     },
   }
