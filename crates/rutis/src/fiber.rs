@@ -556,6 +556,34 @@ impl FiberInner {
             .push(Arc::downgrade(&record));
     }
 
+    /// Remove a finished [`EffectRecord`] from this fiber's unload stack and
+    /// weak index, parking its error in `drained_errors` only if the record
+    /// was still on the stack (not already taken by `drain_effects`).
+    pub(crate) fn detach_effect(&self, record: &Arc<EffectRecord>, err: Option<&Arc<ErrorKind>>) {
+        let mut effects = self.effects.lock().unwrap();
+        let present = effects.iter().any(|r| Arc::ptr_eq(r, record));
+        if present {
+            effects.retain(|r| !Arc::ptr_eq(r, record));
+            if effects.capacity() > 64 && effects.len() * 4 < effects.capacity() {
+                effects.shrink_to_fit();
+            }
+            if let Some(e) = err {
+                // Keep the effects lock until the error is queued.
+                // drain_effects takes the whole effects list under
+                // this lock, then consumes drained_errors: it must
+                // see either this record or its queued error.
+                self.drained_errors.lock().unwrap().push(e.clone());
+            }
+        }
+        drop(effects);
+        let weak = Arc::downgrade(record);
+        let mut index = self.effect_index.lock().unwrap();
+        index.retain(|entry| !Weak::ptr_eq(entry, &weak) && entry.strong_count() > 0);
+        if index.capacity() > 64 && index.len() * 4 < index.capacity() {
+            index.shrink_to_fit();
+        }
+    }
+
     /// The plugin instance for the current generation. A static plugin is
     /// cloned; a factory builds a new instance from the current config each
     /// generation, which is how a config update takes effect. `build` is user

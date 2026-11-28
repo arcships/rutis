@@ -80,6 +80,47 @@ impl Drop for EffectFactoryLease {
     }
 }
 
+struct TimerExitSignal(tokio::sync::watch::Sender<bool>);
+
+impl Drop for TimerExitSignal {
+    fn drop(&mut self) {
+        let _ = self.0.send(true);
+    }
+}
+
+async fn run_timer_once<F, Fut>(f: F) -> Result<(), Error>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), Error>>,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(fut) => match crate::events::CatchUnwind::new(fut).await {
+            Ok(result) => result,
+            Err(panic) => Err(crate::error::panic_error(panic)),
+        },
+        Err(panic) => Err(crate::error::panic_error(panic)),
+    }
+}
+
+async fn run_timer_mut<F, Fut>(f: &mut F) -> Result<(), Error>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(), Error>>,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(fut) => match crate::events::CatchUnwind::new(fut).await {
+            Ok(result) => result,
+            Err(panic) => Err(crate::error::panic_error(panic)),
+        },
+        Err(panic) => Err(crate::error::panic_error(panic)),
+    }
+}
+
+fn report_timer_error(sink: &ErrorSink, owner: &str, error: Error) {
+    let reported = Error::msg(format!("{owner}: timer failed: {error}")).shared();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink(reported)));
+}
+
 impl Ctx {
     pub(crate) fn new_child(
         shared: Arc<Shared>,
@@ -641,6 +682,155 @@ impl Ctx {
             Effect::AsyncDisposer(Box::new(move || Box::pin(cleanup)))
         })?;
         Ok(self.record_disposer(record))
+    }
+
+    /// Runs `f` once after `delay`, unless cancelled early via the returned
+    /// [`Disposer`] or automatically when this plugin stops.
+    ///
+    /// Built on [`effect`](Ctx::effect): when the plugin is already stopping,
+    /// no task is started and the result is `InactiveEffect` (or `Closed` on
+    /// root shutdown). Errors and panics from `f` are caught and sent to the
+    /// host's [`ErrorSink`] without crashing the runtime. Once the callback
+    /// finishes, its cleanup record detaches from the fiber so repeated
+    /// one-shot timers do not accumulate.
+    #[track_caller]
+    pub fn timeout<F, Fut>(&self, delay: Duration, f: F) -> Result<Disposer, Error>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), Error>> + Send + 'static,
+    {
+        let origin = crate::effect::Origin::Effect(std::panic::Location::caller());
+        let cancel = self.cancellation_token().child_token();
+        let (exited_tx, mut exited_rx) = tokio::sync::watch::channel(false);
+        let cleanup_cancel = cancel.clone();
+        let record = self.register_effect_named("timer".into(), origin, move || {
+            Effect::AsyncDisposer(Box::new(move || {
+                Box::pin(async move {
+                    cleanup_cancel.cancel();
+                    let _ = exited_rx.wait_for(|done| *done).await;
+                    Ok(())
+                })
+            }))
+        })?;
+        let handle = self.handle().clone();
+        let sink = self.error_sink();
+        let owner = self.timer_owner();
+        let weak_record = Arc::downgrade(&record);
+        crate::sync::spawn(&handle, async move {
+            let exit = TimerExitSignal(exited_tx);
+            let mut callback = Some(f);
+            let fired = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => false,
+                _ = tokio::time::sleep(delay) => !cancel.is_cancelled(),
+            };
+            if fired {
+                if let Some(run) = callback.take() {
+                    let outcome = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => None,
+                        res = run_timer_once(run) => Some(res),
+                    };
+                    if let Some(Err(error)) = outcome {
+                        report_timer_error(&sink, &owner, error);
+                    }
+                }
+            }
+            cancel.cancel();
+            drop(callback);
+            drop(exit);
+            if let Some(record) = weak_record.upgrade() {
+                // Claim and finish directly: the timer task has already exited
+                // and signalled `exit`, so detach from `fiber.effects` and
+                // `fiber.effect_index` immediately without spawning a redundant
+                // cleanup task.
+                if let Some(cleanups) = record.claim() {
+                    drop(cleanups);
+                    record.finish(None);
+                }
+            }
+        });
+        Ok(self.record_disposer(record))
+    }
+
+    /// Runs `f` repeatedly, waiting `period` after each run finishes before
+    /// starting the next (fixed-delay, non-overlapping), until cancelled via
+    /// the returned [`Disposer`] or automatically when this plugin stops.
+    ///
+    /// Built on [`effect`](Ctx::effect): `Duration::ZERO` is rejected with
+    /// `Validation`; registration on an unloading or disposed plugin returns
+    /// `InactiveEffect` without starting a task. Errors and panics from `f`
+    /// are caught and sent to the host's [`ErrorSink`], and the next tick
+    /// still schedules after `period`.
+    #[track_caller]
+    pub fn interval<F, Fut>(&self, period: Duration, f: F) -> Result<Disposer, Error>
+    where
+        F: FnMut() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), Error>> + Send + 'static,
+    {
+        if period.is_zero() {
+            return Err(ErrorKind::Validation {
+                issues: vec!["interval period must be greater than zero".into()],
+            }
+            .into());
+        }
+        let origin = crate::effect::Origin::Effect(std::panic::Location::caller());
+        let cancel = self.cancellation_token().child_token();
+        let (exited_tx, mut exited_rx) = tokio::sync::watch::channel(false);
+        let cleanup_cancel = cancel.clone();
+        let record = self.register_effect_named("timer".into(), origin, move || {
+            Effect::AsyncDisposer(Box::new(move || {
+                Box::pin(async move {
+                    cleanup_cancel.cancel();
+                    let _ = exited_rx.wait_for(|done| *done).await;
+                    Ok(())
+                })
+            }))
+        })?;
+        let handle = self.handle().clone();
+        let sink = self.error_sink();
+        let owner = self.timer_owner();
+        let weak_record = Arc::downgrade(&record);
+        crate::sync::spawn(&handle, async move {
+            let exit = TimerExitSignal(exited_tx);
+            let mut callback = f;
+            loop {
+                let due = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => false,
+                    _ = tokio::time::sleep(period) => !cancel.is_cancelled(),
+                };
+                if !due {
+                    break;
+                }
+                let outcome = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => break,
+                    res = run_timer_mut(&mut callback) => res,
+                };
+                if let Err(error) = outcome {
+                    report_timer_error(&sink, &owner, error);
+                }
+            }
+            cancel.cancel();
+            drop(callback);
+            drop(exit);
+            if let Some(record) = weak_record.upgrade() {
+                if let Some(cleanups) = record.claim() {
+                    drop(cleanups);
+                    record.finish(None);
+                }
+            }
+        });
+        Ok(self.record_disposer(record))
+    }
+
+    fn timer_owner(&self) -> String {
+        match self.0.fiber.upgrade() {
+            Some(fiber) if fiber.is_root => "the host".to_owned(),
+            Some(fiber) => fiber.display_name(),
+            None => "the host".to_owned(),
+        }
     }
 
     fn provide_inner<T: ?Sized + Send + Sync + 'static>(
@@ -1809,5 +1999,103 @@ mod tests {
             "the announcement ran without the registration's admission, so a withdrawal could \
              announce Removed first"
         );
+    }
+
+    /// Design D3 (#1325): completed one-shot `ctx.timeout`s detach from
+    /// `fiber.effects` and `fiber.effect_index` so long-lived plugins do not
+    /// accumulate dead records; early manual `Disposer::dispose()` detaches
+    /// immediately too.
+    #[tokio::test]
+    async fn completed_timeouts_detach_from_fiber_effects_and_stay_bounded() {
+        let root = Ctx::root().unwrap();
+        let fiber = root.weak_fiber().upgrade().unwrap();
+
+        // 1. 200 sequential one-shot timeouts leave 0 lingering records.
+        for _ in 0..200 {
+            let done = Arc::new(tokio::sync::Notify::new());
+            let n = done.clone();
+            root.timeout(Duration::ZERO, move || async move {
+                n.notify_one();
+                Ok(())
+            })
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), done.notified())
+                .await
+                .expect("sequential timeout should fire");
+        }
+        rutis_test_support::eventually_with(
+            || {
+                (fiber.effects.lock().unwrap().is_empty()
+                    && fiber.effect_index.lock().unwrap().is_empty())
+                .then_some(())
+            },
+            "sequential timeouts detach from fiber.effects",
+            || {
+                format!(
+                    "effects={}, index={}",
+                    fiber.effects.lock().unwrap().len(),
+                    fiber.effect_index.lock().unwrap().len()
+                )
+            },
+        )
+        .await;
+        assert!(
+            fiber.effects.lock().unwrap().capacity() <= 64,
+            "sequential timeouts should not grow effects capacity"
+        );
+
+        // 2. Concurrent burst of 200 timeouts grows and shrinks back cleanly.
+        let remaining = Arc::new(AtomicUsize::new(200));
+        let all_done = Arc::new(tokio::sync::Notify::new());
+        for _ in 0..200 {
+            let rem = remaining.clone();
+            let notify = all_done.clone();
+            root.timeout(Duration::from_millis(1), move || async move {
+                if rem.fetch_sub(1, Ordering::SeqCst) == 1 {
+                    notify.notify_one();
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), all_done.notified())
+            .await
+            .expect("burst of 200 timeouts should fire");
+        rutis_test_support::eventually_with(
+            || {
+                (fiber.effects.lock().unwrap().is_empty()
+                    && fiber.effect_index.lock().unwrap().is_empty())
+                .then_some(())
+            },
+            "concurrent burst of timeouts detaches completely",
+            || {
+                format!(
+                    "effects={}, index={}",
+                    fiber.effects.lock().unwrap().len(),
+                    fiber.effect_index.lock().unwrap().len()
+                )
+            },
+        )
+        .await;
+        assert!(
+            fiber.effects.lock().unwrap().capacity() <= 64,
+            "effects capacity should shrink back after burst, got {}",
+            fiber.effects.lock().unwrap().capacity()
+        );
+
+        // 3. Early manual cancellation detaches immediately on dispose().await.
+        let t_cancel = root
+            .timeout(Duration::from_secs(60), || async { Ok(()) })
+            .unwrap();
+        let i_cancel = root
+            .interval(Duration::from_secs(60), || async { Ok(()) })
+            .unwrap();
+        assert_eq!(fiber.effects.lock().unwrap().len(), 2);
+        t_cancel.dispose().await.unwrap();
+        i_cancel.dispose().await.unwrap();
+        assert!(fiber.effects.lock().unwrap().is_empty());
+        assert!(fiber.effect_index.lock().unwrap().is_empty());
+
+        root.shutdown().await.unwrap();
     }
 }
